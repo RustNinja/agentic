@@ -75,6 +75,20 @@ cargo run -p opensource_cli -- . /tmp/opensourced-proof
 cargo check --manifest-path /tmp/opensourced-proof/Cargo.toml
 ```
 
+## Additional Generated Fixtures
+
+`opensource_core` also has integration tests that generate temporary workspaces
+with different source shapes and then run the reducer against them:
+
+- `data_items.rs`: structs, enums, type aliases, consts, statics, associated
+  constructors, body-only data items, and unit-test pruning.
+- `module_reexports.rs`: external module files, nested modules, renamed
+  dependencies, local aliases, reachable `pub use` items, and unreachable module
+  functions.
+- `trait_ufcs.rs`: explicit UFCS trait calls such as
+  `<Thing as Describe>::describe(...)`, trait impl reachability, enum variants,
+  tuple structs, and unreachable impl methods.
+
 Expected reachable callables for the fixture:
 
 ```text

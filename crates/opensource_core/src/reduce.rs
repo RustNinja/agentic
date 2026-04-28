@@ -227,6 +227,16 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_expr_path_call(&mut self, path: &ExprPath) {
+        if path.qself.is_some() {
+            for callable in self.resolver.resolve_qself_call(path) {
+                self.dependencies.callables.insert(callable);
+            }
+        } else {
+            self.add_call_path(&path.path);
+        }
+    }
+
     fn add_item_path(&mut self, path: &Path) {
         if let Some(item) = self.resolver.resolve_item_path(path) {
             self.dependencies.items.insert(item);
@@ -244,7 +254,7 @@ impl<'a> DependencyVisitor<'a> {
             }
             Expr::Call(call) => {
                 if let Expr::Path(path) = call.func.as_ref() {
-                    self.resolver.type_from_associated_call(&path.path)
+                    self.resolver.type_from_expr_path_call(path)
                 } else {
                     None
                 }
@@ -271,7 +281,7 @@ impl<'a> DependencyVisitor<'a> {
         match expression {
             Expr::Call(call) => {
                 if let Expr::Path(path) = call.func.as_ref() {
-                    self.resolver.type_from_associated_call(&path.path)
+                    self.resolver.type_from_expr_path_call(path)
                 } else {
                     None
                 }
@@ -292,11 +302,13 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_expr_call(&mut self, call: &'ast ExprCall) {
         if let Expr::Path(path) = call.func.as_ref() {
-            self.add_call_path(&path.path);
-            if let Some(first_arg) = call.args.first() {
-                if let Some(receiver) = self.receiver_type(first_arg) {
-                    for callable in self.resolver.resolve_trait_call(&path.path, &receiver) {
-                        self.dependencies.callables.insert(callable);
+            self.add_expr_path_call(path);
+            if path.qself.is_none() {
+                if let Some(first_arg) = call.args.first() {
+                    if let Some(receiver) = self.receiver_type(first_arg) {
+                        for callable in self.resolver.resolve_trait_call(&path.path, &receiver) {
+                            self.dependencies.callables.insert(callable);
+                        }
                     }
                 }
             }
@@ -317,7 +329,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_expr_path(&mut self, path: &'ast ExprPath) {
-        self.add_call_path(&path.path);
+        self.add_expr_path_call(path);
         self.add_item_path(&path.path);
         visit::visit_expr_path(self, path);
     }
@@ -376,11 +388,21 @@ impl Resolver<'_> {
         let name = segments.last()?.clone();
         let (package, module_path) = self.resolve_value_prefix(&segments[..segments.len() - 1])?;
         let id = CallableId::Free {
-            package,
-            module_path,
-            name,
+            package: package.clone(),
+            module_path: module_path.clone(),
+            name: name.clone(),
         };
 
+        if self.project.functions.contains_key(&id) {
+            return Some(id);
+        }
+
+        let alias = self.resolve_alias_target(&package, &module_path, &name)?;
+        let id = CallableId::Free {
+            package: alias.package,
+            module_path: alias.module_path,
+            name: alias.name,
+        };
         self.project.functions.contains_key(&id).then_some(id)
     }
 
@@ -399,6 +421,43 @@ impl Resolver<'_> {
         };
 
         self.resolve_methods(&receiver, &method).into_iter().next()
+    }
+
+    fn resolve_qself_call(&self, path: &ExprPath) -> Vec<CallableId> {
+        let Some(qself) = &path.qself else {
+            return Vec::new();
+        };
+        let Some(method) = path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return Vec::new();
+        };
+        let Some(receiver) = self.resolve_type(&qself.ty) else {
+            return Vec::new();
+        };
+
+        if qself.position == 0 {
+            return self.resolve_methods(&receiver, &method);
+        }
+
+        let trait_segments = path
+            .path
+            .segments
+            .iter()
+            .take(qself.position)
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let Some(trait_item) = self.resolve_item_segments(&self.apply_alias(trait_segments)) else {
+            return Vec::new();
+        };
+        if trait_item.kind != ItemKind::Trait {
+            return Vec::new();
+        }
+
+        self.resolve_trait_item_method(&trait_item, &receiver, &method)
     }
 
     fn resolve_methods(&self, receiver: &TypeRef, method: &str) -> Vec<CallableId> {
@@ -447,6 +506,15 @@ impl Resolver<'_> {
             return Vec::new();
         }
 
+        self.resolve_trait_item_method(&trait_item, receiver, method)
+    }
+
+    fn resolve_trait_item_method(
+        &self,
+        trait_item: &ItemId,
+        receiver: &TypeRef,
+        method: &str,
+    ) -> Vec<CallableId> {
         self.project
             .methods
             .keys()
@@ -464,7 +532,7 @@ impl Resolver<'_> {
                 (package == &receiver.package
                     && type_path == &receiver.type_path
                     && candidate_method == method
-                    && trait_path == &path_from_item(&trait_item))
+                    && trait_path == &path_from_item(trait_item))
                     .then(|| id.clone())
             })
             .collect()
@@ -477,6 +545,13 @@ impl Resolver<'_> {
             } => Some(TypeRef { package, type_path }),
             CallableId::Free { .. } => None,
         }
+    }
+
+    fn type_from_expr_path_call(&self, path: &ExprPath) -> Option<TypeRef> {
+        if let Some(qself) = &path.qself {
+            return self.resolve_type(&qself.ty);
+        }
+        self.type_from_associated_call(&path.path)
     }
 
     fn resolve_type(&self, ty: &Type) -> Option<TypeRef> {
@@ -535,7 +610,7 @@ impl Resolver<'_> {
         }
         let name = path.last()?.clone();
         let module_path = path[..path.len() - 1].to_vec();
-        kinds.iter().find_map(|kind| {
+        if let Some(item) = kinds.iter().find_map(|kind| {
             let id = ItemId {
                 package: package.to_string(),
                 module_path: module_path.clone(),
@@ -543,7 +618,12 @@ impl Resolver<'_> {
                 kind: *kind,
             };
             self.project.items.contains_key(&id).then_some(id)
-        })
+        }) {
+            return Some(item);
+        }
+
+        let alias = self.resolve_alias_target(package, &module_path, &name)?;
+        self.find_item(&alias.package, &alias.full_path(), kinds)
     }
 
     fn resolve_value_prefix(&self, prefix: &[String]) -> Option<(String, Vec<String>)> {
@@ -614,6 +694,48 @@ impl Resolver<'_> {
         let mut resolved = target.clone();
         resolved.extend_from_slice(&segments[1..]);
         resolved
+    }
+
+    fn resolve_alias_target(
+        &self,
+        package: &str,
+        module_path: &[String],
+        name: &str,
+    ) -> Option<ResolvedAlias> {
+        let aliases = self
+            .project
+            .module_aliases
+            .get(&(package.to_string(), module_path.to_vec()))?;
+        let target = aliases.get(name)?;
+        let target_name = target.last()?.clone();
+        let alias_resolver = Resolver {
+            project: self.project,
+            package,
+            module_path,
+            aliases,
+            self_type: None,
+        };
+        let (target_package, target_module_path) =
+            alias_resolver.resolve_value_prefix(&target[..target.len() - 1])?;
+        Some(ResolvedAlias {
+            package: target_package,
+            module_path: target_module_path,
+            name: target_name,
+        })
+    }
+}
+
+struct ResolvedAlias {
+    package: String,
+    module_path: Vec<String>,
+    name: String,
+}
+
+impl ResolvedAlias {
+    fn full_path(&self) -> Vec<String> {
+        let mut path = self.module_path.clone();
+        path.push(self.name.clone());
+        path
     }
 }
 

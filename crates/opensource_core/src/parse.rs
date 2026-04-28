@@ -15,6 +15,7 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
         functions: HashMap::new(),
         methods: HashMap::new(),
         items: HashMap::new(),
+        module_aliases: HashMap::new(),
     };
 
     for package in workspace.packages.values() {
@@ -34,6 +35,7 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
         functions: parser.functions,
         methods: parser.methods,
         items: parser.items,
+        module_aliases: parser.module_aliases,
     })
 }
 
@@ -42,6 +44,7 @@ struct Parser {
     functions: HashMap<CallableId, FunctionRecord>,
     methods: HashMap<CallableId, MethodRecord>,
     items: HashMap<ItemId, ItemRecord>,
+    module_aliases: HashMap<(String, Vec<String>), HashMap<String, Vec<String>>>,
 }
 
 impl Parser {
@@ -61,6 +64,8 @@ impl Parser {
         let syntax = syn::parse_file(&text)
             .map_err(|error| format!("failed to parse {}: {error}", file_path.display()))?;
         let aliases = collect_aliases(&syntax.items);
+        self.module_aliases
+            .insert((package.to_string(), module_path.clone()), aliases.clone());
 
         self.collect_items(package, &module_path, &syntax.items, &aliases)?;
 
@@ -149,6 +154,10 @@ impl Parser {
                         let mut child_path = module_path.to_vec();
                         child_path.push(item_mod.ident.to_string());
                         let child_aliases = collect_aliases(items);
+                        self.module_aliases.insert(
+                            (package.to_string(), child_path.clone()),
+                            child_aliases.clone(),
+                        );
                         self.collect_items(package, &child_path, items, &child_aliases)?;
                     }
                 }
@@ -206,6 +215,9 @@ impl Parser {
         if item_mod.content.is_some() {
             return Ok(());
         }
+        if item_mod.attrs.iter().any(is_cfg_test_attr) {
+            return Ok(());
+        }
 
         let name = item_mod.ident.to_string();
         let file_path = module_dir.join(format!("{name}.rs"));
@@ -226,6 +238,16 @@ impl Parser {
         child_path.push(name);
         self.parse_file(package, child_path, &next_file, &next_dir)
     }
+}
+
+fn is_cfg_test_attr(attribute: &syn::Attribute) -> bool {
+    if !attribute.path().is_ident("cfg") {
+        return false;
+    }
+
+    attribute
+        .parse_args::<syn::Ident>()
+        .is_ok_and(|ident| ident == "test")
 }
 
 fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {

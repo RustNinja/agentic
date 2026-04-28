@@ -14,6 +14,7 @@ pub struct Project {
     pub functions: HashMap<CallableId, FunctionRecord>,
     pub methods: HashMap<CallableId, MethodRecord>,
     pub items: HashMap<ItemId, ItemRecord>,
+    pub module_aliases: HashMap<(String, Vec<String>), HashMap<String, Vec<String>>>,
 }
 
 pub struct SourceFile {
