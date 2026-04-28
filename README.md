@@ -1,4 +1,6 @@
-# opensourced proof
+# agentic
+
+## opensourced proof
 
 This workspace is a proof-of-concept for marking one Rust function with
 `#[opensourced]` and generating a reduced Rust workspace that keeps only the
