@@ -35,6 +35,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for callable in report.reachable {
         println!("  {callable}");
     }
+    println!("reachable items:");
+    for item in report.reachable_items {
+        println!("  {item}");
+    }
 
     Ok(())
 }

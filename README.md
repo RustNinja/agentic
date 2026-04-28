@@ -31,8 +31,9 @@ pub fn open_source_entry(value: i32) -> i32 {
 }
 ```
 
-The reducer finds that marker, walks reachable calls through the workspace, and
-writes a new five-crate workspace without the unreachable functions.
+The reducer finds that marker, walks reachable calls and type/API references
+through the workspace, and writes a new five-crate workspace without unreachable
+implementation code or unit tests.
 
 ## Why This Is Not Proc-Macro-Only
 
@@ -52,13 +53,19 @@ The fixture and tests cover:
 - private helpers reached from public code;
 - associated function calls such as `d::Worker::new`;
 - receiver method calls inferred from a local binding such as `worker.run(...)`;
+- trait method calls inferred from a local receiver, such as
+  `worker.transform(...)`;
+- trait definitions and trait impl blocks needed by reachable methods;
+- enums, structs, type aliases, consts, and statics used in reachable
+  signatures or implementations;
+- pruning unused data/API items such as an unreachable enum;
 - pruning public, private, and method functions that are not reachable;
+- dropping `#[cfg(test)]` modules and `#[test]` functions from generated output;
 - stripping the marker macro and its dependency from the generated workspace;
 - compiling the generated workspace with `cargo check`.
 
-The reducer conservatively keeps non-function items such as structs, type
-aliases, constants, imports, and associated constants so the reduced source keeps
-compiling while function-level pruning is proven.
+The reducer still keeps imports and associated const/type items conservatively
+inside retained impl blocks so the reduced source keeps compiling.
 
 ## Run
 
@@ -78,6 +85,7 @@ c::adjust
 d::hash
 d::normalize
 d::shared
+d::<Worker as Transform>::transform
 d::Worker::new
 d::Worker::run
 e::finish
@@ -98,11 +106,23 @@ e::tempting_but_unused
 e::unused_leaf
 ```
 
+Expected reachable items include:
+
+```text
+d::Mode(Enum)
+d::Score(Type)
+d::Transform(Trait)
+d::Worker(Struct)
+e::DEFAULT_SEED(Const)
+e::Score(Type)
+```
+
 ## Current Boundaries
 
 This proof intentionally uses a syntactic call graph instead of rustc name
 resolution. It is useful for controlled workspaces and for proving the export
-pipeline, but it is not a full compiler frontend. Trait method resolution,
-macro-expanded calls, complex function pointers, `cfg` combinations, build
-scripts, and dependency pruning beyond local path crates need more work before
-this can be treated as a production-grade Rust slicer.
+pipeline, but it is not a full compiler frontend. It now handles direct trait
+method calls when the receiver type can be inferred locally, but macro-expanded
+calls, complex function pointers, broad `cfg` feature matrices, build scripts,
+and dependency pruning beyond local path crates need more work before this can
+be treated as a production-grade Rust slicer.

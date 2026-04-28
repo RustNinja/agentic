@@ -4,7 +4,9 @@ use syn::{ImplItem, Item, ItemImpl, ItemMod, ItemUse, Type, UseTree};
 
 use crate::{
     manifest::Workspace,
-    model::{CallableId, FunctionRecord, MethodRecord, Project, SourceFile},
+    model::{
+        CallableId, FunctionRecord, ItemId, ItemKind, ItemRecord, MethodRecord, Project, SourceFile,
+    },
 };
 
 pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::error::Error>> {
@@ -12,6 +14,7 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
         files: HashMap::new(),
         functions: HashMap::new(),
         methods: HashMap::new(),
+        items: HashMap::new(),
     };
 
     for package in workspace.packages.values() {
@@ -30,6 +33,7 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
         files: parser.files,
         functions: parser.functions,
         methods: parser.methods,
+        items: parser.items,
     })
 }
 
@@ -37,6 +41,7 @@ struct Parser {
     files: HashMap<std::path::PathBuf, SourceFile>,
     functions: HashMap<CallableId, FunctionRecord>,
     methods: HashMap<CallableId, MethodRecord>,
+    items: HashMap<ItemId, ItemRecord>,
 }
 
 impl Parser {
@@ -114,6 +119,31 @@ impl Parser {
                 Item::Impl(item_impl) => {
                     self.collect_impl(package, module_path, item_impl, aliases)?;
                 }
+                Item::Struct(_)
+                | Item::Enum(_)
+                | Item::Union(_)
+                | Item::Type(_)
+                | Item::Trait(_)
+                | Item::Const(_)
+                | Item::Static(_) => {
+                    if let Some((name, kind)) = item_name_and_kind(item) {
+                        let id = ItemId {
+                            package: package.to_string(),
+                            module_path: module_path.to_vec(),
+                            name,
+                            kind,
+                        };
+                        self.items.insert(
+                            id.clone(),
+                            ItemRecord {
+                                package: package.to_string(),
+                                module_path: module_path.to_vec(),
+                                item: item.clone(),
+                                aliases: aliases.clone(),
+                            },
+                        );
+                    }
+                }
                 Item::Mod(item_mod) => {
                     if let Some((_, items)) = &item_mod.content {
                         let mut child_path = module_path.to_vec();
@@ -139,12 +169,17 @@ impl Parser {
         let Some(type_path) = local_type_path(module_path, &item_impl.self_ty) else {
             return Ok(());
         };
+        let trait_path = item_impl
+            .trait_
+            .as_ref()
+            .map(|(_, path, _)| normalized_path(module_path, path));
 
         for impl_item in &item_impl.items {
             if let ImplItem::Fn(method) = impl_item {
                 let id = CallableId::Method {
                     package: package.to_string(),
                     type_path: type_path.clone(),
+                    trait_path: trait_path.clone(),
                     method: method.sig.ident.to_string(),
                 };
                 self.methods.insert(
@@ -190,6 +225,19 @@ impl Parser {
         let mut child_path = module_path.to_vec();
         child_path.push(name);
         self.parse_file(package, child_path, &next_file, &next_dir)
+    }
+}
+
+fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
+    match item {
+        Item::Struct(item) => Some((item.ident.to_string(), ItemKind::Struct)),
+        Item::Enum(item) => Some((item.ident.to_string(), ItemKind::Enum)),
+        Item::Union(item) => Some((item.ident.to_string(), ItemKind::Union)),
+        Item::Type(item) => Some((item.ident.to_string(), ItemKind::Type)),
+        Item::Trait(item) => Some((item.ident.to_string(), ItemKind::Trait)),
+        Item::Const(item) => Some((item.ident.to_string(), ItemKind::Const)),
+        Item::Static(item) => Some((item.ident.to_string(), ItemKind::Static)),
+        _ => None,
     }
 }
 
@@ -264,4 +312,30 @@ fn local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>
     let mut path = module_path.to_vec();
     path.extend(segments);
     Some(path)
+}
+
+fn normalized_path(module_path: &[String], path: &syn::Path) -> Vec<String> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    if segments[0] == "crate" {
+        return segments[1..].to_vec();
+    }
+    if segments[0] == "self" {
+        let mut path = module_path.to_vec();
+        path.extend_from_slice(&segments[1..]);
+        return path;
+    }
+    if segments[0] == "super" {
+        let mut path = module_path.to_vec();
+        path.pop();
+        path.extend_from_slice(&segments[1..]);
+        return path;
+    }
+    segments
 }

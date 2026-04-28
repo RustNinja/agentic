@@ -4,8 +4,21 @@ pub type Score = e::Score;
 
 pub const SALT: Score = e::DEFAULT_SEED;
 
+pub enum Mode {
+    Fast,
+    Slow,
+}
+
+pub enum UnusedEnum {
+    Dead,
+}
+
 pub struct Worker {
     factor: Score,
+}
+
+pub trait Transform {
+    fn transform(&self, value: Score) -> Score;
 }
 
 impl Worker {
@@ -26,16 +39,25 @@ impl Worker {
     }
 }
 
-pub fn hash(value: Score) -> Score {
-    renamed_mix(value) + SALT
+impl Transform for Worker {
+    fn transform(&self, value: Score) -> Score {
+        self.run(value) + renamed_mix(value)
+    }
+}
+
+pub fn hash(value: Score, mode: Mode) -> Score {
+    match mode {
+        Mode::Fast => renamed_mix(value) + SALT,
+        Mode::Slow => renamed_mix(value) - SALT,
+    }
 }
 
 pub fn normalize(value: Score) -> Score {
-    hash(value).abs()
+    hash(value, Mode::Fast).abs()
 }
 
 pub fn shared(value: Score) -> Score {
-    hash(value) - 2
+    hash(value, Mode::Fast) - 2
 }
 
 pub fn unused_public(value: Score) -> Score {
@@ -44,4 +66,12 @@ pub fn unused_public(value: Score) -> Score {
 
 fn unused_private(value: Score) -> Score {
     e::unused_leaf(value)
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn unit_test_that_must_not_be_exported() {
+        assert_eq!(2 + 2, 4);
+    }
 }

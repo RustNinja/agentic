@@ -2,10 +2,10 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use syn::{
     visit::{self, Visit},
-    Expr, ExprCall, ExprMethodCall, ExprPath, Local, Pat, Path, Type,
+    Expr, ExprCall, ExprMethodCall, ExprPath, Local, Pat, PatTupleStruct, Path, Type, TypePath,
 };
 
-use crate::model::{CallableId, Project, ReducedProject};
+use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject};
 
 pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::Error>> {
     let roots = project
@@ -31,17 +31,44 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
 
     let packages = package_closure(project, root.package());
     let mut reachable = BTreeSet::new();
-    let mut queue = VecDeque::new();
-    queue.push_back(root.clone());
+    let mut reachable_items = BTreeSet::new();
+    let mut callable_queue = VecDeque::from([root.clone()]);
+    let mut item_queue = VecDeque::new();
 
-    while let Some(callable) = queue.pop_front() {
-        if !packages.contains(callable.package()) || !reachable.insert(callable.clone()) {
-            continue;
+    while !callable_queue.is_empty() || !item_queue.is_empty() {
+        while let Some(callable) = callable_queue.pop_front() {
+            if !packages.contains(callable.package()) || !reachable.insert(callable.clone()) {
+                continue;
+            }
+
+            let dependencies = callable_dependencies(project, &callable);
+            for dependency in dependencies.callables {
+                if packages.contains(dependency.package()) && !reachable.contains(&dependency) {
+                    callable_queue.push_back(dependency);
+                }
+            }
+            for item in dependencies.items {
+                if packages.contains(item.package()) && !reachable_items.contains(&item) {
+                    item_queue.push_back(item);
+                }
+            }
         }
 
-        for dependency in callable_dependencies(project, &callable) {
-            if packages.contains(dependency.package()) && !reachable.contains(&dependency) {
-                queue.push_back(dependency);
+        while let Some(item) = item_queue.pop_front() {
+            if !packages.contains(item.package()) || !reachable_items.insert(item.clone()) {
+                continue;
+            }
+
+            let dependencies = item_dependencies(project, &item);
+            for dependency in dependencies.callables {
+                if packages.contains(dependency.package()) && !reachable.contains(&dependency) {
+                    callable_queue.push_back(dependency);
+                }
+            }
+            for item in dependencies.items {
+                if packages.contains(item.package()) && !reachable_items.contains(&item) {
+                    item_queue.push_back(item);
+                }
             }
         }
     }
@@ -50,6 +77,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
         root: root.clone(),
         packages,
         reachable,
+        reachable_items,
     })
 }
 
@@ -57,6 +85,22 @@ pub fn is_opensourced_attr(path: &Path) -> bool {
     path.segments
         .last()
         .is_some_and(|segment| segment.ident == "opensourced")
+}
+
+pub fn is_test_attr(path: &Path) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|segment| segment.ident == "test")
+}
+
+pub fn is_cfg_test_attr(attribute: &syn::Attribute) -> bool {
+    if !attribute.path().is_ident("cfg") {
+        return false;
+    }
+
+    attribute
+        .parse_args::<syn::Ident>()
+        .is_ok_and(|ident| ident == "test")
 }
 
 fn package_closure(project: &Project, root: &str) -> BTreeSet<String> {
@@ -85,11 +129,11 @@ fn package_closure(project: &Project, root: &str) -> BTreeSet<String> {
     packages
 }
 
-fn callable_dependencies(project: &Project, callable: &CallableId) -> BTreeSet<CallableId> {
+fn callable_dependencies(project: &Project, callable: &CallableId) -> DependencySet {
     match callable {
         CallableId::Free { .. } => {
             let Some(record) = project.functions.get(callable) else {
-                return BTreeSet::new();
+                return DependencySet::default();
             };
             let resolver = Resolver {
                 project,
@@ -99,14 +143,18 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> BTreeSet<C
                 self_type: None,
             };
             let mut visitor = DependencyVisitor::new(resolver);
+            visitor.visit_signature(&record.item.sig);
             visitor.visit_block(&record.item.block);
             visitor.dependencies
         }
         CallableId::Method {
-            package, type_path, ..
+            package,
+            type_path,
+            trait_path,
+            ..
         } => {
             let Some(record) = project.methods.get(callable) else {
-                return BTreeSet::new();
+                return DependencySet::default();
             };
             let resolver = Resolver {
                 project,
@@ -119,15 +167,48 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> BTreeSet<C
                 }),
             };
             let mut visitor = DependencyVisitor::new(resolver);
+            if let Some(item) = visitor.resolver.resolve_local_type_item(type_path) {
+                visitor.dependencies.items.insert(item);
+            }
+            if let Some(trait_path) = trait_path {
+                if let Some(item) = visitor.resolver.resolve_local_trait_item(trait_path) {
+                    visitor.dependencies.items.insert(item);
+                }
+            }
+            visitor.visit_signature(&record.item.sig);
             visitor.visit_block(&record.item.block);
             visitor.dependencies
         }
     }
 }
 
+fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
+    let Some(record) = project.items.get(item) else {
+        return DependencySet::default();
+    };
+
+    let resolver = Resolver {
+        project,
+        package: &record.package,
+        module_path: &record.module_path,
+        aliases: &record.aliases,
+        self_type: None,
+    };
+    let mut visitor = DependencyVisitor::new(resolver);
+    visitor.visit_item(&record.item);
+    visitor.dependencies.items.remove(item);
+    visitor.dependencies
+}
+
+#[derive(Default)]
+struct DependencySet {
+    callables: BTreeSet<CallableId>,
+    items: BTreeSet<ItemId>,
+}
+
 struct DependencyVisitor<'a> {
     resolver: Resolver<'a>,
-    dependencies: BTreeSet<CallableId>,
+    dependencies: DependencySet,
     variables: HashMap<String, TypeRef>,
 }
 
@@ -135,14 +216,20 @@ impl<'a> DependencyVisitor<'a> {
     fn new(resolver: Resolver<'a>) -> Self {
         Self {
             resolver,
-            dependencies: BTreeSet::new(),
+            dependencies: DependencySet::default(),
             variables: HashMap::new(),
         }
     }
 
-    fn add_path_call(&mut self, path: &Path) {
-        if let Some(callable) = self.resolver.resolve_call_path(path) {
-            self.dependencies.insert(callable);
+    fn add_call_path(&mut self, path: &Path) {
+        for callable in self.resolver.resolve_call_path(path) {
+            self.dependencies.callables.insert(callable);
+        }
+    }
+
+    fn add_item_path(&mut self, path: &Path) {
+        if let Some(item) = self.resolver.resolve_item_path(path) {
+            self.dependencies.items.insert(item);
         }
     }
 
@@ -150,6 +237,9 @@ impl<'a> DependencyVisitor<'a> {
         match expression {
             Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments.first()?.ident.to_string();
+                if name == "self" {
+                    return self.resolver.self_type.clone();
+                }
                 self.variables.get(&name).cloned()
             }
             Expr::Call(call) => {
@@ -202,26 +292,51 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_expr_call(&mut self, call: &'ast ExprCall) {
         if let Expr::Path(path) = call.func.as_ref() {
-            self.add_path_call(&path.path);
+            self.add_call_path(&path.path);
+            if let Some(first_arg) = call.args.first() {
+                if let Some(receiver) = self.receiver_type(first_arg) {
+                    for callable in self.resolver.resolve_trait_call(&path.path, &receiver) {
+                        self.dependencies.callables.insert(callable);
+                    }
+                }
+            }
         }
         visit::visit_expr_call(self, call);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
         if let Some(receiver) = self.receiver_type(&call.receiver) {
-            if let Some(callable) = self
+            for callable in self
                 .resolver
-                .resolve_method(&receiver, &call.method.to_string())
+                .resolve_methods(&receiver, &call.method.to_string())
             {
-                self.dependencies.insert(callable);
+                self.dependencies.callables.insert(callable);
             }
         }
         visit::visit_expr_method_call(self, call);
     }
 
     fn visit_expr_path(&mut self, path: &'ast ExprPath) {
-        self.add_path_call(&path.path);
+        self.add_call_path(&path.path);
+        self.add_item_path(&path.path);
         visit::visit_expr_path(self, path);
+    }
+
+    fn visit_type_path(&mut self, ty: &'ast TypePath) {
+        self.add_item_path(&ty.path);
+        visit::visit_type_path(self, ty);
+    }
+
+    fn visit_pat_tuple_struct(&mut self, pat: &'ast PatTupleStruct) {
+        self.add_item_path(&pat.path);
+        visit::visit_pat_tuple_struct(self, pat);
+    }
+
+    fn visit_pat(&mut self, pat: &'ast Pat) {
+        if let Pat::Path(path) = pat {
+            self.add_item_path(&path.path);
+        }
+        visit::visit_pat(self, pat);
     }
 }
 
@@ -241,9 +356,15 @@ struct Resolver<'a> {
 }
 
 impl Resolver<'_> {
-    fn resolve_call_path(&self, path: &Path) -> Option<CallableId> {
-        self.resolve_free_function(path)
-            .or_else(|| self.resolve_associated_method(path))
+    fn resolve_call_path(&self, path: &Path) -> Vec<CallableId> {
+        let mut callables = Vec::new();
+        if let Some(callable) = self.resolve_free_function(path) {
+            callables.push(callable);
+        }
+        if let Some(callable) = self.resolve_associated_method(path) {
+            callables.push(callable);
+        }
+        callables
     }
 
     fn resolve_free_function(&self, path: &Path) -> Option<CallableId> {
@@ -274,21 +395,79 @@ impl Resolver<'_> {
         let receiver = if receiver_segments.len() == 1 && receiver_segments[0] == "Self" {
             self.self_type.clone()?
         } else {
-            let (package, type_path) = self.resolve_type_prefix(receiver_segments)?;
-            TypeRef { package, type_path }
+            self.resolve_type_segments(receiver_segments)?
         };
 
-        self.resolve_method(&receiver, &method)
+        self.resolve_methods(&receiver, &method).into_iter().next()
     }
 
-    fn resolve_method(&self, receiver: &TypeRef, method: &str) -> Option<CallableId> {
-        let id = CallableId::Method {
+    fn resolve_methods(&self, receiver: &TypeRef, method: &str) -> Vec<CallableId> {
+        let mut matches = Vec::new();
+        let inherent = CallableId::Method {
             package: receiver.package.clone(),
             type_path: receiver.type_path.clone(),
+            trait_path: None,
             method: method.to_string(),
         };
+        if self.project.methods.contains_key(&inherent) {
+            matches.push(inherent);
+        }
 
-        self.project.methods.contains_key(&id).then_some(id)
+        matches.extend(self.project.methods.keys().filter_map(|id| {
+            let CallableId::Method {
+                package,
+                type_path,
+                trait_path: Some(_),
+                method: candidate_method,
+            } = id
+            else {
+                return None;
+            };
+
+            (package == &receiver.package
+                && type_path == &receiver.type_path
+                && candidate_method == method)
+                .then(|| id.clone())
+        }));
+
+        matches
+    }
+
+    fn resolve_trait_call(&self, path: &Path, receiver: &TypeRef) -> Vec<CallableId> {
+        let segments = self.apply_alias(path_segments(path));
+        if segments.len() < 2 {
+            return Vec::new();
+        }
+
+        let method = segments.last().expect("segments length checked");
+        let Some(trait_item) = self.resolve_item_segments(&segments[..segments.len() - 1]) else {
+            return Vec::new();
+        };
+        if trait_item.kind != ItemKind::Trait {
+            return Vec::new();
+        }
+
+        self.project
+            .methods
+            .keys()
+            .filter_map(|id| {
+                let CallableId::Method {
+                    package,
+                    type_path,
+                    trait_path: Some(trait_path),
+                    method: candidate_method,
+                } = id
+                else {
+                    return None;
+                };
+
+                (package == &receiver.package
+                    && type_path == &receiver.type_path
+                    && candidate_method == method
+                    && trait_path == &path_from_item(&trait_item))
+                    .then(|| id.clone())
+            })
+            .collect()
     }
 
     fn type_from_associated_call(&self, path: &Path) -> Option<TypeRef> {
@@ -309,21 +488,67 @@ impl Resolver<'_> {
 
     fn resolve_type_path(&self, path: &Path) -> Option<TypeRef> {
         let segments = self.apply_alias(path_segments(path));
-        let (package, type_path) = self.resolve_type_prefix(&segments)?;
-        Some(TypeRef { package, type_path })
+        self.resolve_type_segments(&segments)
+    }
+
+    fn resolve_type_segments(&self, segments: &[String]) -> Option<TypeRef> {
+        let item = self.resolve_item_segments(segments)?;
+        matches!(
+            item.kind,
+            ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type | ItemKind::Trait
+        )
+        .then(|| TypeRef {
+            package: item.package.clone(),
+            type_path: path_from_item(&item),
+        })
+    }
+
+    fn resolve_local_type_item(&self, type_path: &[String]) -> Option<ItemId> {
+        self.find_item(self.package, type_path, &type_like_kinds())
+    }
+
+    fn resolve_local_trait_item(&self, trait_path: &[String]) -> Option<ItemId> {
+        self.find_item(self.package, trait_path, &[ItemKind::Trait])
+    }
+
+    fn resolve_item_path(&self, path: &Path) -> Option<ItemId> {
+        let segments = self.apply_alias(path_segments(path));
+        self.resolve_item_segments(&segments)
+    }
+
+    fn resolve_item_segments(&self, segments: &[String]) -> Option<ItemId> {
+        for split in (1..=segments.len()).rev() {
+            let candidate = &segments[..split];
+            let Some((package, path)) = self.resolve_prefix(candidate) else {
+                continue;
+            };
+            if let Some(item) = self.find_item(&package, &path, &all_item_kinds()) {
+                return Some(item);
+            }
+        }
+        None
+    }
+
+    fn find_item(&self, package: &str, path: &[String], kinds: &[ItemKind]) -> Option<ItemId> {
+        if path.is_empty() {
+            return None;
+        }
+        let name = path.last()?.clone();
+        let module_path = path[..path.len() - 1].to_vec();
+        kinds.iter().find_map(|kind| {
+            let id = ItemId {
+                package: package.to_string(),
+                module_path: module_path.clone(),
+                name: name.clone(),
+                kind: *kind,
+            };
+            self.project.items.contains_key(&id).then_some(id)
+        })
     }
 
     fn resolve_value_prefix(&self, prefix: &[String]) -> Option<(String, Vec<String>)> {
         if prefix.is_empty() {
             return Some((self.package.to_string(), self.module_path.to_vec()));
-        }
-
-        self.resolve_prefix(prefix)
-    }
-
-    fn resolve_type_prefix(&self, prefix: &[String]) -> Option<(String, Vec<String>)> {
-        if prefix.is_empty() {
-            return None;
         }
 
         self.resolve_prefix(prefix)
@@ -344,6 +569,10 @@ impl Resolver<'_> {
                 path.extend_from_slice(&prefix[1..]);
                 Some((self.package.to_string(), path))
             }
+            "Self" => self
+                .self_type
+                .as_ref()
+                .map(|self_type| (self_type.package.clone(), self_type.type_path.clone())),
             package if package == self.package => {
                 Some((self.package.to_string(), prefix[1..].to_vec()))
             }
@@ -393,6 +622,34 @@ fn path_segments(path: &Path) -> Vec<String> {
         .iter()
         .map(|segment| segment.ident.to_string())
         .collect()
+}
+
+fn path_from_item(item: &ItemId) -> Vec<String> {
+    let mut path = item.module_path.clone();
+    path.push(item.name.clone());
+    path
+}
+
+fn type_like_kinds() -> [ItemKind; 5] {
+    [
+        ItemKind::Struct,
+        ItemKind::Enum,
+        ItemKind::Union,
+        ItemKind::Type,
+        ItemKind::Trait,
+    ]
+}
+
+fn all_item_kinds() -> [ItemKind; 7] {
+    [
+        ItemKind::Struct,
+        ItemKind::Enum,
+        ItemKind::Union,
+        ItemKind::Type,
+        ItemKind::Trait,
+        ItemKind::Const,
+        ItemKind::Static,
+    ]
 }
 
 fn binding_name_and_type(pattern: &Pat) -> Option<(String, Option<&Type>)> {

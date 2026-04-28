@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 
-use syn::{File, ImplItemFn, ItemFn};
+use syn::{File, ImplItemFn, Item, ItemFn};
 
 use crate::manifest::Workspace;
 
@@ -13,6 +13,7 @@ pub struct Project {
     pub files: HashMap<PathBuf, SourceFile>,
     pub functions: HashMap<CallableId, FunctionRecord>,
     pub methods: HashMap<CallableId, MethodRecord>,
+    pub items: HashMap<ItemId, ItemRecord>,
 }
 
 pub struct SourceFile {
@@ -38,11 +39,20 @@ pub struct MethodRecord {
     pub aliases: HashMap<String, Vec<String>>,
 }
 
+#[derive(Clone)]
+pub struct ItemRecord {
+    pub package: String,
+    pub module_path: Vec<String>,
+    pub item: Item,
+    pub aliases: HashMap<String, Vec<String>>,
+}
+
 #[derive(Debug, Clone)]
 pub struct ReducedProject {
     pub root: CallableId,
     pub packages: BTreeSet<String>,
     pub reachable: BTreeSet<CallableId>,
+    pub reachable_items: BTreeSet<ItemId>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -55,6 +65,7 @@ pub enum CallableId {
     Method {
         package: String,
         type_path: Vec<String>,
+        trait_path: Option<Vec<String>>,
         method: String,
     },
 }
@@ -65,6 +76,31 @@ impl CallableId {
             Self::Free { package, .. } | Self::Method { package, .. } => package,
         }
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct ItemId {
+    pub package: String,
+    pub module_path: Vec<String>,
+    pub name: String,
+    pub kind: ItemKind,
+}
+
+impl ItemId {
+    pub fn package(&self) -> &str {
+        &self.package
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum ItemKind {
+    Struct,
+    Enum,
+    Union,
+    Type,
+    Trait,
+    Const,
+    Static,
 }
 
 impl fmt::Display for CallableId {
@@ -84,14 +120,41 @@ impl fmt::Display for CallableId {
             Self::Method {
                 package,
                 type_path,
+                trait_path,
                 method,
             } => {
-                write!(formatter, "{package}")?;
-                for segment in type_path {
-                    write!(formatter, "::{segment}")?;
+                write!(formatter, "{package}::")?;
+                if let Some(trait_path) = trait_path {
+                    write!(formatter, "<")?;
+                    write_segments(formatter, type_path)?;
+                    write!(formatter, " as ")?;
+                    write_segments(formatter, trait_path)?;
+                    write!(formatter, ">::{method}")
+                } else {
+                    write_segments(formatter, type_path)?;
+                    write!(formatter, "::{method}")
                 }
-                write!(formatter, "::{method}")
             }
         }
     }
+}
+
+impl fmt::Display for ItemId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}::", self.package)?;
+        for segment in &self.module_path {
+            write!(formatter, "{segment}::")?;
+        }
+        write!(formatter, "{}({:?})", self.name, self.kind)
+    }
+}
+
+fn write_segments(formatter: &mut fmt::Formatter<'_>, segments: &[String]) -> fmt::Result {
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            write!(formatter, "::")?;
+        }
+        write!(formatter, "{segment}")?;
+    }
+    Ok(())
 }

@@ -3,8 +3,8 @@ use std::{fs, path::Path};
 use syn::{ImplItem, Item, Type, UseTree};
 
 use crate::{
-    model::{CallableId, Project, ReducedProject},
-    reduce::is_opensourced_attr,
+    model::{CallableId, ItemId, ItemKind, Project, ReducedProject},
+    reduce::{is_cfg_test_attr, is_opensourced_attr, is_test_attr},
 };
 
 pub fn write_reduced_workspace(
@@ -170,6 +170,7 @@ fn transform_items(
     items
         .iter()
         .filter_map(|item| match item {
+            _ if item_is_test(item) => None,
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
             Item::Fn(function) => {
                 let id = CallableId::Free {
@@ -183,16 +184,34 @@ fn transform_items(
                     Item::Fn(function)
                 })
             }
+            Item::Struct(_)
+            | Item::Enum(_)
+            | Item::Union(_)
+            | Item::Type(_)
+            | Item::Trait(_)
+            | Item::Const(_)
+            | Item::Static(_) => {
+                let id = item_id(package, module_path, item)?;
+                reduced.reachable_items.contains(&id).then(|| item.clone())
+            }
             Item::Impl(item_impl) => {
                 let type_path = local_type_path(module_path, &item_impl.self_ty)?;
+                let trait_path = item_impl
+                    .trait_
+                    .as_ref()
+                    .map(|(_, path, _)| normalized_path(module_path, path));
                 let mut kept_impl_items = Vec::new();
                 let mut kept_method = false;
 
                 for impl_item in &item_impl.items {
                     if let ImplItem::Fn(method) = impl_item {
+                        if attrs_are_test(&method.attrs) {
+                            continue;
+                        }
                         let id = CallableId::Method {
                             package: package.to_string(),
                             type_path: type_path.clone(),
+                            trait_path: trait_path.clone(),
                             method: method.sig.ident.to_string(),
                         };
                         if reduced.reachable.contains(&id) {
@@ -205,9 +224,20 @@ fn transform_items(
                 }
 
                 if kept_method {
-                    for impl_item in &item_impl.items {
-                        if !matches!(impl_item, ImplItem::Fn(_)) {
-                            kept_impl_items.push(impl_item.clone());
+                    if trait_path.is_some() {
+                        kept_impl_items.clear();
+                        for impl_item in &item_impl.items {
+                            if !impl_item_is_test(impl_item) {
+                                kept_impl_items.push(impl_item.clone());
+                            }
+                        }
+                    } else {
+                        for impl_item in &item_impl.items {
+                            if !matches!(impl_item, ImplItem::Fn(_))
+                                && !impl_item_is_test(impl_item)
+                            {
+                                kept_impl_items.push(impl_item.clone());
+                            }
                         }
                     }
 
@@ -235,8 +265,67 @@ fn transform_items(
         .collect()
 }
 
+fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId> {
+    let (name, kind) = match item {
+        Item::Struct(item) => (item.ident.to_string(), ItemKind::Struct),
+        Item::Enum(item) => (item.ident.to_string(), ItemKind::Enum),
+        Item::Union(item) => (item.ident.to_string(), ItemKind::Union),
+        Item::Type(item) => (item.ident.to_string(), ItemKind::Type),
+        Item::Trait(item) => (item.ident.to_string(), ItemKind::Trait),
+        Item::Const(item) => (item.ident.to_string(), ItemKind::Const),
+        Item::Static(item) => (item.ident.to_string(), ItemKind::Static),
+        _ => return None,
+    };
+
+    Some(ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name,
+        kind,
+    })
+}
+
 fn strip_opensourced_attrs(attrs: &mut Vec<syn::Attribute>) {
     attrs.retain(|attribute| !is_opensourced_attr(attribute.path()));
+}
+
+fn item_is_test(item: &Item) -> bool {
+    match item {
+        Item::Const(item) => attrs_are_test(&item.attrs),
+        Item::Enum(item) => attrs_are_test(&item.attrs),
+        Item::ExternCrate(item) => attrs_are_test(&item.attrs),
+        Item::Fn(item) => attrs_are_test(&item.attrs),
+        Item::ForeignMod(item) => attrs_are_test(&item.attrs),
+        Item::Impl(item) => attrs_are_test(&item.attrs),
+        Item::Macro(item) => attrs_are_test(&item.attrs),
+        Item::Mod(item) => attrs_are_test(&item.attrs),
+        Item::Static(item) => attrs_are_test(&item.attrs),
+        Item::Struct(item) => attrs_are_test(&item.attrs),
+        Item::Trait(item) => attrs_are_test(&item.attrs),
+        Item::TraitAlias(item) => attrs_are_test(&item.attrs),
+        Item::Type(item) => attrs_are_test(&item.attrs),
+        Item::Union(item) => attrs_are_test(&item.attrs),
+        Item::Use(item) => attrs_are_test(&item.attrs),
+        Item::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn impl_item_is_test(item: &ImplItem) -> bool {
+    match item {
+        ImplItem::Const(item) => attrs_are_test(&item.attrs),
+        ImplItem::Fn(item) => attrs_are_test(&item.attrs),
+        ImplItem::Type(item) => attrs_are_test(&item.attrs),
+        ImplItem::Macro(item) => attrs_are_test(&item.attrs),
+        ImplItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn attrs_are_test(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attribute| is_cfg_test_attr(attribute) || is_test_attr(attribute.path()))
 }
 
 fn use_mentions_opensourced(tree: &UseTree) -> bool {
@@ -280,4 +369,30 @@ fn local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>
     let mut path = module_path.to_vec();
     path.extend(segments);
     Some(path)
+}
+
+fn normalized_path(module_path: &[String], path: &syn::Path) -> Vec<String> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return Vec::new();
+    }
+    if segments[0] == "crate" {
+        return segments[1..].to_vec();
+    }
+    if segments[0] == "self" {
+        let mut path = module_path.to_vec();
+        path.extend_from_slice(&segments[1..]);
+        return path;
+    }
+    if segments[0] == "super" {
+        let mut path = module_path.to_vec();
+        path.pop();
+        path.extend_from_slice(&segments[1..]);
+        return path;
+    }
+    segments
 }
