@@ -1,0 +1,22 @@
+[workspace]
+members = [
+    "crates/opensourced",
+    "crates/opensource_core",
+    "crates/opensource_cli",
+    "fixtures/a",
+    "fixtures/b",
+    "fixtures/c",
+    "fixtures/d",
+    "fixtures/e",
+]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+proc-macro2 = "1.0"
+quote = "1.0"
+syn = { version = "2.0", features = ["full", "visit"] }

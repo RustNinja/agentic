@@ -1,0 +1,12 @@
+[package]
+name = "opensource_core"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+prettyplease = "0.2"
+proc-macro2.workspace = true
+quote.workspace = true
+syn.workspace = true
+toml = "0.8"

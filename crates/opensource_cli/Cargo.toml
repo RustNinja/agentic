@@ -1,0 +1,12 @@
+[package]
+name = "opensource_cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "opensource-reduce"
+path = "src/main.rs"
+
+[dependencies]
+opensource_core = { path = "../opensource_core" }
