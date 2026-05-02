@@ -84,7 +84,9 @@ pub fn write_compiler_prune_workspace(
 
     let mut demoted_visibilities = 0;
     for source in project.files.values() {
-        if !reduced.packages.contains(&source.package) || !source.path.starts_with(&workspace.root)
+        if source.package == "opensourced"
+            || !copied_packages.contains(&source.package)
+            || !source.path.starts_with(&workspace.root)
         {
             continue;
         }
@@ -103,7 +105,7 @@ pub fn write_compiler_prune_workspace(
     for package in workspace
         .packages
         .values()
-        .filter(|package| reduced.packages.contains(&package.name))
+        .filter(|package| package.name != "opensourced" && copied_packages.contains(&package.name))
     {
         if !package.lib_path.starts_with(&workspace.root) {
             continue;
@@ -136,7 +138,9 @@ pub fn refresh_compiler_prune_visibility(
     let mut demoted_visibilities = 0;
 
     for source in project.files.values() {
-        if !reduced.packages.contains(&source.package) || !source.path.starts_with(&workspace.root)
+        if source.package == "opensourced"
+            || !copied_packages.contains(&source.package)
+            || !source.path.starts_with(&workspace.root)
         {
             continue;
         }
@@ -228,6 +232,7 @@ fn external_reference_names(
         let Ok(text) = fs::read_to_string(&source.path) else {
             continue;
         };
+        let scan_text = &text;
         let Some(package) = project.workspace.packages.get(&source.package) else {
             continue;
         };
@@ -236,12 +241,12 @@ fn external_reference_names(
                 continue;
             }
             let prefix = format!("{}::", dependency.alias);
-            if !text.contains(&prefix) {
+            if !scan_text.contains(&prefix) {
                 continue;
             }
             for function in project.functions.values() {
                 if function.package == dependency.package
-                    && text.contains(&format!("{prefix}{}", function.item.sig.ident))
+                    && scan_text.contains(&format!("{prefix}{}", function.item.sig.ident))
                 {
                     names.insert((
                         dependency.package.clone(),
@@ -249,19 +254,63 @@ fn external_reference_names(
                     ));
                 }
             }
+            for (id, method) in &project.methods {
+                if id.package() != dependency.package {
+                    continue;
+                }
+                let name = method.item.sig.ident.to_string();
+                if scan_text.contains(&format!("::{name}"))
+                    || scan_text.contains(&format!(".{name}"))
+                {
+                    names.insert((dependency.package.clone(), name));
+                }
+            }
             for item in project.items.values() {
                 if item.package != dependency.package {
                     continue;
                 }
                 if let Some((name, _)) = compiler_prune_item_name(&item.item) {
-                    if text.contains(&format!("{prefix}{name}")) {
+                    if scan_text.contains(&format!("{prefix}{name}")) {
                         names.insert((dependency.package.clone(), name));
                     }
                 }
             }
         }
     }
+    add_signature_item_references(project, &mut names);
     names
+}
+
+fn add_signature_item_references(project: &Project, names: &mut BTreeSet<(String, String)>) {
+    let protected = names.clone();
+    for (package, name) in protected {
+        let signature = project
+            .functions
+            .values()
+            .find(|function| function.package == package && function.item.sig.ident == name)
+            .map(|function| function.item.sig.to_token_stream().to_string())
+            .or_else(|| {
+                project.methods.iter().find_map(|(id, method)| {
+                    (id.package() == package && method.item.sig.ident == name)
+                        .then(|| method.item.sig.to_token_stream().to_string())
+                })
+            });
+        let Some(signature) = signature else {
+            continue;
+        };
+
+        for item in project
+            .items
+            .values()
+            .filter(|item| item.package == package)
+        {
+            if let Some((item_name, _)) = compiler_prune_item_name(&item.item) {
+                if signature.contains(&item_name) {
+                    names.insert((package.clone(), item_name));
+                }
+            }
+        }
+    }
 }
 
 fn compiler_prune_item_name(item: &Item) -> Option<(String, ItemKind)> {
@@ -691,7 +740,10 @@ fn demote_items_for_prune(
                                     && callable_method == &method.sig.ident.to_string()
                             )
                         });
-                        if !is_boundary {
+                        if !is_boundary
+                            && !external_references
+                                .contains(&(package.to_string(), method.sig.ident.to_string()))
+                        {
                             demote_visibility_to_crate(&mut method.vis, demotions);
                         }
                     }
@@ -701,6 +753,7 @@ fn demote_items_for_prune(
         }
     }
     items.retain(|item| !empty_nonboundary_module(item, reduced, package, module_path));
+    items.retain(|item| !nonboundary_impl(item, reduced, external_references, package));
 }
 
 fn demote_visibility_to_crate(vis: &mut syn::Visibility, demotions: &mut usize) {
@@ -758,6 +811,64 @@ fn empty_nonboundary_module(
     let mut child_path = module_path.to_vec();
     child_path.push(item_mod.ident.to_string());
     !module_contains_boundary(reduced, package, &child_path)
+}
+
+fn nonboundary_impl(
+    item: &Item,
+    reduced: &ReducedProject,
+    external_references: &BTreeSet<(String, String)>,
+    package: &str,
+) -> bool {
+    let Item::Impl(item_impl) = item else {
+        return false;
+    };
+    !impl_has_boundary_method(item_impl, reduced, external_references, package)
+}
+
+fn impl_has_boundary_method(
+    item_impl: &syn::ItemImpl,
+    reduced: &ReducedProject,
+    external_references: &BTreeSet<(String, String)>,
+    package: &str,
+) -> bool {
+    let type_path = item_impl
+        .self_ty
+        .to_token_stream()
+        .to_string()
+        .split("::")
+        .map(|segment| segment.trim().to_string())
+        .collect::<Vec<_>>();
+    let trait_path = item_impl.trait_.as_ref().map(|(_, path, _)| {
+        path.to_token_stream()
+            .to_string()
+            .split("::")
+            .map(|segment| segment.trim().to_string())
+            .collect::<Vec<_>>()
+    });
+
+    item_impl.items.iter().any(|impl_item| {
+        let ImplItem::Fn(method) = impl_item else {
+            return false;
+        };
+        if external_references.contains(&(package.to_string(), method.sig.ident.to_string())) {
+            return true;
+        }
+        reduced.reachable.iter().any(|callable| {
+            matches!(
+                callable,
+                CallableId::Method {
+                    package: callable_package,
+                    type_path: callable_type,
+                    trait_path: callable_trait,
+                    method: callable_method,
+                    ..
+                } if callable_package == package
+                    && callable_type == &type_path
+                    && callable_trait == &trait_path
+                    && callable_method == &method.sig.ident.to_string()
+            )
+        })
+    })
 }
 
 fn boundary_or_external_item_exists(

@@ -218,35 +218,14 @@ fn prune_dead_items_from_diagnostics(
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mut by_file: BTreeMap<PathBuf, Vec<DeadItemCandidate>> = BTreeMap::new();
     for diagnostic in diagnostics {
-        if diagnostic
+        let code = diagnostic
             .get("code")
             .and_then(|code| code.get("code"))
-            .and_then(Value::as_str)
-            != Some("dead_code")
-        {
-            continue;
-        }
+            .and_then(Value::as_str);
         let Some(message) = diagnostic.get("message").and_then(Value::as_str) else {
             continue;
         };
-        if !(message.contains("function `")
-            || message.contains("method `")
-            || message.contains("associated function `")
-            || message.contains("associated constant `")
-            || message.contains("constant `")
-            || message.contains("enum `")
-            || message.contains("module `")
-            || message.contains("static `")
-            || message.contains("struct `")
-            || message.contains("type alias `")
-            || message.contains("union `")
-            || message.contains("trait `"))
-        {
-            continue;
-        }
-        let Some(name) = name_from_backticks(message) else {
-            continue;
-        };
+
         for span in diagnostic
             .get("spans")
             .and_then(Value::as_array)
@@ -259,9 +238,12 @@ fn prune_dead_items_from_diagnostics(
             let Some(line_start) = span.get("line_start").and_then(Value::as_u64) else {
                 continue;
             };
+            let Some(name) = dead_candidate_name(code, message, span) else {
+                continue;
+            };
             let path = diagnostic_path(output_root, file_name);
             by_file.entry(path).or_default().push(DeadItemCandidate {
-                name: name.to_string(),
+                name,
                 line_start: line_start as usize,
             });
         }
@@ -306,6 +288,78 @@ fn name_from_backticks(message: &str) -> Option<&str> {
     Some(name)
 }
 
+fn dead_candidate_name(code: Option<&str>, message: &str, span: &Value) -> Option<String> {
+    if code == Some("dead_code") && dead_code_message_is_item(message) {
+        let message_name = name_from_backticks(message)?;
+        return Some(name_from_span_text(span).unwrap_or_else(|| message_name.to_string()));
+    }
+
+    if matches!(code, Some("E0405" | "E0412" | "E0425"))
+        && message.starts_with("cannot find")
+        && span_text(span)?.trim_start().starts_with("impl ")
+    {
+        return Some("impl".to_string());
+    }
+
+    if matches!(code, Some("unused_imports" | "E0432" | "E0603"))
+        && span_text(span)?.trim_start().starts_with("use ")
+    {
+        return Some("use".to_string());
+    }
+
+    None
+}
+
+fn dead_code_message_is_item(message: &str) -> bool {
+    message.contains("function `")
+        || message.contains("method `")
+        || message.contains("associated function `")
+        || message.contains("associated items `")
+        || message.contains("associated constant `")
+        || message.contains("constant `")
+        || message.contains("enum `")
+        || message.contains("field `")
+        || message.contains("fields `")
+        || message.contains("module `")
+        || message.contains("static `")
+        || message.contains("struct `")
+        || message.contains("type alias `")
+        || message.contains("union `")
+        || message.contains("trait `")
+}
+
+fn name_from_span_text(span: &Value) -> Option<String> {
+    let text = span_text(span)?.trim_start();
+    let mut previous = "";
+    for token in text.split_whitespace() {
+        if matches!(
+            previous,
+            "const" | "enum" | "fn" | "mod" | "static" | "struct" | "trait" | "type" | "union"
+        ) {
+            return clean_ident_token(token);
+        }
+        previous = token;
+    }
+    None
+}
+
+fn clean_ident_token(token: &str) -> Option<String> {
+    let token = token.trim_start_matches("r#");
+    let ident = token
+        .chars()
+        .take_while(|character| character.is_ascii_alphanumeric() || *character == '_')
+        .collect::<String>();
+    (!ident.is_empty()).then_some(ident)
+}
+
+fn span_text(span: &Value) -> Option<&str> {
+    span.get("text")
+        .and_then(Value::as_array)?
+        .first()?
+        .get("text")
+        .and_then(Value::as_str)
+}
+
 fn remove_item_at_line(source: &mut String, candidate: &DeadItemCandidate) -> bool {
     let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
     let Some(mut start) = candidate.line_start.checked_sub(1) else {
@@ -337,12 +391,16 @@ fn remove_item_at_line(source: &mut String, candidate: &DeadItemCandidate) -> bo
         }
     }
 
-    let Some(header_end) = (start..lines.len())
-        .find(|index| lines[*index].contains('{') || lines[*index].trim_end().ends_with(';'))
-    else {
+    let Some(header_end) = (start..lines.len()).find(|index| {
+        lines[*index].contains('{')
+            || lines[*index].trim_end().ends_with(';')
+            || lines[*index].trim_end().ends_with(',')
+    }) else {
         return false;
     };
-    if lines[header_end].trim_end().ends_with(';') && !lines[header_end].contains('{') {
+    if (lines[header_end].trim_end().ends_with(';') || lines[header_end].trim_end().ends_with(','))
+        && !lines[header_end].contains('{')
+    {
         lines.drain(start..=header_end);
         *source = lines.join("\n");
         source.push('\n');

@@ -23,17 +23,20 @@ while true; do
     break
   fi
 
-  mapfile -t selected < <(
+  selected="$(
     printf '%s\n' "${cases[@]}" |
       awk 'BEGIN { srand() } { print rand() "\t" $0 }' |
       sort -n |
       head -n 5 |
       cut -f2-
-  )
+  )"
 
-  echo "cycle $cycle: ${#selected[@]} roots"
+  echo "cycle $cycle: 5 roots"
   index=0
-  for case in "${selected[@]}"; do
+  while IFS= read -r case; do
+    if [[ -z "$case" ]]; then
+      continue
+    fi
     index=$((index + 1))
     IFS='|' read -r label package file pattern <<<"$case"
 
@@ -70,5 +73,5 @@ while true; do
 
     CARGO_TARGET_DIR="$original_target" cargo clean --manifest-path "$workspace/Cargo.toml"
     CARGO_TARGET_DIR="$slice_target" cargo clean --manifest-path "$slice/Cargo.toml"
-  done
+  done <<<"$selected"
 done
