@@ -1294,6 +1294,7 @@ fn transform_items(
                 reduced.reachable.contains(&id).then(|| {
                     let mut function = function.clone();
                     strip_opensourced_attrs(&mut function.attrs);
+                    allow_dead_code_if_not_public(&function.vis, &mut function.attrs);
                     Item::Fn(function)
                 })
             }
@@ -1311,8 +1312,15 @@ fn transform_items(
             {
                 Some(Item::Macro(item_macro.clone()))
             }
-            Item::Struct(_)
-            | Item::Enum(_)
+            Item::Struct(item_struct) => item_id(package, module_path, item).and_then(|id| {
+                reduced.reachable_items.contains(&id).then(|| {
+                    let mut item_struct = item_struct.clone();
+                    prune_private_struct_fields(project, reduced, package, &mut item_struct);
+                    allow_dead_code_if_not_public(&item_struct.vis, &mut item_struct.attrs);
+                    Item::Struct(item_struct)
+                })
+            }),
+            Item::Enum(_)
             | Item::Union(_)
             | Item::Type(_)
             | Item::Trait(_)
@@ -1357,6 +1365,7 @@ fn transform_items(
                         if reduced.reachable.contains(&id) {
                             let mut method = method.clone();
                             strip_opensourced_attrs(&mut method.attrs);
+                            allow_dead_code_if_not_public(&method.vis, &mut method.attrs);
                             kept_impl_items.push(ImplItem::Fn(method));
                             kept_method = true;
                         }
@@ -1370,6 +1379,7 @@ fn transform_items(
                             if !impl_item_is_test(impl_item) {
                                 let mut impl_item = impl_item.clone();
                                 strip_opensourced_attrs_from_impl_item(&mut impl_item);
+                                allow_dead_code_for_non_public_impl_item(&mut impl_item);
                                 kept_impl_items.push(impl_item);
                             }
                         }
@@ -1728,7 +1738,7 @@ fn reachable_package_mentions_ident(
             .filter(|item| item.package() == package)
             .any(|item| {
                 project.items.get(item).is_some_and(|record| {
-                    token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+                    reachable_item_mentions_ident(project, reduced, package, item, record, ident)
                 })
             })
 }
@@ -1761,9 +1771,151 @@ fn reachable_module_mentions_ident(
             .filter(|item| item.package() == package && item.module_path == module_path)
             .any(|item| {
                 project.items.get(item).is_some_and(|record| {
-                    token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+                    reachable_item_mentions_ident(project, reduced, package, item, record, ident)
                 })
             })
+}
+
+fn reachable_item_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    item_id: &ItemId,
+    record: &crate::model::ItemRecord,
+    ident: &str,
+) -> bool {
+    let Item::Struct(item_struct) = &record.item else {
+        return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
+    };
+    if matches!(item_struct.vis, syn::Visibility::Public(_)) {
+        return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
+    }
+    if item_id.name == ident || item_id.module_path.iter().any(|segment| segment == ident) {
+        return true;
+    }
+    if item_struct
+        .attrs
+        .iter()
+        .any(|attr| token_stream_mentions_ident(&attr.to_token_stream(), ident))
+    {
+        return true;
+    }
+
+    let syn::Fields::Named(fields) = &item_struct.fields else {
+        return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
+    };
+    fields.named.iter().any(|field| {
+        let Some(name) = field.ident.as_ref() else {
+            return true;
+        };
+        reachable_callables_mention_ident(project, reduced, package, &name.to_string())
+            && token_stream_mentions_ident(&field.to_token_stream(), ident)
+    })
+}
+
+fn reachable_callables_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            if callable_mentions_ident(callable, ident) {
+                return true;
+            }
+            project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            })
+        })
+}
+
+fn reachable_module_import_scope_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    reachable_module_mentions_ident(project, reduced, package, module_path, ident)
+        || project
+            .files
+            .values()
+            .filter(|source| source.package == package)
+            .filter(|source| source.module_path.len() == module_path.len() + 1)
+            .filter(|source| path_has_prefix(&source.module_path, module_path))
+            .filter(|source| module_should_render(project, reduced, package, &source.module_path))
+            .filter(|source| file_has_super_glob_import(&source.syntax))
+            .any(|source| {
+                reachable_module_import_scope_mentions_ident(
+                    project,
+                    reduced,
+                    package,
+                    &source.module_path,
+                    ident,
+                )
+            })
+}
+
+fn file_has_super_glob_import(file: &syn::File) -> bool {
+    file.items.iter().any(|item| {
+        let Item::Use(item_use) = item else {
+            return false;
+        };
+        use_tree_has_super_glob_import(&item_use.tree)
+    })
+}
+
+fn use_tree_has_super_glob_import(tree: &UseTree) -> bool {
+    match tree {
+        UseTree::Path(path) if path.ident == "super" => use_tree_contains_glob(&path.tree),
+        UseTree::Path(path) => use_tree_has_super_glob_import(&path.tree),
+        UseTree::Group(group) => group.items.iter().any(use_tree_has_super_glob_import),
+        UseTree::Name(_) | UseTree::Rename(_) | UseTree::Glob(_) => false,
+    }
+}
+
+fn use_tree_contains_glob(tree: &UseTree) -> bool {
+    match tree {
+        UseTree::Glob(_) => true,
+        UseTree::Path(path) => use_tree_contains_glob(&path.tree),
+        UseTree::Group(group) => group.items.iter().any(use_tree_contains_glob),
+        UseTree::Name(_) | UseTree::Rename(_) => false,
+    }
+}
+
+fn module_glob_is_used_in_module(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    target_package: &str,
+    target_path: &[String],
+) -> bool {
+    project.functions.keys().any(|callable| {
+        let CallableId::Free {
+            package: callable_package,
+            module_path: callable_module,
+            name,
+        } = callable
+        else {
+            return false;
+        };
+        callable_package == target_package
+            && callable_module == target_path
+            && reduced.reachable.contains(callable)
+            && reachable_module_mentions_ident(project, reduced, package, module_path, name)
+    }) || project.items.keys().any(|item| {
+        item.package == target_package
+            && item.module_path == target_path
+            && reduced.reachable_items.contains(item)
+            && reachable_module_mentions_ident(project, reduced, package, module_path, &item.name)
+    })
 }
 
 fn callable_mentions_ident(callable: &CallableId, ident: &str) -> bool {
@@ -1794,6 +1946,52 @@ fn strip_opensourced_attrs_from_impl_item(item: &mut ImplItem) {
     if let ImplItem::Fn(method) = item {
         strip_opensourced_attrs(&mut method.attrs);
     }
+}
+
+fn allow_dead_code_if_not_public(vis: &syn::Visibility, attrs: &mut Vec<syn::Attribute>) {
+    if matches!(vis, syn::Visibility::Public(_)) {
+        return;
+    }
+    if attrs.iter().any(|attr| {
+        attr.path().is_ident("allow")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "dead_code")
+    }) {
+        return;
+    }
+    attrs.push(parse_quote!(#[allow(dead_code)]));
+}
+
+fn allow_dead_code_for_non_public_impl_item(item: &mut ImplItem) {
+    if let ImplItem::Fn(method) = item {
+        allow_dead_code_if_not_public(&method.vis, &mut method.attrs);
+    }
+}
+
+fn prune_private_struct_fields(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    item_struct: &mut syn::ItemStruct,
+) {
+    if matches!(item_struct.vis, syn::Visibility::Public(_)) {
+        return;
+    }
+
+    let syn::Fields::Named(fields) = &mut item_struct.fields else {
+        return;
+    };
+
+    fields.named = fields
+        .named
+        .iter()
+        .filter(|field| {
+            let Some(name) = field.ident.as_ref() else {
+                return true;
+            };
+            reachable_callables_mention_ident(project, reduced, package, &name.to_string())
+        })
+        .cloned()
+        .collect();
 }
 
 fn item_is_test(item: &Item) -> bool {
@@ -1980,7 +2178,7 @@ fn use_target_should_drop(
     };
 
     let leaf_is_used_in_module = target.last().is_some_and(|leaf| {
-        reachable_module_mentions_ident(project, reduced, package, module_path, leaf)
+        reachable_module_import_scope_mentions_ident(project, reduced, package, module_path, leaf)
     });
 
     if let Some(callable) = find_use_function(project, &target_package, &target_path) {
@@ -2022,7 +2220,13 @@ fn use_target_should_drop(
         if is_public_use {
             !reachable_package_mentions_ident(project, reduced, package, leaf)
         } else {
-            !reachable_module_mentions_ident(project, reduced, package, module_path, leaf)
+            !reachable_module_import_scope_mentions_ident(
+                project,
+                reduced,
+                package,
+                module_path,
+                leaf,
+            )
         }
     })
 }
@@ -2072,8 +2276,22 @@ fn use_prefix_should_drop(
 
     resolve_use_target_path(project, package, module_path, prefix).is_some_and(
         |(target_package, target_path)| {
-            project_has_module(project, &target_package, &target_path)
-                && !module_should_render(project, reduced, &target_package, &target_path)
+            if !project_has_module(project, &target_package, &target_path) {
+                return false;
+            }
+            if !module_should_render(project, reduced, &target_package, &target_path) {
+                return true;
+            }
+            !is_public_use
+                && !prefix.first().is_some_and(|first| first == "super")
+                && !module_glob_is_used_in_module(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    &target_package,
+                    &target_path,
+                )
         },
     )
 }
@@ -2258,6 +2476,7 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
             "write_u32",
             "write_u64",
         ]),
+        (Some("std" | "core" | "alloc"), "Future") => Some(&["poll"]),
         (Some("std" | "core" | "alloc"), "Read") => {
             Some(&["read", "read_exact", "read_to_end", "read_to_string"])
         }

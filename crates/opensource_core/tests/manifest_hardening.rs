@@ -571,7 +571,7 @@ fn retains_deref_impls_for_autoderef_method_calls() {
     let lib = read(output.join("deref_method_like/src/lib.rs"));
     assert!(lib.contains("impl std::ops::Deref for Slug"));
     assert!(lib.contains("fn as_str"));
-    assert!(!lib.contains("dead"));
+    assert!(!lib.contains("fn dead("));
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -1005,6 +1005,81 @@ fn prunes_unused_private_local_imports_even_when_item_is_reachable_elsewhere() {
         String::from_utf8_lossy(&cargo_check.stderr),
         feature,
         other,
+    );
+}
+
+#[test]
+fn retains_parent_imports_used_by_child_super_glob_and_prunes_unused_child_glob() {
+    let workspace = temp_path("super-glob-workspace");
+    let output = temp_path("super-glob-output");
+    let target_dir = temp_path("super-glob-target");
+    write_super_glob_parent_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let parent = read(output.join("super_glob_like/src/parent/mod.rs"));
+    let child = read(output.join("super_glob_like/src/parent/child.rs"));
+    assert!(parent.contains("PendingApproval"));
+    assert!(parent.contains("PendingApprovalSeed"));
+    assert!(!parent.contains("self::child"));
+    assert!(child.contains("use super::*"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated super glob slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nparent/mod.rs:\n{}\nparent/child.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        parent,
+        child,
+    );
+}
+
+#[test]
+fn prunes_unused_private_struct_fields_and_their_imports() {
+    let workspace = temp_path("private-field-workspace");
+    let output = temp_path("private-field-output");
+    let target_dir = temp_path("private-field-target");
+    write_unused_private_struct_field_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("private_field_like/src/lib.rs"));
+    assert!(source.contains("raw_params"));
+    assert!(source.contains("Serialize"));
+    assert!(source.contains("Deserialize"));
+    assert!(!source.contains("request_id"));
+    assert!(!source.contains("serde_json"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated private field slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
     );
 }
 
@@ -2814,6 +2889,107 @@ pub fn selected_other() -> OtherValue {
 
 pub struct OtherValue {
     pub value: i32,
+}
+"#,
+    );
+}
+
+fn write_super_glob_parent_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "super_glob_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"pub mod parent;
+pub mod types;
+"#,
+    );
+    write(
+        root.join("src/types.rs"),
+        r#"pub struct PendingApproval {
+    pub id: String,
+}
+
+pub struct PendingApprovalSeed {
+    pub raw_params: String,
+}
+"#,
+    );
+    write(
+        root.join("src/parent/mod.rs"),
+        r#"use crate::types::{PendingApproval, PendingApprovalSeed};
+
+pub mod child;
+use self::child::*;
+"#,
+    );
+    write(
+        root.join("src/parent/child.rs"),
+        r#"use opensourced::opensourced;
+use super::*;
+
+#[opensourced]
+pub fn selected(
+    approval: &PendingApproval,
+    seed: Option<&PendingApprovalSeed>,
+) -> Option<String> {
+    seed.map(|seed| format!("{}:{}", approval.id, seed.raw_params))
+}
+"#,
+    );
+}
+
+fn write_unused_private_struct_field_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "private_field_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Seed {
+    request_id: Value,
+    raw_params: String,
+}
+
+#[opensourced]
+pub(crate) fn selected(seed: &Seed) -> String {
+    seed.raw_params.clone()
 }
 "#,
     );

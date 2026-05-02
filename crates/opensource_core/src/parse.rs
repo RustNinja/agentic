@@ -79,7 +79,12 @@ impl Parser {
         let text = fs::read_to_string(&file_path)?;
         let syntax = syn::parse_file(&text)
             .map_err(|error| format!("failed to parse {}: {error}", file_path.display()))?;
-        let aliases = collect_aliases(&syntax.items);
+        let parent_aliases = module_path.split_last().and_then(|_| {
+            let parent_path = &module_path[..module_path.len().saturating_sub(1)];
+            self.module_aliases
+                .get(&(package.to_string(), parent_path.to_vec()))
+        });
+        let aliases = collect_aliases(&syntax.items, parent_aliases);
         self.module_aliases
             .insert((package.to_string(), module_path.clone()), aliases.clone());
 
@@ -182,7 +187,7 @@ impl Parser {
                     if let Some((_, items)) = &item_mod.content {
                         let mut child_path = module_path.to_vec();
                         child_path.push(item_mod.ident.to_string());
-                        let child_aliases = collect_aliases(items);
+                        let child_aliases = collect_aliases(items, Some(aliases));
                         self.module_aliases.insert(
                             (package.to_string(), child_path.clone()),
                             child_aliases.clone(),
@@ -366,14 +371,48 @@ fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
     }
 }
 
-fn collect_aliases(items: &[Item]) -> HashMap<String, Vec<String>> {
-    let mut aliases = HashMap::new();
+fn collect_aliases(
+    items: &[Item],
+    parent_aliases: Option<&HashMap<String, Vec<String>>>,
+) -> HashMap<String, Vec<String>> {
+    let mut aliases = if items_have_super_glob_import(items) {
+        parent_aliases.cloned().unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     for item in items {
         if let Item::Use(ItemUse { tree, .. }) = item {
             collect_use_tree(tree, Vec::new(), &mut aliases);
         }
     }
     aliases
+}
+
+fn items_have_super_glob_import(items: &[Item]) -> bool {
+    items.iter().any(|item| {
+        let Item::Use(ItemUse { tree, .. }) = item else {
+            return false;
+        };
+        use_tree_has_super_glob_import(tree)
+    })
+}
+
+fn use_tree_has_super_glob_import(tree: &UseTree) -> bool {
+    match tree {
+        UseTree::Path(path) if path.ident == "super" => use_tree_contains_glob(&path.tree),
+        UseTree::Path(path) => use_tree_has_super_glob_import(&path.tree),
+        UseTree::Group(group) => group.items.iter().any(use_tree_has_super_glob_import),
+        UseTree::Name(_) | UseTree::Rename(_) | UseTree::Glob(_) => false,
+    }
+}
+
+fn use_tree_contains_glob(tree: &UseTree) -> bool {
+    match tree {
+        UseTree::Glob(_) => true,
+        UseTree::Path(path) => use_tree_contains_glob(&path.tree),
+        UseTree::Group(group) => group.items.iter().any(use_tree_contains_glob),
+        UseTree::Name(_) | UseTree::Rename(_) => false,
+    }
 }
 
 fn collect_use_tree(
