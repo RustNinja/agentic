@@ -693,6 +693,41 @@ fn retains_external_extension_trait_imports_for_method_resolution() {
 }
 
 #[test]
+fn retains_std_trait_imports_for_method_resolution() {
+    let workspace = temp_path("std-trait-import-workspace");
+    let output = temp_path("std-trait-import-output");
+    let target_dir = temp_path("std-trait-import-target");
+    write_std_trait_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("std_trait_import_like/src/lib.rs"));
+    assert!(source.contains("Hash"));
+    assert!(source.contains("Hasher"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated std trait import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn resolves_type_paths_through_visible_glob_reexports() {
     let workspace = temp_path("glob-type-reexport-workspace");
     let output = temp_path("glob-type-reexport-output");
@@ -2018,6 +2053,43 @@ pub async fn selected<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<S
 }
 
 pub async fn dead() -> &'static str {
+    "dead"
+}
+"#,
+    );
+}
+
+fn write_std_trait_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "std_trait_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use std::hash::{Hash, Hasher};
+
+#[opensourced]
+pub fn selected(value: &str) -> u64 {
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    value.hash(&mut hasher);
+    hasher.finish()
+}
+
+pub fn dead() -> &'static str {
     "dead"
 }
 "#,
