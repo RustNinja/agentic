@@ -1317,6 +1317,7 @@ fn transform_items(
                     let mut item_struct = item_struct.clone();
                     strip_opensourced_attrs(&mut item_struct.attrs);
                     prune_private_struct_fields(project, reduced, package, &mut item_struct);
+                    allow_dead_code_for_private_struct_fields(&mut item_struct);
                     allow_dead_code_if_not_public(&item_struct.vis, &mut item_struct.attrs);
                     Item::Struct(item_struct)
                 })
@@ -1986,6 +1987,16 @@ fn allow_dead_code_if_not_public(vis: &syn::Visibility, attrs: &mut Vec<syn::Att
     if matches!(vis, syn::Visibility::Public(_)) {
         return;
     }
+    allow_dead_code(attrs);
+}
+
+fn allow_dead_code_for_private_struct_fields(item_struct: &mut syn::ItemStruct) {
+    if struct_has_private_fields(item_struct) {
+        allow_dead_code(&mut item_struct.attrs);
+    }
+}
+
+fn allow_dead_code(attrs: &mut Vec<syn::Attribute>) {
     if attrs.iter().any(|attr| {
         attr.path().is_ident("allow")
             && token_stream_mentions_ident(&attr.to_token_stream(), "dead_code")
@@ -1993,6 +2004,20 @@ fn allow_dead_code_if_not_public(vis: &syn::Visibility, attrs: &mut Vec<syn::Att
         return;
     }
     attrs.push(parse_quote!(#[allow(dead_code)]));
+}
+
+fn struct_has_private_fields(item_struct: &syn::ItemStruct) -> bool {
+    match &item_struct.fields {
+        syn::Fields::Named(fields) => fields
+            .named
+            .iter()
+            .any(|field| !matches!(field.vis, syn::Visibility::Public(_))),
+        syn::Fields::Unnamed(fields) => fields
+            .unnamed
+            .iter()
+            .any(|field| !matches!(field.vis, syn::Visibility::Public(_))),
+        syn::Fields::Unit => false,
+    }
 }
 
 fn allow_dead_code_for_non_public_impl_item(item: &mut ImplItem) {

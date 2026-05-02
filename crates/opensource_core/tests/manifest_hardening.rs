@@ -139,7 +139,10 @@ fn slices_marked_data_item_roots() {
     }
 
     let source = read(output.join("item_root_like/src/lib.rs"));
+    assert!(source.contains("#[allow(dead_code)]\npub struct Api"));
     assert!(source.contains("pub struct Api"));
+    assert!(source.contains("state: PrivateState"));
+    assert!(source.contains("struct PrivateState"));
     assert!(source.contains("pub enum Mode"));
     assert!(source.contains("pub trait Handler"));
     assert!(!source.contains("Dead"));
@@ -1749,6 +1752,11 @@ opensourced = {{ path = "{}" }}
 pub struct Api {
     pub mode: Mode,
     pub handler: Box<dyn Handler>,
+    state: PrivateState,
+}
+
+struct PrivateState {
+    generation: usize,
 }
 
 pub enum Mode {
