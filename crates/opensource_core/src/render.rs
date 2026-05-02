@@ -1332,6 +1332,7 @@ fn transform_items(
                 reduced.reachable_items.contains(&id).then(|| {
                     let mut item = item.clone();
                     strip_opensourced_attrs_from_item(&mut item);
+                    allow_dead_code_for_non_public_item(&mut item);
                     item
                 })
             }),
@@ -2033,6 +2034,18 @@ fn struct_has_private_fields(item_struct: &syn::ItemStruct) -> bool {
             .iter()
             .any(|field| !matches!(field.vis, syn::Visibility::Public(_))),
         syn::Fields::Unit => false,
+    }
+}
+
+fn allow_dead_code_for_non_public_item(item: &mut Item) {
+    match item {
+        Item::Const(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
+        Item::Enum(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
+        Item::Static(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
+        Item::Trait(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
+        Item::Type(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
+        Item::Union(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
+        _ => {}
     }
 }
 

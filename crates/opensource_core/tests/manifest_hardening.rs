@@ -120,7 +120,13 @@ fn slices_marked_data_item_roots() {
         .iter()
         .map(ToString::to_string)
         .collect::<Vec<_>>();
-    assert_eq!(roots, ["item_root_like::Api(Struct)"]);
+    assert_eq!(
+        roots,
+        [
+            "item_root_like::Api(Struct)",
+            "item_root_like::PrivateKind(Enum)"
+        ]
+    );
 
     let reachable_items = report
         .reachable_items
@@ -131,6 +137,7 @@ fn slices_marked_data_item_roots() {
         "item_root_like::Api(Struct)",
         "item_root_like::Handler(Trait)",
         "item_root_like::Mode(Enum)",
+        "item_root_like::PrivateKind(Enum)",
     ] {
         assert!(
             reachable_items.iter().any(|actual| actual == expected),
@@ -144,6 +151,7 @@ fn slices_marked_data_item_roots() {
     assert!(source.contains("state: PrivateState"));
     assert!(source.contains("struct PrivateState"));
     assert!(source.contains("pub enum Mode"));
+    assert!(source.contains("#[allow(dead_code)]\nenum PrivateKind"));
     assert!(source.contains("pub trait Handler"));
     assert!(!source.contains("Dead"));
     assert!(!source.contains("#[opensourced]"));
@@ -1763,6 +1771,12 @@ struct PrivateState {
 pub enum Mode {
     Read,
     Write,
+}
+
+#[opensourced]
+enum PrivateKind {
+    Fast,
+    Slow,
 }
 
 pub trait Handler {
