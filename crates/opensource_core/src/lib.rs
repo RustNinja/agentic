@@ -1,3 +1,4 @@
+mod feedback;
 mod manifest;
 mod model;
 mod parse;
@@ -6,6 +7,7 @@ mod render;
 
 use std::path::PathBuf;
 
+pub use feedback::{check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport};
 pub use model::{CallableId, ItemId};
 
 #[derive(Debug, Clone)]

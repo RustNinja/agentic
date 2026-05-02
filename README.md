@@ -80,8 +80,18 @@ inside retained impl blocks so the reduced source keeps compiling.
 ```sh
 cargo test --workspace
 cargo run -p opensource_cli --bin slicers -- --check . /tmp/slicers-proof
+cargo run -p opensource_cli --bin slicers -- --feedback . /tmp/slicers-feedback
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
+
+`--feedback` runs `cargo check --message-format=json` against the generated
+workspace, prints prioritized compiler diagnostics, and writes
+`slice-feedback.json` under the slice output. `--feedback-loop <n>` repeats that
+compiler feedback pass up to `n` times and fails with the JSON report path when
+the slice still does not compile. This is the current production feedback layer:
+the slicer stays fast and syntactic, then rustc gives precise diagnostics for
+the generated slice. A rust-analyzer HIR or rustc-driver backend remains the
+next precision step for resolving hard name-resolution cases before rendering.
 
 ## Additional Generated Fixtures
 

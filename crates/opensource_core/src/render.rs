@@ -2005,12 +2005,82 @@ fn external_use_leaf(target: &[String]) -> Option<&str> {
     Some(leaf)
 }
 
-fn is_external_trait_import_candidate(leaf: &str) -> bool {
-    leaf.ends_with("Ext")
-        || leaf
-            .chars()
-            .next()
-            .is_some_and(|first| first.is_ascii_uppercase())
+fn is_external_trait_import_candidate(target: &[String], leaf: &str) -> bool {
+    if leaf.ends_with("Ext") {
+        return true;
+    }
+
+    if target
+        .first()
+        .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
+    {
+        return is_known_std_trait_import(leaf);
+    }
+
+    leaf.chars()
+        .next()
+        .is_some_and(|first| first.is_ascii_uppercase())
+}
+
+fn is_known_std_trait_import(leaf: &str) -> bool {
+    matches!(
+        leaf,
+        "Add"
+            | "AddAssign"
+            | "AsMut"
+            | "AsRef"
+            | "Borrow"
+            | "BorrowMut"
+            | "BufRead"
+            | "Clone"
+            | "Debug"
+            | "Default"
+            | "Deref"
+            | "DerefMut"
+            | "Display"
+            | "Div"
+            | "DivAssign"
+            | "Drop"
+            | "Eq"
+            | "Error"
+            | "Extend"
+            | "Fn"
+            | "FnMut"
+            | "FnOnce"
+            | "From"
+            | "FromIterator"
+            | "FromStr"
+            | "Future"
+            | "Hash"
+            | "Hasher"
+            | "Index"
+            | "IndexMut"
+            | "Into"
+            | "IntoIterator"
+            | "Iterator"
+            | "Mul"
+            | "MulAssign"
+            | "Neg"
+            | "Not"
+            | "Ord"
+            | "PartialEq"
+            | "PartialOrd"
+            | "Product"
+            | "Read"
+            | "Rem"
+            | "RemAssign"
+            | "Seek"
+            | "Send"
+            | "Shr"
+            | "ShrAssign"
+            | "Sub"
+            | "SubAssign"
+            | "Sum"
+            | "Sync"
+            | "TryFrom"
+            | "TryInto"
+            | "Write"
+    )
 }
 
 fn external_trait_import_should_remain(
@@ -2024,7 +2094,7 @@ fn external_trait_import_should_remain(
     if leaf.ends_with("Ext") {
         return true;
     }
-    if !is_external_trait_import_candidate(leaf) {
+    if !is_external_trait_import_candidate(target, leaf) {
         return false;
     }
     if !is_public_use {

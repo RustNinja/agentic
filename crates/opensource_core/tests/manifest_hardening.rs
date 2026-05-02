@@ -858,6 +858,8 @@ fn retains_std_trait_imports_for_method_resolution() {
     assert!(source.contains("Hash"));
     assert!(source.contains("Hasher"));
     assert!(source.contains("Write"));
+    assert!(!source.contains("AtomicI64"));
+    assert!(!source.contains("Ordering"));
     assert!(!source.contains("#[opensourced]"));
 
     let cargo_check = Command::new("cargo")
@@ -2459,6 +2461,7 @@ opensourced = {{ path = "{}" }}
         root.join("src/lib.rs"),
         r#"use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 #[opensourced]
 pub fn selected(value: &str) -> u64 {
