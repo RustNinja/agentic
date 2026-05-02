@@ -621,6 +621,44 @@ fn rewrites_features_and_keeps_target_dependencies_and_build_script() {
 }
 
 #[test]
+fn resolves_external_workspace_path_dependencies_from_original_root() {
+    let workspace = temp_path("external-workspace-dep-workspace");
+    let output = temp_path("external-workspace-dep-output");
+    let target_dir = temp_path("external-workspace-dep-target");
+    write_external_workspace_path_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace.clone(),
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let root_manifest = read(output.join("Cargo.toml"));
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    assert!(root_manifest.contains("external_helper"));
+    assert!(root_manifest.contains("path = \"/"));
+    assert!(!root_manifest.contains("path = \"../"));
+    assert!(app_manifest.contains("external_helper"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external workspace dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nCargo.toml:\n{}\napp/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        root_manifest,
+        app_manifest,
+    );
+}
+
+#[test]
 fn removes_test_and_runtime_benchmark_cfg_modules() {
     let workspace = temp_path("cfg-benchmark-workspace");
     let output = temp_path("cfg-benchmark-output");
@@ -1800,6 +1838,81 @@ pub fn platform() -> String {
         r#"
 pub fn dead() -> String {
     "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_external_workspace_path_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let external_name = format!(
+        "{}-external-helper",
+        root.file_name().unwrap().to_string_lossy()
+    );
+    let external_root = root.parent().unwrap().join(&external_name);
+    if external_root.exists() {
+        fs::remove_dir_all(&external_root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+external_helper = {{ package = "external-helper", path = "../{external_name}" }}
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+external_helper.workspace = true
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    external_helper::decorate(value)
+}
+
+pub fn dead() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        external_root.join("Cargo.toml"),
+        r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        external_root.join("src/lib.rs"),
+        r#"pub fn decorate(value: &str) -> String {
+    format!("external:{value}")
+}
+
+pub fn unused() -> &'static str {
+    "unused"
 }
 "#,
     );

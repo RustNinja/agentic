@@ -8,6 +8,7 @@ use toml::Value;
 
 #[derive(Debug)]
 pub struct Workspace {
+    pub root: PathBuf,
     pub packages: HashMap<String, Package>,
     pub manifest: Value,
 }
@@ -82,6 +83,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
     }
 
     Ok(Workspace {
+        root,
         packages,
         manifest: root_value,
     })

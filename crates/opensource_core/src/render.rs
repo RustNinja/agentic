@@ -628,7 +628,10 @@ fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) 
                     continue;
                 }
                 if let Some(source) = source_dependencies.get(alias) {
-                    dependencies.insert(alias.clone(), source.clone());
+                    dependencies.insert(
+                        alias.clone(),
+                        dependency_value_with_resolved_path(source, &project.workspace.root),
+                    );
                 }
             }
         }
@@ -681,7 +684,10 @@ fn transformed_dependencies(
 
         if dependency_should_render(project, reduced, package_name, alias, retention) {
             retained_aliases.insert(alias.clone());
-            dependencies.insert(alias.clone(), value.clone());
+            dependencies.insert(
+                alias.clone(),
+                dependency_value_with_resolved_path(value, &package.root),
+            );
         }
     }
 
@@ -761,7 +767,13 @@ fn transformed_dependency_table(
 
         if dependency_should_render(project, reduced, package_name, alias, retention) {
             retained_aliases.insert(alias.clone());
-            dependencies.insert(alias.clone(), value.clone());
+            let value = project
+                .workspace
+                .packages
+                .get(package_name)
+                .map(|package| dependency_value_with_resolved_path(value, &package.root))
+                .unwrap_or_else(|| value.clone());
+            dependencies.insert(alias.clone(), value);
         }
     }
 
@@ -976,6 +988,30 @@ fn dependency_uses_workspace(value: &Value) -> bool {
         .and_then(|table| table.get("workspace"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
+}
+
+fn dependency_value_with_resolved_path(value: &Value, manifest_dir: &Path) -> Value {
+    let Some(table) = value.as_table() else {
+        return value.clone();
+    };
+    let Some(path) = table.get("path").and_then(Value::as_str) else {
+        return value.clone();
+    };
+
+    let mut table = table.clone();
+    let path = PathBuf::from(path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    };
+    let path = path.canonicalize().unwrap_or(path);
+    table.insert("path".to_string(), Value::String(toml_path(&path)));
+    Value::Table(table)
+}
+
+fn toml_path(path: &Path) -> String {
+    path.to_string_lossy().replace('\\', "/")
 }
 
 fn is_marker_dependency(alias: &str, package: &str) -> bool {
