@@ -47,6 +47,62 @@ fn slices_single_package_binary_crate_with_stub_main() {
 }
 
 #[test]
+fn slices_multiple_marked_function_roots() {
+    let workspace = temp_path("multi-root-workspace");
+    let output = temp_path("multi-root-output");
+    let target_dir = temp_path("multi-root-target");
+    write_multi_root_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let roots = report
+        .roots
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roots,
+        [
+            "multi_root_like::selected_a",
+            "multi_root_like::selected_b",
+            "multi_root_like::hidden::selected_hidden"
+        ]
+    );
+
+    let source = read(output.join("multi_root_like/src/lib.rs"));
+    assert!(source.contains("pub fn selected_a"));
+    assert!(source.contains("pub fn selected_b"));
+    assert!(source.contains("pub mod hidden"));
+    assert!(source.contains("pub fn selected_hidden"));
+    assert!(source.contains("fn helper_a"));
+    assert!(source.contains("fn helper_b"));
+    assert!(source.contains("fn helper_hidden"));
+    assert!(!source.contains("dead_root"));
+    assert!(!source.contains("dead_helper"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated multi-root slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn slices_binary_child_module_with_generated_items_and_pruned_stub_imports() {
     let workspace = temp_path("child-binary-workspace");
     let output = temp_path("child-binary-output");
@@ -842,6 +898,43 @@ fn retains_external_trait_imports_without_ext_suffix_for_method_resolution() {
 }
 
 #[test]
+fn prunes_unused_serde_derive_imports_after_dead_items_are_removed() {
+    let workspace = temp_path("serde-derive-import-workspace");
+    let output = temp_path("serde-derive-import-output");
+    let target_dir = temp_path("serde-derive-import-target");
+    write_unused_serde_derive_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("serde_derive_import_like/src/lib.rs"));
+    assert!(source.contains("pub fn selected"));
+    assert!(source.contains("serde::Serialize"));
+    assert!(!source.contains("Deserialize"));
+    assert!(!source.contains("DeadWire"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde derive import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn retains_std_trait_imports_for_method_resolution() {
     let workspace = temp_path("std-trait-import-workspace");
     let output = temp_path("std-trait-import-output");
@@ -1230,6 +1323,75 @@ fn noisy_entrypoint() {
 
 fn dead() -> String {
     "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_multi_root_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "multi_root_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_a(value: i32) -> i32 {
+    helper_a(value)
+}
+
+#[opensourced]
+pub fn selected_b(value: i32) -> i32 {
+    helper_b(value)
+}
+
+fn helper_a(value: i32) -> i32 {
+    value + 1
+}
+
+fn helper_b(value: i32) -> i32 {
+    value * 2
+}
+
+mod hidden {
+    use opensourced::opensourced;
+
+    #[opensourced]
+    pub fn selected_hidden(value: i32) -> i32 {
+        helper_hidden(value)
+    }
+
+    fn helper_hidden(value: i32) -> i32 {
+        value * value
+    }
+
+    pub fn dead_hidden(value: i32) -> i32 {
+        value - 10
+    }
+}
+
+pub fn dead_root(value: i32) -> i32 {
+    dead_helper(value)
+}
+
+fn dead_helper(value: i32) -> i32 {
+    value - 1
 }
 "#,
     );
@@ -2433,6 +2595,49 @@ pub fn selected(input: &str) -> Option<Vec<u8>> {
 
 pub fn dead() -> &'static str {
     "dead"
+}
+"#,
+    );
+}
+
+fn write_unused_serde_derive_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_derive_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct DeadWire {
+    value: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct KeptWire {
+    value: i32,
+}
+
+#[opensourced]
+pub fn selected(value: i32) -> KeptWire {
+    KeptWire { value }
 }
 "#,
     );

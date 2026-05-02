@@ -53,6 +53,7 @@ pub struct ItemRecord {
 #[derive(Debug, Clone)]
 pub struct ReducedProject {
     pub root: CallableId,
+    pub roots: Vec<CallableId>,
     pub packages: BTreeSet<String>,
     pub reachable: BTreeSet<CallableId>,
     pub reachable_items: BTreeSet<ItemId>,

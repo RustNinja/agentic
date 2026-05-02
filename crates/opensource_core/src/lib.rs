@@ -19,6 +19,7 @@ pub struct GenerateOptions {
 #[derive(Debug, Clone)]
 pub struct GenerateReport {
     pub root: CallableId,
+    pub roots: Vec<CallableId>,
     pub packages: Vec<String>,
     pub reachable: Vec<CallableId>,
     pub reachable_items: Vec<ItemId>,
@@ -42,6 +43,7 @@ pub fn generate(options: GenerateOptions) -> Result<GenerateReport, Box<dyn std:
 
     Ok(GenerateReport {
         root: reduced.root,
+        roots: reduced.roots,
         packages,
         reachable,
         reachable_items,

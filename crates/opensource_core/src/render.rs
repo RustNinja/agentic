@@ -1394,6 +1394,9 @@ fn transform_items(
                 let mut item_mod = item_mod.clone();
                 let mut child_path = module_path.to_vec();
                 child_path.push(item_mod.ident.to_string());
+                if module_contains_root(project, reduced, package, &child_path) {
+                    item_mod.vis = parse_quote!(pub);
+                }
 
                 if let Some((brace, child_items)) = &item_mod.content {
                     let child_items =
@@ -1416,6 +1419,33 @@ fn transform_items(
     }
 
     transformed
+}
+
+fn module_contains_root(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    reduced.roots.iter().any(|root| match root {
+        CallableId::Free {
+            package: root_package,
+            module_path: root_module,
+            ..
+        } => root_package == package && path_has_prefix(root_module, module_path),
+        CallableId::Method {
+            package: root_package,
+            type_path,
+            ..
+        } => {
+            root_package == package
+                && project
+                    .methods
+                    .get(root)
+                    .map(|record| path_has_prefix(&record.module_path, module_path))
+                    .unwrap_or_else(|| path_has_prefix(type_path, module_path))
+        }
+    })
 }
 
 fn module_should_render(
@@ -1703,6 +1733,37 @@ fn reachable_package_mentions_ident(
             })
 }
 
+fn reachable_module_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package() == package && item.module_path == module_path)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+                })
+            })
+}
+
 fn callable_mentions_ident(callable: &CallableId, ident: &str) -> bool {
     match callable {
         CallableId::Free {
@@ -1886,14 +1947,28 @@ fn use_target_should_drop(
         .first()
         .is_some_and(|first| use_name_is_external_dependency(project, package, first))
     {
-        return external_use_target_should_drop(project, reduced, package, target, is_public_use);
+        return external_use_target_should_drop(
+            project,
+            reduced,
+            package,
+            module_path,
+            target,
+            is_public_use,
+        );
     }
 
     if target
         .first()
         .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
     {
-        return external_use_target_should_drop(project, reduced, package, target, is_public_use);
+        return external_use_target_should_drop(
+            project,
+            reduced,
+            package,
+            module_path,
+            target,
+            is_public_use,
+        );
     }
 
     let Some((target_package, target_path)) =
@@ -1949,14 +2024,28 @@ fn use_prefix_should_drop(
         .first()
         .is_some_and(|first| use_name_is_external_dependency(project, package, first))
     {
-        return external_use_target_should_drop(project, reduced, package, prefix, is_public_use);
+        return external_use_target_should_drop(
+            project,
+            reduced,
+            package,
+            module_path,
+            prefix,
+            is_public_use,
+        );
     }
 
     if prefix
         .first()
         .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
     {
-        return external_use_target_should_drop(project, reduced, package, prefix, is_public_use);
+        return external_use_target_should_drop(
+            project,
+            reduced,
+            package,
+            module_path,
+            prefix,
+            is_public_use,
+        );
     }
 
     resolve_use_target_path(project, package, module_path, prefix).is_some_and(
@@ -1971,9 +2060,18 @@ fn external_use_target_should_drop(
     project: &Project,
     reduced: &ReducedProject,
     _package: &str,
+    module_path: &[String],
     target: &[String],
     is_public_use: bool,
 ) -> bool {
+    let Some(leaf) = external_use_leaf(target) else {
+        return false;
+    };
+
+    if is_derive_only_external_trait_import(leaf) {
+        return !reachable_module_mentions_ident(project, reduced, _package, module_path, leaf);
+    }
+
     if target.first().is_some_and(|first| {
         known_macro_dependency_package_mentions(
             project,
@@ -1985,16 +2083,16 @@ fn external_use_target_should_drop(
         return false;
     }
 
-    let Some(leaf) = external_use_leaf(target) else {
-        return false;
-    };
-
     if external_trait_import_should_remain(project, reduced, _package, target, leaf, is_public_use)
     {
         return false;
     }
 
-    !reachable_package_mentions_ident(project, reduced, _package, leaf)
+    if is_public_use {
+        !reachable_package_mentions_ident(project, reduced, _package, leaf)
+    } else {
+        !reachable_module_mentions_ident(project, reduced, _package, module_path, leaf)
+    }
 }
 
 fn external_use_leaf(target: &[String]) -> Option<&str> {
@@ -2097,6 +2195,9 @@ fn external_trait_import_should_remain(
     if !is_external_trait_import_candidate(target, leaf) {
         return false;
     }
+    if is_derive_only_external_trait_import(leaf) {
+        return reachable_package_mentions_ident(project, reduced, package, leaf);
+    }
     if !is_public_use {
         return true;
     }
@@ -2104,6 +2205,10 @@ fn external_trait_import_should_remain(
         .iter()
         .take(target.len().saturating_sub(1))
         .any(|segment| reachable_package_mentions_ident(project, reduced, package, segment))
+}
+
+fn is_derive_only_external_trait_import(leaf: &str) -> bool {
+    matches!(leaf, "Deserialize" | "Serialize")
 }
 
 fn use_ident_is_pruned_local_dependency(

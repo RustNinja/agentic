@@ -24,7 +24,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         output_root: options.output_root.clone(),
     })?;
 
-    println!("root: {}", report.root);
+    if report.roots.len() == 1 {
+        println!("root: {}", report.root);
+    } else {
+        println!("roots:");
+        for root in &report.roots {
+            println!("  {root}");
+        }
+    }
     println!("files written: {}", report.files_written);
     println!("packages: {}", report.packages.join(", "));
     println!("reachable callables:");

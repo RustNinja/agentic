@@ -13,7 +13,7 @@ use syn::{
 use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject};
 
 pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::Error>> {
-    let roots = project
+    let mut roots = project
         .functions
         .values()
         .filter(|record| {
@@ -33,19 +33,24 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
                 .then(|| id.clone())
         }))
         .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
 
-    let [root] = roots.as_slice() else {
-        return Err(format!(
-            "expected exactly one #[opensourced] function, found {}",
-            roots.len()
-        )
-        .into());
-    };
+    if roots.is_empty() {
+        return Err("expected at least one #[opensourced] function, found 0".into());
+    }
+    let root = roots
+        .first()
+        .expect("roots were checked as non-empty")
+        .clone();
 
-    let candidate_packages = package_closure(project, root.package());
+    let mut candidate_packages = BTreeSet::new();
+    for root in &roots {
+        candidate_packages.extend(package_closure(project, root.package()));
+    }
     let mut reachable = BTreeSet::new();
     let mut reachable_items = BTreeSet::new();
-    let mut callable_queue = VecDeque::from([root.clone()]);
+    let mut callable_queue = VecDeque::from(roots.clone());
     let mut item_queue = VecDeque::new();
 
     while !callable_queue.is_empty() || !item_queue.is_empty() {
@@ -129,11 +134,12 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
         }
     }
 
-    let mut packages = reachable_packages(root, &reachable, &reachable_items);
+    let mut packages = reachable_packages(&roots, &reachable, &reachable_items);
     add_source_mentioned_dependency_packages(project, &mut packages, &reachable, &reachable_items);
 
     Ok(ReducedProject {
-        root: root.clone(),
+        root,
+        roots,
         packages,
         reachable,
         reachable_items,
@@ -212,11 +218,14 @@ fn package_closure(project: &Project, root: &str) -> BTreeSet<String> {
 }
 
 fn reachable_packages(
-    root: &CallableId,
+    roots: &[CallableId],
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
 ) -> BTreeSet<String> {
-    let mut packages = BTreeSet::from([root.package().to_string()]);
+    let mut packages = roots
+        .iter()
+        .map(|root| root.package().to_string())
+        .collect::<BTreeSet<_>>();
     packages.extend(
         reachable
             .iter()
