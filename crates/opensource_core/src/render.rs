@@ -1747,10 +1747,12 @@ fn reachable_module_mentions_ident(
         .any(|callable| {
             project.functions.get(callable).is_some_and(|record| {
                 record.module_path == module_path
-                    && token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+                    && (callable_mentions_ident(callable, ident)
+                        || token_stream_mentions_ident(&record.item.to_token_stream(), ident))
             }) || project.methods.get(callable).is_some_and(|record| {
                 record.module_path == module_path
-                    && token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+                    && (callable_mentions_ident(callable, ident)
+                        || token_stream_mentions_ident(&record.item.to_token_stream(), ident))
             })
         })
         || reduced
@@ -1977,19 +1979,35 @@ fn use_target_should_drop(
         return false;
     };
 
+    let leaf_is_used_in_module = target.last().is_some_and(|leaf| {
+        reachable_module_mentions_ident(project, reduced, package, module_path, leaf)
+    });
+
     if let Some(callable) = find_use_function(project, &target_package, &target_path) {
+        if !is_public_use && !leaf_is_used_in_module {
+            return true;
+        }
         return !reduced.reachable.contains(&callable);
     }
     if let Some(item) = find_use_item(project, &target_package, &target_path) {
+        if !is_public_use && item.kind != ItemKind::Trait && !leaf_is_used_in_module {
+            return true;
+        }
         return !reduced.reachable_items.contains(&item);
     }
     if let Some((alias_package, alias_path)) =
         resolve_reexported_use_path(project, &target_package, &target_path)
     {
         if let Some(callable) = find_use_function(project, &alias_package, &alias_path) {
+            if !is_public_use && !leaf_is_used_in_module {
+                return true;
+            }
             return !reduced.reachable.contains(&callable);
         }
         if let Some(item) = find_use_item(project, &alias_package, &alias_path) {
+            if !is_public_use && item.kind != ItemKind::Trait && !leaf_is_used_in_module {
+                return true;
+            }
             return !reduced.reachable_items.contains(&item);
         }
         return project_has_module(project, &alias_package, &alias_path)
@@ -2000,9 +2018,13 @@ fn use_target_should_drop(
         return !module_should_render(project, reduced, &target_package, &target_path);
     }
 
-    target
-        .last()
-        .is_some_and(|leaf| !reachable_package_mentions_ident(project, reduced, package, leaf))
+    target.last().is_some_and(|leaf| {
+        if is_public_use {
+            !reachable_package_mentions_ident(project, reduced, package, leaf)
+        } else {
+            !reachable_module_mentions_ident(project, reduced, package, module_path, leaf)
+        }
+    })
 }
 
 fn use_prefix_should_drop(
@@ -2083,8 +2105,15 @@ fn external_use_target_should_drop(
         return false;
     }
 
-    if external_trait_import_should_remain(project, reduced, _package, target, leaf, is_public_use)
-    {
+    if external_trait_import_should_remain(
+        project,
+        reduced,
+        _package,
+        module_path,
+        target,
+        leaf,
+        is_public_use,
+    ) {
         return false;
     }
 
@@ -2115,9 +2144,7 @@ fn is_external_trait_import_candidate(target: &[String], leaf: &str) -> bool {
         return is_known_std_trait_import(leaf);
     }
 
-    leaf.chars()
-        .next()
-        .is_some_and(|first| first.is_ascii_uppercase())
+    is_known_external_trait_import(leaf)
 }
 
 fn is_known_std_trait_import(leaf: &str) -> bool {
@@ -2181,10 +2208,15 @@ fn is_known_std_trait_import(leaf: &str) -> bool {
     )
 }
 
+fn is_known_external_trait_import(leaf: &str) -> bool {
+    matches!(leaf, "Engine")
+}
+
 fn external_trait_import_should_remain(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
+    module_path: &[String],
     target: &[String],
     leaf: &str,
     is_public_use: bool,
@@ -2199,12 +2231,43 @@ fn external_trait_import_should_remain(
         return reachable_package_mentions_ident(project, reduced, package, leaf);
     }
     if !is_public_use {
-        return true;
+        if reachable_module_mentions_ident(project, reduced, package, module_path, leaf) {
+            return true;
+        }
+        let Some(methods) = known_trait_method_idents(target, leaf) else {
+            return true;
+        };
+        return methods.iter().any(|method| {
+            reachable_module_mentions_ident(project, reduced, package, module_path, method)
+        });
     }
     target
         .iter()
         .take(target.len().saturating_sub(1))
         .any(|segment| reachable_package_mentions_ident(project, reduced, package, segment))
+}
+
+fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [&'static str]> {
+    match (target.first().map(String::as_str), leaf) {
+        (Some("std" | "core" | "alloc"), "Hash") => Some(&["hash", "hash_slice"]),
+        (Some("std" | "core" | "alloc"), "Hasher") => Some(&[
+            "finish",
+            "write",
+            "write_u8",
+            "write_u16",
+            "write_u32",
+            "write_u64",
+        ]),
+        (Some("std" | "core" | "alloc"), "Read") => {
+            Some(&["read", "read_exact", "read_to_end", "read_to_string"])
+        }
+        (Some("std" | "core" | "alloc"), "Seek") => Some(&["seek", "rewind", "stream_position"]),
+        (Some("std" | "core" | "alloc"), "Write") => {
+            Some(&["write", "write_all", "write_fmt", "flush"])
+        }
+        (Some("base64"), "Engine") => Some(&["decode", "decode_slice", "encode", "encode_string"]),
+        _ => None,
+    }
 }
 
 fn is_derive_only_external_trait_import(leaf: &str) -> bool {

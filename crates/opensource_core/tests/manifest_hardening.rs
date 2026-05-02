@@ -935,6 +935,80 @@ fn prunes_unused_serde_derive_imports_after_dead_items_are_removed() {
 }
 
 #[test]
+fn prunes_unused_private_external_type_imports_after_dead_items_are_removed() {
+    let workspace = temp_path("external-type-import-workspace");
+    let output = temp_path("external-type-import-output");
+    let target_dir = temp_path("external-type-import-target");
+    write_unused_external_type_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("external_type_import_like/src/lib.rs"));
+    assert!(source.contains("pub fn selected"));
+    assert!(!source.contains("serde_json"));
+    assert!(!source.contains("Map"));
+    assert!(!source.contains("Value"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external type import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn prunes_unused_private_local_imports_even_when_item_is_reachable_elsewhere() {
+    let workspace = temp_path("local-import-workspace");
+    let output = temp_path("local-import-output");
+    let target_dir = temp_path("local-import-target");
+    write_unused_local_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let feature = read(output.join("local_import_like/src/feature.rs"));
+    let other = read(output.join("local_import_like/src/other.rs"));
+    assert!(feature.contains("FeatureValue"));
+    assert!(!feature.contains("OtherValue"));
+    assert!(other.contains("OtherValue"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated local import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nfeature.rs:\n{}\nother.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        feature,
+        other,
+    );
+}
+
+#[test]
 fn retains_std_trait_imports_for_method_resolution() {
     let workspace = temp_path("std-trait-import-workspace");
     let output = temp_path("std-trait-import-output");
@@ -2638,6 +2712,108 @@ pub struct KeptWire {
 #[opensourced]
 pub fn selected(value: i32) -> KeptWire {
     KeptWire { value }
+}
+"#,
+    );
+}
+
+fn write_unused_external_type_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external_type_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde_json::{Map, Value};
+
+#[opensourced]
+pub fn selected(value: i32) -> i32 {
+    value + 1
+}
+
+pub fn dead(input: Map<String, Value>) -> Option<Value> {
+    input.into_iter().next().map(|(_, value)| value)
+}
+"#,
+    );
+}
+
+fn write_unused_local_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "local_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"pub mod feature;
+pub mod other;
+pub mod shared;
+"#,
+    );
+    write(
+        root.join("src/feature.rs"),
+        r#"use crate::shared::{FeatureValue, OtherValue};
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_feature() -> FeatureValue {
+    FeatureValue { value: 1 }
+}
+
+pub fn dead() -> OtherValue {
+    OtherValue { value: 2 }
+}
+"#,
+    );
+    write(
+        root.join("src/other.rs"),
+        r#"use crate::shared::OtherValue;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_other() -> OtherValue {
+    OtherValue { value: 3 }
+}
+"#,
+    );
+    write(
+        root.join("src/shared.rs"),
+        r#"pub struct FeatureValue {
+    pub value: i32,
+}
+
+pub struct OtherValue {
+    pub value: i32,
 }
 "#,
     );
