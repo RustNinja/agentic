@@ -225,12 +225,18 @@ fn build_script_should_render(
     reduced: &ReducedProject,
     package: &Package,
 ) -> bool {
+    let package_usage = package_source_usage(project, reduced, &package.name);
+    build_script_should_render_with_usage(package, &package_usage)
+}
+
+fn build_script_should_render_with_usage(
+    package: &Package,
+    package_usage: &PackageSourceUsage,
+) -> bool {
     let Some(build_script) = build_script_path(package) else {
         return false;
     };
-    if build_script_is_uniffi_only(&build_script)
-        && !package_rendered_sources_mention_ident(project, reduced, &package.name, "uniffi")
-    {
+    if build_script_is_uniffi_only(&build_script) && !package_usage.mentions_ident("uniffi") {
         return false;
     }
     true
@@ -602,6 +608,7 @@ fn write_package_manifest(
         manifest.insert("bin".to_string(), value);
     }
 
+    let package_usage = package_source_usage(project, reduced, package_name);
     let mut retained_dependency_aliases = BTreeSet::new();
     let dependencies = transformed_dependencies(
         project,
@@ -609,19 +616,21 @@ fn write_package_manifest(
         package_name,
         "dependencies",
         DependencyRetention::SourceMentioned,
+        &package_usage,
         &mut retained_dependency_aliases,
     )?;
     if !dependencies.is_empty() {
         manifest.insert("dependencies".to_string(), Value::Table(dependencies));
     }
 
-    if build_script_should_render(project, reduced, package) {
+    if build_script_should_render_with_usage(package, &package_usage) {
         let build_dependencies = transformed_dependencies(
             project,
             reduced,
             package_name,
             "build-dependencies",
             DependencyRetention::BuildScript,
+            &package_usage,
             &mut retained_dependency_aliases,
         )?;
         if !build_dependencies.is_empty() {
@@ -636,6 +645,7 @@ fn write_package_manifest(
         project,
         reduced,
         package_name,
+        &package_usage,
         &mut retained_dependency_aliases,
     )? {
         manifest.insert("target".to_string(), Value::Table(target_dependencies));
@@ -735,9 +745,10 @@ fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) 
         let Some(package) = project.workspace.packages.get(package_name) else {
             continue;
         };
+        let package_usage = package_source_usage(project, reduced, package_name);
         for (table_name, table) in package_dependency_tables(package) {
             let retention = if table_name == "build-dependencies"
-                && build_script_should_render(project, reduced, package)
+                && build_script_should_render_with_usage(package, &package_usage)
             {
                 DependencyRetention::BuildScript
             } else {
@@ -749,7 +760,14 @@ fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) 
                 if is_marker_dependency(alias, &dependency_package)
                     || project.workspace.packages.contains_key(&dependency_package)
                     || !dependency_uses_workspace(value)
-                    || !dependency_should_render(project, reduced, package_name, alias, retention)
+                    || !dependency_should_render(
+                        project,
+                        reduced,
+                        package_name,
+                        alias,
+                        retention,
+                        &package_usage,
+                    )
                 {
                     continue;
                 }
@@ -778,6 +796,7 @@ fn transformed_dependencies(
     package_name: &str,
     table_name: &str,
     retention: DependencyRetention,
+    package_usage: &PackageSourceUsage,
     retained_aliases: &mut BTreeSet<String>,
 ) -> Result<Table, Box<dyn std::error::Error>> {
     let package = project
@@ -808,7 +827,14 @@ fn transformed_dependencies(
             continue;
         }
 
-        if dependency_should_render(project, reduced, package_name, alias, retention) {
+        if dependency_should_render(
+            project,
+            reduced,
+            package_name,
+            alias,
+            retention,
+            package_usage,
+        ) {
             retained_aliases.insert(alias.clone());
             dependencies.insert(
                 alias.clone(),
@@ -824,6 +850,7 @@ fn transformed_target_dependencies(
     project: &Project,
     reduced: &ReducedProject,
     package_name: &str,
+    package_usage: &PackageSourceUsage,
     retained_aliases: &mut BTreeSet<String>,
 ) -> Result<Option<Table>, Box<dyn std::error::Error>> {
     let package = project
@@ -851,6 +878,7 @@ fn transformed_target_dependencies(
             package_name,
             source_dependencies,
             DependencyRetention::SourceMentioned,
+            package_usage,
             retained_aliases,
         );
         if dependencies.is_empty() {
@@ -871,6 +899,7 @@ fn transformed_dependency_table(
     package_name: &str,
     source_dependencies: &Table,
     retention: DependencyRetention,
+    package_usage: &PackageSourceUsage,
     retained_aliases: &mut BTreeSet<String>,
 ) -> Table {
     let mut dependencies = Table::new();
@@ -891,7 +920,14 @@ fn transformed_dependency_table(
             continue;
         }
 
-        if dependency_should_render(project, reduced, package_name, alias, retention) {
+        if dependency_should_render(
+            project,
+            reduced,
+            package_name,
+            alias,
+            retention,
+            package_usage,
+        ) {
             retained_aliases.insert(alias.clone());
             let value = project
                 .workspace
@@ -912,6 +948,7 @@ fn dependency_should_render(
     package_name: &str,
     alias: &str,
     retention: DependencyRetention,
+    package_usage: &PackageSourceUsage,
 ) -> bool {
     retention == DependencyRetention::BuildScript
         || project
@@ -919,129 +956,135 @@ fn dependency_should_render(
             .packages
             .get(package_name)
             .is_some_and(|package| package_should_preserve_source_tree(project, reduced, package))
-        || package_mentions_dependency(project, reduced, package_name, alias)
+        || package_usage.mentions_dependency(alias)
 }
 
-fn package_mentions_dependency(
-    project: &Project,
-    reduced: &ReducedProject,
-    package_name: &str,
-    dependency_alias: &str,
-) -> bool {
-    let code_name = dependency_code_name(dependency_alias);
-    package_rendered_sources(project, reduced, package_name)
-        .any(|file| file_mentions_dependency(&file, dependency_alias, &code_name))
+#[derive(Default)]
+struct PackageSourceUsage {
+    idents: BTreeSet<String>,
+    path_roots: BTreeSet<String>,
+    use_idents: BTreeSet<String>,
 }
 
-fn package_rendered_sources_mention_ident(
-    project: &Project,
-    reduced: &ReducedProject,
-    package_name: &str,
-    ident: &str,
-) -> bool {
-    package_rendered_sources(project, reduced, package_name)
-        .any(|file| token_stream_mentions_ident(&file.to_token_stream(), ident))
-}
-
-fn package_rendered_sources<'a>(
-    project: &'a Project,
-    reduced: &'a ReducedProject,
-    package_name: &'a str,
-) -> impl Iterator<Item = syn::File> + 'a {
-    project
-        .files
-        .values()
-        .filter(move |source| source.package == package_name)
-        .filter(move |source| {
-            module_should_render(project, reduced, &source.package, &source.module_path)
-        })
-        .map(|source| {
-            transform_file(
-                project,
-                reduced,
-                &source.package,
-                &source.module_path,
-                &source.syntax,
-            )
-        })
-}
-
-fn file_mentions_dependency(file: &syn::File, alias: &str, code_name: &str) -> bool {
-    let tokens = file.to_token_stream();
-    token_stream_mentions_path_root(&tokens, code_name)
-        || file_use_tree_starts_with(file, code_name)
-        || (alias != code_name
-            && (token_stream_mentions_path_root(&tokens, alias)
-                || file_use_tree_starts_with(file, alias)))
-        || known_macro_dependency_mentions(&tokens, alias, code_name)
-}
-
-fn token_stream_mentions_path_root(tokens: &TokenStream, ident: &str) -> bool {
-    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
-    for token in &token_trees {
-        if let TokenTree::Group(group) = token {
-            if token_stream_mentions_path_root(&group.stream(), ident) {
-                return true;
+impl PackageSourceUsage {
+    fn record_file(&mut self, file: &syn::File) {
+        collect_token_usage(&file.to_token_stream(), self);
+        for item in &file.items {
+            if let Item::Use(item_use) = item {
+                collect_use_tree_idents(&item_use.tree, &mut self.use_idents);
             }
         }
     }
 
-    token_trees.windows(3).any(|window| {
-        matches!(&window[0], TokenTree::Ident(candidate) if candidate == ident)
-            && matches!(&window[1], TokenTree::Punct(punct) if punct.as_char() == ':')
-            && matches!(&window[2], TokenTree::Punct(punct) if punct.as_char() == ':')
-    })
-}
+    fn mentions_ident(&self, ident: &str) -> bool {
+        self.idents.contains(ident)
+    }
 
-fn file_use_tree_starts_with(file: &syn::File, ident: &str) -> bool {
-    file.items.iter().any(|item| {
-        let Item::Use(item_use) = item else {
-            return false;
-        };
-        use_tree_starts_with(&item_use.tree, ident)
-    })
-}
-
-fn use_tree_starts_with(tree: &UseTree, ident: &str) -> bool {
-    match tree {
-        UseTree::Path(path) => path.ident == ident || use_tree_starts_with(&path.tree, ident),
-        UseTree::Name(name) => name.ident == ident,
-        UseTree::Rename(rename) => rename.ident == ident,
-        UseTree::Group(group) => group
-            .items
-            .iter()
-            .any(|item| use_tree_starts_with(item, ident)),
-        UseTree::Glob(_) => false,
+    fn mentions_dependency(&self, alias: &str) -> bool {
+        let code_name = dependency_code_name(alias);
+        self.path_roots.contains(&code_name)
+            || self.use_idents.contains(&code_name)
+            || (alias != code_name
+                && (self.path_roots.contains(alias) || self.use_idents.contains(alias)))
+            || known_macro_dependency_usage(self, alias, &code_name)
     }
 }
 
-fn known_macro_dependency_mentions(tokens: &TokenStream, alias: &str, code_name: &str) -> bool {
+fn package_source_usage(
+    project: &Project,
+    reduced: &ReducedProject,
+    package_name: &str,
+) -> PackageSourceUsage {
+    let mut usage = PackageSourceUsage::default();
+    for source in project
+        .files
+        .values()
+        .filter(|source| source.package == package_name)
+        .filter(|source| {
+            module_should_render(project, reduced, &source.package, &source.module_path)
+        })
+    {
+        let file = transform_file(
+            project,
+            reduced,
+            &source.package,
+            &source.module_path,
+            &source.syntax,
+        );
+        usage.record_file(&file);
+    }
+    usage
+}
+
+fn collect_token_usage(tokens: &TokenStream, usage: &mut PackageSourceUsage) {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        match token {
+            TokenTree::Ident(ident) => {
+                usage.idents.insert(ident.to_string());
+            }
+            TokenTree::Group(group) => collect_token_usage(&group.stream(), usage),
+            TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
+
+    for window in token_trees.windows(3) {
+        if let (TokenTree::Ident(candidate), TokenTree::Punct(first), TokenTree::Punct(second)) =
+            (&window[0], &window[1], &window[2])
+        {
+            if first.as_char() == ':' && second.as_char() == ':' {
+                usage.path_roots.insert(candidate.to_string());
+            }
+        }
+    }
+}
+
+fn collect_use_tree_idents(tree: &UseTree, idents: &mut BTreeSet<String>) {
+    match tree {
+        UseTree::Path(path) => {
+            idents.insert(path.ident.to_string());
+            collect_use_tree_idents(&path.tree, idents);
+        }
+        UseTree::Name(name) => {
+            idents.insert(name.ident.to_string());
+        }
+        UseTree::Rename(rename) => {
+            idents.insert(rename.ident.to_string());
+            idents.insert(rename.rename.to_string());
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_tree_idents(item, idents);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn known_macro_dependency_usage(usage: &PackageSourceUsage, alias: &str, code_name: &str) -> bool {
     match code_name {
         "serde" | "serde_derive" => {
-            token_stream_mentions_ident(tokens, "Serialize")
-                || token_stream_mentions_ident(tokens, "Deserialize")
-                || token_stream_mentions_ident(tokens, "serde")
+            usage.mentions_ident("Serialize")
+                || usage.mentions_ident("Deserialize")
+                || usage.mentions_ident("serde")
         }
-        "thiserror" => {
-            token_stream_mentions_ident(tokens, "Error")
-                && token_stream_mentions_ident(tokens, "error")
-        }
+        "thiserror" => usage.mentions_ident("Error") && usage.mentions_ident("error"),
         "uniffi" => {
-            token_stream_mentions_ident(tokens, "Record")
-                || token_stream_mentions_ident(tokens, "Object")
-                || token_stream_mentions_ident(tokens, "Enum")
-                || token_stream_mentions_ident(tokens, "Error")
-                || token_stream_mentions_ident(tokens, "export")
+            usage.mentions_ident("Record")
+                || usage.mentions_ident("Object")
+                || usage.mentions_ident("Enum")
+                || usage.mentions_ident("Error")
+                || usage.mentions_ident("export")
         }
         "clap" => {
-            token_stream_mentions_ident(tokens, "Parser")
-                || token_stream_mentions_ident(tokens, "Subcommand")
-                || token_stream_mentions_ident(tokens, "Args")
-                || token_stream_mentions_ident(tokens, "ValueEnum")
-                || token_stream_mentions_ident(tokens, "command")
-                || token_stream_mentions_ident(tokens, "arg")
+            usage.mentions_ident("Parser")
+                || usage.mentions_ident("Subcommand")
+                || usage.mentions_ident("Args")
+                || usage.mentions_ident("ValueEnum")
+                || usage.mentions_ident("command")
+                || usage.mentions_ident("arg")
         }
-        _ => alias != code_name && token_stream_mentions_ident(tokens, alias),
+        _ => alias != code_name && usage.mentions_ident(alias),
     }
 }
 
