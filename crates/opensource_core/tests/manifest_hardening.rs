@@ -92,6 +92,65 @@ fn slices_binary_child_module_with_generated_items_and_pruned_stub_imports() {
 }
 
 #[test]
+fn glob_reexports_only_pull_names_mentioned_by_reachable_code() {
+    let workspace = temp_path("glob-reexport-workspace");
+    let output = temp_path("glob-reexport-output");
+    let target_dir = temp_path("glob-reexport-target");
+    write_glob_reexport_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let reachable = report
+        .reachable
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        !reachable
+            .iter()
+            .any(|callable| callable.contains("unused_api_function")),
+        "glob import retained an unmentioned api function: {reachable:?}",
+    );
+    assert!(
+        !reachable
+            .iter()
+            .any(|callable| callable.contains("unused_noise_function")),
+        "glob import retained an unmentioned noise function: {reachable:?}",
+    );
+
+    let lib = read(output.join("glob_reexport_like/src/lib.rs"));
+    let api = read(output.join("glob_reexport_like/src/api.rs"));
+    assert!(lib.contains("pub use api::*"));
+    assert!(!lib.contains("pub use noisy::*"));
+    assert!(!lib.contains("pub mod noisy"));
+    assert!(api.contains("pub struct Chosen"));
+    assert!(!api.contains("UnusedApi"));
+    assert!(!api.contains("unused_api_function"));
+    assert!(!output.join("glob_reexport_like/src/noisy.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated glob reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}\nsrc/api.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+        api,
+    );
+}
+
+#[test]
 fn slices_automod_directory_modules_without_expanding_macro_usage() {
     let workspace = temp_path("automod-workspace");
     let output = temp_path("automod-output");
@@ -611,6 +670,79 @@ fn resolves_associated_methods_across_crate_root_reexports() {
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         impls,
+    );
+}
+
+#[test]
+fn preserves_macro_included_generated_dependency_sources() {
+    let workspace = temp_path("included-generated-workspace");
+    let output = temp_path("included-generated-output");
+    let target_dir = temp_path("included-generated-target");
+    write_included_generated_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let proto_manifest = read(output.join("proto_dep/Cargo.toml"));
+    let proto = read(output.join("proto_dep/src/lib.rs"));
+    assert!(proto_manifest.contains("itoa"));
+    assert!(proto.contains("include_proto"));
+    assert!(proto.contains("pub mod generated"));
+    assert!(output.join("proto_dep/src/prost/generated.rs").exists());
+    assert!(output.join("proto_dep/src/prost/unused.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated include-backed dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nproto_dep/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        proto,
+    );
+}
+
+#[test]
+fn keeps_trait_impls_distinct_by_trait_input_type() {
+    let workspace = temp_path("trait-input-workspace");
+    let output = temp_path("trait-input-output");
+    let target_dir = temp_path("trait-input-target");
+    write_trait_input_impl_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("trait_input_like/src/lib.rs"));
+    assert!(source.contains("impl From<LiveEvent> for ApiEvent"));
+    assert!(!source.contains("impl From<DeadEvent> for ApiEvent"));
+    assert!(!source.contains("DEAD_EVENT_KIND"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated trait input impl slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
     );
 }
 
@@ -1758,6 +1890,206 @@ impl Service {
     pub fn dead_helper() -> u32 {
         99
     }
+}
+"#,
+    );
+}
+
+fn write_included_generated_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "proto_dep"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+proto_dep = { path = "../proto_dep" }
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> String {
+    proto_dep::generated::Generated::label()
+}
+"#,
+    );
+    write(
+        root.join("proto_dep/Cargo.toml"),
+        r#"[package]
+name = "proto_dep"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+itoa = "1"
+"#,
+    );
+    write(
+        root.join("proto_dep/src/lib.rs"),
+        r#"#[macro_export]
+macro_rules! include_proto {
+    ($path:literal) => {
+        include!(concat!("prost/", $path));
+    };
+}
+
+pub mod generated {
+    include_proto!("generated.rs");
+}
+
+pub mod unused {
+    include_proto!("unused.rs");
+}
+"#,
+    );
+    write(
+        root.join("proto_dep/src/prost/generated.rs"),
+        r#"pub struct Generated;
+
+impl Generated {
+    pub fn label() -> String {
+        let mut buffer = itoa::Buffer::new();
+        buffer.format(7).to_string()
+    }
+}
+"#,
+    );
+    write(
+        root.join("proto_dep/src/prost/unused.rs"),
+        r#"pub struct Unused;
+"#,
+    );
+}
+
+fn write_trait_input_impl_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "trait_input_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> ApiEvent {
+    LiveEvent {}.into()
+}
+
+pub enum ApiEvent {
+    Live,
+    Dead,
+}
+
+pub struct LiveEvent {}
+
+pub struct DeadEvent {}
+
+const DEAD_EVENT_KIND: &str = "dead";
+
+impl From<LiveEvent> for ApiEvent {
+    fn from(_: LiveEvent) -> Self {
+        ApiEvent::Live
+    }
+}
+
+impl From<DeadEvent> for ApiEvent {
+    fn from(_: DeadEvent) -> Self {
+        let _ = DEAD_EVENT_KIND;
+        ApiEvent::Dead
+    }
+}
+"#,
+    );
+}
+
+fn write_glob_reexport_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "glob_reexport_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub mod api;
+pub mod noisy;
+
+pub use api::*;
+pub use noisy::*;
+
+#[opensourced]
+pub fn selected() -> Chosen {
+    Chosen
+}
+"#,
+    );
+    write(
+        root.join("src/api.rs"),
+        r#"pub struct Chosen;
+
+pub struct UnusedApi;
+
+pub fn unused_api_function() -> UnusedApi {
+    UnusedApi
+}
+"#,
+    );
+    write(
+        root.join("src/noisy.rs"),
+        r#"pub struct UnusedNoise;
+
+pub fn unused_noise_function() -> UnusedNoise {
+    UnusedNoise
 }
 "#,
     );

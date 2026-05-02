@@ -6,7 +6,7 @@ use std::{
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
-use syn::{parse_quote, ImplItem, Item, Type, UseTree};
+use syn::{parse_quote, GenericArgument, ImplItem, Item, PathArguments, Type, UseTree};
 use toml::{value::Table, Value};
 
 use crate::{
@@ -56,6 +56,11 @@ pub fn write_reduced_workspace(
             files_written += copy_build_script_assets(package, &build_script, &package_output)?;
         }
 
+        if package_should_preserve_source_tree(project, reduced, package) {
+            files_written += copy_source_tree(package, &package_output)?;
+            continue;
+        }
+
         for source in project
             .files
             .values()
@@ -86,6 +91,94 @@ pub fn write_reduced_workspace(
     }
 
     Ok(files_written)
+}
+
+fn package_should_preserve_source_tree(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &Package,
+) -> bool {
+    let has_reachable_rust = reduced
+        .reachable
+        .iter()
+        .any(|callable| callable.package() == package.name)
+        || reduced
+            .reachable_items
+            .iter()
+            .any(|item| item.package == package.name);
+    !has_reachable_rust
+        && package_sources_mention_include_macro(project, &package.name)
+        && package_has_unparsed_source_files(project, package)
+}
+
+fn package_sources_mention_include_macro(project: &Project, package: &str) -> bool {
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .any(|source| token_stream_mentions_ident(&source.syntax.to_token_stream(), "include"))
+}
+
+fn package_has_unparsed_source_files(project: &Project, package: &Package) -> bool {
+    let parsed = project
+        .files
+        .values()
+        .filter(|source| source.package == package.name)
+        .map(|source| source.path.clone())
+        .collect::<BTreeSet<_>>();
+    package.root.join("src").exists()
+        && source_tree_rs_files(&package.root.join("src"))
+            .is_ok_and(|files| files.into_iter().any(|file| !parsed.contains(&file)))
+}
+
+fn source_tree_rs_files(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let mut files = Vec::new();
+    if !path.exists() {
+        return Ok(files);
+    }
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let path = entry.path();
+        if entry.file_type()?.is_dir() {
+            files.extend(source_tree_rs_files(&path)?);
+        } else if path.extension().is_some_and(|extension| extension == "rs") {
+            files.push(path.canonicalize()?);
+        }
+    }
+    Ok(files)
+}
+
+fn copy_source_tree(
+    package: &Package,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    copy_source_tree_path(package, &package.root.join("src"), package_output)
+}
+
+fn copy_source_tree_path(
+    package: &Package,
+    path: &Path,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Ok(0);
+    }
+    if path.is_file() {
+        let relative_path = path.strip_prefix(&package.root)?;
+        let output_path = package_output.join(relative_path);
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(path, output_path)?;
+        return Ok(1);
+    }
+
+    let mut copied = 0;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        copied += copy_source_tree_path(package, &entry.path(), package_output)?;
+    }
+    Ok(copied)
 }
 
 fn build_script_path(package: &Package) -> Option<PathBuf> {
@@ -637,6 +730,11 @@ fn dependency_should_render(
     retention: DependencyRetention,
 ) -> bool {
     retention == DependencyRetention::BuildScript
+        || project
+            .workspace
+            .packages
+            .get(package_name)
+            .is_some_and(|package| package_should_preserve_source_tree(project, reduced, package))
         || package_mentions_dependency(project, reduced, package_name, alias)
 }
 
@@ -1027,6 +1125,11 @@ fn transform_items(
                     .trait_
                     .as_ref()
                     .map(|(_, path, _)| normalized_path(module_path, path, &aliases));
+                let trait_input_type_paths = item_impl
+                    .trait_
+                    .as_ref()
+                    .map(|(_, path, _)| trait_input_type_paths(module_path, path, &aliases))
+                    .unwrap_or_default();
                 let mut kept_impl_items = Vec::new();
                 let mut kept_method = false;
 
@@ -1039,6 +1142,7 @@ fn transform_items(
                             package: package.to_string(),
                             type_path: type_path.clone(),
                             trait_path: trait_path.clone(),
+                            trait_input_type_paths: trait_input_type_paths.clone(),
                             method: method.sig.ident.to_string(),
                         };
                         if reduced.reachable.contains(&id) {
@@ -1817,6 +1921,56 @@ fn normalized_path(
         aliases,
     );
     normalize_segments(module_path, segments).unwrap_or_default()
+}
+
+fn trait_input_type_paths(
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> Vec<Vec<String>> {
+    let mut type_paths = Vec::new();
+    for segment in &path.segments {
+        if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+            for argument in &arguments.args {
+                if let GenericArgument::Type(ty) = argument {
+                    collect_type_paths(module_path, ty, aliases, &mut type_paths);
+                }
+            }
+        }
+    }
+    type_paths.sort();
+    type_paths.dedup();
+    type_paths
+}
+
+fn collect_type_paths(
+    module_path: &[String],
+    ty: &Type,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+    type_paths: &mut Vec<Vec<String>>,
+) {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(path) = local_type_path(module_path, ty, aliases) {
+                type_paths.push(path);
+            }
+            for segment in &type_path.path.segments {
+                if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let GenericArgument::Type(ty) = argument {
+                            collect_type_paths(module_path, ty, aliases, type_paths);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Reference(reference) => {
+            collect_type_paths(module_path, &reference.elem, aliases, type_paths);
+        }
+        Type::Group(group) => collect_type_paths(module_path, &group.elem, aliases, type_paths),
+        Type::Paren(paren) => collect_type_paths(module_path, &paren.elem, aliases, type_paths),
+        _ => {}
+    }
 }
 
 fn normalize_segments(module_path: &[String], segments: Vec<String>) -> Option<Vec<String>> {

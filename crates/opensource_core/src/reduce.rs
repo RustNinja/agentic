@@ -7,7 +7,7 @@ use syn::{
     visit::{self, Visit},
     Expr, ExprCall, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, FnArg, GenericArgument,
     ImplItem, ItemMacro, Local, Macro, Member, Meta, Pat, PatTupleStruct, Path, PathArguments,
-    ReturnType, Type, TypePath,
+    ReturnType, Type, TypePath, UseTree,
 };
 
 use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject};
@@ -93,6 +93,24 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
         }
 
         let dependencies = retained_item_macro_dependencies(
+            project,
+            &candidate_packages,
+            &reachable,
+            &reachable_items,
+        );
+        for dependency in dependencies.callables {
+            if candidate_packages.contains(dependency.package()) && !reachable.contains(&dependency)
+            {
+                callable_queue.push_back(dependency);
+            }
+        }
+        for item in dependencies.items {
+            if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
+                item_queue.push_back(item);
+            }
+        }
+
+        let dependencies = retained_rendered_use_dependencies(
             project,
             &candidate_packages,
             &reachable,
@@ -258,6 +276,285 @@ fn retained_item_macro_dependencies(
         }
     }
     dependencies
+}
+
+fn retained_rendered_use_dependencies(
+    project: &Project,
+    candidate_packages: &BTreeSet<String>,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    for source in project
+        .files
+        .values()
+        .filter(|source| candidate_packages.contains(&source.package))
+        .filter(|source| module_has_reachable_code(project, reachable, reachable_items, source))
+    {
+        let aliases = project
+            .module_aliases
+            .get(&(source.package.clone(), source.module_path.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let resolver = Resolver {
+            project,
+            package: &source.package,
+            module_path: &source.module_path,
+            aliases: &aliases,
+            self_type: None,
+        };
+        let reachable_idents = reachable_source_idents(
+            project,
+            reachable,
+            reachable_items,
+            &source.package,
+            &source.module_path,
+        );
+
+        for item in &source.syntax.items {
+            let syn::Item::Use(item_use) = item else {
+                continue;
+            };
+            let mut named_paths = Vec::new();
+            let mut glob_paths = Vec::new();
+            collect_use_dependency_paths(
+                &item_use.tree,
+                Vec::new(),
+                &mut named_paths,
+                &mut glob_paths,
+            );
+
+            for path in named_paths {
+                if reachable_idents.contains(&path.visible_name) {
+                    dependencies.extend(resolve_use_named_dependency(&resolver, &path.segments));
+                }
+            }
+            for path in glob_paths {
+                dependencies.extend(resolve_use_glob_dependencies(
+                    &resolver,
+                    &path,
+                    &reachable_idents,
+                ));
+            }
+        }
+    }
+    dependencies
+}
+
+fn reachable_source_idents(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    package: &str,
+    module_path: &[String],
+) -> BTreeSet<String> {
+    let mut idents = BTreeSet::new();
+    for callable in reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+    {
+        if let Some(record) = project.functions.get(callable) {
+            if record.module_path == module_path {
+                collect_token_idents(&record.item.to_token_stream(), &mut idents);
+            }
+        }
+        if let Some(record) = project.methods.get(callable) {
+            if record.module_path == module_path {
+                collect_token_idents(&record.item.to_token_stream(), &mut idents);
+            }
+        }
+    }
+    for item in reachable_items
+        .iter()
+        .filter(|item| item.package == package && item.module_path == module_path)
+    {
+        if let Some(record) = project.items.get(item) {
+            collect_token_idents(&record.item.to_token_stream(), &mut idents);
+        }
+    }
+    idents
+}
+
+fn module_has_reachable_code(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    source: &crate::model::SourceFile,
+) -> bool {
+    source.module_path.is_empty()
+        || reachable.iter().any(|callable| match callable {
+            CallableId::Free {
+                package,
+                module_path,
+                ..
+            } => package == &source.package && path_has_prefix(module_path, &source.module_path),
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                package == &source.package
+                    && project
+                        .methods
+                        .get(callable)
+                        .map(|record| path_has_prefix(&record.module_path, &source.module_path))
+                        .unwrap_or_else(|| path_has_prefix(type_path, &source.module_path))
+            }
+        })
+        || reachable_items.iter().any(|item| {
+            item.package == source.package
+                && path_has_prefix(&item.module_path, &source.module_path)
+        })
+}
+
+#[derive(Debug)]
+struct UseDependencyPath {
+    segments: Vec<String>,
+    visible_name: String,
+}
+
+fn collect_use_dependency_paths(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    named_paths: &mut Vec<UseDependencyPath>,
+    glob_paths: &mut Vec<Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_dependency_paths(&path.tree, prefix, named_paths, glob_paths);
+        }
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            prefix.push(name.ident.to_string());
+            named_paths.push(UseDependencyPath {
+                segments: prefix,
+                visible_name,
+            });
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            named_paths.push(UseDependencyPath {
+                segments: prefix,
+                visible_name: rename.rename.to_string(),
+            });
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_use_dependency_paths(nested, prefix.clone(), named_paths, glob_paths);
+            }
+        }
+        UseTree::Glob(_) => {
+            glob_paths.push(prefix);
+        }
+    }
+}
+
+fn resolve_use_named_dependency(resolver: &Resolver<'_>, path: &[String]) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    if let Some(item) = resolver.resolve_item_segments(path) {
+        dependencies.items.insert(item);
+        return dependencies;
+    }
+    if let Some(callable) = resolver.resolve_free_function_segments(path) {
+        dependencies.callables.insert(callable);
+        return dependencies;
+    }
+
+    let Some((package, resolved_path)) = resolver.resolve_value_prefix(path) else {
+        return dependencies;
+    };
+    if resolved_path.is_empty() {
+        return dependencies;
+    }
+    let Some(name) = resolved_path.last() else {
+        return dependencies;
+    };
+    let parent = &resolved_path[..resolved_path.len() - 1];
+    dependencies.items.extend(
+        resolver
+            .project
+            .items
+            .keys()
+            .filter(|item| {
+                item.package == package
+                    && item.name == *name
+                    && path_has_prefix(&item.module_path, parent)
+            })
+            .cloned(),
+    );
+    dependencies.callables.extend(
+        resolver
+            .project
+            .functions
+            .keys()
+            .filter(|callable| match callable {
+                CallableId::Free {
+                    package: callable_package,
+                    module_path,
+                    name: callable_name,
+                } => {
+                    callable_package == &package
+                        && callable_name == name
+                        && path_has_prefix(module_path, parent)
+                }
+                CallableId::Method { .. } => false,
+            })
+            .cloned(),
+    );
+    dependencies
+}
+
+fn resolve_use_glob_dependencies(
+    resolver: &Resolver<'_>,
+    path: &[String],
+    reachable_idents: &BTreeSet<String>,
+) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    let Some((package, module_path)) = resolver.resolve_prefix(path) else {
+        return dependencies;
+    };
+    dependencies.items.extend(
+        resolver
+            .project
+            .items
+            .keys()
+            .filter(|item| {
+                item.package == package
+                    && item.module_path == module_path
+                    && reachable_idents.contains(&item.name)
+            })
+            .cloned(),
+    );
+    dependencies.callables.extend(
+        resolver
+            .project
+            .functions
+            .keys()
+            .filter(|callable| match callable {
+                CallableId::Free {
+                    package: callable_package,
+                    module_path: callable_module,
+                    name,
+                } => {
+                    callable_package == &package
+                        && callable_module == &module_path
+                        && reachable_idents.contains(name)
+                }
+                CallableId::Method { .. } => false,
+            })
+            .cloned(),
+    );
+    dependencies
+}
+
+fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
+    path.len() >= prefix.len() && path.iter().zip(prefix).all(|(left, right)| left == right)
 }
 
 fn item_macro_feeds_reachable_code(
@@ -1179,6 +1476,10 @@ impl Resolver<'_> {
 
     fn resolve_free_function(&self, path: &Path) -> Option<CallableId> {
         let segments = self.apply_alias(path_segments(path));
+        self.resolve_free_function_segments(&segments)
+    }
+
+    fn resolve_free_function_segments(&self, segments: &[String]) -> Option<CallableId> {
         if segments.is_empty() {
             return None;
         }
@@ -1265,6 +1566,7 @@ impl Resolver<'_> {
                 package: candidate.package.clone(),
                 type_path: candidate.type_path.clone(),
                 trait_path: None,
+                trait_input_type_paths: Vec::new(),
                 method: method.to_string(),
             };
             if self.project.methods.contains_key(&inherent) {
@@ -1277,6 +1579,7 @@ impl Resolver<'_> {
                     type_path,
                     trait_path: Some(_),
                     method: candidate_method,
+                    ..
                 } = id
                 else {
                     return None;
@@ -1327,6 +1630,7 @@ impl Resolver<'_> {
                     type_path,
                     trait_path: Some(trait_path),
                     method: candidate_method,
+                    ..
                 } = id
                 else {
                     return None;

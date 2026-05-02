@@ -69,6 +69,7 @@ pub enum CallableId {
         package: String,
         type_path: Vec<String>,
         trait_path: Option<Vec<String>>,
+        trait_input_type_paths: Vec<Vec<String>>,
         method: String,
     },
 }
@@ -125,6 +126,7 @@ impl fmt::Display for CallableId {
                 package,
                 type_path,
                 trait_path,
+                trait_input_type_paths,
                 method,
             } => {
                 write!(formatter, "{package}::")?;
@@ -133,6 +135,16 @@ impl fmt::Display for CallableId {
                     write_segments(formatter, type_path)?;
                     write!(formatter, " as ")?;
                     write_segments(formatter, trait_path)?;
+                    if !trait_input_type_paths.is_empty() {
+                        write!(formatter, "<")?;
+                        for (index, input_path) in trait_input_type_paths.iter().enumerate() {
+                            if index > 0 {
+                                write!(formatter, ", ")?;
+                            }
+                            write_segments(formatter, input_path)?;
+                        }
+                        write!(formatter, ">")?;
+                    }
                     write!(formatter, ">::{method}")
                 } else {
                     write_segments(formatter, type_path)?;

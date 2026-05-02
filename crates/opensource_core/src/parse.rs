@@ -223,6 +223,7 @@ impl Parser {
                     package: package.to_string(),
                     type_path: type_path.clone(),
                     trait_path: trait_path.clone(),
+                    trait_input_type_paths: trait_input_type_paths.clone(),
                     method: method.sig.ident.to_string(),
                 };
                 self.methods.insert(
