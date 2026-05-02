@@ -2777,6 +2777,21 @@ fn external_trait_import_should_remain(
         if reachable_module_mentions_ident(project, reduced, package, module_path, leaf) {
             return true;
         }
+        let receiver_is_reachable =
+            known_trait_receiver_idents(target, leaf).is_none_or(|receivers| {
+                receivers.iter().any(|receiver| {
+                    reachable_module_mentions_ident(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        receiver,
+                    )
+                })
+            });
+        if !receiver_is_reachable {
+            return false;
+        }
         if known_trait_associated_function_idents(target, leaf).is_some_and(|functions| {
             functions.iter().any(|function| {
                 reachable_module_has_associated_function_call(
@@ -2801,6 +2816,13 @@ fn external_trait_import_should_remain(
         .iter()
         .take(target.len().saturating_sub(1))
         .any(|segment| reachable_package_mentions_ident(project, reduced, package, segment))
+}
+
+fn known_trait_receiver_idents(target: &[String], leaf: &str) -> Option<&'static [&'static str]> {
+    match (target.first().map(String::as_str), leaf) {
+        (Some("sha1"), "Digest") => Some(&["Sha1"]),
+        _ => None,
+    }
 }
 
 fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [&'static str]> {

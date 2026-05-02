@@ -1193,6 +1193,48 @@ fn retains_digest_trait_import_for_associated_new_call() {
 }
 
 #[test]
+fn prunes_digest_trait_import_when_hash_usage_is_dead() {
+    let workspace = temp_path("digest-trait-dead-hash-workspace");
+    let output = temp_path("digest-trait-dead-hash-output");
+    let target_dir = temp_path("digest-trait-dead-hash-target");
+    write_digest_trait_dead_hash_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("digest_trait_dead_hash_like/src/lib.rs"));
+    assert!(source.contains("pub fn selected"));
+    assert!(source.contains("Mutex::new"));
+    assert!(!source.contains("sha1"));
+    assert!(!source.contains("Digest"));
+    assert!(!source.contains("Sha1"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let manifest = read(output.join("digest_trait_dead_hash_like/Cargo.toml"));
+    assert!(!manifest.contains("sha1"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-Dwarnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated dead digest trait import slice did not compile cleanly\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn prunes_unused_private_external_type_imports_after_dead_items_are_removed() {
     let workspace = temp_path("external-type-import-workspace");
     let output = temp_path("external-type-import-output");
@@ -3336,6 +3378,50 @@ use sha1::{Digest, Sha1};
 
 #[opensourced]
 pub fn selected(input: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
+}
+"#,
+    );
+}
+
+fn write_digest_trait_dead_hash_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "digest_trait_dead_hash_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hex = "0.4"
+opensourced = {{ path = "{}" }}
+sha1 = "0.10"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use sha1::{Digest, Sha1};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub type Cache = Mutex<HashMap<String, String>>;
+
+#[opensourced]
+pub fn selected() -> Cache {
+    Mutex::new(HashMap::new())
+}
+
+fn dead_bucket(input: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(input.as_bytes());
     hex::encode(hasher.finalize())
