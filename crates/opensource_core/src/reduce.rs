@@ -2,7 +2,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 
 use syn::{
     visit::{self, Visit},
-    Expr, ExprCall, ExprMethodCall, ExprPath, Local, Pat, PatTupleStruct, Path, Type, TypePath,
+    Expr, ExprCall, ExprMacro, ExprMethodCall, ExprPath, ImplItem, ItemMacro, Local, Macro, Pat,
+    PatTupleStruct, Path, Type, TypePath,
 };
 
 use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject};
@@ -203,6 +204,7 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
                     visitor.dependencies.items.insert(item);
                 }
             }
+            visitor.visit_impl_peers(callable, record, trait_path.is_some());
             visitor.visit_signature(&record.item.sig);
             visitor.visit_block(&record.item.block);
             visitor.dependencies
@@ -320,6 +322,33 @@ impl<'a> DependencyVisitor<'a> {
             _ => None,
         }
     }
+
+    fn visit_impl_peers(
+        &mut self,
+        callable: &CallableId,
+        record: &crate::model::MethodRecord,
+        keep_trait_peers: bool,
+    ) {
+        for impl_item in &record.impl_items {
+            if impl_item_is_test(impl_item) {
+                continue;
+            }
+
+            match impl_item {
+                ImplItem::Fn(method) if keep_trait_peers => {
+                    if method.sig.ident != callable_method(callable) {
+                        let mut peer = callable.clone();
+                        if let CallableId::Method { method: name, .. } = &mut peer {
+                            *name = method.sig.ident.to_string();
+                        }
+                        self.dependencies.callables.insert(peer);
+                    }
+                }
+                ImplItem::Fn(_) => {}
+                _ => visit::visit_impl_item(self, impl_item),
+            }
+        }
+    }
 }
 
 impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
@@ -344,6 +373,29 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             }
         }
         visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_macro(&mut self, expr: &'ast ExprMacro) {
+        self.add_macro_path(&expr.mac.path);
+        visit::visit_expr_macro(self, expr);
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast ItemMacro) {
+        if let Some(ident) = &item.ident {
+            let id = ItemId {
+                package: self.resolver.package.to_string(),
+                module_path: self.resolver.module_path.to_vec(),
+                name: ident.to_string(),
+                kind: ItemKind::Macro,
+            };
+            self.dependencies.items.insert(id);
+        }
+        visit::visit_item_macro(self, item);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast Macro) {
+        self.add_macro_path(&mac.path);
+        visit::visit_macro(self, mac);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
@@ -379,6 +431,14 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_item_path(&path.path);
         }
         visit::visit_pat(self, pat);
+    }
+}
+
+impl DependencyVisitor<'_> {
+    fn add_macro_path(&mut self, path: &Path) {
+        if let Some(item) = self.resolver.resolve_macro_path(path) {
+            self.dependencies.items.insert(item);
+        }
     }
 }
 
@@ -621,6 +681,11 @@ impl Resolver<'_> {
         self.resolve_item_segments(&segments)
     }
 
+    fn resolve_macro_path(&self, path: &Path) -> Option<ItemId> {
+        let segments = self.apply_alias(path_segments(path));
+        self.resolve_macro_segments(&segments)
+    }
+
     fn resolve_item_segments(&self, segments: &[String]) -> Option<ItemId> {
         for split in (1..=segments.len()).rev() {
             let candidate = &segments[..split];
@@ -628,6 +693,19 @@ impl Resolver<'_> {
                 continue;
             };
             if let Some(item) = self.find_item(&package, &path, &all_item_kinds()) {
+                return Some(item);
+            }
+        }
+        None
+    }
+
+    fn resolve_macro_segments(&self, segments: &[String]) -> Option<ItemId> {
+        for split in (1..=segments.len()).rev() {
+            let candidate = &segments[..split];
+            let Some((package, path)) = self.resolve_prefix(candidate) else {
+                continue;
+            };
+            if let Some(item) = self.find_item(&package, &path, &[ItemKind::Macro]) {
                 return Some(item);
             }
         }
@@ -792,7 +870,7 @@ fn type_like_kinds() -> [ItemKind; 5] {
     ]
 }
 
-fn all_item_kinds() -> [ItemKind; 7] {
+fn all_item_kinds() -> [ItemKind; 8] {
     [
         ItemKind::Struct,
         ItemKind::Enum,
@@ -801,7 +879,32 @@ fn all_item_kinds() -> [ItemKind; 7] {
         ItemKind::Trait,
         ItemKind::Const,
         ItemKind::Static,
+        ItemKind::Macro,
     ]
+}
+
+fn callable_method(callable: &CallableId) -> &str {
+    match callable {
+        CallableId::Method { method, .. } => method,
+        CallableId::Free { .. } => "",
+    }
+}
+
+fn impl_item_is_test(item: &ImplItem) -> bool {
+    match item {
+        ImplItem::Const(item) => attrs_are_test(&item.attrs),
+        ImplItem::Fn(item) => attrs_are_test(&item.attrs),
+        ImplItem::Type(item) => attrs_are_test(&item.attrs),
+        ImplItem::Macro(item) => attrs_are_test(&item.attrs),
+        ImplItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn attrs_are_test(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attribute| is_cfg_test_attr(attribute) || is_test_attr(attribute.path()))
 }
 
 fn binding_name_and_type(pattern: &Pat) -> Option<(String, Option<&Type>)> {

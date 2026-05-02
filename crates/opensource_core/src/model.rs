@@ -4,7 +4,7 @@ use std::{
     path::PathBuf,
 };
 
-use syn::{File, ImplItemFn, Item, ItemFn};
+use syn::{File, ImplItem, ImplItemFn, Item, ItemFn};
 
 use crate::manifest::Workspace;
 
@@ -37,6 +37,7 @@ pub struct FunctionRecord {
 pub struct MethodRecord {
     pub module_path: Vec<String>,
     pub item: ImplItemFn,
+    pub impl_items: Vec<ImplItem>,
     pub aliases: HashMap<String, Vec<String>>,
 }
 
@@ -102,6 +103,7 @@ pub enum ItemKind {
     Trait,
     Const,
     Static,
+    Macro,
 }
 
 impl fmt::Display for CallableId {

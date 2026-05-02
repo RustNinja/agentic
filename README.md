@@ -104,6 +104,8 @@ with different source shapes and then run the reducer against them:
 
 See `docs/uniffi_slicer_experiment.md` for the UniFFI fixture rationale and
 verified result.
+See `docs/slice_coverage_matrix.md` for the full supported slice matrix and
+current boundaries.
 
 Expected reachable callables for the fixture:
 
@@ -156,5 +158,6 @@ pipeline, but it is not a full compiler frontend. It now handles direct trait
 method calls when the receiver type can be inferred locally, borrowed UFCS trait
 calls, workspace member globs, external dependencies, and local path crate
 pruning. Macro-expanded calls, complex function pointers, broad `cfg` feature
-matrices, build scripts, and fine-grained external dependency pruning need more
-work before this can be treated as a production-grade Rust slicer.
+matrices, macro-expanded hidden calls, build scripts, and fine-grained external
+dependency pruning need more work before this can be treated as a production
+grade Rust slicer.

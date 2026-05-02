@@ -130,7 +130,8 @@ impl Parser {
                 | Item::Type(_)
                 | Item::Trait(_)
                 | Item::Const(_)
-                | Item::Static(_) => {
+                | Item::Static(_)
+                | Item::Macro(_) => {
                     if let Some((name, kind)) = item_name_and_kind(item) {
                         let id = ItemId {
                             package: package.to_string(),
@@ -196,6 +197,7 @@ impl Parser {
                     MethodRecord {
                         module_path: module_path.to_vec(),
                         item: method.clone(),
+                        impl_items: item_impl.items.clone(),
                         aliases: aliases.clone(),
                     },
                 );
@@ -259,6 +261,10 @@ fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
         Item::Trait(item) => Some((item.ident.to_string(), ItemKind::Trait)),
         Item::Const(item) => Some((item.ident.to_string(), ItemKind::Const)),
         Item::Static(item) => Some((item.ident.to_string(), ItemKind::Static)),
+        Item::Macro(item) => item
+            .ident
+            .as_ref()
+            .map(|ident| (ident.to_string(), ItemKind::Macro)),
         _ => None,
     }
 }

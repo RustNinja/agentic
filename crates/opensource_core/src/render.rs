@@ -353,7 +353,8 @@ fn transform_items(
             | Item::Type(_)
             | Item::Trait(_)
             | Item::Const(_)
-            | Item::Static(_) => {
+            | Item::Static(_)
+            | Item::Macro(_) => {
                 let id = item_id(package, module_path, item)?;
                 reduced.reachable_items.contains(&id).then(|| item.clone())
             }
@@ -415,9 +416,6 @@ fn transform_items(
                 let mut item_mod = item_mod.clone();
                 let mut child_path = module_path.to_vec();
                 child_path.push(item_mod.ident.to_string());
-                if !module_should_render(project, reduced, package, &child_path) {
-                    return None;
-                }
 
                 if let Some((brace, child_items)) = &item_mod.content {
                     let child_items =
@@ -426,6 +424,8 @@ fn transform_items(
                         return None;
                     }
                     item_mod.content = Some((*brace, child_items));
+                } else if !module_should_render(project, reduced, package, &child_path) {
+                    return None;
                 }
                 Some(Item::Mod(item_mod))
             }
@@ -481,6 +481,7 @@ fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId>
         Item::Trait(item) => (item.ident.to_string(), ItemKind::Trait),
         Item::Const(item) => (item.ident.to_string(), ItemKind::Const),
         Item::Static(item) => (item.ident.to_string(), ItemKind::Static),
+        Item::Macro(item) => (item.ident.as_ref()?.to_string(), ItemKind::Macro),
         _ => return None,
     };
 
@@ -633,6 +634,18 @@ fn use_target_should_drop(
     if let Some(item) = find_use_item(project, &target_package, &target_path) {
         return !reduced.reachable_items.contains(&item);
     }
+    if let Some((alias_package, alias_path)) =
+        resolve_reexported_use_path(project, &target_package, &target_path)
+    {
+        if let Some(callable) = find_use_function(project, &alias_package, &alias_path) {
+            return !reduced.reachable.contains(&callable);
+        }
+        if let Some(item) = find_use_item(project, &alias_package, &alias_path) {
+            return !reduced.reachable_items.contains(&item);
+        }
+        return project_has_module(project, &alias_package, &alias_path)
+            && !module_should_render(project, reduced, &alias_package, &alias_path);
+    }
 
     project_has_module(project, &target_package, &target_path)
         && !module_should_render(project, reduced, &target_package, &target_path)
@@ -745,6 +758,20 @@ fn resolve_use_target_path(
     }
 }
 
+fn resolve_reexported_use_path(
+    project: &Project,
+    package: &str,
+    path: &[String],
+) -> Option<(String, Vec<String>)> {
+    let name = path.last()?;
+    let module_path = &path[..path.len() - 1];
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))?;
+    let target = aliases.get(name)?;
+    resolve_use_target_path(project, package, module_path, target)
+}
+
 fn find_use_function(project: &Project, package: &str, path: &[String]) -> Option<CallableId> {
     let name = path.last()?.clone();
     let module_path = path[..path.len() - 1].to_vec();
@@ -767,6 +794,7 @@ fn find_use_item(project: &Project, package: &str, path: &[String]) -> Option<It
         ItemKind::Trait,
         ItemKind::Const,
         ItemKind::Static,
+        ItemKind::Macro,
     ]
     .into_iter()
     .find_map(|kind| {
