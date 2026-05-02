@@ -30,10 +30,37 @@ pub struct LintAuditOptions {
 }
 
 #[derive(Debug, Clone)]
+pub struct CompilerPruneOptions {
+    pub workspace_root: PathBuf,
+    pub output_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompilerPruneRefreshOptions {
+    pub workspace_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
 pub struct LintAuditReport {
     pub packages: Vec<String>,
     pub linted_roots: Vec<PathBuf>,
     pub files_written: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompilerPruneReport {
+    pub root: RootId,
+    pub packages: Vec<String>,
+    pub linted_roots: Vec<PathBuf>,
+    pub files_written: usize,
+    pub demoted_visibilities: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct CompilerPruneRefreshReport {
+    pub root: RootId,
+    pub packages: Vec<String>,
+    pub demoted_visibilities: usize,
 }
 
 pub fn generate(options: GenerateOptions) -> Result<GenerateReport, Box<dyn std::error::Error>> {
@@ -76,6 +103,44 @@ pub fn generate_lint_audit_workspace(
     })
 }
 
+pub fn generate_compiler_prune_workspace(
+    options: CompilerPruneOptions,
+) -> Result<CompilerPruneReport, Box<dyn std::error::Error>> {
+    let workspace = manifest::load_workspace(&options.workspace_root)?;
+    let project = parse::parse_workspace(workspace)?;
+    let reduced = reduce::reduce(&project)?;
+    let report = render::write_compiler_prune_workspace(&project, &reduced, &options.output_root)?;
+
+    let mut packages = report.copied_packages.clone();
+    packages.sort();
+
+    Ok(CompilerPruneReport {
+        root: reduced.root,
+        packages,
+        linted_roots: report.linted_roots,
+        files_written: report.files_written,
+        demoted_visibilities: report.demoted_visibilities,
+    })
+}
+
+pub fn refresh_compiler_prune_visibility(
+    options: CompilerPruneRefreshOptions,
+) -> Result<CompilerPruneRefreshReport, Box<dyn std::error::Error>> {
+    let workspace = manifest::load_workspace(&options.workspace_root)?;
+    let project = parse::parse_workspace(workspace)?;
+    let reduced = reduce::reduce(&project)?;
+    let report = render::refresh_compiler_prune_visibility(&project, &reduced)?;
+
+    let mut packages = report.copied_packages.clone();
+    packages.sort();
+
+    Ok(CompilerPruneRefreshReport {
+        root: reduced.root,
+        packages,
+        demoted_visibilities: report.demoted_visibilities,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -85,7 +150,11 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{generate, generate_lint_audit_workspace, GenerateOptions, LintAuditOptions};
+    use super::{
+        generate, generate_compiler_prune_workspace, generate_lint_audit_workspace,
+        refresh_compiler_prune_visibility, CompilerPruneOptions, CompilerPruneRefreshOptions,
+        GenerateOptions, LintAuditOptions,
+    };
 
     #[test]
     fn reduces_fixture_to_reachable_callables() {
@@ -231,6 +300,71 @@ mod tests {
         assert!(source.contains("slicers lint-audit"));
         assert!(source.contains("warn(dead_code, unused_imports, unused_macros, unreachable_pub)"));
         assert!(source.contains("internal_entry"));
+    }
+
+    #[test]
+    fn compiler_prune_copies_dependency_closure_and_lowers_visibility() {
+        let output = temp_output("compiler-prune");
+        let report = generate_compiler_prune_workspace(CompilerPruneOptions {
+            workspace_root: workspace_root(),
+            output_root: output.clone(),
+        })
+        .expect("compiler prune workspace should generate");
+
+        assert_eq!(
+            report.packages,
+            ["a", "b", "c", "d", "e", "opensourced"],
+            "compiler-prune should copy the recursive Cargo dependency closure, not the full workspace"
+        );
+        assert!(report.demoted_visibilities > 0);
+        assert!(!output.join("crates/opensource_core").exists());
+        assert!(!output.join("crates/opensource_cli").exists());
+        assert!(!output.join("docs").exists());
+
+        let root_manifest = fs::read_to_string(output.join("Cargo.toml")).unwrap();
+        assert!(root_manifest.contains("\"fixtures/a\""));
+        assert!(root_manifest.contains("\"fixtures/b\""));
+        assert!(root_manifest.contains("\"fixtures/c\""));
+        assert!(root_manifest.contains("\"fixtures/d\""));
+        assert!(root_manifest.contains("\"fixtures/e\""));
+        assert!(root_manifest.contains("\"crates/opensourced\""));
+        assert!(!root_manifest.contains("opensource_core"));
+
+        let a_source = fs::read_to_string(output.join("fixtures/a/src/lib.rs")).unwrap();
+        assert!(a_source.contains("slicers compiler-prune"));
+        assert!(a_source.contains("pub(crate) fn internal_entry"));
+
+        let b_source = fs::read_to_string(output.join("fixtures/b/src/lib.rs")).unwrap();
+        assert!(!b_source.contains("cfg(test)"));
+        assert!(!b_source.contains("unit_test_that_must_not_be_exported"));
+    }
+
+    #[test]
+    fn compiler_prune_refresh_relowers_after_dead_callers_are_removed() {
+        let output = temp_output("compiler-prune-refresh");
+        generate_compiler_prune_workspace(CompilerPruneOptions {
+            workspace_root: workspace_root(),
+            output_root: output.clone(),
+        })
+        .expect("compiler prune workspace should generate");
+
+        let a_path = output.join("fixtures/a/src/lib.rs");
+        let mut a_source = fs::read_to_string(&a_path).unwrap();
+        let start = a_source.find("pub(crate) fn internal_entry").unwrap();
+        a_source.truncate(start);
+        fs::write(&a_path, a_source).unwrap();
+
+        let before = fs::read_to_string(output.join("fixtures/b/src/lib.rs")).unwrap();
+        assert!(before.contains("pub fn unused_public"));
+
+        let report = refresh_compiler_prune_visibility(CompilerPruneRefreshOptions {
+            workspace_root: output.clone(),
+        })
+        .expect("refresh should succeed");
+
+        assert!(report.demoted_visibilities > 0);
+        let after = fs::read_to_string(output.join("fixtures/b/src/lib.rs")).unwrap();
+        assert!(after.contains("pub(crate) fn unused_public"));
     }
 
     fn workspace_root() -> PathBuf {

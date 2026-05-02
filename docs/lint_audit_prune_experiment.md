@@ -17,6 +17,24 @@ Run it with:
 slicers --lint-audit <workspace-root> <output-root>
 ```
 
+Compiler-prune mode starts from the marked `#[opensourced]` root, reads
+`Cargo.toml`, copies that package plus its recursive non-dev local Cargo
+dependency closure, lowers public visibility for non-boundary items, injects
+strict lints, and removes dead function-like/item blocks reported by
+`cargo check`:
+
+```sh
+slicers --compiler-prune <workspace-root> <output-root>
+```
+
+It writes `slicers-compiler-prune-report.json` with each cargo-check/removal
+round. After removing dead callers, it reparses the partially stripped slice and
+re-lowers visibility from the updated dependency/source graph, so public items
+that were only kept alive by now-removed code can be stripped in later rounds.
+This is the copy-first stripping path: the graph reducer protects the initial
+public boundary, while the compiler proves which lowered items can be removed
+from the copied workspace.
+
 Optional rust-analyzer audit:
 
 ```sh

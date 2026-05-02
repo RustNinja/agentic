@@ -1,6 +1,16 @@
-use std::{ffi::OsStr, fs, path::PathBuf, process::Command};
+use std::{
+    collections::BTreeMap,
+    ffi::OsStr,
+    fs,
+    path::{Path, PathBuf},
+    process::{Command, Output},
+};
 
-use opensource_core::{generate, generate_lint_audit_workspace, GenerateOptions, LintAuditOptions};
+use opensource_core::{
+    generate, generate_compiler_prune_workspace, generate_lint_audit_workspace,
+    refresh_compiler_prune_visibility, CompilerPruneOptions, CompilerPruneRefreshOptions,
+    GenerateOptions, LintAuditOptions,
+};
 use serde_json::{json, Value};
 
 fn main() {
@@ -13,6 +23,7 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut run_check = false;
     let mut lint_audit = false;
+    let mut compiler_prune = false;
     let mut rust_analyzer = RustAnalyzerOptions::default();
     let mut positional = Vec::new();
     let mut args = std::env::args_os().skip(1);
@@ -20,6 +31,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         match arg.as_os_str() {
             value if value == OsStr::new("--check") => run_check = true,
             value if value == OsStr::new("--lint-audit") => lint_audit = true,
+            value if value == OsStr::new("--compiler-prune") => compiler_prune = true,
             value if value == OsStr::new("--ra-audit") => rust_analyzer.enabled = true,
             value if value == OsStr::new("--ra-disable-build-scripts") => {
                 rust_analyzer.disable_build_scripts = true
@@ -64,6 +76,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Ok(());
     }
 
+    if compiler_prune {
+        run_compiler_prune(
+            workspace_root.clone(),
+            output_root.clone(),
+            rust_analyzer.clone(),
+        )?;
+        return Ok(());
+    }
+
     let report = generate(GenerateOptions {
         workspace_root: workspace_root.clone(),
         output_root: output_root.clone(),
@@ -97,6 +118,255 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     Ok(())
+}
+
+fn run_compiler_prune(
+    workspace_root: PathBuf,
+    output_root: PathBuf,
+    rust_analyzer: RustAnalyzerOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let report = generate_compiler_prune_workspace(CompilerPruneOptions {
+        workspace_root,
+        output_root: output_root.clone(),
+    })?;
+
+    println!("compiler-prune root: {}", report.root);
+    println!("compiler-prune files written: {}", report.files_written);
+    println!("compiler-prune packages: {}", report.packages.join(", "));
+    println!(
+        "compiler-prune demoted visibilities: {}",
+        report.demoted_visibilities
+    );
+    println!("compiler-prune linted crate roots:");
+    for path in &report.linted_roots {
+        println!("  {}", path.display());
+    }
+
+    let mut rounds = Vec::new();
+    let mut final_output = run_cargo_check_json(&output_root)?;
+    let mut diagnostics = lint_audit_diagnostics(&final_output.stdout);
+    for round in 0..12 {
+        let removed = prune_dead_items_from_diagnostics(&output_root, &diagnostics)?;
+        let redemoted = if removed == 0 {
+            0
+        } else {
+            refresh_compiler_prune_visibility(CompilerPruneRefreshOptions {
+                workspace_root: output_root.clone(),
+            })?
+            .demoted_visibilities
+        };
+        rounds.push(json!({
+            "round": round,
+            "cargo_status": final_output.status.code(),
+            "diagnostic_count": diagnostics.len(),
+            "removed_dead_items": removed,
+            "redemoted_visibilities": redemoted,
+        }));
+        if removed == 0 && redemoted == 0 {
+            break;
+        }
+        final_output = run_cargo_check_json(&output_root)?;
+        diagnostics = lint_audit_diagnostics(&final_output.stdout);
+    }
+
+    let report_path = output_root.join("slicers-compiler-prune-report.json");
+    let payload = json!({
+        "root": report.root.to_string(),
+        "packages": report.packages,
+        "files_written": report.files_written,
+        "demoted_visibilities": report.demoted_visibilities,
+        "cargo_status": final_output.status.code(),
+        "diagnostic_count": diagnostics.len(),
+        "diagnostics": diagnostics,
+        "rounds": rounds,
+    });
+    fs::write(&report_path, serde_json::to_string_pretty(&payload)?)?;
+
+    println!(
+        "compiler-prune diagnostics: {} ({})",
+        payload["diagnostic_count"],
+        report_path.display()
+    );
+
+    if !final_output.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&final_output.stderr));
+    }
+
+    if rust_analyzer.enabled {
+        run_rust_analyzer_audit(&output_root, &rust_analyzer)?;
+    }
+
+    Ok(())
+}
+
+fn run_cargo_check_json(output_root: &Path) -> Result<Output, Box<dyn std::error::Error>> {
+    let target_dir = std::env::var_os("SLICERS_CARGO_TARGET_DIR")
+        .map(PathBuf::from)
+        .unwrap_or(std::env::current_dir()?.join("target/slicers-compiler-prune"));
+    Ok(Command::new("cargo")
+        .arg("check")
+        .arg("--message-format=json")
+        .arg("--manifest-path")
+        .arg(output_root.join("Cargo.toml"))
+        .env("CARGO_TARGET_DIR", target_dir)
+        .output()?)
+}
+
+fn prune_dead_items_from_diagnostics(
+    output_root: &Path,
+    diagnostics: &[Value],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut by_file: BTreeMap<PathBuf, Vec<DeadItemCandidate>> = BTreeMap::new();
+    for diagnostic in diagnostics {
+        if diagnostic
+            .get("code")
+            .and_then(|code| code.get("code"))
+            .and_then(Value::as_str)
+            != Some("dead_code")
+        {
+            continue;
+        }
+        let Some(message) = diagnostic.get("message").and_then(Value::as_str) else {
+            continue;
+        };
+        if !(message.contains("function `")
+            || message.contains("method `")
+            || message.contains("associated function `")
+            || message.contains("enum `")
+            || message.contains("struct `")
+            || message.contains("union `")
+            || message.contains("trait `"))
+        {
+            continue;
+        }
+        let Some(name) = name_from_backticks(message) else {
+            continue;
+        };
+        for span in diagnostic
+            .get("spans")
+            .and_then(Value::as_array)
+            .into_iter()
+            .flatten()
+        {
+            let Some(file_name) = span.get("file_name").and_then(Value::as_str) else {
+                continue;
+            };
+            let Some(line_start) = span.get("line_start").and_then(Value::as_u64) else {
+                continue;
+            };
+            let path = diagnostic_path(output_root, file_name);
+            by_file.entry(path).or_default().push(DeadItemCandidate {
+                name: name.to_string(),
+                line_start: line_start as usize,
+            });
+        }
+    }
+
+    let mut removed = 0;
+    for (path, mut candidates) in by_file {
+        if !path.exists() {
+            continue;
+        }
+        candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
+        candidates.dedup();
+        let mut source = fs::read_to_string(&path)?;
+        for candidate in candidates {
+            if remove_item_at_line(&mut source, &candidate) {
+                removed += 1;
+            }
+        }
+        fs::write(path, source)?;
+    }
+    Ok(removed)
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct DeadItemCandidate {
+    name: String,
+    line_start: usize,
+}
+
+fn diagnostic_path(output_root: &Path, file_name: &str) -> PathBuf {
+    let path = PathBuf::from(file_name);
+    if path.is_absolute() {
+        path
+    } else {
+        output_root.join(path)
+    }
+}
+
+fn name_from_backticks(message: &str) -> Option<&str> {
+    let (_, rest) = message.split_once('`')?;
+    let (name, _) = rest.split_once('`')?;
+    Some(name)
+}
+
+fn remove_item_at_line(source: &mut String, candidate: &DeadItemCandidate) -> bool {
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(mut start) = candidate.line_start.checked_sub(1) else {
+        return false;
+    };
+    if start >= lines.len() {
+        return false;
+    }
+
+    let needle = candidate.name.clone();
+    let raw_needle = format!("r#{}", candidate.name);
+    let search_floor = start.saturating_sub(8);
+    while start > search_floor
+        && !lines[start].contains(&needle)
+        && !lines[start].contains(&raw_needle)
+    {
+        start -= 1;
+    }
+    if !lines[start].contains(&needle) && !lines[start].contains(&raw_needle) {
+        return false;
+    }
+
+    while start > 0 {
+        let previous = lines[start - 1].trim_start();
+        if previous.starts_with("#[") || previous.starts_with("///") {
+            start -= 1;
+        } else {
+            break;
+        }
+    }
+
+    let Some(open_line) = (start..lines.len()).find(|index| lines[*index].contains('{')) else {
+        return false;
+    };
+    let mut depth = 0isize;
+    let mut saw_open = false;
+    let mut end = None;
+    for (index, line) in lines.iter().enumerate().skip(open_line) {
+        for character in line.chars() {
+            match character {
+                '{' => {
+                    saw_open = true;
+                    depth += 1;
+                }
+                '}' if saw_open => {
+                    depth -= 1;
+                    if depth == 0 {
+                        end = Some(index);
+                        break;
+                    }
+                }
+                _ => {}
+            }
+        }
+        if end.is_some() {
+            break;
+        }
+    }
+    let Some(end) = end else {
+        return false;
+    };
+
+    lines.drain(start..=end);
+    *source = lines.join("\n");
+    source.push('\n');
+    true
 }
 
 #[derive(Clone, Debug, Default)]
@@ -303,8 +573,9 @@ fn lint_audit_diagnostics(stdout: &[u8]) -> Vec<Value> {
                 .get("code")
                 .and_then(|code| code.get("code"))
                 .and_then(Value::as_str);
-            matches!(level, Some("warning") | Some("error"))
-                && code.is_some_and(|code| interesting_codes.contains(&code))
+            level == Some("error")
+                || (level == Some("warning")
+                    && code.is_some_and(|code| interesting_codes.contains(&code)))
         })
         .map(|message| {
             let primary_spans = message
@@ -333,6 +604,7 @@ fn lint_audit_diagnostics(stdout: &[u8]) -> Vec<Value> {
 fn usage() -> String {
     [
         "usage: slicers [--check] [--lint-audit] [--ra-audit]",
+        "               [--compiler-prune]",
         "               [--rust-analyzer <path>]",
         "               [--ra-proc-macro-srv <path>]",
         "               [--ra-disable-build-scripts] [--ra-disable-proc-macros]",

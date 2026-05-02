@@ -20,6 +20,18 @@ pub struct LintAuditWorkspaceReport {
     pub linted_roots: Vec<PathBuf>,
 }
 
+pub struct CompilerPruneWorkspaceReport {
+    pub files_written: usize,
+    pub linted_roots: Vec<PathBuf>,
+    pub demoted_visibilities: usize,
+    pub copied_packages: Vec<String>,
+}
+
+pub struct CompilerPruneRefreshWorkspaceReport {
+    pub demoted_visibilities: usize,
+    pub copied_packages: Vec<String>,
+}
+
 pub fn write_lint_audit_workspace(
     workspace: &Workspace,
     output_root: &Path,
@@ -51,6 +63,265 @@ pub fn write_lint_audit_workspace(
         files_written,
         linted_roots,
     })
+}
+
+pub fn write_compiler_prune_workspace(
+    project: &Project,
+    reduced: &ReducedProject,
+    output_root: &Path,
+) -> Result<CompilerPruneWorkspaceReport, Box<dyn std::error::Error>> {
+    if output_root.exists() {
+        fs::remove_dir_all(output_root)?;
+    }
+    fs::create_dir_all(output_root)?;
+
+    let workspace = &project.workspace;
+    let copied_packages = compiler_prune_package_closure(project, reduced.root.package());
+    let external_references = external_reference_names(project, &copied_packages);
+    let mut files_written = copy_compiler_prune_tree(project, &copied_packages, output_root)?;
+    rewrite_lint_audit_manifests(&workspace.root, output_root, output_root)?;
+    restrict_workspace_members(project, &copied_packages, output_root)?;
+
+    let mut demoted_visibilities = 0;
+    for source in project.files.values() {
+        if !reduced.packages.contains(&source.package) || !source.path.starts_with(&workspace.root)
+        {
+            continue;
+        }
+        let relative_path = source.path.strip_prefix(&workspace.root)?;
+        let output_path = output_root.join(relative_path);
+        demoted_visibilities += demote_dependency_visibility(
+            &output_path,
+            reduced,
+            &external_references,
+            &source.package,
+            &source.module_path,
+        )?;
+    }
+
+    let mut linted_roots = Vec::new();
+    for package in workspace
+        .packages
+        .values()
+        .filter(|package| reduced.packages.contains(&package.name))
+    {
+        if !package.lib_path.starts_with(&workspace.root) {
+            continue;
+        }
+        let relative_path = package.lib_path.strip_prefix(&workspace.root)?;
+        let output_path = output_root.join(relative_path);
+        if inject_compiler_prune_attrs(&output_path)? {
+            linted_roots.push(output_path);
+        }
+    }
+    linted_roots.sort();
+
+    files_written += linted_roots.len();
+
+    Ok(CompilerPruneWorkspaceReport {
+        files_written,
+        linted_roots,
+        demoted_visibilities,
+        copied_packages: copied_packages.into_iter().collect(),
+    })
+}
+
+pub fn refresh_compiler_prune_visibility(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> Result<CompilerPruneRefreshWorkspaceReport, Box<dyn std::error::Error>> {
+    let workspace = &project.workspace;
+    let copied_packages = compiler_prune_package_closure(project, reduced.root.package());
+    let external_references = external_reference_names(project, &copied_packages);
+    let mut demoted_visibilities = 0;
+
+    for source in project.files.values() {
+        if !reduced.packages.contains(&source.package) || !source.path.starts_with(&workspace.root)
+        {
+            continue;
+        }
+        demoted_visibilities += demote_dependency_visibility(
+            &source.path,
+            reduced,
+            &external_references,
+            &source.package,
+            &source.module_path,
+        )?;
+    }
+
+    Ok(CompilerPruneRefreshWorkspaceReport {
+        demoted_visibilities,
+        copied_packages: copied_packages.into_iter().collect(),
+    })
+}
+
+fn copy_compiler_prune_tree(
+    project: &Project,
+    copied_packages: &BTreeSet<String>,
+    output_root: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let workspace_root = &project.workspace.root;
+    let mut copied = 0;
+    for root_file in [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain",
+        "rust-toolchain.toml",
+    ] {
+        let source = workspace_root.join(root_file);
+        if source.exists() {
+            copied += copy_lint_audit_tree(workspace_root, &source, output_root)?;
+        }
+    }
+
+    for package in copied_packages
+        .iter()
+        .filter_map(|package| project.workspace.packages.get(package))
+        .filter(|package| package.root.starts_with(workspace_root))
+    {
+        if package.root == *workspace_root {
+            let source_dir = package.root.join("src");
+            if source_dir.exists() {
+                copied += copy_lint_audit_tree(workspace_root, &source_dir, output_root)?;
+            }
+            let build_script = package.root.join("build.rs");
+            if build_script.exists() {
+                copied += copy_lint_audit_tree(workspace_root, &build_script, output_root)?;
+            }
+        } else {
+            copied += copy_lint_audit_tree(workspace_root, &package.root, output_root)?;
+        }
+    }
+
+    Ok(copied)
+}
+
+fn compiler_prune_package_closure(project: &Project, root_package: &str) -> BTreeSet<String> {
+    let mut packages = BTreeSet::new();
+    let mut queue = vec![root_package.to_string()];
+    while let Some(package) = queue.pop() {
+        if !packages.insert(package.clone()) {
+            continue;
+        }
+        let Some(record) = project.workspace.packages.get(&package) else {
+            continue;
+        };
+        for dependency in &record.dependencies {
+            if project.workspace.packages.contains_key(&dependency.package) {
+                queue.push(dependency.package.clone());
+            }
+        }
+    }
+    packages
+}
+
+fn external_reference_names(
+    project: &Project,
+    copied_packages: &BTreeSet<String>,
+) -> BTreeSet<(String, String)> {
+    let mut names = BTreeSet::new();
+    for source in project
+        .files
+        .values()
+        .filter(|source| copied_packages.contains(&source.package))
+    {
+        let Ok(text) = fs::read_to_string(&source.path) else {
+            continue;
+        };
+        let Some(package) = project.workspace.packages.get(&source.package) else {
+            continue;
+        };
+        for dependency in &package.dependencies {
+            if !copied_packages.contains(&dependency.package) {
+                continue;
+            }
+            let prefix = format!("{}::", dependency.alias);
+            if !text.contains(&prefix) {
+                continue;
+            }
+            for function in project.functions.values() {
+                if function.package == dependency.package
+                    && text.contains(&format!("{prefix}{}", function.item.sig.ident))
+                {
+                    names.insert((
+                        dependency.package.clone(),
+                        function.item.sig.ident.to_string(),
+                    ));
+                }
+            }
+            for item in project.items.values() {
+                if item.package != dependency.package {
+                    continue;
+                }
+                if let Some((name, _)) = compiler_prune_item_name(&item.item) {
+                    if text.contains(&format!("{prefix}{name}")) {
+                        names.insert((dependency.package.clone(), name));
+                    }
+                }
+            }
+        }
+    }
+    names
+}
+
+fn compiler_prune_item_name(item: &Item) -> Option<(String, ItemKind)> {
+    match item {
+        Item::Struct(item) => Some((item.ident.to_string(), ItemKind::Struct)),
+        Item::Enum(item) => Some((item.ident.to_string(), ItemKind::Enum)),
+        Item::Union(item) => Some((item.ident.to_string(), ItemKind::Union)),
+        Item::Type(item) => Some((item.ident.to_string(), ItemKind::Type)),
+        Item::Trait(item) => Some((item.ident.to_string(), ItemKind::Trait)),
+        Item::Const(item) => Some((item.ident.to_string(), ItemKind::Const)),
+        Item::Static(item) => Some((item.ident.to_string(), ItemKind::Static)),
+        Item::Macro(item) => item
+            .ident
+            .as_ref()
+            .map(|ident| (ident.to_string(), ItemKind::Macro)),
+        _ => None,
+    }
+}
+
+fn restrict_workspace_members(
+    project: &Project,
+    copied_packages: &BTreeSet<String>,
+    output_root: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let root_manifest = output_root.join("Cargo.toml");
+    if !root_manifest.exists() {
+        return Ok(());
+    }
+
+    let mut manifest = fs::read_to_string(&root_manifest)?.parse::<Value>()?;
+    let Some(workspace) = manifest.get_mut("workspace").and_then(Value::as_table_mut) else {
+        return Ok(());
+    };
+
+    let mut members = copied_packages
+        .iter()
+        .filter_map(|package| project.workspace.packages.get(package))
+        .filter(|package| package.root.starts_with(&project.workspace.root))
+        .map(|package| {
+            package
+                .root
+                .strip_prefix(&project.workspace.root)
+                .map(|relative| {
+                    if relative.as_os_str().is_empty() {
+                        ".".to_string()
+                    } else {
+                        relative.to_string_lossy().replace('\\', "/")
+                    }
+                })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    members.sort();
+    members.dedup();
+    workspace.insert(
+        "members".to_string(),
+        Value::Array(members.into_iter().map(Value::String).collect()),
+    );
+
+    fs::write(root_manifest, toml::to_string_pretty(&manifest)?)?;
+    Ok(())
 }
 
 fn copy_lint_audit_tree(
@@ -184,6 +455,353 @@ fn inject_lint_audit_attrs(path: &Path) -> Result<bool, Box<dyn std::error::Erro
 
     fs::write(path, output)?;
     Ok(true)
+}
+
+fn inject_compiler_prune_attrs(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let text = fs::read_to_string(path)?;
+    if text.contains("slicers compiler-prune")
+        || text.contains("#![deny(dead_code, unused_imports, unused_macros, unreachable_pub)]")
+    {
+        return Ok(false);
+    }
+
+    let attrs = [
+        "#![deny(dead_code, unused_imports, unused_macros, unreachable_pub)]",
+        "#![allow(unused_crate_dependencies)]",
+        "// slicers compiler-prune: broad copy with dependency visibility lowered",
+    ];
+    let mut lines = text.lines().collect::<Vec<_>>();
+    let mut insert_at = 0;
+    while insert_at < lines.len()
+        && (lines[insert_at].starts_with("#![") || lines[insert_at].starts_with("//!"))
+    {
+        insert_at += 1;
+    }
+
+    let mut output = String::new();
+    for line in lines.drain(..insert_at) {
+        output.push_str(line);
+        output.push('\n');
+    }
+    for attr in attrs {
+        output.push_str(attr);
+        output.push('\n');
+    }
+    for line in lines {
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    fs::write(path, output)?;
+    Ok(true)
+}
+
+fn demote_dependency_visibility(
+    path: &Path,
+    reduced: &ReducedProject,
+    external_references: &BTreeSet<(String, String)>,
+    package: &str,
+    module_path: &[String],
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Ok(0);
+    }
+
+    let text = fs::read_to_string(path)?;
+    let mut syntax = syn::parse_file(&text)?;
+    let mut demotions = 0;
+    demote_items_for_prune(
+        &mut syntax.items,
+        reduced,
+        external_references,
+        package,
+        module_path,
+        &mut demotions,
+    );
+    fs::write(path, prettyplease::unparse(&syntax))?;
+    Ok(demotions)
+}
+
+fn demote_items_for_prune(
+    items: &mut Vec<Item>,
+    reduced: &ReducedProject,
+    external_references: &BTreeSet<(String, String)>,
+    package: &str,
+    module_path: &[String],
+    demotions: &mut usize,
+) {
+    items.retain(|item| !item_is_test(item));
+    for item in items {
+        match item {
+            Item::Use(item_use) => {
+                if !public_use_may_reexport_boundary(&item_use.tree, reduced, package, module_path)
+                {
+                    demote_visibility_to_crate(&mut item_use.vis, demotions);
+                }
+            }
+            Item::Fn(function) => {
+                let id = CallableId::Free {
+                    package: package.to_string(),
+                    module_path: module_path.to_vec(),
+                    name: function.sig.ident.to_string(),
+                };
+                if !reduced.reachable.contains(&id)
+                    && !external_references
+                        .contains(&(package.to_string(), function.sig.ident.to_string()))
+                {
+                    demote_visibility_to_crate(&mut function.vis, demotions);
+                }
+            }
+            Item::Struct(item) => {
+                if !boundary_or_external_item_exists(
+                    reduced,
+                    external_references,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Struct,
+                ) {
+                    demote_visibility_to_crate(&mut item.vis, demotions);
+                }
+            }
+            Item::Enum(item) => {
+                if !boundary_or_external_item_exists(
+                    reduced,
+                    external_references,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Enum,
+                ) {
+                    demote_visibility_to_crate(&mut item.vis, demotions);
+                }
+            }
+            Item::Union(item) => {
+                if !boundary_or_external_item_exists(
+                    reduced,
+                    external_references,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Union,
+                ) {
+                    demote_visibility_to_crate(&mut item.vis, demotions);
+                }
+            }
+            Item::Type(item) => {
+                if !boundary_or_external_item_exists(
+                    reduced,
+                    external_references,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Type,
+                ) {
+                    demote_visibility_to_crate(&mut item.vis, demotions);
+                }
+            }
+            Item::Trait(item) => {
+                if !boundary_or_external_item_exists(
+                    reduced,
+                    external_references,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Trait,
+                ) {
+                    demote_visibility_to_crate(&mut item.vis, demotions);
+                }
+            }
+            Item::Const(item) => {
+                if !boundary_or_external_item_exists(
+                    reduced,
+                    external_references,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Const,
+                ) {
+                    demote_visibility_to_crate(&mut item.vis, demotions);
+                }
+            }
+            Item::Static(item) => {
+                if !boundary_or_external_item_exists(
+                    reduced,
+                    external_references,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Static,
+                ) {
+                    demote_visibility_to_crate(&mut item.vis, demotions);
+                }
+            }
+            Item::Mod(item_mod) => {
+                let mut child_path = module_path.to_vec();
+                child_path.push(item_mod.ident.to_string());
+                if !module_contains_boundary(reduced, package, &child_path) {
+                    demote_visibility_to_crate(&mut item_mod.vis, demotions);
+                }
+                if let Some((_, child_items)) = &mut item_mod.content {
+                    demote_items_for_prune(
+                        child_items,
+                        reduced,
+                        external_references,
+                        package,
+                        &child_path,
+                        demotions,
+                    );
+                }
+            }
+            Item::Impl(item_impl) => {
+                let type_path = item_impl
+                    .self_ty
+                    .to_token_stream()
+                    .to_string()
+                    .split("::")
+                    .map(|segment| segment.trim().to_string())
+                    .collect::<Vec<_>>();
+                for impl_item in &mut item_impl.items {
+                    if let ImplItem::Fn(method) = impl_item {
+                        let is_boundary = reduced.reachable.iter().any(|callable| {
+                            matches!(
+                                callable,
+                                CallableId::Method {
+                                    package: callable_package,
+                                    type_path: callable_type,
+                                    method: callable_method,
+                                    ..
+                                } if callable_package == package
+                                    && callable_type == &type_path
+                                    && callable_method == &method.sig.ident.to_string()
+                            )
+                        });
+                        if !is_boundary {
+                            demote_visibility_to_crate(&mut method.vis, demotions);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn demote_visibility_to_crate(vis: &mut syn::Visibility, demotions: &mut usize) {
+    if matches!(vis, syn::Visibility::Public(_)) {
+        *vis = parse_quote!(pub(crate));
+        *demotions += 1;
+    }
+}
+
+fn boundary_or_external_item_exists(
+    reduced: &ReducedProject,
+    external_references: &BTreeSet<(String, String)>,
+    package: &str,
+    module_path: &[String],
+    name: &str,
+    kind: ItemKind,
+) -> bool {
+    external_references.contains(&(package.to_string(), name.to_string()))
+        || reduced.reachable_items.contains(&ItemId {
+            package: package.to_string(),
+            module_path: module_path.to_vec(),
+            name: name.to_string(),
+            kind,
+        })
+}
+
+fn module_contains_boundary(
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    reduced.reachable.iter().any(|callable| match callable {
+        CallableId::Free {
+            package: callable_package,
+            module_path: callable_module,
+            ..
+        } => callable_package == package && path_has_prefix(callable_module, module_path),
+        CallableId::Method {
+            package: callable_package,
+            type_path,
+            ..
+        } => callable_package == package && path_has_prefix(type_path, module_path),
+    }) || reduced
+        .reachable_items
+        .iter()
+        .any(|item| item.package == package && path_has_prefix(&item.module_path, module_path))
+}
+
+fn public_use_may_reexport_boundary(
+    tree: &UseTree,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    let mut names = BTreeSet::new();
+    collect_use_leaf_names(tree, &mut names);
+    if names.iter().any(|name| name == "self" || name == "*") {
+        return true;
+    }
+    reduced.reachable.iter().any(|callable| match callable {
+        CallableId::Free {
+            package: callable_package,
+            module_path: callable_module,
+            name,
+        } => {
+            callable_package == package
+                && path_has_prefix(callable_module, module_path)
+                && names.contains(name)
+        }
+        CallableId::Method {
+            package: callable_package,
+            type_path,
+            trait_path,
+            method,
+            ..
+        } => {
+            callable_package == package
+                && (path_has_prefix(type_path, module_path)
+                    || trait_path
+                        .as_ref()
+                        .is_some_and(|path| path_has_prefix(path, module_path)))
+                && (names.contains(method)
+                    || type_path.last().is_some_and(|name| names.contains(name))
+                    || trait_path
+                        .as_ref()
+                        .and_then(|path| path.last())
+                        .is_some_and(|name| names.contains(name)))
+        }
+    }) || reduced.reachable_items.iter().any(|item| {
+        item.package == package
+            && path_has_prefix(&item.module_path, module_path)
+            && names.contains(&item.name)
+    })
+}
+
+fn collect_use_leaf_names(tree: &UseTree, names: &mut BTreeSet<String>) {
+    match tree {
+        UseTree::Path(path) => collect_use_leaf_names(&path.tree, names),
+        UseTree::Name(name) => {
+            names.insert(name.ident.to_string());
+        }
+        UseTree::Rename(rename) => {
+            names.insert(rename.rename.to_string());
+        }
+        UseTree::Glob(_) => {
+            names.insert("*".to_string());
+        }
+        UseTree::Group(group) => {
+            for tree in &group.items {
+                collect_use_leaf_names(tree, names);
+            }
+        }
+    }
 }
 
 pub fn write_reduced_workspace(
