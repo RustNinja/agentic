@@ -390,6 +390,11 @@ fn transform_items(
                     Item::Fn(function)
                 })
             }
+            Item::Macro(item_macro)
+                if should_retain_macro_invocation(project, reduced, package, item_macro) =>
+            {
+                Some(Item::Macro(item_macro.clone()))
+            }
             Item::Struct(_)
             | Item::Enum(_)
             | Item::Union(_)
@@ -534,6 +539,51 @@ fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId>
         name,
         kind,
     })
+}
+
+fn should_retain_macro_invocation(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    item_macro: &syn::ItemMacro,
+) -> bool {
+    item_macro.ident.is_none()
+        && macro_path_ends_with(&item_macro.mac.path, "setup_scaffolding")
+        && reachable_package_mentions_ident(project, reduced, package, "uniffi")
+}
+
+fn macro_path_ends_with(path: &syn::Path, name: &str) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|segment| segment.ident == name)
+}
+
+fn reachable_package_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package() == package)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+                })
+            })
 }
 
 fn strip_opensourced_attrs(attrs: &mut Vec<syn::Attribute>) {

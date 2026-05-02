@@ -38,6 +38,7 @@ pub struct MethodRecord {
     pub module_path: Vec<String>,
     pub item: ImplItemFn,
     pub impl_items: Vec<ImplItem>,
+    pub trait_input_type_paths: Vec<Vec<String>>,
     pub aliases: HashMap<String, Vec<String>>,
 }
 

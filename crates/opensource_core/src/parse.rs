@@ -1,6 +1,8 @@
 use std::{collections::HashMap, fs, path::Path};
 
-use syn::{ImplItem, Item, ItemImpl, ItemMod, ItemUse, Type, UseTree};
+use syn::{
+    GenericArgument, ImplItem, Item, ItemImpl, ItemMod, ItemUse, PathArguments, Type, UseTree,
+};
 
 use crate::{
     manifest::Workspace,
@@ -183,6 +185,11 @@ impl Parser {
             .trait_
             .as_ref()
             .map(|(_, path, _)| normalized_path(module_path, path));
+        let trait_input_type_paths = item_impl
+            .trait_
+            .as_ref()
+            .map(|(_, path, _)| trait_input_type_paths(module_path, path))
+            .unwrap_or_default();
 
         for impl_item in &item_impl.items {
             if let ImplItem::Fn(method) = impl_item {
@@ -198,6 +205,7 @@ impl Parser {
                         module_path: module_path.to_vec(),
                         item: method.clone(),
                         impl_items: item_impl.items.clone(),
+                        trait_input_type_paths: trait_input_type_paths.clone(),
                         aliases: aliases.clone(),
                     },
                 );
@@ -366,4 +374,41 @@ fn normalized_path(module_path: &[String], path: &syn::Path) -> Vec<String> {
         return path;
     }
     segments
+}
+
+fn trait_input_type_paths(module_path: &[String], path: &syn::Path) -> Vec<Vec<String>> {
+    let mut type_paths = Vec::new();
+    for segment in &path.segments {
+        if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+            for argument in &arguments.args {
+                if let GenericArgument::Type(ty) = argument {
+                    collect_type_paths(module_path, ty, &mut type_paths);
+                }
+            }
+        }
+    }
+    type_paths.sort();
+    type_paths.dedup();
+    type_paths
+}
+
+fn collect_type_paths(module_path: &[String], ty: &Type, type_paths: &mut Vec<Vec<String>>) {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(path) = local_type_path(module_path, ty) {
+                type_paths.push(path);
+            }
+            for segment in &type_path.path.segments {
+                if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let GenericArgument::Type(ty) = argument {
+                            collect_type_paths(module_path, ty, type_paths);
+                        }
+                    }
+                }
+            }
+        }
+        Type::Reference(reference) => collect_type_paths(module_path, &reference.elem, type_paths),
+        _ => {}
+    }
 }

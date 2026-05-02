@@ -3,8 +3,8 @@ use std::collections::{BTreeSet, HashMap, VecDeque};
 use proc_macro2::{TokenStream, TokenTree};
 use syn::{
     visit::{self, Visit},
-    Expr, ExprCall, ExprMacro, ExprMethodCall, ExprPath, ImplItem, ItemMacro, Local, Macro, Pat,
-    PatTupleStruct, Path, Type, TypePath,
+    Expr, ExprCall, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, FnArg, GenericArgument,
+    ImplItem, ItemMacro, Local, Macro, Pat, PatTupleStruct, Path, PathArguments, Type, TypePath,
 };
 
 use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject};
@@ -174,6 +174,7 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
             };
             let mut visitor = DependencyVisitor::new(resolver);
             visitor.visit_signature(&record.item.sig);
+            visitor.add_fn_inputs(&record.item.sig.inputs);
             visitor.visit_block(&record.item.block);
             visitor.dependencies
         }
@@ -207,6 +208,7 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
             }
             visitor.visit_impl_peers(callable, record, trait_path.is_some());
             visitor.visit_signature(&record.item.sig);
+            visitor.add_fn_inputs(&record.item.sig.inputs);
             visitor.visit_block(&record.item.block);
             visitor.dependencies
         }
@@ -249,6 +251,20 @@ impl<'a> DependencyVisitor<'a> {
             resolver,
             dependencies: DependencySet::default(),
             variables: HashMap::new(),
+        }
+    }
+
+    fn add_fn_inputs(&mut self, inputs: &syn::punctuated::Punctuated<FnArg, syn::token::Comma>) {
+        for input in inputs {
+            let FnArg::Typed(input) = input else {
+                continue;
+            };
+            let Pat::Ident(ident) = input.pat.as_ref() else {
+                continue;
+            };
+            if let Some(type_ref) = self.resolver.resolve_type(&input.ty) {
+                self.variables.insert(ident.ident.to_string(), type_ref);
+            }
         }
     }
 
@@ -324,6 +340,35 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn result_ok_type(&self, expression: &Expr) -> Option<TypeRef> {
+        let Expr::Call(call) = expression else {
+            return None;
+        };
+        let Expr::Path(path) = call.func.as_ref() else {
+            return None;
+        };
+        self.resolver.type_from_path_turbofish(&path.path)
+    }
+
+    fn add_result_ok_binding_type(&mut self, pattern: &Pat, type_ref: &TypeRef) {
+        let Pat::TupleStruct(tuple) = pattern else {
+            return;
+        };
+        if !tuple
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "Ok")
+        {
+            return;
+        }
+        let Some(Pat::Ident(ident)) = tuple.elems.first() else {
+            return;
+        };
+        self.variables
+            .insert(ident.ident.to_string(), type_ref.clone());
+    }
+
     fn visit_impl_peers(
         &mut self,
         callable: &CallableId,
@@ -376,6 +421,24 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         visit::visit_expr_call(self, call);
     }
 
+    fn visit_expr_match(&mut self, expr_match: &'ast ExprMatch) {
+        self.visit_expr(&expr_match.expr);
+        let ok_type = self.result_ok_type(&expr_match.expr);
+
+        for arm in &expr_match.arms {
+            let variables = self.variables.clone();
+            if let Some(ok_type) = &ok_type {
+                self.add_result_ok_binding_type(&arm.pat, ok_type);
+            }
+            self.visit_pat(&arm.pat);
+            if let Some((_, guard)) = &arm.guard {
+                self.visit_expr(guard);
+            }
+            self.visit_expr(&arm.body);
+            self.variables = variables;
+        }
+    }
+
     fn visit_expr_macro(&mut self, expr: &'ast ExprMacro) {
         self.add_macro_path(&expr.mac.path);
         visit::visit_expr_macro(self, expr);
@@ -408,6 +471,21 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             {
                 self.dependencies.callables.insert(callable);
             }
+            if call.method == "into" {
+                for callable in self
+                    .resolver
+                    .resolve_conversion_impls(&receiver, "From", "from")
+                {
+                    self.dependencies.callables.insert(callable);
+                }
+            } else if call.method == "try_into" {
+                for callable in self
+                    .resolver
+                    .resolve_conversion_impls(&receiver, "TryFrom", "try_from")
+                {
+                    self.dependencies.callables.insert(callable);
+                }
+            }
         }
         visit::visit_expr_method_call(self, call);
     }
@@ -429,8 +507,17 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_pat(&mut self, pat: &'ast Pat) {
-        if let Pat::Path(path) = pat {
-            self.add_item_path(&path.path);
+        match pat {
+            Pat::Path(path) => self.add_item_path(&path.path),
+            Pat::Ident(ident) => {
+                if let Some(item) = self
+                    .resolver
+                    .resolve_pattern_ident_item(&ident.ident.to_string())
+                {
+                    self.dependencies.items.insert(item);
+                }
+            }
+            _ => {}
         }
         visit::visit_pat(self, pat);
     }
@@ -658,10 +745,58 @@ impl Resolver<'_> {
     }
 
     fn resolve_type(&self, ty: &Type) -> Option<TypeRef> {
-        let Type::Path(type_path) = ty else {
-            return None;
-        };
-        self.resolve_type_path(&type_path.path)
+        match ty {
+            Type::Path(type_path) => self.resolve_type_path(&type_path.path),
+            Type::Reference(reference) => self.resolve_type(&reference.elem),
+            _ => None,
+        }
+    }
+
+    fn type_from_path_turbofish(&self, path: &Path) -> Option<TypeRef> {
+        path.segments.iter().find_map(|segment| {
+            let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                return None;
+            };
+            arguments.args.iter().find_map(|argument| {
+                let GenericArgument::Type(ty) = argument else {
+                    return None;
+                };
+                self.resolve_type(ty)
+            })
+        })
+    }
+
+    fn resolve_conversion_impls(
+        &self,
+        receiver: &TypeRef,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Vec<CallableId> {
+        self.project
+            .methods
+            .iter()
+            .filter_map(|(id, record)| {
+                let CallableId::Method {
+                    package,
+                    trait_path: Some(trait_path),
+                    method,
+                    ..
+                } = id
+                else {
+                    return None;
+                };
+                (package == &receiver.package
+                    && method == method_name
+                    && trait_path
+                        .last()
+                        .is_some_and(|candidate| candidate == trait_name)
+                    && record
+                        .trait_input_type_paths
+                        .iter()
+                        .any(|type_path| type_path == &receiver.type_path))
+                .then(|| id.clone())
+            })
+            .collect()
     }
 
     fn resolve_type_path(&self, path: &Path) -> Option<TypeRef> {
@@ -692,6 +827,12 @@ impl Resolver<'_> {
     fn resolve_item_path(&self, path: &Path) -> Option<ItemId> {
         let segments = self.apply_alias(path_segments(path));
         self.resolve_item_segments(&segments)
+    }
+
+    fn resolve_pattern_ident_item(&self, ident: &str) -> Option<ItemId> {
+        let segments = self.apply_alias(vec![ident.to_string()]);
+        self.resolve_item_segments(&segments)
+            .filter(|item| matches!(item.kind, ItemKind::Const | ItemKind::Static))
     }
 
     fn resolve_macro_path(&self, path: &Path) -> Option<ItemId> {

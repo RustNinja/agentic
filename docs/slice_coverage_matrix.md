@@ -15,7 +15,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Enums | `data_items.rs`, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Unit, tuple, and struct-like variants used in signatures, bodies, and patterns |
 | Unions | `component_matrix.rs` | Union item reached through a retained struct field and constructor literal |
 | Type aliases | `data_items.rs`, root fixture, `component_matrix.rs` | Aliases used in signatures, fields, and local bindings |
-| Consts/statics | root fixture, `data_items.rs`, `component_matrix.rs` | Constants/statics used in bodies, fields, and associated const values |
+| Consts/statics | root fixture, `data_items.rs`, `component_matrix.rs`, `pattern_constants.rs` | Constants/statics used in bodies, fields, associated const values, and unqualified match patterns |
 | Inherent impl methods | all integration fixtures | Associated constructors, receiver calls, async methods, generic impl blocks |
 | Trait definitions | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Trait items retained when trait impl methods are reachable |
 | Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Receiver calls, explicit `<Type as Trait>::method`, and `Trait::method(&receiver, ...)` |
@@ -31,7 +31,8 @@ dead functions, items, modules, tests, and local crates are absent.
 | Macro definitions | `component_matrix.rs` | Used `macro_rules!` definitions are kept, unused macro definitions are pruned, and direct helper calls inside retained macro bodies are followed |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
-| UniFFI-shaped API | `uniffi_mobile.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, serde DTOs, and mobile bridge shape |
+| UniFFI-shaped API | `uniffi_mobile.rs`, `uniffi_setup.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, retained `uniffi::setup_scaffolding!()`, serde DTOs, and mobile bridge shape |
+| Real UniFFI project | `docs/real_litter_uniffi_slice_report.md` | Litter `codex-mobile-client` cloud sync and preferences slices build after pruning |
 
 ## Current Boundaries
 
