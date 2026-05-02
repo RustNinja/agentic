@@ -26,13 +26,21 @@ dead functions, items, modules, tests, and local crates are absent.
 | Reexports | `module_reexports.rs`, `component_matrix.rs` | Reachable `pub use` targets are kept; dead grouped reexports are pruned |
 | Dependency aliases | root fixture, `module_reexports.rs` | `package = "..."` dependency aliases and renamed imports |
 | Workspace member globs | `component_matrix.rs` | `[workspace].members = ["crates/*"]` expansion |
+| Single-package binary roots | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Non-workspace crates, `src/main.rs` parsing, and stub binary roots |
+| Macro-declared modules | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | `automod::dir!(... "path")` directories are parsed and rendered as explicit reduced `mod` declarations |
 | External dependencies | `uniffi_mobile.rs`, `component_matrix.rs` | Used workspace dependencies such as `serde = { features = ["derive"] }` are preserved; unused external deps with no retained source reference are pruned |
+| Build dependencies | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | `[build-dependencies]` are retained when `build.rs` is copied |
+| Target dependencies | `manifest_hardening.rs` | `[target.'cfg(...)'.dependencies]` tables are preserved when retained source references them |
+| Feature pruning | `manifest_hardening.rs` | Optional dependency feature entries are removed when the dependency is pruned |
 | Local path dependency pruning | `uniffi_mobile.rs`, `component_matrix.rs` | Unused local crates are omitted from manifests and source imports |
 | Macro definitions | `component_matrix.rs` | Used `macro_rules!` definitions are kept, unused macro definitions are pruned, and direct helper calls inside retained macro bodies are followed |
+| Item macro-generated items | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Item macro invocations such as `lazy_static!` are retained when generated identifiers are referenced by reachable code |
+| Build-script assets | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Non-Rust assets referenced by `build.rs` string literal paths are copied without copying unrelated package docs/config |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
 | UniFFI-shaped API | `uniffi_mobile.rs`, `uniffi_setup.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, retained `uniffi::setup_scaffolding!()`, serde DTOs, and mobile bridge shape |
 | Real UniFFI project | `docs/real_litter_uniffi_slice_report.md` | Litter `codex-mobile-client` cloud sync and preferences slices build after pruning |
+| Real high-star Rust project | `docs/real_rtk_slice_report.md` | RTK `find_corrections` and `filter_json_string` slices build after binary, automod, macro, and build-script hardening |
 
 ## Current Boundaries
 
@@ -41,11 +49,11 @@ These are tracked limitations, not silently claimed support:
 | Area | Boundary |
 | --- | --- |
 | Full rustc name resolution | The reducer is syntactic and does not replace rustc or rust-analyzer name resolution |
-| Macro-expanded dependencies | The slicer scans retained macro bodies for direct local paths, but does not run macro expansion or model generated code |
+| Macro-expanded dependencies | The slicer does not run macro expansion; it has conservative support for item macros whose token identifiers feed reachable code |
 | Generic trait receiver inference | Calls through generic bounds such as `value.trait_method()` are not fully resolved without a concrete receiver type |
 | Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed |
-| Build scripts | `build.rs` outputs and generated Rust files are not modeled |
-| Feature/platform cfg matrices | `#[cfg(test)]` is pruned; broader feature/platform matrix evaluation is still conservative |
+| Build scripts | `build.rs` and referenced non-Rust assets are copied; generated Rust files under `OUT_DIR` are not semantically modeled |
+| Feature/platform cfg matrices | `#[cfg(test)]` is pruned and target dependency tables are preserved; broader feature/platform matrix evaluation is still conservative |
 | External crate pruning | External dependencies are pruned when their crate alias is absent from retained source tokens; full rustc-level unused import analysis is not implemented |
 
 ## Verification Commands

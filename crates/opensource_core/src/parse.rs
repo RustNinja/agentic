@@ -1,5 +1,11 @@
-use std::{collections::HashMap, fs, path::Path};
+use std::{
+    collections::HashMap,
+    fs,
+    path::{Path, PathBuf},
+};
 
+use proc_macro2::TokenTree;
+use quote::ToTokens;
 use syn::{
     GenericArgument, ImplItem, Item, ItemImpl, ItemMod, ItemUse, PathArguments, Type, UseTree,
 };
@@ -27,6 +33,7 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
                 Vec::new(),
                 &package.lib_path,
                 &package.root.join("src"),
+                &package.root,
             )?;
         }
     }
@@ -56,6 +63,7 @@ impl Parser {
         module_path: Vec<String>,
         file_path: &Path,
         module_dir: &Path,
+        package_root: &Path,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let file_path = file_path.canonicalize()?;
         if self.files.contains_key(&file_path) {
@@ -89,8 +97,20 @@ impl Parser {
             .items
             .clone();
         for item in items {
-            if let Item::Mod(item_mod) = item {
-                self.parse_external_module(package, &module_path, module_dir, &item_mod)?;
+            match item {
+                Item::Mod(item_mod) => {
+                    self.parse_external_module(
+                        package,
+                        &module_path,
+                        module_dir,
+                        package_root,
+                        &item_mod,
+                    )?;
+                }
+                Item::Macro(item_macro) => {
+                    self.parse_automod_dir(package, &module_path, package_root, &item_macro)?;
+                }
+                _ => {}
             }
         }
 
@@ -220,6 +240,7 @@ impl Parser {
         package: &str,
         module_path: &[String],
         module_dir: &Path,
+        package_root: &Path,
         item_mod: &ItemMod,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if item_mod.content.is_some() {
@@ -246,8 +267,76 @@ impl Parser {
 
         let mut child_path = module_path.to_vec();
         child_path.push(name);
-        self.parse_file(package, child_path, &next_file, &next_dir)
+        self.parse_file(package, child_path, &next_file, &next_dir, package_root)
     }
+
+    fn parse_automod_dir(
+        &mut self,
+        package: &str,
+        module_path: &[String],
+        package_root: &Path,
+        item_macro: &syn::ItemMacro,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(relative_dir) = automod_dir_path(item_macro) else {
+            return Ok(());
+        };
+        let dir = package_root.join(relative_dir);
+        if !dir.exists() {
+            return Ok(());
+        }
+
+        let mut entries = fs::read_dir(&dir)?
+            .filter_map(Result::ok)
+            .map(|entry| entry.path())
+            .filter(|path| path.extension().is_some_and(|extension| extension == "rs"))
+            .filter(|path| {
+                path.file_name()
+                    .is_some_and(|file_name| file_name != "mod.rs")
+            })
+            .collect::<Vec<_>>();
+        entries.sort();
+
+        for path in entries {
+            let Some(stem) = path.file_stem().and_then(|stem| stem.to_str()) else {
+                continue;
+            };
+            let mut child_path = module_path.to_vec();
+            child_path.push(stem.to_string());
+            let module_dir = path
+                .parent()
+                .expect("automod child file should have a parent")
+                .to_path_buf();
+            self.parse_file(package, child_path, &path, &module_dir, package_root)?;
+        }
+
+        Ok(())
+    }
+}
+
+fn automod_dir_path(item_macro: &syn::ItemMacro) -> Option<PathBuf> {
+    if !is_automod_dir_macro(&item_macro.mac.path) {
+        return None;
+    }
+
+    item_macro.mac.tokens.clone().into_iter().find_map(|token| {
+        let TokenTree::Literal(literal) = token else {
+            return None;
+        };
+        syn::parse2::<syn::LitStr>(literal.to_token_stream())
+            .ok()
+            .map(|literal| PathBuf::from(literal.value()))
+    })
+}
+
+fn is_automod_dir_macro(path: &syn::Path) -> bool {
+    let mut segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string());
+    matches!(
+        (segments.next().as_deref(), segments.next().as_deref()),
+        (Some("automod"), Some("dir"))
+    )
 }
 
 fn is_cfg_test_attr(attribute: &syn::Attribute) -> bool {

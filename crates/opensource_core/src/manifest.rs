@@ -35,15 +35,19 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
         .get("workspace")
         .and_then(|workspace| workspace.get("members"))
         .and_then(Value::as_array)
-        .ok_or("workspace Cargo.toml must define [workspace].members")?
-        .iter()
-        .map(|member| {
-            member
-                .as_str()
-                .map(str::to_string)
-                .ok_or("workspace member must be a string")
+        .map(|members| {
+            members
+                .iter()
+                .map(|member| {
+                    member
+                        .as_str()
+                        .map(str::to_string)
+                        .ok_or("workspace member must be a string")
+                })
+                .collect::<Result<Vec<_>, _>>()
         })
-        .collect::<Result<Vec<_>, _>>()?;
+        .transpose()?
+        .unwrap_or_else(|| vec![".".to_string()]);
     let members = expand_workspace_members(&root, &raw_members)?;
 
     let mut packages = HashMap::new();
@@ -61,12 +65,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
             .ok_or_else(|| format!("missing package.name in {}", manifest_path.display()))?
             .to_string();
 
-        let lib_path = manifest
-            .get("lib")
-            .and_then(|lib| lib.get("path"))
-            .and_then(Value::as_str)
-            .map(|path| package_root.join(path))
-            .unwrap_or_else(|| package_root.join("src/lib.rs"));
+        let lib_path = entry_source_path(&package_root, &manifest);
 
         let dependencies = parse_dependencies(&manifest);
 
@@ -91,6 +90,23 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
 fn read_manifest(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     Ok(text.parse::<Value>()?)
+}
+
+fn entry_source_path(package_root: &Path, manifest: &Value) -> PathBuf {
+    if let Some(path) = manifest
+        .get("lib")
+        .and_then(|lib| lib.get("path"))
+        .and_then(Value::as_str)
+    {
+        return package_root.join(path);
+    }
+
+    let default_lib = package_root.join("src/lib.rs");
+    if default_lib.exists() {
+        return default_lib;
+    }
+
+    package_root.join("src/main.rs")
 }
 
 fn expand_workspace_members(
@@ -173,28 +189,48 @@ fn wildcard_matches(pattern: &str, value: &str) -> bool {
 fn parse_dependencies(manifest: &Value) -> Vec<Dependency> {
     let mut dependencies = Vec::new();
 
-    for table_name in ["dependencies"] {
-        let Some(table) = manifest.get(table_name).and_then(Value::as_table) else {
-            continue;
-        };
-
-        for (alias, value) in table {
-            let package = match value {
-                Value::String(_) => alias.clone(),
-                Value::Table(table) => table
-                    .get("package")
-                    .and_then(Value::as_str)
-                    .unwrap_or(alias)
-                    .to_string(),
-                _ => alias.clone(),
-            };
-
-            dependencies.push(Dependency {
-                alias: alias.clone(),
-                package,
-            });
+    for table_name in ["dependencies", "build-dependencies"] {
+        if let Some(table) = manifest.get(table_name).and_then(Value::as_table) {
+            parse_dependency_table(table, &mut dependencies);
         }
     }
 
+    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            if let Some(table) = target.get("dependencies").and_then(Value::as_table) {
+                parse_dependency_table(table, &mut dependencies);
+            }
+        }
+    }
+
+    dependencies.sort_by(|left, right| {
+        left.alias
+            .cmp(&right.alias)
+            .then_with(|| left.package.cmp(&right.package))
+    });
+    dependencies.dedup_by(|left, right| left.alias == right.alias && left.package == right.package);
+
     dependencies
+}
+
+fn parse_dependency_table(table: &toml::value::Table, dependencies: &mut Vec<Dependency>) {
+    for (alias, value) in table {
+        let package = match value {
+            Value::String(_) => alias.clone(),
+            Value::Table(table) => table
+                .get("package")
+                .and_then(Value::as_str)
+                .unwrap_or(alias)
+                .to_string(),
+            _ => alias.clone(),
+        };
+
+        dependencies.push(Dependency {
+            alias: alias.clone(),
+            package,
+        });
+    }
 }

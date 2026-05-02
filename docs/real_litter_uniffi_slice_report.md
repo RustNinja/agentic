@@ -201,9 +201,12 @@ rust-analyzer based.
 Known remaining risks:
 
 - Generated slices can retain unused imports. This is currently warning-only.
-- `build.rs`, `[build-dependencies]`, and generated `OUT_DIR` code are not fully modeled.
-- Target-specific dependency tables are not fully modeled.
-- Feature tables are copied more conservatively than dependency tables.
+- `build.rs` and referenced non-Rust assets are copied, but generated `OUT_DIR`
+  Rust code is not semantically modeled.
+- Target-specific dependency tables are preserved when retained source
+  references them, but full platform cfg evaluation is not implemented.
+- Feature tables are rewritten for pruned optional dependencies, but full
+  feature-resolution semantics are still conservative.
 - Proc macro expansion is not executed.
 - Glob imports/reexports are still conservative.
 - Full `cfg` matrix evaluation is not implemented.
