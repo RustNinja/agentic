@@ -23,6 +23,19 @@ pub struct GenerateReport {
     pub files_written: usize,
 }
 
+#[derive(Debug, Clone)]
+pub struct LintAuditOptions {
+    pub workspace_root: PathBuf,
+    pub output_root: PathBuf,
+}
+
+#[derive(Debug, Clone)]
+pub struct LintAuditReport {
+    pub packages: Vec<String>,
+    pub linted_roots: Vec<PathBuf>,
+    pub files_written: usize,
+}
+
 pub fn generate(options: GenerateOptions) -> Result<GenerateReport, Box<dyn std::error::Error>> {
     let workspace = manifest::load_workspace(&options.workspace_root)?;
     let project = parse::parse_workspace(workspace)?;
@@ -47,6 +60,22 @@ pub fn generate(options: GenerateOptions) -> Result<GenerateReport, Box<dyn std:
     })
 }
 
+pub fn generate_lint_audit_workspace(
+    options: LintAuditOptions,
+) -> Result<LintAuditReport, Box<dyn std::error::Error>> {
+    let workspace = manifest::load_workspace(&options.workspace_root)?;
+    let report = render::write_lint_audit_workspace(&workspace, &options.output_root)?;
+
+    let mut packages = workspace.packages.keys().cloned().collect::<Vec<_>>();
+    packages.sort();
+
+    Ok(LintAuditReport {
+        packages,
+        linted_roots: report.linted_roots,
+        files_written: report.files_written,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -56,7 +85,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{generate, GenerateOptions};
+    use super::{generate, generate_lint_audit_workspace, GenerateOptions, LintAuditOptions};
 
     #[test]
     fn reduces_fixture_to_reachable_callables() {
@@ -179,6 +208,29 @@ mod tests {
             .expect("cargo check should start");
 
         assert!(status.success(), "generated workspace did not compile");
+    }
+
+    #[test]
+    fn lint_audit_workspace_copies_full_tree_and_injects_lints() {
+        let output = temp_output("lint-audit");
+        let report = generate_lint_audit_workspace(LintAuditOptions {
+            workspace_root: workspace_root(),
+            output_root: output.clone(),
+        })
+        .expect("lint audit workspace should generate");
+
+        assert!(report.files_written > 0);
+        assert!(report.packages.iter().any(|package| package == "a"));
+        assert!(report
+            .linted_roots
+            .iter()
+            .any(|path| path.ends_with("a/src/lib.rs")));
+        assert!(output.join("Cargo.lock").exists());
+
+        let source = fs::read_to_string(output.join("fixtures/a/src/lib.rs")).unwrap();
+        assert!(source.contains("slicers lint-audit"));
+        assert!(source.contains("warn(dead_code, unused_imports, unused_macros, unreachable_pub)"));
+        assert!(source.contains("internal_entry"));
     }
 
     fn workspace_root() -> PathBuf {

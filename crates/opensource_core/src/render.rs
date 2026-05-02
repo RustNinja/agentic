@@ -10,10 +10,181 @@ use syn::{parse_quote, GenericArgument, ImplItem, Item, PathArguments, Type, Use
 use toml::{value::Table, Value};
 
 use crate::{
-    manifest::Package,
+    manifest::{Package, Workspace},
     model::{CallableId, ItemId, ItemKind, Project, ReducedProject, SourceFile},
     reduce::{is_cfg_test_attr, is_opensourced_attr, is_test_attr},
 };
+
+pub struct LintAuditWorkspaceReport {
+    pub files_written: usize,
+    pub linted_roots: Vec<PathBuf>,
+}
+
+pub fn write_lint_audit_workspace(
+    workspace: &Workspace,
+    output_root: &Path,
+) -> Result<LintAuditWorkspaceReport, Box<dyn std::error::Error>> {
+    if output_root.exists() {
+        fs::remove_dir_all(output_root)?;
+    }
+    fs::create_dir_all(output_root)?;
+
+    let mut files_written = copy_lint_audit_tree(&workspace.root, &workspace.root, output_root)?;
+    rewrite_lint_audit_manifests(&workspace.root, output_root, output_root)?;
+
+    let mut linted_roots = Vec::new();
+    for package in workspace.packages.values() {
+        if !package.lib_path.starts_with(&workspace.root) {
+            continue;
+        }
+        let relative_path = package.lib_path.strip_prefix(&workspace.root)?;
+        let output_path = output_root.join(relative_path);
+        if inject_lint_audit_attrs(&output_path)? {
+            linted_roots.push(output_path);
+        }
+    }
+    linted_roots.sort();
+
+    files_written += linted_roots.len();
+
+    Ok(LintAuditWorkspaceReport {
+        files_written,
+        linted_roots,
+    })
+}
+
+fn copy_lint_audit_tree(
+    workspace_root: &Path,
+    path: &Path,
+    output_root: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let relative_path = path.strip_prefix(workspace_root)?;
+    let output_path = output_root.join(relative_path);
+
+    if path.is_file() {
+        if let Some(parent) = output_path.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(path, output_path)?;
+        return Ok(1);
+    }
+
+    fs::create_dir_all(&output_path)?;
+    let mut copied = 0;
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        let file_name = entry.file_name();
+        let file_name = file_name.to_string_lossy();
+        if file_name == "target" || file_name == ".git" {
+            continue;
+        }
+        copied += copy_lint_audit_tree(workspace_root, &entry.path(), output_root)?;
+    }
+    Ok(copied)
+}
+
+fn rewrite_lint_audit_manifests(
+    workspace_root: &Path,
+    output_root: &Path,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if path.is_file() {
+        if path.file_name().is_some_and(|name| name == "Cargo.toml") {
+            rewrite_lint_audit_manifest(workspace_root, output_root, path)?;
+        }
+        return Ok(());
+    }
+
+    for entry in fs::read_dir(path)? {
+        let entry = entry?;
+        rewrite_lint_audit_manifests(workspace_root, output_root, &entry.path())?;
+    }
+    Ok(())
+}
+
+fn rewrite_lint_audit_manifest(
+    workspace_root: &Path,
+    output_root: &Path,
+    output_manifest: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let relative_manifest = output_manifest.strip_prefix(output_root)?;
+    let source_manifest = workspace_root.join(relative_manifest);
+    let source_manifest_dir = source_manifest
+        .parent()
+        .ok_or_else(|| format!("manifest {} has no parent", source_manifest.display()))?;
+    let mut manifest = fs::read_to_string(output_manifest)?.parse::<Value>()?;
+    rewrite_external_path_dependencies(&mut manifest, workspace_root, source_manifest_dir);
+    fs::write(output_manifest, toml::to_string_pretty(&manifest)?)?;
+    Ok(())
+}
+
+fn rewrite_external_path_dependencies(
+    value: &mut Value,
+    workspace_root: &Path,
+    manifest_dir: &Path,
+) {
+    match value {
+        Value::Table(table) => {
+            if let Some(Value::String(path)) = table.get_mut("path") {
+                let candidate = manifest_dir.join(&*path);
+                let canonical = candidate.canonicalize().unwrap_or(candidate);
+                if !canonical.starts_with(workspace_root) {
+                    *path = canonical.to_string_lossy().into_owned();
+                }
+            }
+            for (_, value) in table.iter_mut() {
+                rewrite_external_path_dependencies(value, workspace_root, manifest_dir);
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                rewrite_external_path_dependencies(value, workspace_root, manifest_dir);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn inject_lint_audit_attrs(path: &Path) -> Result<bool, Box<dyn std::error::Error>> {
+    if !path.exists() {
+        return Ok(false);
+    }
+
+    let text = fs::read_to_string(path)?;
+    if text.contains("slicers lint-audit") {
+        return Ok(false);
+    }
+
+    let attrs = [
+        "#![warn(dead_code, unused_imports, unused_macros, unreachable_pub)]",
+        "#![allow(unused_crate_dependencies)]",
+        "// slicers lint-audit: broad-copy compiler-assisted prune probe",
+    ];
+    let mut lines = text.lines().collect::<Vec<_>>();
+    let mut insert_at = 0;
+    while insert_at < lines.len()
+        && (lines[insert_at].starts_with("#![") || lines[insert_at].starts_with("//!"))
+    {
+        insert_at += 1;
+    }
+
+    let mut output = String::new();
+    for line in lines.drain(..insert_at) {
+        output.push_str(line);
+        output.push('\n');
+    }
+    for attr in attrs {
+        output.push_str(attr);
+        output.push('\n');
+    }
+    for line in lines {
+        output.push_str(line);
+        output.push('\n');
+    }
+
+    fs::write(path, output)?;
+    Ok(true)
+}
 
 pub fn write_reduced_workspace(
     project: &Project,
