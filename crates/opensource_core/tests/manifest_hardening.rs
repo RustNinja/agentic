@@ -103,6 +103,66 @@ fn slices_multiple_marked_function_roots() {
 }
 
 #[test]
+fn slices_marked_data_item_roots() {
+    let workspace = temp_path("item-root-workspace");
+    let output = temp_path("item-root-output");
+    let target_dir = temp_path("item-root-target");
+    write_item_root_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let roots = report
+        .roots
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(roots, ["item_root_like::Api(Struct)"]);
+
+    let reachable_items = report
+        .reachable_items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    for expected in [
+        "item_root_like::Api(Struct)",
+        "item_root_like::Handler(Trait)",
+        "item_root_like::Mode(Enum)",
+    ] {
+        assert!(
+            reachable_items.iter().any(|actual| actual == expected),
+            "missing reachable item {expected}; got {reachable_items:?}",
+        );
+    }
+
+    let source = read(output.join("item_root_like/src/lib.rs"));
+    assert!(source.contains("pub struct Api"));
+    assert!(source.contains("pub enum Mode"));
+    assert!(source.contains("pub trait Handler"));
+    assert!(!source.contains("Dead"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated item-root slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn slices_binary_child_module_with_generated_items_and_pruned_stub_imports() {
     let workspace = temp_path("child-binary-workspace");
     let output = temp_path("child-binary-output");
@@ -1575,6 +1635,53 @@ pub fn dead_root(value: i32) -> i32 {
 
 fn dead_helper(value: i32) -> i32 {
     value - 1
+}
+"#,
+    );
+}
+
+fn write_item_root_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "item_root_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub struct Api {
+    pub mode: Mode,
+    pub handler: Box<dyn Handler>,
+}
+
+pub enum Mode {
+    Read,
+    Write,
+}
+
+pub trait Handler {
+    fn handle(&self, mode: Mode) -> usize;
+}
+
+pub struct Dead;
+
+pub fn dead_factory() -> Dead {
+    Dead
 }
 "#,
     );

@@ -6,14 +6,14 @@ use syn::{
     parse::Parser,
     visit::{self, Visit},
     Expr, ExprCall, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, FnArg, GenericArgument,
-    ImplItem, ItemMacro, Local, Macro, Member, Meta, Pat, PatTupleStruct, Path, PathArguments,
-    ReturnType, Type, TypePath, UseTree,
+    ImplItem, Item, ItemMacro, Local, Macro, Member, Meta, Pat, PatTupleStruct, Path,
+    PathArguments, ReturnType, Type, TypePath, UseTree,
 };
 
-use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject};
+use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId};
 
 pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::Error>> {
-    let mut roots = project
+    let mut callable_roots = project
         .functions
         .values()
         .filter(|record| {
@@ -33,11 +33,29 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
                 .then(|| id.clone())
         }))
         .collect::<Vec<_>>();
+    callable_roots.sort();
+    callable_roots.dedup();
+
+    let mut item_roots = project
+        .items
+        .iter()
+        .filter(|(_, record)| item_has_opensourced_attr(&record.item))
+        .map(|(id, _)| id.clone())
+        .collect::<Vec<_>>();
+    item_roots.sort();
+    item_roots.dedup();
+
+    let mut roots = callable_roots
+        .iter()
+        .cloned()
+        .map(RootId::Callable)
+        .chain(item_roots.iter().cloned().map(RootId::Item))
+        .collect::<Vec<_>>();
     roots.sort();
     roots.dedup();
 
     if roots.is_empty() {
-        return Err("expected at least one #[opensourced] function, found 0".into());
+        return Err("expected at least one #[opensourced] function or item, found 0".into());
     }
     let root = roots
         .first()
@@ -50,8 +68,8 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
     }
     let mut reachable = BTreeSet::new();
     let mut reachable_items = BTreeSet::new();
-    let mut callable_queue = VecDeque::from(roots.clone());
-    let mut item_queue = VecDeque::new();
+    let mut callable_queue = VecDeque::from(callable_roots);
+    let mut item_queue = VecDeque::from(item_roots);
 
     while !callable_queue.is_empty() || !item_queue.is_empty() {
         while let Some(callable) = callable_queue.pop_front() {
@@ -152,6 +170,22 @@ pub fn is_opensourced_attr(path: &Path) -> bool {
         .is_some_and(|segment| segment.ident == "opensourced")
 }
 
+fn item_has_opensourced_attr(item: &Item) -> bool {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        _ => return false,
+    }
+    .iter()
+    .any(|attribute| is_opensourced_attr(attribute.path()))
+}
+
 pub fn is_test_attr(path: &Path) -> bool {
     path.segments
         .last()
@@ -218,7 +252,7 @@ fn package_closure(project: &Project, root: &str) -> BTreeSet<String> {
 }
 
 fn reachable_packages(
-    roots: &[CallableId],
+    roots: &[RootId],
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
 ) -> BTreeSet<String> {

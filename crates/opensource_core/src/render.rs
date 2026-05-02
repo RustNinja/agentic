@@ -11,7 +11,7 @@ use toml::{value::Table, Value};
 
 use crate::{
     manifest::Package,
-    model::{CallableId, ItemId, ItemKind, Project, ReducedProject, SourceFile},
+    model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId, SourceFile},
     reduce::{is_cfg_test_attr, is_opensourced_attr, is_test_attr},
 };
 
@@ -1315,6 +1315,7 @@ fn transform_items(
             Item::Struct(item_struct) => item_id(package, module_path, item).and_then(|id| {
                 reduced.reachable_items.contains(&id).then(|| {
                     let mut item_struct = item_struct.clone();
+                    strip_opensourced_attrs(&mut item_struct.attrs);
                     prune_private_struct_fields(project, reduced, package, &mut item_struct);
                     allow_dead_code_if_not_public(&item_struct.vis, &mut item_struct.attrs);
                     Item::Struct(item_struct)
@@ -1326,8 +1327,13 @@ fn transform_items(
             | Item::Trait(_)
             | Item::Const(_)
             | Item::Static(_)
-            | Item::Macro(_) => item_id(package, module_path, item)
-                .and_then(|id| reduced.reachable_items.contains(&id).then(|| item.clone())),
+            | Item::Macro(_) => item_id(package, module_path, item).and_then(|id| {
+                reduced.reachable_items.contains(&id).then(|| {
+                    let mut item = item.clone();
+                    strip_opensourced_attrs_from_item(&mut item);
+                    item
+                })
+            }),
             Item::Impl(item_impl) => {
                 let aliases = project
                     .module_aliases
@@ -1438,22 +1444,27 @@ fn module_contains_root(
     module_path: &[String],
 ) -> bool {
     reduced.roots.iter().any(|root| match root {
-        CallableId::Free {
-            package: root_package,
-            module_path: root_module,
-            ..
-        } => root_package == package && path_has_prefix(root_module, module_path),
-        CallableId::Method {
-            package: root_package,
-            type_path,
-            ..
-        } => {
-            root_package == package
-                && project
-                    .methods
-                    .get(root)
-                    .map(|record| path_has_prefix(&record.module_path, module_path))
-                    .unwrap_or_else(|| path_has_prefix(type_path, module_path))
+        RootId::Callable(callable) => match callable {
+            CallableId::Free {
+                package: root_package,
+                module_path: root_module,
+                ..
+            } => root_package == package && path_has_prefix(root_module, module_path),
+            CallableId::Method {
+                package: root_package,
+                type_path,
+                ..
+            } => {
+                root_package == package
+                    && project
+                        .methods
+                        .get(callable)
+                        .map(|record| path_has_prefix(&record.module_path, module_path))
+                        .unwrap_or_else(|| path_has_prefix(type_path, module_path))
+            }
+        },
+        RootId::Item(item) => {
+            item.package == package && path_has_prefix(&item.module_path, module_path)
         }
     })
 }
@@ -1945,6 +1956,20 @@ fn strip_opensourced_attrs(attrs: &mut Vec<syn::Attribute>) {
 fn strip_opensourced_attrs_from_impl_item(item: &mut ImplItem) {
     if let ImplItem::Fn(method) = item {
         strip_opensourced_attrs(&mut method.attrs);
+    }
+}
+
+fn strip_opensourced_attrs_from_item(item: &mut Item) {
+    match item {
+        Item::Const(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Enum(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Macro(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Static(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Struct(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Trait(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Type(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Union(item) => strip_opensourced_attrs(&mut item.attrs),
+        _ => {}
     }
 }
 

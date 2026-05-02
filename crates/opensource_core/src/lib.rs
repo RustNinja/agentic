@@ -8,7 +8,7 @@ mod render;
 use std::path::PathBuf;
 
 pub use feedback::{check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport};
-pub use model::{CallableId, ItemId};
+pub use model::{CallableId, ItemId, RootId};
 
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
@@ -18,8 +18,8 @@ pub struct GenerateOptions {
 
 #[derive(Debug, Clone)]
 pub struct GenerateReport {
-    pub root: CallableId,
-    pub roots: Vec<CallableId>,
+    pub root: RootId,
+    pub roots: Vec<RootId>,
     pub packages: Vec<String>,
     pub reachable: Vec<CallableId>,
     pub reachable_items: Vec<ItemId>,
