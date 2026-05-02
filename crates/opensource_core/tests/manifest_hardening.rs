@@ -151,6 +151,46 @@ fn glob_reexports_only_pull_names_mentioned_by_reachable_code() {
 }
 
 #[test]
+fn slices_trait_method_roots_without_marker_attrs_or_unrelated_bins() {
+    let workspace = temp_path("trait-method-bin-workspace");
+    let output = temp_path("trait-method-bin-output");
+    let target_dir = temp_path("trait-method-bin-target");
+    write_trait_method_binary_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let manifest = read(output.join("trait_method_bin_like/Cargo.toml"));
+    let source = read(output.join("trait_method_bin_like/src/main.rs"));
+    assert!(manifest.contains("name = \"trait-method-bin\""));
+    assert!(!manifest.contains("other-bin"));
+    assert!(!source.contains("#[opensourced]"));
+    assert!(source.contains("impl Drop for TerminalGuard"));
+    assert!(source.contains("fn main()"));
+    assert!(!output.join("trait_method_bin_like/src/other.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated trait-method binary slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nCargo.toml:\n{}\nsrc/main.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        source,
+    );
+}
+
+#[test]
 fn slices_automod_directory_modules_without_expanding_macro_usage() {
     let workspace = temp_path("automod-workspace");
     let output = temp_path("automod-output");
@@ -2090,6 +2130,68 @@ pub fn unused_api_function() -> UnusedApi {
 
 pub fn unused_noise_function() -> UnusedNoise {
     UnusedNoise
+}
+"#,
+    );
+}
+
+fn write_trait_method_binary_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["trait_method_bin_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("trait_method_bin_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "trait_method_bin_like"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "trait-method-bin"
+path = "src/main.rs"
+
+[[bin]]
+name = "other-bin"
+path = "src/other.rs"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("trait_method_bin_like/src/main.rs"),
+        r#"use opensourced::opensourced;
+use std::sync::atomic::{AtomicBool, Ordering};
+
+static RAW_MODE: AtomicBool = AtomicBool::new(true);
+
+struct TerminalGuard;
+
+impl Drop for TerminalGuard {
+    #[opensourced]
+    fn drop(&mut self) {
+        RAW_MODE.store(false, Ordering::Relaxed);
+    }
+}
+
+fn main() {}
+"#,
+    );
+    write(
+        root.join("trait_method_bin_like/src/other.rs"),
+        r#"fn main() {
+    println!("not part of this slice");
 }
 "#,
     );

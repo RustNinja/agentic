@@ -468,10 +468,12 @@ fn write_package_manifest(
         manifest.insert("package".to_string(), default_package(&package.name));
     }
 
-    for key in ["lib", "bin"] {
-        if let Some(value) = package.manifest.get(key) {
-            manifest.insert(key.to_string(), value.clone());
-        }
+    if let Some(value) = package.manifest.get("lib") {
+        manifest.insert("lib".to_string(), value.clone());
+    }
+
+    if let Some(value) = transformed_bin_targets(package)? {
+        manifest.insert("bin".to_string(), value);
     }
 
     let mut retained_dependency_aliases = BTreeSet::new();
@@ -522,6 +524,50 @@ fn write_package_manifest(
         toml::to_string_pretty(&Value::Table(manifest))?,
     )?;
     Ok(())
+}
+
+fn transformed_bin_targets(package: &Package) -> Result<Option<Value>, Box<dyn std::error::Error>> {
+    let Some(value) = package.manifest.get("bin") else {
+        return Ok(None);
+    };
+    let Some(bins) = value.as_array() else {
+        return Ok(Some(value.clone()));
+    };
+
+    let entry_source = package.lib_path.canonicalize()?;
+    let retained = bins
+        .iter()
+        .filter(|bin| bin_target_matches_entry_source(package, bin, &entry_source))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    Ok((!retained.is_empty()).then_some(Value::Array(retained)))
+}
+
+fn bin_target_matches_entry_source(package: &Package, bin: &Value, entry_source: &Path) -> bool {
+    let Some(table) = bin.as_table() else {
+        return false;
+    };
+
+    if let Some(path) = table.get("path").and_then(Value::as_str) {
+        return package
+            .root
+            .join(path)
+            .canonicalize()
+            .is_ok_and(|path| path == entry_source);
+    }
+
+    let Some(name) = table.get("name").and_then(Value::as_str) else {
+        return false;
+    };
+    [
+        package.root.join("src/main.rs"),
+        package.root.join("src/bin").join(format!("{name}.rs")),
+        package.root.join("src/bin").join(name).join("main.rs"),
+    ]
+    .into_iter()
+    .filter_map(|path| path.canonicalize().ok())
+    .any(|path| path == entry_source)
 }
 
 fn default_workspace_package() -> Value {
@@ -1159,7 +1205,9 @@ fn transform_items(
                         kept_impl_items.clear();
                         for impl_item in &item_impl.items {
                             if !impl_item_is_test(impl_item) {
-                                kept_impl_items.push(impl_item.clone());
+                                let mut impl_item = impl_item.clone();
+                                strip_opensourced_attrs_from_impl_item(&mut impl_item);
+                                kept_impl_items.push(impl_item);
                             }
                         }
                     } else {
@@ -1514,6 +1562,12 @@ fn callable_mentions_ident(callable: &CallableId, ident: &str) -> bool {
 
 fn strip_opensourced_attrs(attrs: &mut Vec<syn::Attribute>) {
     attrs.retain(|attribute| !is_opensourced_attr(attribute.path()));
+}
+
+fn strip_opensourced_attrs_from_impl_item(item: &mut ImplItem) {
+    if let ImplItem::Fn(method) = item {
+        strip_opensourced_attrs(&mut method.attrs);
+    }
 }
 
 fn item_is_test(item: &Item) -> bool {
