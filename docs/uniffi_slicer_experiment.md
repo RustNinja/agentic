@@ -69,7 +69,7 @@ annotations.
 
 ```sh
 cargo test --workspace
-cargo run -p opensource_cli --bin slicers -- . /tmp/slicers-proof
+cargo run -p opensource_cli --bin slicers -- --check . /tmp/slicers-proof
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
 

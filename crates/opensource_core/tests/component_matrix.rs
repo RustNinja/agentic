@@ -34,6 +34,7 @@ fn slices_generics_traits_impls_modules_reexports_macros_and_unions() {
     for expected in [
         "api::export",
         "domain::details::decorate",
+        "domain::details::hidden_macro_helper",
         "domain::format_report",
         "domain::service::Service::new",
         "domain::service::Service::run",
@@ -119,6 +120,17 @@ fn slices_generics_traits_impls_modules_reexports_macros_and_unions() {
     assert!(!api_source.contains("unused_api"));
     assert!(!api_source.contains("#[opensourced]"));
 
+    let root_manifest = read(output.join("Cargo.toml"));
+    let api_manifest = read(output.join("api/Cargo.toml"));
+    assert!(
+        !root_manifest.contains("serde"),
+        "unused workspace external dependency should be pruned:\n{root_manifest}"
+    );
+    assert!(
+        !api_manifest.contains("serde"),
+        "unused package external dependency should be pruned:\n{api_manifest}"
+    );
+
     let domain_lib = read(output.join("domain/src/lib.rs"));
     assert!(domain_lib.contains("pub mod prelude"));
     assert!(domain_lib.contains("pub use crate::model::{Envelope, Mode};"));
@@ -155,6 +167,7 @@ fn slices_generics_traits_impls_modules_reexports_macros_and_unions() {
     let domain_details = read(output.join("domain/src/details.rs"));
     assert!(domain_details.contains("macro_rules! wrap_label"));
     assert!(domain_details.contains("pub fn decorate"));
+    assert!(domain_details.contains("fn hidden_macro_helper"));
     assert!(!domain_details.contains("unused_macro"));
     assert!(!domain_details.contains("unused_detail"));
 
@@ -216,6 +229,7 @@ license = "MIT"
 
 [workspace.dependencies]
 opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
 "#,
             manifest_path(&opensourced_path)
         ),
@@ -232,6 +246,7 @@ license.workspace = true
 [dependencies]
 domain = { path = "../domain" }
 opensourced.workspace = true
+serde.workspace = true
 unused_local = { path = "../unused_local" }
 "#,
     );
@@ -384,7 +399,7 @@ pub struct UnusedService;
         root.join("crates/domain/src/details.rs"),
         r#"macro_rules! wrap_label {
     ($value:expr) => {
-        format!("report:{}", $value)
+        format!("report:{}", hidden_macro_helper($value))
     };
 }
 
@@ -396,6 +411,10 @@ macro_rules! unused_macro {
 
 pub fn decorate(value: &str) -> String {
     wrap_label!(value)
+}
+
+fn hidden_macro_helper(value: &str) -> String {
+    value.trim().to_string()
 }
 
 pub fn unused_detail() -> String {

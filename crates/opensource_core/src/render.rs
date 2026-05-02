@@ -1,5 +1,7 @@
 use std::{fs, path::Path};
 
+use proc_macro2::{TokenStream, TokenTree};
+use quote::ToTokens;
 use syn::{ImplItem, Item, Type, UseTree};
 use toml::{value::Table, Value};
 
@@ -210,6 +212,7 @@ fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) 
             if is_marker_dependency(alias, &dependency_package)
                 || project.workspace.packages.contains_key(&dependency_package)
                 || !dependency_uses_workspace(value)
+                || !package_mentions_dependency(project, reduced, package_name, alias)
             {
                 continue;
             }
@@ -257,10 +260,50 @@ fn transformed_dependencies(
             continue;
         }
 
-        dependencies.insert(alias.clone(), value.clone());
+        if package_mentions_dependency(project, reduced, package_name, alias) {
+            dependencies.insert(alias.clone(), value.clone());
+        }
     }
 
     Ok(dependencies)
+}
+
+fn package_mentions_dependency(
+    project: &Project,
+    reduced: &ReducedProject,
+    package_name: &str,
+    dependency_alias: &str,
+) -> bool {
+    let code_name = dependency_code_name(dependency_alias);
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package_name)
+        .filter(|source| {
+            module_should_render(project, reduced, &source.package, &source.module_path)
+        })
+        .map(|source| {
+            transform_file(
+                project,
+                reduced,
+                &source.package,
+                &source.module_path,
+                &source.syntax,
+            )
+        })
+        .any(|file| token_stream_mentions_ident(&file.to_token_stream(), &code_name))
+}
+
+fn dependency_code_name(alias: &str) -> String {
+    alias.replace('-', "_")
+}
+
+fn token_stream_mentions_ident(tokens: &TokenStream, ident: &str) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        TokenTree::Ident(candidate) => candidate == ident,
+        TokenTree::Group(group) => token_stream_mentions_ident(&group.stream(), ident),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
 }
 
 fn dependency_package_name(alias: &str, value: &Value) -> String {

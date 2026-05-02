@@ -1,5 +1,6 @@
 use std::collections::{BTreeSet, HashMap, VecDeque};
 
+use proc_macro2::{TokenStream, TokenTree};
 use syn::{
     visit::{self, Visit},
     Expr, ExprCall, ExprMacro, ExprMethodCall, ExprPath, ImplItem, ItemMacro, Local, Macro, Pat,
@@ -389,6 +390,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 kind: ItemKind::Macro,
             };
             self.dependencies.items.insert(id);
+            self.add_macro_token_dependencies(&item.mac.tokens);
         }
         visit::visit_item_macro(self, item);
     }
@@ -438,6 +440,17 @@ impl DependencyVisitor<'_> {
     fn add_macro_path(&mut self, path: &Path) {
         if let Some(item) = self.resolver.resolve_macro_path(path) {
             self.dependencies.items.insert(item);
+        }
+    }
+
+    fn add_macro_token_dependencies(&mut self, tokens: &TokenStream) {
+        for segments in token_path_candidates(tokens) {
+            let Ok(path) = syn::parse_str::<Path>(&segments.join("::")) else {
+                continue;
+            };
+            self.add_call_path(&path);
+            self.add_item_path(&path);
+            self.add_macro_path(&path);
         }
     }
 }
@@ -916,4 +929,73 @@ fn binding_name_and_type(pattern: &Pat) -> Option<(String, Option<&Type>)> {
         },
         _ => None,
     }
+}
+
+fn token_path_candidates(tokens: &TokenStream) -> Vec<Vec<String>> {
+    let mut candidates = Vec::new();
+    collect_token_path_candidates(tokens, &mut candidates);
+    candidates
+}
+
+fn collect_token_path_candidates(tokens: &TokenStream, candidates: &mut Vec<Vec<String>>) {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            collect_token_path_candidates(&group.stream(), candidates);
+        }
+    }
+
+    let mut index = 0;
+    while index < token_trees.len() {
+        let TokenTree::Ident(ident) = &token_trees[index] else {
+            index += 1;
+            continue;
+        };
+
+        let mut segments = vec![ident.to_string()];
+        let mut cursor = index + 1;
+        while has_path_separator(&token_trees, cursor) {
+            let Some(TokenTree::Ident(next)) = token_trees.get(cursor + 2) else {
+                break;
+            };
+            segments.push(next.to_string());
+            cursor += 3;
+        }
+
+        if !macro_pattern_keyword(&segments) {
+            candidates.push(segments.clone());
+            if let Some(last) = segments.last() {
+                candidates.push(vec![last.clone()]);
+            }
+        }
+
+        index = cursor.max(index + 1);
+    }
+}
+
+fn has_path_separator(tokens: &[TokenTree], index: usize) -> bool {
+    matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+        && matches!(tokens.get(index + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+}
+
+fn macro_pattern_keyword(segments: &[String]) -> bool {
+    matches!(
+        segments,
+        [single]
+            if matches!(
+                single.as_str(),
+                "block"
+                    | "expr"
+                    | "ident"
+                    | "item"
+                    | "literal"
+                    | "meta"
+                    | "pat"
+                    | "path"
+                    | "stmt"
+                    | "tt"
+                    | "ty"
+                    | "vis"
+            )
+    )
 }

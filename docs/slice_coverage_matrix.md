@@ -26,9 +26,9 @@ dead functions, items, modules, tests, and local crates are absent.
 | Reexports | `module_reexports.rs`, `component_matrix.rs` | Reachable `pub use` targets are kept; dead grouped reexports are pruned |
 | Dependency aliases | root fixture, `module_reexports.rs` | `package = "..."` dependency aliases and renamed imports |
 | Workspace member globs | `component_matrix.rs` | `[workspace].members = ["crates/*"]` expansion |
-| External dependencies | `uniffi_mobile.rs` | Workspace dependencies such as `serde = { features = ["derive"] }` are preserved |
+| External dependencies | `uniffi_mobile.rs`, `component_matrix.rs` | Used workspace dependencies such as `serde = { features = ["derive"] }` are preserved; unused external deps with no retained source reference are pruned |
 | Local path dependency pruning | `uniffi_mobile.rs`, `component_matrix.rs` | Unused local crates are omitted from manifests and source imports |
-| Macro definitions | `component_matrix.rs` | Used `macro_rules!` definitions are kept; unused macro definitions are pruned |
+| Macro definitions | `component_matrix.rs` | Used `macro_rules!` definitions are kept, unused macro definitions are pruned, and direct helper calls inside retained macro bodies are followed |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
 | UniFFI-shaped API | `uniffi_mobile.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, serde DTOs, and mobile bridge shape |
@@ -40,17 +40,17 @@ These are tracked limitations, not silently claimed support:
 | Area | Boundary |
 | --- | --- |
 | Full rustc name resolution | The reducer is syntactic and does not replace rustc or rust-analyzer name resolution |
-| Macro-expanded dependencies | The slicer keeps used macro definitions, but does not inspect macro expansion output for hidden function dependencies |
+| Macro-expanded dependencies | The slicer scans retained macro bodies for direct local paths, but does not run macro expansion or model generated code |
 | Generic trait receiver inference | Calls through generic bounds such as `value.trait_method()` are not fully resolved without a concrete receiver type |
 | Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed |
 | Build scripts | `build.rs` outputs and generated Rust files are not modeled |
 | Feature/platform cfg matrices | `#[cfg(test)]` is pruned; broader feature/platform matrix evaluation is still conservative |
-| External crate pruning | External dependencies are preserved when referenced by retained package manifests, not minimized per item |
+| External crate pruning | External dependencies are pruned when their crate alias is absent from retained source tokens; full rustc-level unused import analysis is not implemented |
 
 ## Verification Commands
 
 ```sh
 cargo test --workspace
-cargo run -p opensource_cli --bin slicers -- . /tmp/slicers-proof
+cargo run -p opensource_cli --bin slicers -- --check . /tmp/slicers-proof
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```

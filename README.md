@@ -79,7 +79,7 @@ inside retained impl blocks so the reduced source keeps compiling.
 
 ```sh
 cargo test --workspace
-cargo run -p opensource_cli --bin slicers -- . /tmp/slicers-proof
+cargo run -p opensource_cli --bin slicers -- --check . /tmp/slicers-proof
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
 
@@ -157,7 +157,8 @@ resolution. It is useful for controlled workspaces and for proving the slice
 pipeline, but it is not a full compiler frontend. It now handles direct trait
 method calls when the receiver type can be inferred locally, borrowed UFCS trait
 calls, workspace member globs, external dependencies, and local path crate
-pruning. Macro-expanded calls, complex function pointers, broad `cfg` feature
-matrices, macro-expanded hidden calls, build scripts, and fine-grained external
-dependency pruning need more work before this can be treated as a production
-grade Rust slicer.
+pruning. It also scans retained macro bodies for direct local paths and prunes
+external dependencies whose crate alias is absent from the retained source.
+Complex function pointers, trait objects, broad `cfg` feature matrices, full
+macro expansion, build scripts, and rustc-level unused import analysis remain
+outside the current syntactic model.
