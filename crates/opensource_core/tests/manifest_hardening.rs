@@ -213,6 +213,42 @@ fn slices_explicit_nested_lib_path_modules() {
 }
 
 #[test]
+fn slices_raw_identifier_file_modules() {
+    let workspace = temp_path("raw-module-workspace");
+    let output = temp_path("raw-module-output");
+    let target_dir = temp_path("raw-module-target");
+    write_raw_identifier_module_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("raw_module_like/src/lib.rs"));
+    assert!(lib.contains("mod r#type"));
+    assert!(lib.contains("pub fn selected"));
+    assert!(!lib.contains("#[opensourced]"));
+    assert!(output.join("raw_module_like/src/type.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated raw identifier module slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
 fn retains_return_type_methods_and_trait_impls_for_dependency_items() {
     let workspace = temp_path("trait-return-workspace");
     let output = temp_path("trait-return-output");
@@ -246,6 +282,89 @@ fn retains_return_type_methods_and_trait_impls_for_dependency_items() {
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         helper,
+    );
+}
+
+#[test]
+fn retains_display_impls_used_only_by_format_macro() {
+    let workspace = temp_path("format-display-workspace");
+    let output = temp_path("format-display-output");
+    let target_dir = temp_path("format-display-target");
+    write_format_display_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let helper = read(output.join("format_helper/src/lib.rs"));
+    assert!(helper.contains("impl fmt::Display for Name"));
+    assert!(helper.contains("fn as_str"));
+    assert!(!helper.contains("dead_function"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated format display slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nformat_helper/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper,
+    );
+}
+
+#[test]
+fn slices_field_receivers_fold_builders_enum_patterns_and_parse_impls() {
+    let workspace = temp_path("generic-inference-workspace");
+    let output = temp_path("generic-inference-output");
+    let target_dir = temp_path("generic-inference-target");
+    write_generic_inference_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let model = read(output.join("model_dep/src/lib.rs"));
+    assert!(model.contains("self.registry.register"));
+    assert!(model.contains(".fold(Report::new()"));
+    assert!(model.contains("impl CLayout for Type"));
+    assert!(model.contains("impl CLayout for Primitive"));
+    assert!(model.contains("fn with_part"));
+    assert!(model.contains("fn label"));
+    assert!(model.contains("fn as_usize"));
+    assert!(!model.contains("dead_model_function"));
+    assert!(!model.contains("dead_report_method"));
+
+    let primitive = read(output.join("primitive_dep/src/lib.rs"));
+    assert!(primitive.contains("impl FromStr for Primitive"));
+    assert!(primitive.contains("fn weight"));
+    assert!(!primitive.contains("dead_primitive_function"));
+    assert!(!primitive.contains("dead_weight"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated generic inference slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nmodel_dep/src/lib.rs:\n{}\nprimitive_dep/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        model,
+        primitive,
     );
 }
 
@@ -545,6 +664,50 @@ pub fn selected() -> String {
     );
 }
 
+fn write_raw_identifier_module_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "raw_module_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+mod r#type;
+
+#[opensourced]
+pub fn selected() -> String {
+    r#type::helper()
+}
+"#,
+    );
+    write(
+        root.join("src/type.rs"),
+        r#"pub fn helper() -> String {
+    "raw".to_string()
+}
+
+pub fn dead() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
 fn write_trait_return_fixture(root: &Path) {
     if root.exists() {
         fs::remove_dir_all(root).unwrap();
@@ -650,6 +813,326 @@ pub fn make_fit() -> Fit {
 
 pub fn dead_function() -> usize {
     42
+}
+"#,
+    );
+}
+
+fn write_format_display_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "format_helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+format_helper = { path = "../format_helper" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    format_helper::render_name(value)
+}
+"#,
+    );
+    write(
+        root.join("format_helper/Cargo.toml"),
+        r#"[package]
+name = "format_helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("format_helper/src/lib.rs"),
+        r#"use std::fmt;
+
+pub struct Name(String);
+
+impl Name {
+    pub fn new(value: String) -> Self {
+        Self(value)
+    }
+
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+}
+
+impl fmt::Display for Name {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+
+pub fn class_prefix(value: &str) -> Name {
+    Name::new(format!("prefix_{value}"))
+}
+
+pub fn render_name(value: &str) -> String {
+    format!("{}_new", class_prefix(value))
+}
+
+pub fn dead_function(value: &str) -> String {
+    format!("dead_{value}")
+}
+"#,
+    );
+}
+
+fn write_generic_inference_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "model_dep", "primitive_dep"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+model_dep = { path = "../model_dep" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(source: &str) -> String {
+    model_dep::scan(source)
+}
+"#,
+    );
+    write(
+        root.join("model_dep/Cargo.toml"),
+        r#"[package]
+name = "model_dep"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+primitive_dep = { path = "../primitive_dep" }
+"#,
+    );
+    write(
+        root.join("model_dep/src/lib.rs"),
+        r#"pub type Primitive = primitive_dep::Primitive;
+
+pub struct Size(usize);
+
+impl Size {
+    pub fn as_usize(self) -> usize {
+        self.0
+    }
+}
+
+pub struct Layout {
+    pub size: Size,
+}
+
+impl Layout {
+    pub fn new(size: usize) -> Self {
+        Self { size: Size(size) }
+    }
+}
+
+pub trait CLayout {
+    fn c_layout(&self) -> Layout;
+}
+
+pub enum Type {
+    Primitive(Primitive),
+    Named { inner: Box<Type> },
+    Empty,
+}
+
+impl CLayout for Primitive {
+    fn c_layout(&self) -> Layout {
+        Layout::new(self.weight())
+    }
+}
+
+impl CLayout for Type {
+    fn c_layout(&self) -> Layout {
+        match self {
+            Self::Primitive(primitive) => primitive.c_layout(),
+            Self::Named { inner } => {
+                let layout = inner.c_layout();
+                Layout::new(layout.size.as_usize() + 1)
+            }
+            Self::Empty => Layout::new(0),
+        }
+    }
+}
+
+#[derive(Default)]
+pub struct Registry {
+    values: Vec<usize>,
+}
+
+impl Registry {
+    pub fn register(&mut self, ty: Type) {
+        let layout = ty.c_layout();
+        self.values.push(layout.size.as_usize());
+    }
+
+    pub fn drain(self) -> impl Iterator<Item = usize> {
+        self.values.into_iter()
+    }
+}
+
+pub struct Scanner {
+    registry: Registry,
+}
+
+impl Scanner {
+    pub fn new() -> Self {
+        Self {
+            registry: Registry::default(),
+        }
+    }
+
+    pub fn scan(mut self, source: &str) -> String {
+        if let Some(primitive) = parse_primitive(source) {
+            self.registry.register(Type::Primitive(primitive));
+        }
+
+        self.registry
+            .drain()
+            .fold(Report::new(), |report, size| report.with_part(size))
+            .finish()
+    }
+}
+
+pub struct Report {
+    parts: Vec<usize>,
+}
+
+impl Report {
+    pub fn new() -> Self {
+        Self { parts: Vec::new() }
+    }
+
+    pub fn with_part(mut self, size: usize) -> Self {
+        self.parts.push(size);
+        self
+    }
+
+    pub fn finish(self) -> String {
+        format!("report:{}", self.label())
+    }
+
+    pub fn label(&self) -> String {
+        self.parts
+            .iter()
+            .map(|part| part.to_string())
+            .collect::<Vec<_>>()
+            .join(",")
+    }
+
+    pub fn dead_report_method(self) -> Self {
+        self
+    }
+}
+
+fn parse_primitive(source: &str) -> Option<Primitive> {
+    source.parse().ok()
+}
+
+pub fn scan(source: &str) -> String {
+    Scanner::new().scan(source)
+}
+
+pub fn dead_model_function() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("primitive_dep/Cargo.toml"),
+        r#"[package]
+name = "primitive_dep"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("primitive_dep/src/lib.rs"),
+        r#"use std::str::FromStr;
+
+#[derive(Clone, Copy)]
+pub enum Primitive {
+    I32,
+    U8,
+}
+
+impl Primitive {
+    pub fn weight(&self) -> usize {
+        match self {
+            Self::I32 => 4,
+            Self::U8 => 1,
+        }
+    }
+
+    pub fn dead_weight(&self) -> usize {
+        100
+    }
+}
+
+impl FromStr for Primitive {
+    type Err = ();
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "i32" => Ok(Self::I32),
+            "u8" => Ok(Self::U8),
+            _ => Err(()),
+        }
+    }
+}
+
+pub fn dead_primitive_function() -> usize {
+    9
 }
 "#,
     );

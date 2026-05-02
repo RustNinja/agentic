@@ -256,12 +256,13 @@ impl Parser {
         }
 
         let name = item_mod.ident.to_string();
-        let file_path = module_dir.join(format!("{name}.rs"));
-        let mod_path = module_dir.join(&name).join("mod.rs");
+        let source_name = module_source_name(&name);
+        let file_path = module_dir.join(format!("{source_name}.rs"));
+        let mod_path = module_dir.join(&source_name).join("mod.rs");
         let (next_file, next_dir) = if file_path.exists() {
-            (file_path, module_dir.join(&name))
+            (file_path, module_dir.join(&source_name))
         } else if mod_path.exists() {
-            (mod_path, module_dir.join(&name))
+            (mod_path, module_dir.join(&source_name))
         } else {
             return Err(format!(
                 "module {name} has no matching source file in package {package} at {} (looked for {} and {})",
@@ -507,4 +508,8 @@ fn collect_type_paths(module_path: &[String], ty: &Type, type_paths: &mut Vec<Ve
         Type::Reference(reference) => collect_type_paths(module_path, &reference.elem, type_paths),
         _ => {}
     }
+}
+
+fn module_source_name(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
 }

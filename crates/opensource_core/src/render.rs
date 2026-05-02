@@ -1546,8 +1546,13 @@ fn use_target_should_drop(
             && !module_should_render(project, reduced, &alias_package, &alias_path);
     }
 
-    project_has_module(project, &target_package, &target_path)
-        && !module_should_render(project, reduced, &target_package, &target_path)
+    if project_has_module(project, &target_package, &target_path) {
+        return !module_should_render(project, reduced, &target_package, &target_path);
+    }
+
+    target
+        .last()
+        .is_some_and(|leaf| !reachable_package_mentions_ident(project, reduced, package, leaf))
 }
 
 fn use_prefix_should_drop(
