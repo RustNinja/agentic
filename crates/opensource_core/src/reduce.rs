@@ -1227,6 +1227,17 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_serde_default_field_dependencies(&mut self, fields: &syn::Fields) {
+        for field in fields.iter() {
+            if !attrs_include_serde_default(&field.attrs) {
+                continue;
+            }
+            for type_ref in self.resolver.type_refs_in_type(&field.ty) {
+                self.add_trait_impls_for_type_named(&type_ref, "Default");
+            }
+        }
+    }
+
     fn add_parse_method_trait_dependencies(&mut self) {
         for type_ref in self.expected_parse_types.clone() {
             self.add_trait_impls_for_type_named(&type_ref, "FromStr");
@@ -1474,6 +1485,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
         self.add_derive_field_trait_dependencies(&item.attrs, &item.fields);
         self.add_generic_field_type_trait_dependencies(&item.fields);
+        self.add_serde_default_field_dependencies(&item.fields);
         visit::visit_item_struct(self, item);
     }
 
@@ -1482,6 +1494,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         for variant in &item.variants {
             self.add_derive_field_trait_dependencies(&variant.attrs, &variant.fields);
             self.add_generic_field_type_trait_dependencies(&variant.fields);
+            self.add_serde_default_field_dependencies(&variant.fields);
             for field in variant.fields.iter() {
                 for type_ref in self.resolver.type_refs_in_type(&field.ty) {
                     for trait_name in &derive_traits {
@@ -2577,6 +2590,17 @@ fn derive_trait_names(attrs: &[syn::Attribute]) -> BTreeSet<String> {
         );
     }
     traits
+}
+
+fn attrs_include_serde_default(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        if !attr.path().is_ident("serde") {
+            return false;
+        }
+        let mut idents = BTreeSet::new();
+        collect_token_idents(&attr.to_token_stream(), &mut idents);
+        idents.contains("default")
+    })
 }
 
 fn trait_path_is_conversion_like(trait_path: &[String]) -> bool {

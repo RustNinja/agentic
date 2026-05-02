@@ -556,6 +556,40 @@ fn retains_trait_impls_required_by_derive_field_bounds() {
 }
 
 #[test]
+fn retains_default_impls_required_by_serde_default_fields() {
+    let workspace = temp_path("serde-default-workspace");
+    let output = temp_path("serde-default-output");
+    let target_dir = temp_path("serde-default-target");
+    write_serde_default_field_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("serde_default_like/src/lib.rs"));
+    assert!(source.contains("impl Default for HomeSelection"));
+    assert!(source.contains("#[serde(default)]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde-default slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn retains_deref_impls_for_autoderef_method_calls() {
     let workspace = temp_path("deref-method-workspace");
     let output = temp_path("deref-method-output");
@@ -1930,6 +1964,59 @@ impl std::fmt::Debug for Guid {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
+}
+"#,
+    );
+}
+
+fn write_serde_default_field_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_default_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct HomeSelection {
+    selected_project_id: Option<String>,
+}
+
+impl Default for HomeSelection {
+    fn default() -> Self {
+        Self {
+            selected_project_id: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PersistedPreferences {
+    #[serde(default)]
+    home_selection: HomeSelection,
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> bool {
+    serde_json::from_str::<PersistedPreferences>(input).is_ok()
 }
 "#,
     );
