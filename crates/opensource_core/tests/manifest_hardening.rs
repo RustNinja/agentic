@@ -1123,6 +1123,41 @@ fn prunes_unused_serde_derive_imports_after_dead_items_are_removed() {
 }
 
 #[test]
+fn retains_serde_trait_import_for_associated_deserialize_call() {
+    let workspace = temp_path("serde-trait-associated-workspace");
+    let output = temp_path("serde-trait-associated-output");
+    let target_dir = temp_path("serde-trait-associated-target");
+    write_serde_trait_associated_call_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("serde_trait_associated_like/src/lib.rs"));
+    assert!(source.contains("use serde::Deserialize"));
+    assert!(source.contains("Option::<serde_json::Value>::deserialize"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde trait associated slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn prunes_unused_private_external_type_imports_after_dead_items_are_removed() {
     let workspace = temp_path("external-type-import-workspace");
     let output = temp_path("external-type-import-output");
@@ -3191,6 +3226,48 @@ pub struct KeptWire {
 #[opensourced]
 pub fn selected(value: i32) -> KeptWire {
     KeptWire { value }
+}
+"#,
+    );
+}
+
+fn write_serde_trait_associated_call_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_trait_associated_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+#[opensourced]
+pub fn selected<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text),
+        other => serde_json::to_string(&other).ok(),
+    }))
 }
 "#,
     );

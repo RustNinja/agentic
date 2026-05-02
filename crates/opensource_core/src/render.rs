@@ -2514,7 +2514,15 @@ fn external_use_target_should_drop(
     };
 
     if is_derive_only_external_trait_import(leaf) {
-        return !reachable_module_mentions_ident(project, reduced, _package, module_path, leaf);
+        return !external_trait_import_should_remain(
+            project,
+            reduced,
+            _package,
+            module_path,
+            target,
+            leaf,
+            is_public_use,
+        );
     }
 
     if target.first().is_some_and(|first| {
@@ -2632,7 +2640,7 @@ fn is_known_std_trait_import(leaf: &str) -> bool {
 }
 
 fn is_known_external_trait_import(leaf: &str) -> bool {
-    matches!(leaf, "Engine")
+    matches!(leaf, "Deserialize" | "Engine" | "Serialize")
 }
 
 fn external_trait_import_should_remain(
@@ -2662,7 +2670,20 @@ fn external_trait_import_should_remain(
         return false;
     }
     if is_derive_only_external_trait_import(leaf) {
-        return reachable_package_mentions_ident(project, reduced, package, leaf);
+        if reachable_module_mentions_ident(project, reduced, package, module_path, leaf) {
+            return true;
+        }
+        let Some(functions) = known_trait_associated_function_idents(target, leaf) else {
+            return false;
+        };
+        if is_public_use {
+            return functions.iter().any(|function| {
+                reachable_package_mentions_ident(project, reduced, package, function)
+            });
+        }
+        return functions.iter().any(|function| {
+            reachable_module_mentions_ident(project, reduced, package, module_path, function)
+        });
     }
     if !is_public_use {
         if reachable_module_mentions_ident(project, reduced, package, module_path, leaf) {
@@ -2737,7 +2758,19 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
             "write_u64",
             "write_u128",
         ]),
+        (Some("serde"), "Serialize") => Some(&["serialize"]),
         (Some("base64"), "Engine") => Some(&["decode", "decode_slice", "encode", "encode_string"]),
+        _ => None,
+    }
+}
+
+fn known_trait_associated_function_idents(
+    target: &[String],
+    leaf: &str,
+) -> Option<&'static [&'static str]> {
+    match (target.first().map(String::as_str), leaf) {
+        (Some("serde"), "Deserialize") => Some(&["deserialize"]),
+        (Some("serde"), "Serialize") => Some(&["serialize"]),
         _ => None,
     }
 }
