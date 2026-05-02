@@ -13,17 +13,37 @@ fn main() {
 fn run() -> Result<(), Box<dyn std::error::Error>> {
     let mut run_check = false;
     let mut lint_audit = false;
+    let mut rust_analyzer = RustAnalyzerOptions::default();
     let mut positional = Vec::new();
-    for arg in std::env::args_os().skip(1) {
-        if arg == OsStr::new("--check") {
-            run_check = true;
-        } else if arg == OsStr::new("--lint-audit") {
-            lint_audit = true;
-        } else if arg == OsStr::new("--help") || arg == OsStr::new("-h") {
-            println!("{}", usage());
-            return Ok(());
-        } else {
-            positional.push(PathBuf::from(arg));
+    let mut args = std::env::args_os().skip(1);
+    while let Some(arg) = args.next() {
+        match arg.as_os_str() {
+            value if value == OsStr::new("--check") => run_check = true,
+            value if value == OsStr::new("--lint-audit") => lint_audit = true,
+            value if value == OsStr::new("--ra-audit") => rust_analyzer.enabled = true,
+            value if value == OsStr::new("--ra-disable-build-scripts") => {
+                rust_analyzer.disable_build_scripts = true
+            }
+            value if value == OsStr::new("--ra-disable-proc-macros") => {
+                rust_analyzer.disable_proc_macros = true
+            }
+            value if value == OsStr::new("--rust-analyzer") => {
+                let Some(path) = args.next() else {
+                    return Err("--rust-analyzer requires a path".into());
+                };
+                rust_analyzer.binary = Some(PathBuf::from(path));
+            }
+            value if value == OsStr::new("--ra-proc-macro-srv") => {
+                let Some(path) = args.next() else {
+                    return Err("--ra-proc-macro-srv requires a path".into());
+                };
+                rust_analyzer.proc_macro_srv = Some(PathBuf::from(path));
+            }
+            value if value == OsStr::new("--help") || value == OsStr::new("-h") => {
+                println!("{}", usage());
+                return Ok(());
+            }
+            _ => positional.push(PathBuf::from(arg)),
         }
     }
 
@@ -36,7 +56,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if lint_audit {
-        run_lint_audit(workspace_root.clone(), output_root.clone())?;
+        run_lint_audit(
+            workspace_root.clone(),
+            output_root.clone(),
+            rust_analyzer.clone(),
+        )?;
         return Ok(());
     }
 
@@ -68,12 +92,26 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
 
+    if rust_analyzer.enabled {
+        run_rust_analyzer_audit(&output_root, &rust_analyzer)?;
+    }
+
     Ok(())
+}
+
+#[derive(Clone, Debug, Default)]
+struct RustAnalyzerOptions {
+    enabled: bool,
+    binary: Option<PathBuf>,
+    proc_macro_srv: Option<PathBuf>,
+    disable_build_scripts: bool,
+    disable_proc_macros: bool,
 }
 
 fn run_lint_audit(
     workspace_root: PathBuf,
     output_root: PathBuf,
+    rust_analyzer: RustAnalyzerOptions,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report = generate_lint_audit_workspace(LintAuditOptions {
         workspace_root,
@@ -113,7 +151,138 @@ fn run_lint_audit(
         eprintln!("{}", String::from_utf8_lossy(&output.stderr));
     }
 
+    if rust_analyzer.enabled {
+        run_rust_analyzer_audit(&output_root, &rust_analyzer)?;
+    }
+
     Ok(())
+}
+
+fn run_rust_analyzer_audit(
+    output_root: &PathBuf,
+    options: &RustAnalyzerOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let binary = rust_analyzer_binary(options);
+    let availability = Command::new(&binary).arg("--version").output();
+    let Ok(availability) = availability else {
+        write_rust_analyzer_report(
+            output_root,
+            &binary,
+            json!({
+                "available": false,
+                "error": "failed to start rust-analyzer",
+            }),
+        )?;
+        println!(
+            "rust-analyzer audit unavailable: failed to start {}",
+            binary.display()
+        );
+        return Ok(());
+    };
+
+    if !availability.status.success() {
+        write_rust_analyzer_report(
+            output_root,
+            &binary,
+            json!({
+                "available": false,
+                "status": availability.status.code(),
+                "stdout": String::from_utf8_lossy(&availability.stdout),
+                "stderr": String::from_utf8_lossy(&availability.stderr),
+            }),
+        )?;
+        println!(
+            "rust-analyzer audit unavailable: {} --version failed",
+            binary.display()
+        );
+        return Ok(());
+    }
+
+    let diagnostics = run_rust_analyzer_command(&binary, "diagnostics", output_root, options)?;
+    let unresolved =
+        run_rust_analyzer_command(&binary, "unresolved-references", output_root, options)?;
+    let payload = json!({
+        "available": true,
+        "binary": path_to_json_string(binary.as_os_str()),
+        "version": String::from_utf8_lossy(&availability.stdout).trim(),
+        "diagnostics": diagnostics,
+        "unresolved_references": unresolved,
+    });
+    write_rust_analyzer_report(output_root, &binary, payload)?;
+    println!(
+        "rust-analyzer audit written: {}",
+        output_root
+            .join("slicers-rust-analyzer-report.json")
+            .display()
+    );
+    Ok(())
+}
+
+fn run_rust_analyzer_command(
+    binary: &PathBuf,
+    subcommand: &str,
+    output_root: &PathBuf,
+    options: &RustAnalyzerOptions,
+) -> Result<Value, Box<dyn std::error::Error>> {
+    let mut command = Command::new(binary);
+    command.arg(subcommand).arg(output_root);
+    if options.disable_build_scripts {
+        command.arg("--disable-build-scripts");
+    }
+    if options.disable_proc_macros {
+        command.arg("--disable-proc-macros");
+    }
+    if !options.disable_proc_macros {
+        if let Some(proc_macro_srv) = rust_analyzer_proc_macro_srv(options) {
+            command.arg("--proc-macro-srv").arg(proc_macro_srv);
+        }
+    }
+
+    let output = command.output()?;
+    Ok(json!({
+        "status": output.status.code(),
+        "stdout": String::from_utf8_lossy(&output.stdout),
+        "stderr": String::from_utf8_lossy(&output.stderr),
+    }))
+}
+
+fn rust_analyzer_binary(options: &RustAnalyzerOptions) -> PathBuf {
+    if let Some(binary) = &options.binary {
+        return binary.clone();
+    }
+    if let Some(binary) = std::env::var_os("SLICERS_RUST_ANALYZER") {
+        return PathBuf::from(binary);
+    }
+    PathBuf::from("rust-analyzer")
+}
+
+fn rust_analyzer_proc_macro_srv(options: &RustAnalyzerOptions) -> Option<PathBuf> {
+    if let Some(proc_macro_srv) = &options.proc_macro_srv {
+        return Some(proc_macro_srv.clone());
+    }
+    std::env::var_os("SLICERS_RA_PROC_MACRO_SRV").map(PathBuf::from)
+}
+
+fn write_rust_analyzer_report(
+    output_root: &PathBuf,
+    binary: &PathBuf,
+    mut payload: Value,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(object) = payload.as_object_mut() {
+        object.insert(
+            "binary".to_string(),
+            Value::String(path_to_json_string(binary.as_os_str())),
+        );
+    }
+    fs::write(
+        output_root.join("slicers-rust-analyzer-report.json"),
+        serde_json::to_string_pretty(&payload)?,
+    )?;
+    Ok(())
+}
+
+fn path_to_json_string(path: &OsStr) -> String {
+    path.to_string_lossy().into_owned()
 }
 
 fn lint_audit_diagnostics(stdout: &[u8]) -> Vec<Value> {
@@ -162,7 +331,14 @@ fn lint_audit_diagnostics(stdout: &[u8]) -> Vec<Value> {
 }
 
 fn usage() -> String {
-    "usage: slicers [--check] [--lint-audit] <workspace-root> <output-root>".to_string()
+    [
+        "usage: slicers [--check] [--lint-audit] [--ra-audit]",
+        "               [--rust-analyzer <path>]",
+        "               [--ra-proc-macro-srv <path>]",
+        "               [--ra-disable-build-scripts] [--ra-disable-proc-macros]",
+        "               <workspace-root> <output-root>",
+    ]
+    .join("\n")
 }
 
 fn same_path(left: &PathBuf, right: &PathBuf) -> bool {
