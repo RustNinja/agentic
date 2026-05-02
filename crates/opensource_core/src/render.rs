@@ -27,7 +27,7 @@ pub fn write_reduced_workspace(
 
     write_workspace_manifest(project, reduced, output_root)?;
 
-    let mut files_written = 1;
+    let mut files_written = 1 + copy_workspace_lockfile(project, output_root)?;
     for package_name in &reduced.packages {
         let package = project
             .workspace
@@ -93,6 +93,19 @@ pub fn write_reduced_workspace(
     }
 
     Ok(files_written)
+}
+
+fn copy_workspace_lockfile(
+    project: &Project,
+    output_root: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let lockfile = project.workspace.root.join("Cargo.lock");
+    if !lockfile.exists() {
+        return Ok(0);
+    }
+
+    fs::copy(lockfile, output_root.join("Cargo.lock"))?;
+    Ok(1)
 }
 
 fn package_should_preserve_source_tree(
@@ -529,11 +542,36 @@ fn write_workspace_manifest(
     }
 
     root.insert("workspace".to_string(), Value::Table(workspace));
+    if let Some(patch) = transformed_patch_tables(project) {
+        root.insert("patch".to_string(), patch);
+    }
     fs::write(
         output_root.join("Cargo.toml"),
         toml::to_string_pretty(&Value::Table(root))?,
     )?;
     Ok(())
+}
+
+fn transformed_patch_tables(project: &Project) -> Option<Value> {
+    let source_patches = project.workspace.manifest.get("patch")?.as_table()?;
+    let mut patches = Table::new();
+    for (source, value) in source_patches {
+        let Some(source_table) = value.as_table() else {
+            patches.insert(source.clone(), value.clone());
+            continue;
+        };
+
+        let mut transformed = Table::new();
+        for (name, dependency) in source_table {
+            transformed.insert(
+                name.clone(),
+                dependency_value_with_resolved_path(dependency, &project.workspace.root),
+            );
+        }
+        patches.insert(source.clone(), Value::Table(transformed));
+    }
+
+    (!patches.is_empty()).then_some(Value::Table(patches))
 }
 
 fn write_package_manifest(
@@ -1231,6 +1269,7 @@ fn transform_items(
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
             Item::Use(item_use) => {
                 let mut item_use = item_use.clone();
+                let is_public_use = matches!(item_use.vis, syn::Visibility::Public(_));
                 let tree = prune_use_tree(
                     project,
                     reduced,
@@ -1238,6 +1277,7 @@ fn transform_items(
                     module_path,
                     &item_use.tree,
                     Vec::new(),
+                    is_public_use,
                 );
                 let Some(tree) = tree else {
                     continue;
@@ -1749,6 +1789,7 @@ fn prune_use_tree(
     module_path: &[String],
     tree: &UseTree,
     mut prefix: Vec<String>,
+    is_public_use: bool,
 ) -> Option<UseTree> {
     match tree {
         UseTree::Path(path) => {
@@ -1766,19 +1807,33 @@ fn prune_use_tree(
                 module_path,
                 &path.tree,
                 prefix,
+                is_public_use,
             )?);
             Some(UseTree::Path(path))
         }
         UseTree::Name(name) => {
             prefix.push(name.ident.to_string());
-            (!use_target_should_drop(project, reduced, package, module_path, &prefix))
-                .then(|| UseTree::Name(name.clone()))
+            (!use_target_should_drop(
+                project,
+                reduced,
+                package,
+                module_path,
+                &prefix,
+                is_public_use,
+            ))
+            .then(|| UseTree::Name(name.clone()))
         }
         UseTree::Rename(rename) => {
             prefix.push(rename.ident.to_string());
             let alias = rename.rename.to_string();
-            (!use_target_should_drop(project, reduced, package, module_path, &prefix)
-                || reachable_package_mentions_ident(project, reduced, package, &alias))
+            (!use_target_should_drop(
+                project,
+                reduced,
+                package,
+                module_path,
+                &prefix,
+                is_public_use,
+            ) || reachable_package_mentions_ident(project, reduced, package, &alias))
             .then(|| UseTree::Rename(rename.clone()))
         }
         UseTree::Group(group) => {
@@ -1787,15 +1842,28 @@ fn prune_use_tree(
                 .items
                 .iter()
                 .filter_map(|item| {
-                    prune_use_tree(project, reduced, package, module_path, item, prefix.clone())
+                    prune_use_tree(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        item,
+                        prefix.clone(),
+                        is_public_use,
+                    )
                 })
                 .collect();
             (!group.items.is_empty()).then_some(UseTree::Group(group))
         }
-        UseTree::Glob(glob) => {
-            (!use_prefix_should_drop(project, reduced, package, module_path, &prefix))
-                .then(|| UseTree::Glob(glob.clone()))
-        }
+        UseTree::Glob(glob) => (!use_prefix_should_drop(
+            project,
+            reduced,
+            package,
+            module_path,
+            &prefix,
+            is_public_use,
+        ))
+        .then(|| UseTree::Glob(glob.clone())),
     }
 }
 
@@ -1805,6 +1873,7 @@ fn use_target_should_drop(
     package: &str,
     module_path: &[String],
     target: &[String],
+    is_public_use: bool,
 ) -> bool {
     if target
         .first()
@@ -1817,14 +1886,14 @@ fn use_target_should_drop(
         .first()
         .is_some_and(|first| use_name_is_external_dependency(project, package, first))
     {
-        return external_use_target_should_drop(project, reduced, package, target);
+        return external_use_target_should_drop(project, reduced, package, target, is_public_use);
     }
 
     if target
         .first()
         .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
     {
-        return external_use_target_should_drop(project, reduced, package, target);
+        return external_use_target_should_drop(project, reduced, package, target, is_public_use);
     }
 
     let Some((target_package, target_path)) =
@@ -1867,6 +1936,7 @@ fn use_prefix_should_drop(
     package: &str,
     module_path: &[String],
     prefix: &[String],
+    is_public_use: bool,
 ) -> bool {
     if prefix
         .first()
@@ -1879,14 +1949,14 @@ fn use_prefix_should_drop(
         .first()
         .is_some_and(|first| use_name_is_external_dependency(project, package, first))
     {
-        return external_use_target_should_drop(project, reduced, package, prefix);
+        return external_use_target_should_drop(project, reduced, package, prefix, is_public_use);
     }
 
     if prefix
         .first()
         .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
     {
-        return external_use_target_should_drop(project, reduced, package, prefix);
+        return external_use_target_should_drop(project, reduced, package, prefix, is_public_use);
     }
 
     resolve_use_target_path(project, package, module_path, prefix).is_some_and(
@@ -1902,6 +1972,7 @@ fn external_use_target_should_drop(
     reduced: &ReducedProject,
     _package: &str,
     target: &[String],
+    is_public_use: bool,
 ) -> bool {
     if target.first().is_some_and(|first| {
         known_macro_dependency_package_mentions(
@@ -1918,7 +1989,8 @@ fn external_use_target_should_drop(
         return false;
     };
 
-    if external_trait_import_should_remain(project, reduced, _package, target, leaf) {
+    if external_trait_import_should_remain(project, reduced, _package, target, leaf, is_public_use)
+    {
         return false;
     }
 
@@ -1947,12 +2019,16 @@ fn external_trait_import_should_remain(
     package: &str,
     target: &[String],
     leaf: &str,
+    is_public_use: bool,
 ) -> bool {
     if leaf.ends_with("Ext") {
         return true;
     }
     if !is_external_trait_import_candidate(leaf) {
         return false;
+    }
+    if !is_public_use {
+        return true;
     }
     target
         .iter()
