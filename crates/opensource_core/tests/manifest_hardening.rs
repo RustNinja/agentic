@@ -147,6 +147,7 @@ fn slices_marked_data_item_roots() {
     assert!(source.contains("pub trait Handler"));
     assert!(!source.contains("Dead"));
     assert!(!source.contains("#[opensourced]"));
+    assert!(!source.contains("opensourced::opensourced"));
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -1765,6 +1766,7 @@ pub enum Mode {
 }
 
 pub trait Handler {
+    #[opensourced]
     fn handle(&self, mode: Mode) -> usize;
 }
 

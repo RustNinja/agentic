@@ -6,7 +6,7 @@ use std::{
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
-use syn::{parse_quote, GenericArgument, ImplItem, Item, PathArguments, Type, UseTree};
+use syn::{parse_quote, GenericArgument, ImplItem, Item, PathArguments, TraitItem, Type, UseTree};
 use toml::{value::Table, Value};
 
 use crate::{
@@ -1976,9 +1976,25 @@ fn strip_opensourced_attrs_from_item(item: &mut Item) {
         Item::Mod(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Static(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Struct(item) => strip_opensourced_attrs(&mut item.attrs),
-        Item::Trait(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Trait(item) => {
+            strip_opensourced_attrs(&mut item.attrs);
+            for trait_item in &mut item.items {
+                strip_opensourced_attrs_from_trait_item(trait_item);
+            }
+        }
         Item::Type(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Union(item) => strip_opensourced_attrs(&mut item.attrs),
+        _ => {}
+    }
+}
+
+fn strip_opensourced_attrs_from_trait_item(item: &mut TraitItem) {
+    match item {
+        TraitItem::Const(item) => strip_opensourced_attrs(&mut item.attrs),
+        TraitItem::Fn(item) => strip_opensourced_attrs(&mut item.attrs),
+        TraitItem::Macro(item) => strip_opensourced_attrs(&mut item.attrs),
+        TraitItem::Type(item) => strip_opensourced_attrs(&mut item.attrs),
+        TraitItem::Verbatim(_) => {}
         _ => {}
     }
 }
