@@ -1831,6 +1831,10 @@ fn external_use_target_should_drop(
         return false;
     };
 
+    if is_extension_trait_import(leaf) {
+        return false;
+    }
+
     !reachable_package_mentions_ident(project, reduced, _package, leaf)
 }
 
@@ -1840,6 +1844,10 @@ fn external_use_leaf(target: &[String]) -> Option<&str> {
         return target.get(target.len() - 2).map(String::as_str);
     }
     Some(leaf)
+}
+
+fn is_extension_trait_import(leaf: &str) -> bool {
+    leaf.ends_with("Ext")
 }
 
 fn use_ident_is_pruned_local_dependency(

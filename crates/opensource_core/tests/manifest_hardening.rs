@@ -659,6 +659,74 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
 }
 
 #[test]
+fn retains_external_extension_trait_imports_for_method_resolution() {
+    let workspace = temp_path("extension-trait-workspace");
+    let output = temp_path("extension-trait-output");
+    let target_dir = temp_path("extension-trait-target");
+    write_extension_trait_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("extension_trait_like/src/lib.rs"));
+    assert!(source.contains("AsyncReadExt"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated extension trait slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn resolves_type_paths_through_visible_glob_reexports() {
+    let workspace = temp_path("glob-type-reexport-workspace");
+    let output = temp_path("glob-type-reexport-output");
+    let target_dir = temp_path("glob-type-reexport-target");
+    write_glob_type_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let models = read(output.join("glob_type_reexport_like/src/types/models.rs"));
+    assert!(models.contains("pub enum AppAskForApproval"));
+    assert!(models.contains("crate::types::AppAskForApproval"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated glob type reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ntypes/models.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        models,
+    );
+}
+
+#[test]
 fn removes_test_and_runtime_benchmark_cfg_modules() {
     let workspace = temp_path("cfg-benchmark-workspace");
     let output = temp_path("cfg-benchmark-output");
@@ -1913,6 +1981,101 @@ edition = "2021"
 
 pub fn unused() -> &'static str {
     "unused"
+}
+"#,
+    );
+}
+
+fn write_extension_trait_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "extension_trait_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+tokio = {{ version = "1", features = ["io-util"] }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use tokio::io::{AsyncRead, AsyncReadExt};
+
+#[opensourced]
+pub async fn selected<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<String> {
+    let mut value = String::new();
+    reader.read_to_string(&mut value).await?;
+    Ok(value)
+}
+
+pub async fn dead() -> &'static str {
+    "dead"
+}
+"#,
+    );
+}
+
+fn write_glob_type_reexport_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "glob_type_reexport_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub mod types;
+
+#[opensourced]
+pub fn selected() -> types::ThreadSnapshot {
+    types::ThreadSnapshot {
+        effective_approval_policy: None,
+    }
+}
+"#,
+    );
+    write(
+        root.join("src/types/mod.rs"),
+        r#"pub mod models;
+
+pub use models::*;
+"#,
+    );
+    write(
+        root.join("src/types/models.rs"),
+        r#"pub struct ThreadSnapshot {
+    pub effective_approval_policy: Option<crate::types::AppAskForApproval>,
+}
+
+pub enum AppAskForApproval {
+    Never,
+}
+
+pub enum DeadPolicy {
+    Noise,
 }
 "#,
     );

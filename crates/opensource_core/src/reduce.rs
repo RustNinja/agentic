@@ -455,6 +455,36 @@ fn collect_use_dependency_paths(
     }
 }
 
+fn visible_glob_use_paths(items: &[syn::Item]) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for item in items {
+        let syn::Item::Use(item_use) = item else {
+            continue;
+        };
+        if matches!(item_use.vis, syn::Visibility::Inherited) {
+            continue;
+        }
+        collect_glob_use_paths(&item_use.tree, Vec::new(), &mut paths);
+    }
+    paths
+}
+
+fn collect_glob_use_paths(tree: &UseTree, mut prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_glob_use_paths(&path.tree, prefix, paths);
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_glob_use_paths(nested, prefix.clone(), paths);
+            }
+        }
+        UseTree::Glob(_) => paths.push(prefix),
+        UseTree::Name(_) | UseTree::Rename(_) => {}
+    }
+}
+
 fn resolve_use_named_dependency(resolver: &Resolver<'_>, path: &[String]) -> DependencySet {
     let mut dependencies = DependencySet::default();
     if let Some(item) = resolver.resolve_item_segments(path) {
@@ -2085,7 +2115,31 @@ impl Resolver<'_> {
         }
         let name = path.last()?.clone();
         let module_path = path[..path.len() - 1].to_vec();
-        if let Some(item) = kinds.iter().find_map(|kind| {
+        if let Some(item) = self.find_item_in_module(package, path, kinds) {
+            return Some(item);
+        }
+
+        if let Some(alias) = self.resolve_alias_target(package, &module_path, &name) {
+            if let Some(item) = self.find_item(&alias.package, &alias.full_path(), kinds) {
+                return Some(item);
+            }
+        }
+
+        self.find_glob_reexport_item(package, &module_path, &name, kinds, &mut BTreeSet::new())
+    }
+
+    fn find_item_in_module(
+        &self,
+        package: &str,
+        path: &[String],
+        kinds: &[ItemKind],
+    ) -> Option<ItemId> {
+        if path.is_empty() {
+            return None;
+        }
+        let name = path.last()?.clone();
+        let module_path = path[..path.len() - 1].to_vec();
+        kinds.iter().find_map(|kind| {
             let id = ItemId {
                 package: package.to_string(),
                 module_path: module_path.clone(),
@@ -2093,12 +2147,63 @@ impl Resolver<'_> {
                 kind: *kind,
             };
             self.project.items.contains_key(&id).then_some(id)
-        }) {
-            return Some(item);
+        })
+    }
+
+    fn find_glob_reexport_item(
+        &self,
+        package: &str,
+        module_path: &[String],
+        name: &str,
+        kinds: &[ItemKind],
+        visited: &mut BTreeSet<(String, Vec<String>, String)>,
+    ) -> Option<ItemId> {
+        if !visited.insert((package.to_string(), module_path.to_vec(), name.to_string())) {
+            return None;
         }
 
-        let alias = self.resolve_alias_target(package, &module_path, &name)?;
-        self.find_item(&alias.package, &alias.full_path(), kinds)
+        let source = self
+            .project
+            .files
+            .values()
+            .find(|source| source.package == package && source.module_path == module_path)?;
+        for glob_path in visible_glob_use_paths(&source.syntax.items) {
+            let aliases = self
+                .project
+                .module_aliases
+                .get(&(package.to_string(), module_path.to_vec()))
+                .cloned()
+                .unwrap_or_default();
+            let resolver = Resolver {
+                project: self.project,
+                package,
+                module_path,
+                aliases: &aliases,
+                self_type: None,
+            };
+            let glob_path = resolver.apply_alias(glob_path);
+            let Some((target_package, target_module_path)) = resolver.resolve_prefix(&glob_path)
+            else {
+                continue;
+            };
+
+            let mut target_path = target_module_path.clone();
+            target_path.push(name.to_string());
+            if let Some(item) = self.find_item_in_module(&target_package, &target_path, kinds) {
+                return Some(item);
+            }
+            if let Some(item) = self.find_glob_reexport_item(
+                &target_package,
+                &target_module_path,
+                name,
+                kinds,
+                visited,
+            ) {
+                return Some(item);
+            }
+        }
+
+        None
     }
 
     fn resolve_value_prefix(&self, prefix: &[String]) -> Option<(String, Vec<String>)> {
