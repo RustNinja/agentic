@@ -253,6 +253,7 @@ fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
         syn::Item::Trait(item) => &item.attrs,
         syn::Item::Type(item) => &item.attrs,
         syn::Item::Union(item) => &item.attrs,
+        syn::Item::Mod(item) => &item.attrs,
         _ => &[],
     }
 }
@@ -804,6 +805,10 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
 }
 
 fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
+    if item.kind == ItemKind::Module {
+        return module_root_dependencies(project, item);
+    }
+
     let Some(record) = project.items.get(item) else {
         return DependencySet::default();
     };
@@ -819,6 +824,60 @@ fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
     visitor.visit_item(&record.item);
     visitor.dependencies.items.remove(item);
     visitor.dependencies
+}
+
+fn module_root_dependencies(project: &Project, item: &ItemId) -> DependencySet {
+    let module_path = path_from_item(item);
+    let mut dependencies = DependencySet::default();
+
+    dependencies.callables.extend(
+        project
+            .functions
+            .keys()
+            .filter(|callable| {
+                callable.package() == item.package
+                    && callable_module_path(project, callable)
+                        .is_some_and(|path| path_has_prefix(path, &module_path))
+            })
+            .cloned(),
+    );
+    dependencies.callables.extend(
+        project
+            .methods
+            .keys()
+            .filter(|callable| {
+                callable.package() == item.package
+                    && callable_module_path(project, callable)
+                        .is_some_and(|path| path_has_prefix(path, &module_path))
+            })
+            .cloned(),
+    );
+    dependencies.items.extend(
+        project
+            .items
+            .keys()
+            .filter(|candidate| {
+                candidate.package == item.package
+                    && path_has_prefix(&candidate.module_path, &module_path)
+                    && *candidate != item
+            })
+            .cloned(),
+    );
+
+    dependencies
+}
+
+fn callable_module_path<'a>(
+    project: &'a Project,
+    callable: &'a CallableId,
+) -> Option<&'a [String]> {
+    match callable {
+        CallableId::Free { module_path, .. } => Some(module_path),
+        CallableId::Method { .. } => project
+            .methods
+            .get(callable)
+            .map(|record| record.module_path.as_slice()),
+    }
 }
 
 #[derive(Default)]

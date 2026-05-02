@@ -232,8 +232,13 @@ fn prune_dead_items_from_diagnostics(
         if !(message.contains("function `")
             || message.contains("method `")
             || message.contains("associated function `")
+            || message.contains("associated constant `")
+            || message.contains("constant `")
             || message.contains("enum `")
+            || message.contains("module `")
+            || message.contains("static `")
             || message.contains("struct `")
+            || message.contains("type alias `")
             || message.contains("union `")
             || message.contains("trait `"))
         {
@@ -332,13 +337,22 @@ fn remove_item_at_line(source: &mut String, candidate: &DeadItemCandidate) -> bo
         }
     }
 
-    let Some(open_line) = (start..lines.len()).find(|index| lines[*index].contains('{')) else {
+    let Some(header_end) = (start..lines.len())
+        .find(|index| lines[*index].contains('{') || lines[*index].trim_end().ends_with(';'))
+    else {
         return false;
     };
+    if lines[header_end].trim_end().ends_with(';') && !lines[header_end].contains('{') {
+        lines.drain(start..=header_end);
+        *source = lines.join("\n");
+        source.push('\n');
+        return true;
+    }
+
     let mut depth = 0isize;
     let mut saw_open = false;
     let mut end = None;
-    for (index, line) in lines.iter().enumerate().skip(open_line) {
+    for (index, line) in lines.iter().enumerate().skip(header_end) {
         for character in line.chars() {
             match character {
                 '{' => {

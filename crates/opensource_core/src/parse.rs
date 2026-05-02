@@ -179,6 +179,23 @@ impl Parser {
                     }
                 }
                 Item::Mod(item_mod) => {
+                    if let Some((name, kind)) = item_name_and_kind(item) {
+                        let id = ItemId {
+                            package: package.to_string(),
+                            module_path: module_path.to_vec(),
+                            name,
+                            kind,
+                        };
+                        self.items.insert(
+                            id.clone(),
+                            ItemRecord {
+                                package: package.to_string(),
+                                module_path: module_path.to_vec(),
+                                item: item.clone(),
+                                aliases: aliases.clone(),
+                            },
+                        );
+                    }
                     if let Some((_, items)) = &item_mod.content {
                         let mut child_path = module_path.to_vec();
                         child_path.push(item_mod.ident.to_string());
@@ -362,6 +379,7 @@ fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
             .ident
             .as_ref()
             .map(|ident| (ident.to_string(), ItemKind::Macro)),
+        Item::Mod(item) => Some((item.ident.to_string(), ItemKind::Module)),
         _ => None,
     }
 }

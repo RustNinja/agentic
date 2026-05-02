@@ -19,10 +19,11 @@ enum RootCase {
     ReexportFunction,
     AssociatedConstFunction,
     NestedModuleFunction,
+    ModuleItem,
 }
 
 impl RootCase {
-    const ALL: [Self; 10] = [
+    const ALL: [Self; 11] = [
         Self::FreeFunction,
         Self::InherentMethod,
         Self::TraitImplMethod,
@@ -33,6 +34,7 @@ impl RootCase {
         Self::ReexportFunction,
         Self::AssociatedConstFunction,
         Self::NestedModuleFunction,
+        Self::ModuleItem,
     ];
 
     fn label(self) -> &'static str {
@@ -47,12 +49,13 @@ impl RootCase {
             Self::ReexportFunction => "reexport-function",
             Self::AssociatedConstFunction => "associated-const-function",
             Self::NestedModuleFunction => "nested-module-function",
+            Self::ModuleItem => "module-item",
         }
     }
 }
 
 #[test]
-fn ten_root_loop_slices_functions_methods_enums_and_traits() {
+fn root_loop_slices_functions_methods_items_and_modules() {
     let mut summaries = Vec::new();
 
     for case in RootCase::ALL {
@@ -127,7 +130,7 @@ fn ten_root_loop_slices_functions_methods_enums_and_traits() {
         ));
     }
 
-    eprintln!("10-root slicer loop:\n{}", summaries.join("\n"));
+    eprintln!("root slicer loop:\n{}", summaries.join("\n"));
 }
 
 fn write_fixture_workspace(root: &Path, root_case: RootCase) {
@@ -245,6 +248,16 @@ pub mod nested {{
     }}
 }}
 
+{}pub mod module_root {{
+    pub fn alpha(value: i32) -> String {{
+        domain::deep::inner::describe(value)
+    }}
+
+    pub fn beta(value: i32) -> i32 {{
+        domain::make_payload(value).value
+    }}
+}}
+
 pub fn dead_app_function() -> i32 {{
     noise::dead_noise()
 }}
@@ -257,6 +270,7 @@ pub fn dead_app_function() -> i32 {{
             attr(root_case, RootCase::ReexportFunction),
             attr(root_case, RootCase::AssociatedConstFunction),
             attr(root_case, RootCase::NestedModuleFunction),
+            attr(root_case, RootCase::ModuleItem),
         ),
     );
 

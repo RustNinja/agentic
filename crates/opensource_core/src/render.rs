@@ -277,6 +277,7 @@ fn compiler_prune_item_name(item: &Item) -> Option<(String, ItemKind)> {
             .ident
             .as_ref()
             .map(|ident| (ident.to_string(), ItemKind::Macro)),
+        Item::Mod(item) => Some((item.ident.to_string(), ItemKind::Module)),
         _ => None,
     }
 }
@@ -535,7 +536,7 @@ fn demote_items_for_prune(
     demotions: &mut usize,
 ) {
     items.retain(|item| !item_is_test(item));
-    for item in items {
+    for item in &mut *items {
         match item {
             Item::Use(item_use) => {
                 if !public_use_may_reexport_boundary(&item_use.tree, reduced, package, module_path)
@@ -544,6 +545,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Fn(function) => {
+                protect_opensourced_dead_code(&mut function.attrs);
                 let id = CallableId::Free {
                     package: package.to_string(),
                     module_path: module_path.to_vec(),
@@ -557,6 +559,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Struct(item) => {
+                protect_opensourced_dead_code(&mut item.attrs);
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -569,6 +572,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Enum(item) => {
+                protect_opensourced_dead_code(&mut item.attrs);
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -581,6 +585,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Union(item) => {
+                protect_opensourced_dead_code(&mut item.attrs);
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -593,6 +598,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Type(item) => {
+                protect_opensourced_dead_code(&mut item.attrs);
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -605,6 +611,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Trait(item) => {
+                protect_opensourced_dead_code(&mut item.attrs);
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -617,6 +624,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Const(item) => {
+                protect_opensourced_dead_code(&mut item.attrs);
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -629,6 +637,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Static(item) => {
+                protect_opensourced_dead_code(&mut item.attrs);
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -641,6 +650,7 @@ fn demote_items_for_prune(
                 }
             }
             Item::Mod(item_mod) => {
+                protect_opensourced_dead_code(&mut item_mod.attrs);
                 let mut child_path = module_path.to_vec();
                 child_path.push(item_mod.ident.to_string());
                 if !module_contains_boundary(reduced, package, &child_path) {
@@ -667,6 +677,7 @@ fn demote_items_for_prune(
                     .collect::<Vec<_>>();
                 for impl_item in &mut item_impl.items {
                     if let ImplItem::Fn(method) = impl_item {
+                        protect_opensourced_dead_code(&mut method.attrs);
                         let is_boundary = reduced.reachable.iter().any(|callable| {
                             matches!(
                                 callable,
@@ -689,6 +700,7 @@ fn demote_items_for_prune(
             _ => {}
         }
     }
+    items.retain(|item| !empty_nonboundary_module(item, reduced, package, module_path));
 }
 
 fn demote_visibility_to_crate(vis: &mut syn::Visibility, demotions: &mut usize) {
@@ -696,6 +708,56 @@ fn demote_visibility_to_crate(vis: &mut syn::Visibility, demotions: &mut usize) 
         *vis = parse_quote!(pub(crate));
         *demotions += 1;
     }
+}
+
+fn protect_opensourced_dead_code(attrs: &mut Vec<syn::Attribute>) {
+    if !attrs
+        .iter()
+        .any(|attribute| is_opensourced_attr(attribute.path()))
+    {
+        return;
+    }
+    if attrs.iter().any(|attribute| {
+        attribute.path().is_ident("allow")
+            && attribute
+                .to_token_stream()
+                .to_string()
+                .contains("dead_code")
+    }) {
+        return;
+    }
+    attrs.push(parse_quote!(#[allow(dead_code)]));
+}
+
+fn empty_nonboundary_module(
+    item: &Item,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    let Item::Mod(item_mod) = item else {
+        return false;
+    };
+    let Some((_, child_items)) = &item_mod.content else {
+        return false;
+    };
+    if !child_items.is_empty() {
+        return false;
+    }
+
+    let id = ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name: item_mod.ident.to_string(),
+        kind: ItemKind::Module,
+    };
+    if reduced.reachable_items.contains(&id) {
+        return false;
+    }
+
+    let mut child_path = module_path.to_vec();
+    child_path.push(item_mod.ident.to_string());
+    !module_contains_boundary(reduced, package, &child_path)
 }
 
 fn boundary_or_external_item_exists(
@@ -2186,6 +2248,7 @@ fn transform_items(
             }
             Item::Mod(item_mod) => {
                 let mut item_mod = item_mod.clone();
+                strip_opensourced_attrs(&mut item_mod.attrs);
                 let mut child_path = module_path.to_vec();
                 child_path.push(item_mod.ident.to_string());
 
@@ -2260,6 +2323,7 @@ fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId>
         Item::Const(item) => (item.ident.to_string(), ItemKind::Const),
         Item::Static(item) => (item.ident.to_string(), ItemKind::Static),
         Item::Macro(item) => (item.ident.as_ref()?.to_string(), ItemKind::Macro),
+        Item::Mod(item) => (item.ident.to_string(), ItemKind::Module),
         _ => return None,
     };
 
@@ -2537,6 +2601,7 @@ fn strip_opensourced_attrs_from_item(item: &mut Item) {
         Item::Trait(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Type(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Union(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Mod(item) => strip_opensourced_attrs(&mut item.attrs),
         _ => {}
     }
 }

@@ -121,6 +121,7 @@ pub enum ItemKind {
     Const,
     Static,
     Macro,
+    Module,
 }
 
 impl fmt::Display for CallableId {

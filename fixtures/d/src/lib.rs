@@ -60,6 +60,16 @@ pub fn shared(value: Score) -> Score {
     hash(value, Mode::Fast) - 2
 }
 
+pub mod nested {
+    pub fn routed(value: super::Score) -> super::Score {
+        super::hash(value, super::Mode::Fast)
+    }
+
+    pub fn unused_nested(value: super::Score) -> super::Score {
+        super::unused_public(value)
+    }
+}
+
 pub fn unused_public(value: Score) -> Score {
     unused_private(value)
 }
