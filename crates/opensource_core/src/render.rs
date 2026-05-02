@@ -2474,7 +2474,18 @@ fn external_trait_import_should_remain(
     is_public_use: bool,
 ) -> bool {
     if leaf.ends_with("Ext") {
-        return true;
+        if is_public_use {
+            return true;
+        }
+        if reachable_module_mentions_ident(project, reduced, package, module_path, leaf) {
+            return true;
+        }
+        let Some(methods) = known_trait_method_idents(target, leaf) else {
+            return true;
+        };
+        return methods.iter().any(|method| {
+            reachable_module_mentions_ident(project, reduced, package, module_path, method)
+        });
     }
     if !is_external_trait_import_candidate(target, leaf) {
         return false;
@@ -2518,6 +2529,43 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
         (Some("std" | "core" | "alloc"), "Write") => {
             Some(&["write", "write_all", "write_fmt", "flush"])
         }
+        (Some("tokio"), "AsyncReadExt") => Some(&[
+            "read",
+            "read_buf",
+            "read_exact",
+            "read_i8",
+            "read_i16",
+            "read_i32",
+            "read_i64",
+            "read_i128",
+            "read_to_end",
+            "read_to_string",
+            "read_u8",
+            "read_u16",
+            "read_u32",
+            "read_u64",
+            "read_u128",
+            "chain",
+            "take",
+        ]),
+        (Some("tokio"), "AsyncWriteExt") => Some(&[
+            "flush",
+            "shutdown",
+            "write",
+            "write_all",
+            "write_all_buf",
+            "write_buf",
+            "write_i8",
+            "write_i16",
+            "write_i32",
+            "write_i64",
+            "write_i128",
+            "write_u8",
+            "write_u16",
+            "write_u32",
+            "write_u64",
+            "write_u128",
+        ]),
         (Some("base64"), "Engine") => Some(&["decode", "decode_slice", "encode", "encode_string"]),
         _ => None,
     }
