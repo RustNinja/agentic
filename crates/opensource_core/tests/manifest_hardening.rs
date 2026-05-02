@@ -249,6 +249,116 @@ fn slices_raw_identifier_file_modules() {
 }
 
 #[test]
+fn slices_methods_marked_as_roots() {
+    let workspace = temp_path("method-root-workspace");
+    let output = temp_path("method-root-output");
+    let target_dir = temp_path("method-root-target");
+    write_method_root_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("method_root_like/src/lib.rs"));
+    assert!(lib.contains("pub fn selected"));
+    assert!(lib.contains("fn helper"));
+    assert!(!lib.contains("dead_method"));
+    assert!(!lib.contains("dead_function"));
+    assert!(!lib.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated method-root slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_trait_impls_required_by_derive_field_bounds() {
+    let workspace = temp_path("derive-field-workspace");
+    let output = temp_path("derive-field-output");
+    let target_dir = temp_path("derive-field-target");
+    write_derive_field_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let helper = read(output.join("derive_helper/src/lib.rs"));
+    let formatting = read(output.join("derive_helper/src/formatting.rs"));
+    assert!(formatting.contains("impl std::fmt::Debug for Guid"));
+    assert!(helper.contains("impl Default for Guid"));
+    assert!(formatting.contains("fn as_str") || helper.contains("fn as_str"));
+    assert!(!helper.contains("dead_guid_method"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated derive-field slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nderive_helper/src/lib.rs:\n{}\nderive_helper/src/formatting.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper,
+        formatting,
+    );
+}
+
+#[test]
+fn retains_deref_impls_for_autoderef_method_calls() {
+    let workspace = temp_path("deref-method-workspace");
+    let output = temp_path("deref-method-output");
+    let target_dir = temp_path("deref-method-target");
+    write_deref_method_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("deref_method_like/src/lib.rs"));
+    assert!(lib.contains("impl std::ops::Deref for Slug"));
+    assert!(lib.contains("fn as_str"));
+    assert!(!lib.contains("dead"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated deref-method slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
 fn retains_return_type_methods_and_trait_impls_for_dependency_items() {
     let workspace = temp_path("trait-return-workspace");
     let output = temp_path("trait-return-output");
@@ -703,6 +813,195 @@ pub fn selected() -> String {
 
 pub fn dead() -> String {
     "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_method_root_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "method_root_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub struct Processor(String);
+
+impl Processor {
+    #[opensourced]
+    pub fn selected(&self) -> String {
+        helper(self.0.as_str())
+    }
+
+    pub fn dead_method(&self) -> String {
+        dead_function()
+    }
+}
+
+fn helper(value: &str) -> String {
+    format!("live:{value}")
+}
+
+fn dead_function() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_derive_field_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "derive_helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+derive_helper = { path = "../derive_helper" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[derive(Debug, Default)]
+pub struct Envelope {
+    pub id: derive_helper::Guid,
+}
+
+impl Envelope {
+    #[opensourced]
+    pub fn new(id: derive_helper::Guid) -> Self {
+        Self { id }
+    }
+}
+"#,
+    );
+    write(
+        root.join("derive_helper/Cargo.toml"),
+        r#"[package]
+name = "derive_helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("derive_helper/src/lib.rs"),
+        r#"mod formatting;
+
+pub struct Guid(String);
+
+impl Guid {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    pub fn dead_guid_method(&self) -> &str {
+        "dead"
+    }
+}
+
+impl Default for Guid {
+    fn default() -> Self {
+        Self(String::new())
+    }
+}
+"#,
+    );
+    write(
+        root.join("derive_helper/src/formatting.rs"),
+        r#"use crate::Guid;
+
+impl std::fmt::Debug for Guid {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(self.as_str())
+    }
+}
+"#,
+    );
+}
+
+fn write_deref_method_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "deref_method_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub struct Slug(String);
+
+impl Slug {
+    #[opensourced]
+    pub fn is_short(&self) -> bool {
+        self.len() < 12 && self.bytes().all(|byte| byte != b',')
+    }
+
+    fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
+
+    fn dead(&self) -> bool {
+        false
+    }
+}
+
+impl std::ops::Deref for Slug {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
 }
 "#,
     );

@@ -203,17 +203,17 @@ impl Parser {
         item_impl: &ItemImpl,
         aliases: &HashMap<String, Vec<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(type_path) = local_type_path(module_path, &item_impl.self_ty) else {
+        let Some(type_path) = local_type_path(module_path, &item_impl.self_ty, aliases) else {
             return Ok(());
         };
         let trait_path = item_impl
             .trait_
             .as_ref()
-            .map(|(_, path, _)| normalized_path(module_path, path));
+            .map(|(_, path, _)| normalized_path(module_path, path, aliases));
         let trait_input_type_paths = item_impl
             .trait_
             .as_ref()
-            .map(|(_, path, _)| trait_input_type_paths(module_path, path))
+            .map(|(_, path, _)| trait_input_type_paths(module_path, path, aliases))
             .unwrap_or_default();
 
         for impl_item in &item_impl.items {
@@ -414,16 +414,42 @@ fn collect_use_tree(
     }
 }
 
-fn local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>> {
+fn local_type_path(
+    module_path: &[String],
+    self_ty: &Type,
+    aliases: &HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
     let Type::Path(type_path) = self_ty else {
         return None;
     };
-    let segments = type_path
-        .path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
+    let segments = apply_alias(
+        type_path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    normalize_segments(module_path, segments)
+}
+
+fn normalized_path(
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let segments = apply_alias(
+        path.segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    normalize_segments(module_path, segments).unwrap_or_default()
+}
+
+fn normalize_segments(module_path: &[String], segments: Vec<String>) -> Option<Vec<String>> {
     if segments.is_empty() {
         return None;
     }
@@ -447,39 +473,29 @@ fn local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>
     Some(path)
 }
 
-fn normalized_path(module_path: &[String], path: &syn::Path) -> Vec<String> {
-    let segments = path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
-    if segments.is_empty() {
-        return Vec::new();
-    }
-    if segments[0] == "crate" {
-        return segments[1..].to_vec();
-    }
-    if segments[0] == "self" {
-        let mut path = module_path.to_vec();
-        path.extend_from_slice(&segments[1..]);
-        return path;
-    }
-    if segments[0] == "super" {
-        let mut path = module_path.to_vec();
-        path.pop();
-        path.extend_from_slice(&segments[1..]);
-        return path;
-    }
-    segments
+fn apply_alias(mut segments: Vec<String>, aliases: &HashMap<String, Vec<String>>) -> Vec<String> {
+    let Some(first) = segments.first() else {
+        return segments;
+    };
+    let Some(target) = aliases.get(first) else {
+        return segments;
+    };
+    let mut resolved = target.clone();
+    resolved.extend(segments.drain(1..));
+    resolved
 }
 
-fn trait_input_type_paths(module_path: &[String], path: &syn::Path) -> Vec<Vec<String>> {
+fn trait_input_type_paths(
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &HashMap<String, Vec<String>>,
+) -> Vec<Vec<String>> {
     let mut type_paths = Vec::new();
     for segment in &path.segments {
         if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
             for argument in &arguments.args {
                 if let GenericArgument::Type(ty) = argument {
-                    collect_type_paths(module_path, ty, &mut type_paths);
+                    collect_type_paths(module_path, ty, aliases, &mut type_paths);
                 }
             }
         }
@@ -489,23 +505,30 @@ fn trait_input_type_paths(module_path: &[String], path: &syn::Path) -> Vec<Vec<S
     type_paths
 }
 
-fn collect_type_paths(module_path: &[String], ty: &Type, type_paths: &mut Vec<Vec<String>>) {
+fn collect_type_paths(
+    module_path: &[String],
+    ty: &Type,
+    aliases: &HashMap<String, Vec<String>>,
+    type_paths: &mut Vec<Vec<String>>,
+) {
     match ty {
         Type::Path(type_path) => {
-            if let Some(path) = local_type_path(module_path, ty) {
+            if let Some(path) = local_type_path(module_path, ty, aliases) {
                 type_paths.push(path);
             }
             for segment in &type_path.path.segments {
                 if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
                     for argument in &arguments.args {
                         if let GenericArgument::Type(ty) = argument {
-                            collect_type_paths(module_path, ty, type_paths);
+                            collect_type_paths(module_path, ty, aliases, type_paths);
                         }
                     }
                 }
             }
         }
-        Type::Reference(reference) => collect_type_paths(module_path, &reference.elem, type_paths),
+        Type::Reference(reference) => {
+            collect_type_paths(module_path, &reference.elem, aliases, type_paths)
+        }
         _ => {}
     }
 }

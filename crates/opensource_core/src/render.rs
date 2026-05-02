@@ -995,13 +995,19 @@ fn transform_items(
             | Item::Macro(_) => item_id(package, module_path, item)
                 .and_then(|id| reduced.reachable_items.contains(&id).then(|| item.clone())),
             Item::Impl(item_impl) => {
-                let Some(type_path) = local_type_path(module_path, &item_impl.self_ty) else {
+                let aliases = project
+                    .module_aliases
+                    .get(&(package.to_string(), module_path.to_vec()))
+                    .cloned()
+                    .unwrap_or_default();
+                let Some(type_path) = local_type_path(module_path, &item_impl.self_ty, &aliases)
+                else {
                     continue;
                 };
                 let trait_path = item_impl
                     .trait_
                     .as_ref()
-                    .map(|(_, path, _)| normalized_path(module_path, path));
+                    .map(|(_, path, _)| normalized_path(module_path, path, &aliases));
                 let mut kept_impl_items = Vec::new();
                 let mut kept_method = false;
 
@@ -1759,16 +1765,42 @@ fn project_has_module(project: &Project, package: &str, module_path: &[String]) 
             .any(|source| source.package == package && source.module_path == module_path)
 }
 
-fn local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>> {
+fn local_type_path(
+    module_path: &[String],
+    self_ty: &Type,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
     let Type::Path(type_path) = self_ty else {
         return None;
     };
-    let segments = type_path
-        .path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
+    let segments = apply_alias(
+        type_path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    normalize_segments(module_path, segments)
+}
+
+fn normalized_path(
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let segments = apply_alias(
+        path.segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    normalize_segments(module_path, segments).unwrap_or_default()
+}
+
+fn normalize_segments(module_path: &[String], segments: Vec<String>) -> Option<Vec<String>> {
     if segments.is_empty() {
         return None;
     }
@@ -1786,34 +1818,22 @@ fn local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>
         path.extend_from_slice(&segments[1..]);
         return Some(path);
     }
-
     let mut path = module_path.to_vec();
     path.extend(segments);
     Some(path)
 }
 
-fn normalized_path(module_path: &[String], path: &syn::Path) -> Vec<String> {
-    let segments = path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .collect::<Vec<_>>();
-    if segments.is_empty() {
-        return Vec::new();
-    }
-    if segments[0] == "crate" {
-        return segments[1..].to_vec();
-    }
-    if segments[0] == "self" {
-        let mut path = module_path.to_vec();
-        path.extend_from_slice(&segments[1..]);
-        return path;
-    }
-    if segments[0] == "super" {
-        let mut path = module_path.to_vec();
-        path.pop();
-        path.extend_from_slice(&segments[1..]);
-        return path;
-    }
-    segments
+fn apply_alias(
+    mut segments: Vec<String>,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let Some(first) = segments.first() else {
+        return segments;
+    };
+    let Some(target) = aliases.get(first) else {
+        return segments;
+    };
+    let mut resolved = target.clone();
+    resolved.extend(segments.drain(1..));
+    resolved
 }

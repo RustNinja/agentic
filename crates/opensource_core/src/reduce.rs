@@ -24,6 +24,14 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
                 .any(|attribute| is_opensourced_attr(attribute.path()))
         })
         .map(|record| record.id.clone())
+        .chain(project.methods.iter().filter_map(|(id, record)| {
+            record
+                .item
+                .attrs
+                .iter()
+                .any(|attribute| is_opensourced_attr(attribute.path()))
+                .then(|| id.clone())
+        }))
         .collect::<Vec<_>>();
 
     let [root] = roots.as_slice() else {
@@ -698,6 +706,9 @@ impl<'a> DependencyVisitor<'a> {
 
     fn add_external_call_arg_trait_impls(&mut self, call: &ExprCall) {
         for argument in &call.args {
+            let Expr::Reference(_) = argument else {
+                continue;
+            };
             if let Some(type_ref) = self.receiver_type(argument) {
                 self.add_trait_impls_for_type(&type_ref);
             }
@@ -792,6 +803,25 @@ impl<'a> DependencyVisitor<'a> {
         };
         visitor.visit_expr(expression);
         visitor.found
+    }
+
+    fn add_derive_field_trait_dependencies(
+        &mut self,
+        attrs: &[syn::Attribute],
+        fields: &syn::Fields,
+    ) {
+        let derive_traits = derive_trait_names(attrs);
+        if derive_traits.is_empty() {
+            return;
+        }
+
+        for field in fields.iter() {
+            for type_ref in self.resolver.type_refs_in_type(&field.ty) {
+                for trait_name in &derive_traits {
+                    self.add_trait_impls_for_type_named(&type_ref, trait_name);
+                }
+            }
+        }
     }
 
     fn add_parse_method_trait_dependencies(&mut self) {
@@ -959,6 +989,26 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         }
     }
 
+    fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
+        self.add_derive_field_trait_dependencies(&item.attrs, &item.fields);
+        visit::visit_item_struct(self, item);
+    }
+
+    fn visit_item_enum(&mut self, item: &'ast syn::ItemEnum) {
+        let derive_traits = derive_trait_names(&item.attrs);
+        for variant in &item.variants {
+            self.add_derive_field_trait_dependencies(&variant.attrs, &variant.fields);
+            for field in variant.fields.iter() {
+                for type_ref in self.resolver.type_refs_in_type(&field.ty) {
+                    for trait_name in &derive_traits {
+                        self.add_trait_impls_for_type_named(&type_ref, trait_name);
+                    }
+                }
+            }
+        }
+        visit::visit_item_enum(self, item);
+    }
+
     fn visit_macro(&mut self, mac: &'ast Macro) {
         self.add_macro_path(&mac.path);
         self.add_format_macro_trait_dependencies(mac);
@@ -971,11 +1021,15 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             return;
         }
         if let Some(receiver) = self.receiver_type(&call.receiver) {
-            for callable in self
-                .resolver
-                .resolve_methods(&receiver, &call.method.to_string())
-            {
+            let method = call.method.to_string();
+            let resolved_methods = self.resolver.resolve_methods(&receiver, &method);
+            let has_resolved_method = !resolved_methods.is_empty();
+            for callable in resolved_methods {
                 self.dependencies.callables.insert(callable);
+            }
+            if !has_resolved_method {
+                self.add_trait_impls_for_type_named(&receiver, "Deref");
+                self.add_trait_impls_for_type_named(&receiver, "DerefMut");
             }
             if call.method == "into" {
                 for callable in self
@@ -1378,6 +1432,17 @@ impl Resolver<'_> {
             return Vec::new();
         };
         let mut type_refs = Vec::new();
+        self.collect_type_arguments(ty, &mut type_refs);
+        type_refs.sort();
+        type_refs.dedup();
+        type_refs
+    }
+
+    fn type_refs_in_type(&self, ty: &Type) -> Vec<TypeRef> {
+        let mut type_refs = Vec::new();
+        if let Some(type_ref) = self.resolve_receiver_type(ty) {
+            type_refs.push(type_ref);
+        }
         self.collect_type_arguments(ty, &mut type_refs);
         type_refs.sort();
         type_refs.dedup();
@@ -1847,6 +1912,26 @@ fn field_member_type<'a>(fields: &'a syn::Fields, member: &Member) -> Option<&'a
             .map(|field| &field.ty),
         _ => None,
     }
+}
+
+fn derive_trait_names(attrs: &[syn::Attribute]) -> BTreeSet<String> {
+    let mut traits = BTreeSet::new();
+    for attr in attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let parser = syn::punctuated::Punctuated::<Path, syn::Token![,]>::parse_terminated;
+        let Ok(paths) = attr.parse_args_with(parser) else {
+            continue;
+        };
+        traits.extend(
+            paths
+                .iter()
+                .filter_map(|path| path.segments.last())
+                .map(|segment| segment.ident.to_string()),
+        );
+    }
+    traits
 }
 
 fn callable_method(callable: &CallableId) -> &str {
