@@ -1872,6 +1872,38 @@ fn reachable_module_has_method_call(
             })
 }
 
+fn reachable_module_has_associated_function_call(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    function: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && item_fn_has_associated_function_call(&record.item, function)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && impl_item_fn_has_associated_function_call(&record.item, function)
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package() == package && item.module_path == module_path)
+            .any(|item| {
+                project
+                    .items
+                    .get(item)
+                    .is_some_and(|record| item_has_associated_function_call(&record.item, function))
+            })
+}
+
 fn item_fn_has_method_call(item: &syn::ItemFn, method: &str) -> bool {
     let mut visitor = MethodCallVisitor::new(method);
     visitor.visit_item_fn(item);
@@ -1886,6 +1918,24 @@ fn impl_item_fn_has_method_call(item: &syn::ImplItemFn, method: &str) -> bool {
 
 fn item_has_method_call(item: &Item, method: &str) -> bool {
     let mut visitor = MethodCallVisitor::new(method);
+    visitor.visit_item(item);
+    visitor.found
+}
+
+fn item_fn_has_associated_function_call(item: &syn::ItemFn, function: &str) -> bool {
+    let mut visitor = AssociatedFunctionCallVisitor::new(function);
+    visitor.visit_item_fn(item);
+    visitor.found
+}
+
+fn impl_item_fn_has_associated_function_call(item: &syn::ImplItemFn, function: &str) -> bool {
+    let mut visitor = AssociatedFunctionCallVisitor::new(function);
+    visitor.visit_impl_item_fn(item);
+    visitor.found
+}
+
+fn item_has_associated_function_call(item: &Item, function: &str) -> bool {
+    let mut visitor = AssociatedFunctionCallVisitor::new(function);
     visitor.visit_item(item);
     visitor.found
 }
@@ -1911,6 +1961,38 @@ impl Visit<'_> for MethodCallVisitor<'_> {
             return;
         }
         visit::visit_expr_method_call(self, node);
+    }
+}
+
+struct AssociatedFunctionCallVisitor<'a> {
+    function: &'a str,
+    found: bool,
+}
+
+impl<'a> AssociatedFunctionCallVisitor<'a> {
+    fn new(function: &'a str) -> Self {
+        Self {
+            function,
+            found: false,
+        }
+    }
+}
+
+impl Visit<'_> for AssociatedFunctionCallVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            if path.path.segments.len() > 1
+                && path
+                    .path
+                    .segments
+                    .last()
+                    .is_some_and(|segment| segment.ident == self.function)
+            {
+                self.found = true;
+                return;
+            }
+        }
+        visit::visit_expr_call(self, node);
     }
 }
 
@@ -2640,7 +2722,7 @@ fn is_known_std_trait_import(leaf: &str) -> bool {
 }
 
 fn is_known_external_trait_import(leaf: &str) -> bool {
-    matches!(leaf, "Deserialize" | "Engine" | "Serialize")
+    matches!(leaf, "Deserialize" | "Digest" | "Engine" | "Serialize")
 }
 
 fn external_trait_import_should_remain(
@@ -2682,11 +2764,30 @@ fn external_trait_import_should_remain(
             });
         }
         return functions.iter().any(|function| {
-            reachable_module_mentions_ident(project, reduced, package, module_path, function)
+            reachable_module_has_associated_function_call(
+                project,
+                reduced,
+                package,
+                module_path,
+                function,
+            )
         });
     }
     if !is_public_use {
         if reachable_module_mentions_ident(project, reduced, package, module_path, leaf) {
+            return true;
+        }
+        if known_trait_associated_function_idents(target, leaf).is_some_and(|functions| {
+            functions.iter().any(|function| {
+                reachable_module_has_associated_function_call(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    function,
+                )
+            })
+        }) {
             return true;
         }
         let Some(methods) = known_trait_method_idents(target, leaf) else {
@@ -2759,6 +2860,7 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
             "write_u128",
         ]),
         (Some("serde"), "Serialize") => Some(&["serialize"]),
+        (Some("sha1"), "Digest") => Some(&["chain_update", "finalize", "reset", "update"]),
         (Some("base64"), "Engine") => Some(&["decode", "decode_slice", "encode", "encode_string"]),
         _ => None,
     }
@@ -2771,6 +2873,7 @@ fn known_trait_associated_function_idents(
     match (target.first().map(String::as_str), leaf) {
         (Some("serde"), "Deserialize") => Some(&["deserialize"]),
         (Some("serde"), "Serialize") => Some(&["serialize"]),
+        (Some("sha1"), "Digest") => Some(&["digest", "new", "new_with_prefix"]),
         _ => None,
     }
 }

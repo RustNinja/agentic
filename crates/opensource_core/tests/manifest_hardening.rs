@@ -1158,6 +1158,41 @@ fn retains_serde_trait_import_for_associated_deserialize_call() {
 }
 
 #[test]
+fn retains_digest_trait_import_for_associated_new_call() {
+    let workspace = temp_path("digest-trait-associated-workspace");
+    let output = temp_path("digest-trait-associated-output");
+    let target_dir = temp_path("digest-trait-associated-target");
+    write_digest_trait_associated_call_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("digest_trait_associated_like/src/lib.rs"));
+    assert!(source.contains("sha1::{Digest, Sha1}"));
+    assert!(source.contains("Sha1::new"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated digest trait associated slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn prunes_unused_private_external_type_imports_after_dead_items_are_removed() {
     let workspace = temp_path("external-type-import-workspace");
     let output = temp_path("external-type-import-output");
@@ -3268,6 +3303,42 @@ where
         serde_json::Value::String(text) => Some(text),
         other => serde_json::to_string(&other).ok(),
     }))
+}
+"#,
+    );
+}
+
+fn write_digest_trait_associated_call_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "digest_trait_associated_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hex = "0.4"
+opensourced = {{ path = "{}" }}
+sha1 = "0.10"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use sha1::{Digest, Sha1};
+
+#[opensourced]
+pub fn selected(input: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
 }
 "#,
     );
