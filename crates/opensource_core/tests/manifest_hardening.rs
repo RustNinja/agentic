@@ -728,6 +728,115 @@ fn retains_std_trait_imports_for_method_resolution() {
 }
 
 #[test]
+fn retains_dyn_trait_bounds_used_by_reachable_struct_fields() {
+    let workspace = temp_path("dyn-trait-field-workspace");
+    let output = temp_path("dyn-trait-field-output");
+    let target_dir = temp_path("dyn-trait-field-target");
+    write_dyn_trait_field_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("dyn_trait_field_like/src/lib.rs"));
+    assert!(source.contains("trait PlatformService"));
+    assert!(source.contains("Arc<dyn PlatformService>"));
+    assert!(!source.contains("DeadService"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated dyn trait field slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn retains_trait_impls_for_generic_field_type_bounds() {
+    let workspace = temp_path("generic-field-bound-workspace");
+    let output = temp_path("generic-field-bound-output");
+    let target_dir = temp_path("generic-field-bound-target");
+    write_generic_field_bound_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("generic_field_bound_like/src/lib.rs"));
+    assert!(source.contains("trait ExternalHandler"));
+    assert!(source.contains("impl ExternalHandler for ClientHandler"));
+    assert!(source.contains("ExternalHandle<ClientHandler>"));
+    assert!(!source.contains("DeadHandler"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated generic field bound slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn resolves_methods_after_if_let_option_unwrap() {
+    let workspace = temp_path("if-let-option-workspace");
+    let output = temp_path("if-let-option-output");
+    let target_dir = temp_path("if-let-option-target");
+    write_if_let_option_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("if_let_option_like/src/lib.rs"));
+    assert!(source.contains("fn emit"));
+    assert!(source.contains("shared_client"));
+    assert!(!source.contains("unused_emit"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated if-let option slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn resolves_type_paths_through_visible_glob_reexports() {
     let workspace = temp_path("glob-type-reexport-workspace");
     let output = temp_path("glob-type-reexport-output");
@@ -2091,6 +2200,157 @@ pub fn selected(value: &str) -> u64 {
 
 pub fn dead() -> &'static str {
     "dead"
+}
+"#,
+    );
+}
+
+fn write_dyn_trait_field_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "dyn_trait_field_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use std::sync::Arc;
+
+trait PlatformService: Send + Sync {
+    fn label(&self) -> &'static str;
+}
+
+pub struct RuntimeHandle {
+    service: Option<Arc<dyn PlatformService>>,
+}
+
+#[opensourced]
+pub fn selected() -> RuntimeHandle {
+    RuntimeHandle { service: None }
+}
+
+trait DeadService {}
+
+pub struct DeadHandle {
+    service: Option<Arc<dyn DeadService>>,
+}
+"#,
+    );
+}
+
+fn write_generic_field_bound_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "generic_field_bound_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"trait ExternalHandler {
+    fn ready(&self) -> bool;
+}
+
+pub struct ExternalHandle<T: ExternalHandler> {
+    inner: T,
+}
+
+struct ClientHandler;
+
+impl ExternalHandler for ClientHandler {
+    fn ready(&self) -> bool {
+        true
+    }
+}
+
+pub struct RuntimeHandle {
+    handle: Option<ExternalHandle<ClientHandler>>,
+}
+
+#[opensourced]
+pub fn selected() -> RuntimeHandle {
+    RuntimeHandle { handle: None }
+}
+
+struct DeadHandler;
+
+impl ExternalHandler for DeadHandler {
+    fn ready(&self) -> bool {
+        false
+    }
+}
+"#,
+    );
+}
+
+fn write_if_let_option_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "if_let_option_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use std::sync::Arc;
+
+pub struct Client {
+    store: Store,
+}
+
+pub struct Store;
+
+impl Store {
+    fn emit(&self) {}
+
+    fn unused_emit(&self) {}
+}
+
+fn shared_client() -> Option<Arc<Client>> {
+    None
+}
+
+#[opensourced]
+pub fn selected() {
+    if let Some(client) = shared_client() {
+        client.store.emit();
+    }
 }
 "#,
     );

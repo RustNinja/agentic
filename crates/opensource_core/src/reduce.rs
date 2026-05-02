@@ -1065,6 +1065,32 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_non_conversion_trait_impls_for_type(&mut self, type_ref: &TypeRef) {
+        let type_refs = self.resolver.type_ref_candidates(type_ref);
+        for callable in self.resolver.project.methods.keys() {
+            let CallableId::Method {
+                package,
+                type_path,
+                trait_path: Some(trait_path),
+                ..
+            } = callable
+            else {
+                continue;
+            };
+
+            if trait_path_is_conversion_like(trait_path) {
+                continue;
+            }
+
+            if type_refs
+                .iter()
+                .any(|candidate| package == &candidate.package && type_path == &candidate.type_path)
+            {
+                self.dependencies.callables.insert(callable.clone());
+            }
+        }
+    }
+
     fn add_trait_impls_for_type(&mut self, type_ref: &TypeRef) {
         let type_refs = self.resolver.type_ref_candidates(type_ref);
         for callable in self.resolver.project.methods.keys() {
@@ -1174,6 +1200,14 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_generic_field_type_trait_dependencies(&mut self, fields: &syn::Fields) {
+        for field in fields.iter() {
+            for type_ref in self.resolver.type_argument_refs_in_type(&field.ty) {
+                self.add_non_conversion_trait_impls_for_type(&type_ref);
+            }
+        }
+    }
+
     fn add_parse_method_trait_dependencies(&mut self) {
         for type_ref in self.expected_parse_types.clone() {
             self.add_trait_impls_for_type_named(&type_ref, "FromStr");
@@ -1195,6 +1229,63 @@ impl<'a> DependencyVisitor<'a> {
                 }
             }
             _ => {}
+        }
+    }
+
+    fn bind_single_payload_pattern(&mut self, pattern: &Pat, type_ref: &TypeRef) {
+        if let Pat::TupleStruct(tuple) = pattern {
+            if tuple.elems.len() == 1
+                && tuple.path.segments.last().is_some_and(|segment| {
+                    matches!(segment.ident.to_string().as_str(), "Some" | "Ok" | "Err")
+                })
+            {
+                if let Some(inner) = tuple.elems.first() {
+                    self.add_pattern_bindings_for_type(inner, type_ref);
+                    return;
+                }
+            }
+        }
+
+        self.add_pattern_bindings_for_type(pattern, type_ref);
+    }
+
+    fn expression_type_arguments(&self, expression: &Expr) -> Vec<TypeRef> {
+        match expression {
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return Vec::new();
+                };
+                let callables = if path.qself.is_some() {
+                    self.resolver.resolve_qself_call(path)
+                } else {
+                    self.resolver.resolve_call_path(&path.path)
+                };
+                callables
+                    .iter()
+                    .flat_map(|callable| {
+                        self.resolver.return_type_arguments_from_callable(callable)
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            }
+            Expr::MethodCall(call) => {
+                let Some(receiver) = self.receiver_type(&call.receiver) else {
+                    return Vec::new();
+                };
+                self.resolver
+                    .resolve_methods(&receiver, &call.method.to_string())
+                    .iter()
+                    .flat_map(|callable| {
+                        self.resolver.return_type_arguments_from_callable(callable)
+                    })
+                    .collect::<BTreeSet<_>>()
+                    .into_iter()
+                    .collect()
+            }
+            Expr::Reference(reference) => self.expression_type_arguments(&reference.expr),
+            Expr::Paren(paren) => self.expression_type_arguments(&paren.expr),
+            _ => Vec::new(),
         }
     }
 
@@ -1321,6 +1412,28 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         }
     }
 
+    fn visit_expr_if(&mut self, expr_if: &'ast syn::ExprIf) {
+        let outer_variables = self.variables.clone();
+        if let Expr::Let(expr_let) = expr_if.cond.as_ref() {
+            let type_arguments = self.expression_type_arguments(&expr_let.expr);
+            if let [type_ref] = type_arguments.as_slice() {
+                self.bind_single_payload_pattern(&expr_let.pat, type_ref);
+            }
+            self.visit_expr(&expr_let.expr);
+            self.visit_pat(&expr_let.pat);
+        } else {
+            self.visit_expr(&expr_if.cond);
+        }
+
+        self.visit_block(&expr_if.then_branch);
+        self.variables = outer_variables.clone();
+
+        if let Some((_, else_branch)) = &expr_if.else_branch {
+            self.visit_expr(else_branch);
+        }
+        self.variables = outer_variables;
+    }
+
     fn visit_expr_macro(&mut self, expr: &'ast ExprMacro) {
         self.add_macro_path(&expr.mac.path);
         visit::visit_expr_macro(self, expr);
@@ -1341,6 +1454,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
         self.add_derive_field_trait_dependencies(&item.attrs, &item.fields);
+        self.add_generic_field_type_trait_dependencies(&item.fields);
         visit::visit_item_struct(self, item);
     }
 
@@ -1348,6 +1462,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         let derive_traits = derive_trait_names(&item.attrs);
         for variant in &item.variants {
             self.add_derive_field_trait_dependencies(&variant.attrs, &variant.fields);
+            self.add_generic_field_type_trait_dependencies(&variant.fields);
             for field in variant.fields.iter() {
                 for type_ref in self.resolver.type_refs_in_type(&field.ty) {
                     for trait_name in &derive_traits {
@@ -1413,6 +1528,11 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_type_path(&mut self, ty: &'ast TypePath) {
         self.add_item_path(&ty.path);
         visit::visit_type_path(self, ty);
+    }
+
+    fn visit_trait_bound(&mut self, bound: &'ast syn::TraitBound) {
+        self.add_item_path(&bound.path);
+        visit::visit_trait_bound(self, bound);
     }
 
     fn visit_pat_tuple_struct(&mut self, pat: &'ast PatTupleStruct) {
@@ -1734,6 +1854,42 @@ impl Resolver<'_> {
         }
     }
 
+    fn return_type_arguments_from_callable(&self, callable: &CallableId) -> Vec<TypeRef> {
+        match callable {
+            CallableId::Free { .. } => {
+                let Some(record) = self.project.functions.get(callable) else {
+                    return Vec::new();
+                };
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.type_arguments_from_return_type(&record.item.sig.output)
+            }
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let Some(record) = self.project.methods.get(callable) else {
+                    return Vec::new();
+                };
+                let resolver = Resolver {
+                    project: self.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(TypeRef {
+                        package: package.clone(),
+                        type_path: type_path.clone(),
+                    }),
+                };
+                resolver.type_arguments_from_return_type(&record.item.sig.output)
+            }
+        }
+    }
+
     fn type_from_return_type(&self, output: &ReturnType) -> Option<TypeRef> {
         let ReturnType::Type(_, ty) = output else {
             return None;
@@ -1800,6 +1956,14 @@ impl Resolver<'_> {
         if let Some(type_ref) = self.resolve_receiver_type(ty) {
             type_refs.push(type_ref);
         }
+        self.collect_type_arguments(ty, &mut type_refs);
+        type_refs.sort();
+        type_refs.dedup();
+        type_refs
+    }
+
+    fn type_argument_refs_in_type(&self, ty: &Type) -> Vec<TypeRef> {
+        let mut type_refs = Vec::new();
         self.collect_type_arguments(ty, &mut type_refs);
         type_refs.sort();
         type_refs.dedup();
@@ -2392,6 +2556,15 @@ fn derive_trait_names(attrs: &[syn::Attribute]) -> BTreeSet<String> {
         );
     }
     traits
+}
+
+fn trait_path_is_conversion_like(trait_path: &[String]) -> bool {
+    trait_path.last().is_some_and(|name| {
+        matches!(
+            name.as_str(),
+            "From" | "Into" | "TryFrom" | "TryInto" | "FromStr"
+        )
+    })
 }
 
 fn callable_method(callable: &CallableId) -> &str {
