@@ -3099,6 +3099,7 @@ tokio = {{ version = "1", features = ["io-util"] }}
 
 #[opensourced]
 pub fn selected(value: &str) -> String {
+    let _ = std::fs::read_to_string(value).ok();
     value.to_string()
 }
 

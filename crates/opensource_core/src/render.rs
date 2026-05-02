@@ -6,6 +6,7 @@ use std::{
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
+use syn::visit::{self, Visit};
 use syn::{parse_quote, GenericArgument, ImplItem, Item, PathArguments, TraitItem, Type, UseTree};
 use toml::{value::Table, Value};
 
@@ -1797,6 +1798,79 @@ fn reachable_module_mentions_ident(
             })
 }
 
+fn reachable_module_has_method_call(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    method: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                record.module_path == module_path && item_fn_has_method_call(&record.item, method)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && impl_item_fn_has_method_call(&record.item, method)
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package() == package && item.module_path == module_path)
+            .any(|item| {
+                project
+                    .items
+                    .get(item)
+                    .is_some_and(|record| item_has_method_call(&record.item, method))
+            })
+}
+
+fn item_fn_has_method_call(item: &syn::ItemFn, method: &str) -> bool {
+    let mut visitor = MethodCallVisitor::new(method);
+    visitor.visit_item_fn(item);
+    visitor.found
+}
+
+fn impl_item_fn_has_method_call(item: &syn::ImplItemFn, method: &str) -> bool {
+    let mut visitor = MethodCallVisitor::new(method);
+    visitor.visit_impl_item_fn(item);
+    visitor.found
+}
+
+fn item_has_method_call(item: &Item, method: &str) -> bool {
+    let mut visitor = MethodCallVisitor::new(method);
+    visitor.visit_item(item);
+    visitor.found
+}
+
+struct MethodCallVisitor<'a> {
+    method: &'a str,
+    found: bool,
+}
+
+impl<'a> MethodCallVisitor<'a> {
+    fn new(method: &'a str) -> Self {
+        Self {
+            method,
+            found: false,
+        }
+    }
+}
+
+impl Visit<'_> for MethodCallVisitor<'_> {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        if node.method == self.method {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
 fn reachable_item_mentions_ident(
     project: &Project,
     reduced: &ReducedProject,
@@ -2538,7 +2612,7 @@ fn external_trait_import_should_remain(
             return true;
         };
         return methods.iter().any(|method| {
-            reachable_module_mentions_ident(project, reduced, package, module_path, method)
+            reachable_module_has_method_call(project, reduced, package, module_path, method)
         });
     }
     if !is_external_trait_import_candidate(target, leaf) {
@@ -2555,7 +2629,7 @@ fn external_trait_import_should_remain(
             return true;
         };
         return methods.iter().any(|method| {
-            reachable_module_mentions_ident(project, reduced, package, module_path, method)
+            reachable_module_has_method_call(project, reduced, package, module_path, method)
         });
     }
     target
