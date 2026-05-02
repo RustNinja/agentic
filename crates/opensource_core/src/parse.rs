@@ -184,6 +184,9 @@ impl Parser {
                     }
                 }
                 Item::Mod(item_mod) => {
+                    if item_mod.attrs.iter().any(is_cfg_test_attr) {
+                        continue;
+                    }
                     let id = ItemId {
                         package: package.to_string(),
                         module_path: module_path.to_vec(),

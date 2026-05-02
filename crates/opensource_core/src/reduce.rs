@@ -852,7 +852,9 @@ fn module_root_dependencies(project: &Project, item: &ItemId) -> DependencySet {
             .functions
             .iter()
             .filter(|(_, record)| {
-                record.package == item.package && path_has_prefix(&record.module_path, &module_path)
+                record.package == item.package
+                    && path_has_prefix(&record.module_path, &module_path)
+                    && !attrs_are_test(&record.item.attrs)
             })
             .map(|(id, _)| id.clone()),
     );
@@ -861,21 +863,42 @@ fn module_root_dependencies(project: &Project, item: &ItemId) -> DependencySet {
             .methods
             .iter()
             .filter(|(id, record)| {
-                id.package() == item.package && path_has_prefix(&record.module_path, &module_path)
+                id.package() == item.package
+                    && path_has_prefix(&record.module_path, &module_path)
+                    && !attrs_are_test(&record.item.attrs)
             })
             .map(|(id, _)| id.clone()),
     );
     dependencies.items.extend(
         project
             .items
-            .keys()
-            .filter(|id| {
-                id.package == item.package && path_has_prefix(&id.module_path, &module_path)
+            .iter()
+            .filter(|(id, record)| {
+                id.package == item.package
+                    && path_has_prefix(&id.module_path, &module_path)
+                    && !item_has_test_attr(&record.item)
             })
-            .cloned(),
+            .map(|(id, _)| id.clone()),
     );
 
     dependencies
+}
+
+fn item_has_test_attr(item: &Item) -> bool {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        _ => return false,
+    }
+    .iter()
+    .any(|attribute| is_cfg_test_attr(attribute) || is_test_attr(attribute.path()))
 }
 
 #[derive(Default)]

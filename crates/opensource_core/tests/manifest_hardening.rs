@@ -189,6 +189,7 @@ fn slices_marked_module_roots() {
     assert!(source.contains("pub fn run"));
     assert!(source.contains("fn helper"));
     assert!(!source.contains("pub mod dead"));
+    assert!(!source.contains("module_test_helper"));
     assert!(!source.contains("#[opensourced]"));
 
     let cargo_check = Command::new("cargo")
@@ -1775,6 +1776,13 @@ pub mod api {
         match mode {
             Mode::Read => 1,
             Mode::Write => 2,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        pub fn module_test_helper() -> usize {
+            99
         }
     }
 }
