@@ -15,7 +15,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Enums | `data_items.rs`, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Unit, tuple, and struct-like variants used in signatures, bodies, and patterns |
 | Unions | `component_matrix.rs` | Union item reached through a retained struct field and constructor literal |
 | Type aliases | `data_items.rs`, root fixture, `component_matrix.rs` | Aliases used in signatures, fields, and local bindings |
-| Consts/statics | root fixture, `data_items.rs`, `component_matrix.rs`, `pattern_constants.rs` | Constants/statics used in bodies, fields, associated const values, and unqualified match patterns |
+| Consts/statics | root fixture, `data_items.rs`, `component_matrix.rs`, `pattern_constants.rs`, `manifest_hardening.rs` | Constants/statics used in bodies, fields, associated const values, unqualified match patterns, and implicit `format!("{NAME}")` captures |
 | Inherent impl methods | all integration fixtures | Associated constructors, receiver calls, async methods, generic impl blocks |
 | Trait definitions | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Trait items retained when trait impl methods are reachable |
 | Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Receiver calls, explicit `<Type as Trait>::method`, `Trait::method(&receiver, ...)`, format-only `Display`, and `to_string()`-required `Display` impls |
@@ -24,7 +24,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | External trait imports | `manifest_hardening.rs` | Extension traits such as `tokio::io::AsyncReadExt` and trait-method imports without an `Ext` suffix such as `base64::Engine` are retained |
 | External modules | `module_reexports.rs`, `component_matrix.rs` | `mod file;`, `mod/name/mod.rs`, nested modules, and empty dead module pruning |
 | Inline modules | `module_reexports.rs`, `component_matrix.rs` | Inline modules with retained reexports are preserved |
-| Reexports | `module_reexports.rs`, `component_matrix.rs` | Reachable `pub use` targets are kept; dead grouped reexports are pruned |
+| Reexports | `module_reexports.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Reachable `pub use` targets are kept; dead grouped and external `pub use` reexports are pruned |
 | Dependency aliases | root fixture, `module_reexports.rs` | `package = "..."` dependency aliases and renamed imports |
 | Workspace member globs | `component_matrix.rs` | `[workspace].members = ["crates/*"]` expansion |
 | Single-package binary roots | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Non-workspace crates, `src/main.rs` parsing, and stub binary roots |
@@ -37,6 +37,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Macro definitions | `component_matrix.rs` | Used `macro_rules!` definitions are kept, unused macro definitions are pruned, and direct helper calls inside retained macro bodies are followed |
 | Item macro-generated items | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Item macro invocations such as `lazy_static!` are retained when generated identifiers are referenced by reachable code |
 | Build-script assets | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Non-Rust assets referenced by `build.rs` string literal paths are copied without copying unrelated package docs/config |
+| Source include assets | `manifest_hardening.rs` | Files referenced by retained `include!`, `include_str!`, and `include_bytes!` literal paths are copied next to the sliced source; unused include assets are not copied |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
 | UniFFI-shaped API | `uniffi_mobile.rs`, `uniffi_setup.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, retained `uniffi::setup_scaffolding!()`, serde DTOs, and mobile bridge shape |

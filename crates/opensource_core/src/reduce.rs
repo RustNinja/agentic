@@ -1154,6 +1154,16 @@ impl<'a> DependencyVisitor<'a> {
             return;
         };
 
+        if let Some(format_string) = arguments.first().and_then(format_literal_value) {
+            for capture in format_string_capture_idents(&format_string) {
+                let Ok(path) = syn::parse_str::<Path>(&capture) else {
+                    continue;
+                };
+                self.add_call_path(&path);
+                self.add_item_path(&path);
+            }
+        }
+
         for argument in arguments.iter().skip(1) {
             self.visit_expr(argument);
             if let Some(type_ref) = self.infer_expr_type(argument) {
@@ -2644,6 +2654,44 @@ fn literal_path_segments(literal: &Literal) -> Option<Vec<String>> {
             .iter()
             .all(|segment| syn::parse_str::<syn::Ident>(segment).is_ok()))
     .then_some(segments)
+}
+
+fn format_literal_value(expression: &Expr) -> Option<String> {
+    let Expr::Lit(literal) = expression else {
+        return None;
+    };
+    let syn::Lit::Str(literal) = &literal.lit else {
+        return None;
+    };
+    Some(literal.value())
+}
+
+fn format_string_capture_idents(format: &str) -> BTreeSet<String> {
+    let mut captures = BTreeSet::new();
+    let mut chars = format.char_indices().peekable();
+    while let Some((_, ch)) = chars.next() {
+        if ch != '{' {
+            continue;
+        }
+        if chars.peek().is_some_and(|(_, next)| *next == '{') {
+            chars.next();
+            continue;
+        }
+
+        let mut capture = String::new();
+        while let Some((_, next)) = chars.peek().copied() {
+            if next == '}' || next == ':' || next == '!' || next == '.' || next == '[' {
+                break;
+            }
+            capture.push(next);
+            chars.next();
+        }
+
+        if syn::parse_str::<syn::Ident>(&capture).is_ok() {
+            captures.insert(capture);
+        }
+    }
+    captures
 }
 
 fn macro_token_idents(tokens: &TokenStream) -> BTreeSet<String> {

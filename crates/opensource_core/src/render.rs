@@ -87,6 +87,8 @@ pub fn write_reduced_workspace(
             }
             fs::write(output_path, prettyplease::unparse(&transformed))?;
             files_written += 1;
+            files_written +=
+                copy_source_include_assets(package, source, &transformed, &package_output)?;
         }
     }
 
@@ -365,6 +367,91 @@ fn copy_non_rust_path_assets(
     }
 
     Ok(copied)
+}
+
+fn copy_source_include_assets(
+    package: &Package,
+    source: &SourceFile,
+    syntax: &syn::File,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let Some(source_dir) = source.path.parent() else {
+        return Ok(0);
+    };
+
+    let mut candidates = BTreeSet::new();
+    collect_include_macro_paths(&syntax.to_token_stream(), &mut candidates);
+
+    let mut copied = 0;
+    for candidate in candidates {
+        let path = if candidate.is_absolute() {
+            candidate
+        } else {
+            source_dir.join(candidate)
+        };
+        let Ok(path) = path.canonicalize() else {
+            continue;
+        };
+        if !path.starts_with(&package.root) || !path.is_file() {
+            continue;
+        }
+        copy_asset(package, &path, package_output)?;
+        copied += 1;
+    }
+
+    Ok(copied)
+}
+
+fn collect_include_macro_paths(tokens: &TokenStream, candidates: &mut BTreeSet<PathBuf>) {
+    let mut tokens = tokens.clone().into_iter().peekable();
+    while let Some(token) = tokens.next() {
+        match token {
+            TokenTree::Ident(ident) if is_file_include_macro(&ident.to_string()) => {
+                let Some(TokenTree::Punct(punct)) = tokens.next() else {
+                    continue;
+                };
+                if punct.as_char() != '!' {
+                    continue;
+                }
+                let Some(TokenTree::Group(group)) = tokens.next() else {
+                    continue;
+                };
+                if let Some(path) = include_macro_literal_path(&group.stream()) {
+                    candidates.insert(path);
+                }
+            }
+            TokenTree::Group(group) => collect_include_macro_paths(&group.stream(), candidates),
+            TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
+}
+
+fn is_file_include_macro(ident: &str) -> bool {
+    matches!(ident, "include" | "include_str" | "include_bytes")
+}
+
+fn include_macro_literal_path(tokens: &TokenStream) -> Option<PathBuf> {
+    for token in tokens.clone() {
+        match token {
+            TokenTree::Literal(literal) => {
+                let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) else {
+                    continue;
+                };
+                let value = literal.value();
+                if value.is_empty() || value.contains('\0') {
+                    return None;
+                }
+                return Some(PathBuf::from(value));
+            }
+            TokenTree::Group(group) => {
+                if let Some(path) = include_macro_literal_path(&group.stream()) {
+                    return Some(path);
+                }
+            }
+            TokenTree::Ident(_) | TokenTree::Punct(_) => {}
+        }
+    }
+    None
 }
 
 fn copy_asset(
@@ -1831,7 +1918,7 @@ fn external_use_target_should_drop(
         return false;
     };
 
-    if is_external_trait_import_candidate(leaf) {
+    if external_trait_import_should_remain(project, reduced, _package, target, leaf) {
         return false;
     }
 
@@ -1852,6 +1939,25 @@ fn is_external_trait_import_candidate(leaf: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|first| first.is_ascii_uppercase())
+}
+
+fn external_trait_import_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    target: &[String],
+    leaf: &str,
+) -> bool {
+    if leaf.ends_with("Ext") {
+        return true;
+    }
+    if !is_external_trait_import_candidate(leaf) {
+        return false;
+    }
+    target
+        .iter()
+        .take(target.len().saturating_sub(1))
+        .any(|segment| reachable_package_mentions_ident(project, reduced, package, segment))
 }
 
 fn use_ident_is_pruned_local_dependency(

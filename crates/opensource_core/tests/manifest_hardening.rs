@@ -234,6 +234,83 @@ fn slices_automod_directory_modules_without_expanding_macro_usage() {
 }
 
 #[test]
+fn copies_assets_referenced_by_retained_include_macros() {
+    let workspace = temp_path("include-assets-workspace");
+    let output = temp_path("include-assets-output");
+    let target_dir = temp_path("include-assets-target");
+    write_include_assets_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("include_assets_like/src/lib.rs"));
+    assert!(lib.contains("include_str!(\"guidelines/core.md\")"));
+    assert!(lib.contains("include_str!(\"../assets/extra.txt\")"));
+    assert!(!lib.contains("UNUSED"));
+    assert!(output
+        .join("include_assets_like/src/guidelines/core.md")
+        .exists());
+    assert!(output.join("include_assets_like/assets/extra.txt").exists());
+    assert!(!output
+        .join("include_assets_like/src/guidelines/unused.md")
+        .exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated include-assets slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn prunes_unused_external_pub_reexport_names() {
+    let workspace = temp_path("external-reexport-workspace");
+    let output = temp_path("external-reexport-output");
+    let target_dir = temp_path("external-reexport-target");
+    write_external_pub_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("external_reexport_like/src/lib.rs"));
+    assert!(lib.contains("Value"));
+    assert!(!lib.contains("Map"));
+    assert!(!lib.contains("Number"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external-reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
 fn slices_nested_modules_declared_from_file_modules() {
     let workspace = temp_path("nested-file-workspace");
     let output = temp_path("nested-file-output");
@@ -2978,6 +3055,103 @@ fn main() {}
         root.join("trait_method_bin_like/src/other.rs"),
         r#"fn main() {
     println!("not part of this slice");
+}
+"#,
+    );
+}
+
+fn write_include_assets_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["include_assets_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("include_assets_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "include_assets_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("include_assets_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+const CORE: &str = include_str!("guidelines/core.md");
+const EXTRA: &str = include_str!("../assets/extra.txt");
+const UNUSED: &str = include_str!("guidelines/unused.md");
+
+#[opensourced]
+pub fn selected(include_extra: bool) -> String {
+    if include_extra {
+        format!("{CORE}\n{EXTRA}")
+    } else {
+        CORE.to_string()
+    }
+}
+
+pub fn noisy() -> &'static str {
+    UNUSED
+}
+"#,
+    );
+    write(
+        root.join("include_assets_like/src/guidelines/core.md"),
+        "core guideline",
+    );
+    write(
+        root.join("include_assets_like/src/guidelines/unused.md"),
+        "unused guideline",
+    );
+    write(root.join("include_assets_like/assets/extra.txt"), "extra");
+}
+
+fn write_external_pub_reexport_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["external_reexport_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("external_reexport_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external_reexport_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("external_reexport_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+pub use serde_json::{Map, Number, Value};
+
+#[opensourced]
+pub fn selected(input: &Value) -> bool {
+    input.is_object()
+}
+
+pub fn noisy(map: Map<String, Value>, number: Number) -> usize {
+    map.len() + number.as_u64().unwrap_or_default() as usize
 }
 "#,
     );
