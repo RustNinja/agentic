@@ -10,7 +10,7 @@ use syn::{
     ReturnType, Type, TypePath, UseTree,
 };
 
-use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject};
+use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId};
 
 pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::Error>> {
     let roots = project
@@ -23,20 +23,23 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
                 .iter()
                 .any(|attribute| is_opensourced_attr(attribute.path()))
         })
-        .map(|record| record.id.clone())
+        .map(|record| RootId::Callable(record.id.clone()))
         .chain(project.methods.iter().filter_map(|(id, record)| {
             record
                 .item
                 .attrs
                 .iter()
                 .any(|attribute| is_opensourced_attr(attribute.path()))
-                .then(|| id.clone())
+                .then(|| RootId::Callable(id.clone()))
+        }))
+        .chain(project.items.iter().filter_map(|(id, record)| {
+            item_has_opensourced_attr(&record.item).then(|| RootId::Item(id.clone()))
         }))
         .collect::<Vec<_>>();
 
     let [root] = roots.as_slice() else {
         return Err(format!(
-            "expected exactly one #[opensourced] function, found {}",
+            "expected exactly one #[opensourced] root, found {}",
             roots.len()
         )
         .into());
@@ -45,8 +48,12 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
     let candidate_packages = package_closure(project, root.package());
     let mut reachable = BTreeSet::new();
     let mut reachable_items = BTreeSet::new();
-    let mut callable_queue = VecDeque::from([root.clone()]);
+    let mut callable_queue = VecDeque::new();
     let mut item_queue = VecDeque::new();
+    match root {
+        RootId::Callable(callable) => callable_queue.push_back(callable.clone()),
+        RootId::Item(item) => item_queue.push_back(item.clone()),
+    }
 
     while !callable_queue.is_empty() || !item_queue.is_empty() {
         while let Some(callable) = callable_queue.pop_front() {
@@ -212,7 +219,7 @@ fn package_closure(project: &Project, root: &str) -> BTreeSet<String> {
 }
 
 fn reachable_packages(
-    root: &CallableId,
+    root: &RootId,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
 ) -> BTreeSet<String> {
@@ -228,6 +235,26 @@ fn reachable_packages(
             .map(|item| item.package().to_string()),
     );
     packages
+}
+
+fn item_has_opensourced_attr(item: &syn::Item) -> bool {
+    item_attrs(item)
+        .iter()
+        .any(|attribute| is_opensourced_attr(attribute.path()))
+}
+
+fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+    match item {
+        syn::Item::Const(item) => &item.attrs,
+        syn::Item::Enum(item) => &item.attrs,
+        syn::Item::Macro(item) => &item.attrs,
+        syn::Item::Static(item) => &item.attrs,
+        syn::Item::Struct(item) => &item.attrs,
+        syn::Item::Trait(item) => &item.attrs,
+        syn::Item::Type(item) => &item.attrs,
+        syn::Item::Union(item) => &item.attrs,
+        _ => &[],
+    }
 }
 
 fn retained_item_macro_dependencies(
@@ -847,6 +874,9 @@ impl<'a> DependencyVisitor<'a> {
     fn add_expr_path_call(&mut self, path: &ExprPath) {
         if path.qself.is_some() {
             for callable in self.resolver.resolve_qself_call(path) {
+                self.dependencies.callables.insert(callable);
+            }
+            for callable in self.resolver.resolve_qself_impl_methods(path) {
                 self.dependencies.callables.insert(callable);
             }
         } else {
@@ -1719,6 +1749,61 @@ impl Resolver<'_> {
         }
 
         self.resolve_trait_item_method(&trait_item, &receiver, &method)
+    }
+
+    fn resolve_qself_impl_methods(&self, path: &ExprPath) -> Vec<CallableId> {
+        let Some(qself) = &path.qself else {
+            return Vec::new();
+        };
+        let Some(receiver) = self.resolve_type(&qself.ty) else {
+            return Vec::new();
+        };
+        let trait_path = if qself.position == 0 {
+            None
+        } else {
+            let trait_segments = path
+                .path
+                .segments
+                .iter()
+                .take(qself.position)
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let Some(trait_item) = self.resolve_item_segments(&self.apply_alias(trait_segments))
+            else {
+                return Vec::new();
+            };
+            if trait_item.kind != ItemKind::Trait {
+                return Vec::new();
+            }
+            Some(path_from_item(&trait_item))
+        };
+
+        let type_refs = self.type_ref_candidates(&receiver);
+        let mut callables = self
+            .project
+            .methods
+            .keys()
+            .filter_map(|id| {
+                let CallableId::Method {
+                    package,
+                    type_path,
+                    trait_path: candidate_trait_path,
+                    ..
+                } = id
+                else {
+                    return None;
+                };
+
+                (candidate_trait_path.as_ref() == trait_path.as_ref()
+                    && type_refs.iter().any(|candidate| {
+                        package == &candidate.package && type_path == &candidate.type_path
+                    }))
+                .then(|| id.clone())
+            })
+            .collect::<Vec<_>>();
+        callables.sort();
+        callables.dedup();
+        callables
     }
 
     fn resolve_methods(&self, receiver: &TypeRef, method: &str) -> Vec<CallableId> {

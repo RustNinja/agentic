@@ -9,16 +9,17 @@ dead functions, items, modules, tests, and local crates are absent.
 | Area | Verified by | Coverage |
 | --- | --- | --- |
 | Cross-crate free functions | `opensource_core` unit fixture | Root function, direct calls, transitive calls across five crates |
+| Root marker targets | `root_loop_matrix.rs`, `manifest_hardening.rs` | `#[opensourced]` roots on free functions, inherent methods, trait impl methods, enums, and traits |
 | Private helpers | `data_items.rs`, root fixture | Private functions reached from exported code are retained |
 | Public dead APIs | all integration fixtures | Public functions not reached from the root are pruned |
 | Structs | `data_items.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Unit structs, tuple structs, named-field structs, generic structs |
-| Enums | `data_items.rs`, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Unit, tuple, and struct-like variants used in signatures, bodies, and patterns |
+| Enums | `data_items.rs`, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `root_loop_matrix.rs` | Unit, tuple, and struct-like variants used in signatures, bodies, patterns, and enum-root slices |
 | Unions | `component_matrix.rs` | Union item reached through a retained struct field and constructor literal |
 | Type aliases | `data_items.rs`, root fixture, `component_matrix.rs` | Aliases used in signatures, fields, and local bindings |
 | Consts/statics | root fixture, `data_items.rs`, `component_matrix.rs`, `pattern_constants.rs`, `manifest_hardening.rs` | Constants/statics used in bodies, fields, associated const values, unqualified match patterns, and implicit `format!("{NAME}")` captures |
 | Inherent impl methods | all integration fixtures | Associated constructors, receiver calls, async methods, generic impl blocks |
-| Trait definitions | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Trait items retained when trait impl methods are reachable |
-| Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Receiver calls, explicit `<Type as Trait>::method`, `Trait::method(&receiver, ...)`, format-only `Display`, and `to_string()`-required `Display` impls |
+| Trait definitions | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `root_loop_matrix.rs` | Trait items retained when trait impl methods are reachable, and trait-root slices with default method bodies build |
+| Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `manifest_hardening.rs`, `root_loop_matrix.rs` | Receiver calls, explicit `<Type as Trait>::method`, `Trait::method(&receiver, ...)`, format-only `Display`, `to_string()`-required `Display` impls, and trait impls required by qualified associated const paths |
 | Trait impl peers | `component_matrix.rs` | Required peer methods and associated type/const items are retained so trait impls compile |
 | Associated types/consts | `component_matrix.rs` | Associated type and associated const dependencies are followed from retained impls |
 | External trait imports | `manifest_hardening.rs` | Extension traits such as `tokio::io::AsyncReadExt`, private std traits such as `std::io::Write`, and trait-method imports without an `Ext` suffix such as `base64::Engine` are retained |
@@ -40,6 +41,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Source include assets | `manifest_hardening.rs` | Files referenced by retained `include!`, `include_str!`, and `include_bytes!` literal paths are copied next to the sliced source; unused include assets are not copied |
 | Workspace patches and locks | `manifest_hardening.rs` | Root `[patch.*]` tables and `Cargo.lock` are preserved so sliced workspaces keep the source repository's dependency resolution |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
+| Multi-root regression loop | `root_loop_matrix.rs` | Ten independent marked roots are compiled in the original workspace, sliced, and compiled again |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
 | UniFFI-shaped API | `uniffi_mobile.rs`, `uniffi_setup.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, retained `uniffi::setup_scaffolding!()`, serde DTOs, and mobile bridge shape |
 | Real UniFFI project | `docs/real_litter_uniffi_slice_report.md` | Litter `codex-mobile-client` cloud sync and preferences slices build after pruning |

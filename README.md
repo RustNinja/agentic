@@ -2,16 +2,16 @@
 
 ## Slicer Proof
 
-This workspace is a proof-of-concept for marking one Rust function with
+This workspace is a proof-of-concept for marking one Rust root item with
 `#[opensourced]` and generating a reduced Rust workspace that keeps only the
-function-level dependency closure needed by that entry point. The intended use
+dependency closure needed by that entry point. The intended use
 case is giving a human or AI agent a small, compilable slice of a large Rust
 workspace instead of the full source tree.
 
 ## Shape
 
-- `crates/opensourced`: proc-macro crate that validates and preserves a marked
-  free function.
+- `crates/opensourced`: proc-macro crate that validates marker arguments and
+  preserves the marked item.
 - `crates/opensource_core`: `syn`-based parser, call-graph reducer, and source
   renderer.
 - `crates/opensource_cli`: command-line wrapper around `opensource_core`.
@@ -36,7 +36,9 @@ pub fn open_source_entry(value: i32) -> i32 {
 
 The reducer finds that marker, walks reachable calls and type/API references
 through the workspace, and writes a new workspace without unreachable
-implementation code, unused local crates, or unit tests.
+implementation code, unused local crates, or unit tests. Supported roots include
+free functions, impl methods, trait impl methods, and data/API items such as
+structs, enums, traits, type aliases, consts, statics, and named macros.
 
 ## Why This Is Not Proc-Macro-Only
 
@@ -101,6 +103,10 @@ with different source shapes and then run the reducer against them:
   uniffi::...)` annotations, serde workspace dependencies, object-like impl
   methods, trait calls, and an unused local diagnostics crate that must be
   removed from the slice.
+- `root_loop_matrix.rs`: a 10-root loop that checks original and sliced
+  workspaces for free functions, inherent methods, trait impl methods, enum
+  roots, trait roots, generic calls, macro calls, reexports, associated consts,
+  and nested module functions.
 
 See `docs/uniffi_slicer_experiment.md` for the UniFFI fixture rationale and
 verified result.

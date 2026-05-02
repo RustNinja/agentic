@@ -52,10 +52,25 @@ pub struct ItemRecord {
 
 #[derive(Debug, Clone)]
 pub struct ReducedProject {
-    pub root: CallableId,
+    pub root: RootId,
     pub packages: BTreeSet<String>,
     pub reachable: BTreeSet<CallableId>,
     pub reachable_items: BTreeSet<ItemId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum RootId {
+    Callable(CallableId),
+    Item(ItemId),
+}
+
+impl RootId {
+    pub fn package(&self) -> &str {
+        match self {
+            Self::Callable(callable) => callable.package(),
+            Self::Item(item) => item.package(),
+        }
+    }
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
@@ -151,6 +166,15 @@ impl fmt::Display for CallableId {
                     write!(formatter, "::{method}")
                 }
             }
+        }
+    }
+}
+
+impl fmt::Display for RootId {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Callable(callable) => write!(formatter, "{callable}"),
+            Self::Item(item) => write!(formatter, "{item}"),
         }
     }
 }
