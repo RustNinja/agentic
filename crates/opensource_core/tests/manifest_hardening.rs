@@ -530,6 +530,41 @@ fn retains_display_impls_used_only_by_format_macro() {
 }
 
 #[test]
+fn retains_display_impls_used_by_to_string_method() {
+    let workspace = temp_path("to-string-display-workspace");
+    let output = temp_path("to-string-display-output");
+    let target_dir = temp_path("to-string-display-target");
+    write_to_string_display_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let helper = read(output.join("display_helper/src/lib.rs"));
+    assert!(helper.contains("impl fmt::Display for CacheKey"));
+    assert!(helper.contains("fn fmt"));
+    assert!(!helper.contains("dead_function"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated to_string display slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ndisplay_helper/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper,
+    );
+}
+
+#[test]
 fn slices_field_receivers_fold_builders_enum_patterns_and_parse_impls() {
     let workspace = temp_path("generic-inference-workspace");
     let output = temp_path("generic-inference-output");
@@ -1747,6 +1782,77 @@ pub fn render_name(value: &str) -> String {
 
 pub fn dead_function(value: &str) -> String {
     format!("dead_{value}")
+}
+"#,
+    );
+}
+
+fn write_to_string_display_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "display_helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+display_helper = { path = "../display_helper" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use display_helper::CacheKey;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(key: CacheKey) -> String {
+    key.to_string()
+}
+"#,
+    );
+    write(
+        root.join("display_helper/Cargo.toml"),
+        r#"[package]
+name = "display_helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("display_helper/src/lib.rs"),
+        r#"use std::fmt;
+
+pub struct CacheKey {
+    pub message_id: String,
+    pub revision_token: String,
+}
+
+impl fmt::Display for CacheKey {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "{}:{}", self.message_id, self.revision_token)
+    }
+}
+
+pub fn dead_function() -> &'static str {
+    "dead"
 }
 "#,
     );

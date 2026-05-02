@@ -1510,6 +1510,8 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 {
                     self.dependencies.callables.insert(callable);
                 }
+            } else if call.method == "to_string" {
+                self.add_trait_impls_for_type_named(&receiver, "Display");
             } else if call.method == "parse" {
                 self.add_parse_method_trait_dependencies();
             }

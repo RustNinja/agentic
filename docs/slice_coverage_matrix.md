@@ -18,7 +18,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Consts/statics | root fixture, `data_items.rs`, `component_matrix.rs`, `pattern_constants.rs` | Constants/statics used in bodies, fields, associated const values, and unqualified match patterns |
 | Inherent impl methods | all integration fixtures | Associated constructors, receiver calls, async methods, generic impl blocks |
 | Trait definitions | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Trait items retained when trait impl methods are reachable |
-| Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Receiver calls, explicit `<Type as Trait>::method`, and `Trait::method(&receiver, ...)` |
+| Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Receiver calls, explicit `<Type as Trait>::method`, `Trait::method(&receiver, ...)`, format-only `Display`, and `to_string()`-required `Display` impls |
 | Trait impl peers | `component_matrix.rs` | Required peer methods and associated type/const items are retained so trait impls compile |
 | Associated types/consts | `component_matrix.rs` | Associated type and associated const dependencies are followed from retained impls |
 | External trait imports | `manifest_hardening.rs` | Extension traits such as `tokio::io::AsyncReadExt` and trait-method imports without an `Ext` suffix such as `base64::Engine` are retained |
