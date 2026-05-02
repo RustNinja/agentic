@@ -136,6 +136,121 @@ fn slices_automod_directory_modules_into_explicit_reduced_modules() {
 }
 
 #[test]
+fn slices_nested_modules_declared_from_file_modules() {
+    let workspace = temp_path("nested-file-workspace");
+    let output = temp_path("nested-file-output");
+    let target_dir = temp_path("nested-file-target");
+    write_nested_file_module_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join("nested_file_like/src/feature.rs").exists());
+    assert!(output
+        .join("nested_file_like/src/feature/nested.rs")
+        .exists());
+
+    let feature = read(output.join("nested_file_like/src/feature.rs"));
+    assert!(feature.contains("mod nested"));
+    assert!(feature.contains("pub fn selected"));
+    assert!(!feature.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated nested file module slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nfeature.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        feature,
+    );
+}
+
+#[test]
+fn slices_explicit_nested_lib_path_modules() {
+    let workspace = temp_path("explicit-lib-workspace");
+    let output = temp_path("explicit-lib-output");
+    let target_dir = temp_path("explicit-lib-target");
+    write_explicit_nested_lib_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join("explicit_lib_like/src/dump/lib.rs").exists());
+    assert!(output.join("explicit_lib_like/src/dump/client.rs").exists());
+
+    let lib = read(output.join("explicit_lib_like/src/dump/lib.rs"));
+    assert!(lib.contains("pub mod client"));
+    assert!(lib.contains("pub fn selected"));
+    assert!(!lib.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated explicit lib path slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/dump/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_return_type_methods_and_trait_impls_for_dependency_items() {
+    let workspace = temp_path("trait-return-workspace");
+    let output = temp_path("trait-return-output");
+    let target_dir = temp_path("trait-return-target");
+    write_trait_return_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let helper = read(output.join("helper_dep/src/lib.rs"));
+    assert!(helper.contains("impl Write for ByteCountWriter"));
+    assert!(helper.contains("fn count"));
+    assert!(helper.contains("fn as_some"));
+    assert!(!helper.contains("dead_method"));
+    assert!(!helper.contains("dead_function"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated trait/return slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nhelper_dep/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper,
+    );
+}
+
+#[test]
 fn rewrites_features_and_keeps_target_dependencies_and_build_script() {
     let workspace = temp_path("manifest-workspace");
     let output = temp_path("manifest-output");
@@ -336,6 +451,206 @@ fn helper() -> String {
         root.join("src/plugins/dead_slice.rs"),
         r#"pub fn dead() -> String {
     "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_nested_file_module_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "nested_file_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/main.rs"),
+        r#"mod feature;
+
+fn main() {}
+"#,
+    );
+    write(
+        root.join("src/feature.rs"),
+        r#"use opensourced::opensourced;
+
+mod nested;
+
+#[opensourced]
+pub fn selected() -> String {
+    nested::helper()
+}
+"#,
+    );
+    write(
+        root.join("src/feature/nested.rs"),
+        r#"pub fn helper() -> String {
+    "nested".to_string()
+}
+"#,
+    );
+}
+
+fn write_explicit_nested_lib_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "explicit_lib_like"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/dump/lib.rs"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/dump/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub mod client;
+
+#[opensourced]
+pub fn selected() -> String {
+    client::helper()
+}
+"#,
+    );
+    write(
+        root.join("src/dump/client.rs"),
+        r#"pub fn helper() -> String {
+    "client".to_string()
+}
+"#,
+    );
+}
+
+fn write_trait_return_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "helper_dep"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helper_dep = { path = "../helper_dep" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    let copied = helper_dep::count_copy(value).unwrap();
+    format!("{copied}:{}", helper_dep::make_fit().as_some())
+}
+"#,
+    );
+    write(
+        root.join("helper_dep/Cargo.toml"),
+        r#"[package]
+name = "helper_dep"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("helper_dep/src/lib.rs"),
+        r#"use std::io::{self, Write};
+
+#[derive(Default)]
+pub struct ByteCountWriter(usize);
+
+impl ByteCountWriter {
+    pub fn count(self) -> usize {
+        self.0
+    }
+
+    pub fn dead_method(self) -> usize {
+        999
+    }
+}
+
+impl Write for ByteCountWriter {
+    fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+        self.0 += buf.len();
+        Ok(buf.len())
+    }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+}
+
+pub enum Fit {
+    All,
+    None,
+}
+
+impl Fit {
+    pub fn as_some(&self) -> bool {
+        matches!(self, Self::All)
+    }
+
+    pub fn dead_method(&self) -> bool {
+        false
+    }
+}
+
+pub fn count_copy(value: &str) -> io::Result<usize> {
+    let mut reader = value.as_bytes();
+    let mut writer = ByteCountWriter::default();
+    io::copy(&mut reader, &mut writer)?;
+    Ok(writer.count())
+}
+
+pub fn make_fit() -> Fit {
+    Fit::All
+}
+
+pub fn dead_function() -> usize {
+    42
 }
 "#,
     );

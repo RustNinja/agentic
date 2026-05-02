@@ -45,7 +45,7 @@ pub fn write_reduced_workspace(
         )?;
         files_written += 1;
 
-        if let Some(build_script) = build_script_path(package) {
+        if let Some(build_script) = build_script_to_render(project, reduced, package) {
             let relative_path = build_script.strip_prefix(&package.root)?;
             let output_path = package_output.join(relative_path);
             if let Some(parent) = output_path.parent() {
@@ -101,6 +101,41 @@ fn build_script_path(package: &Package) -> Option<PathBuf> {
             path.exists().then_some(path)
         }
     }
+}
+
+fn build_script_to_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &Package,
+) -> Option<PathBuf> {
+    build_script_should_render(project, reduced, package).then(|| build_script_path(package))?
+}
+
+fn build_script_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &Package,
+) -> bool {
+    let Some(build_script) = build_script_path(package) else {
+        return false;
+    };
+    if build_script_is_uniffi_only(&build_script)
+        && !package_rendered_sources_mention_ident(project, reduced, &package.name, "uniffi")
+    {
+        return false;
+    }
+    true
+}
+
+fn build_script_is_uniffi_only(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|text| syn::parse_file(&text).ok())
+        .is_some_and(|syntax| {
+            let tokens = syntax.to_token_stream();
+            token_stream_mentions_ident(&tokens, "uniffi")
+                && token_stream_mentions_ident(&tokens, "generate_scaffolding")
+        })
 }
 
 fn is_binary_entry_source(source: &SourceFile) -> bool {
@@ -359,7 +394,7 @@ fn write_package_manifest(
         manifest.insert("dependencies".to_string(), Value::Table(dependencies));
     }
 
-    if build_script_path(package).is_some() {
+    if build_script_should_render(project, reduced, package) {
         let build_dependencies = transformed_dependencies(
             project,
             reduced,
@@ -436,12 +471,13 @@ fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) 
             continue;
         };
         for (table_name, table) in package_dependency_tables(package) {
-            let retention =
-                if table_name == "build-dependencies" && build_script_path(package).is_some() {
-                    DependencyRetention::BuildScript
-                } else {
-                    DependencyRetention::SourceMentioned
-                };
+            let retention = if table_name == "build-dependencies"
+                && build_script_should_render(project, reduced, package)
+            {
+                DependencyRetention::BuildScript
+            } else {
+                DependencyRetention::SourceMentioned
+            };
 
             for (alias, value) in table {
                 let dependency_package = dependency_package_name(alias, value);
@@ -611,11 +647,30 @@ fn package_mentions_dependency(
     dependency_alias: &str,
 ) -> bool {
     let code_name = dependency_code_name(dependency_alias);
+    package_rendered_sources(project, reduced, package_name)
+        .any(|file| file_mentions_dependency(&file, dependency_alias, &code_name))
+}
+
+fn package_rendered_sources_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package_name: &str,
+    ident: &str,
+) -> bool {
+    package_rendered_sources(project, reduced, package_name)
+        .any(|file| token_stream_mentions_ident(&file.to_token_stream(), ident))
+}
+
+fn package_rendered_sources<'a>(
+    project: &'a Project,
+    reduced: &'a ReducedProject,
+    package_name: &'a str,
+) -> impl Iterator<Item = syn::File> + 'a {
     project
         .files
         .values()
-        .filter(|source| source.package == package_name)
-        .filter(|source| {
+        .filter(move |source| source.package == package_name)
+        .filter(move |source| {
             module_should_render(project, reduced, &source.package, &source.module_path)
         })
         .map(|source| {
@@ -627,18 +682,60 @@ fn package_mentions_dependency(
                 &source.syntax,
             )
         })
-        .any(|file| file_mentions_dependency(&file, dependency_alias, &code_name))
 }
 
 fn file_mentions_dependency(file: &syn::File, alias: &str, code_name: &str) -> bool {
     let tokens = file.to_token_stream();
-    token_stream_mentions_ident(&tokens, code_name)
+    token_stream_mentions_path_root(&tokens, code_name)
+        || file_use_tree_starts_with(file, code_name)
+        || (alias != code_name
+            && (token_stream_mentions_path_root(&tokens, alias)
+                || file_use_tree_starts_with(file, alias)))
         || known_macro_dependency_mentions(&tokens, alias, code_name)
+}
+
+fn token_stream_mentions_path_root(tokens: &TokenStream, ident: &str) -> bool {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            if token_stream_mentions_path_root(&group.stream(), ident) {
+                return true;
+            }
+        }
+    }
+
+    token_trees.windows(3).any(|window| {
+        matches!(&window[0], TokenTree::Ident(candidate) if candidate == ident)
+            && matches!(&window[1], TokenTree::Punct(punct) if punct.as_char() == ':')
+            && matches!(&window[2], TokenTree::Punct(punct) if punct.as_char() == ':')
+    })
+}
+
+fn file_use_tree_starts_with(file: &syn::File, ident: &str) -> bool {
+    file.items.iter().any(|item| {
+        let Item::Use(item_use) = item else {
+            return false;
+        };
+        use_tree_starts_with(&item_use.tree, ident)
+    })
+}
+
+fn use_tree_starts_with(tree: &UseTree, ident: &str) -> bool {
+    match tree {
+        UseTree::Path(path) => path.ident == ident || use_tree_starts_with(&path.tree, ident),
+        UseTree::Name(name) => name.ident == ident,
+        UseTree::Rename(rename) => rename.ident == ident,
+        UseTree::Group(group) => group
+            .items
+            .iter()
+            .any(|item| use_tree_starts_with(item, ident)),
+        UseTree::Glob(_) => false,
+    }
 }
 
 fn known_macro_dependency_mentions(tokens: &TokenStream, alias: &str, code_name: &str) -> bool {
     match code_name {
-        "serde" => {
+        "serde" | "serde_derive" => {
             token_stream_mentions_ident(tokens, "Serialize")
                 || token_stream_mentions_ident(tokens, "Deserialize")
                 || token_stream_mentions_ident(tokens, "serde")
@@ -666,8 +763,50 @@ fn known_macro_dependency_mentions(tokens: &TokenStream, alias: &str, code_name:
     }
 }
 
+fn known_macro_dependency_package_mentions(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    code_name: &str,
+) -> bool {
+    match code_name {
+        "serde" | "serde_derive" => {
+            reachable_package_mentions_ident(project, reduced, package, "Serialize")
+                || reachable_package_mentions_ident(project, reduced, package, "Deserialize")
+                || reachable_package_mentions_ident(project, reduced, package, "serde")
+        }
+        "thiserror" => {
+            reachable_package_mentions_ident(project, reduced, package, "Error")
+                && reachable_package_mentions_ident(project, reduced, package, "error")
+        }
+        "uniffi" => {
+            reachable_package_mentions_ident(project, reduced, package, "Record")
+                || reachable_package_mentions_ident(project, reduced, package, "Object")
+                || reachable_package_mentions_ident(project, reduced, package, "Enum")
+                || reachable_package_mentions_ident(project, reduced, package, "Error")
+                || reachable_package_mentions_ident(project, reduced, package, "export")
+        }
+        "clap" => {
+            reachable_package_mentions_ident(project, reduced, package, "Parser")
+                || reachable_package_mentions_ident(project, reduced, package, "Subcommand")
+                || reachable_package_mentions_ident(project, reduced, package, "Args")
+                || reachable_package_mentions_ident(project, reduced, package, "ValueEnum")
+                || reachable_package_mentions_ident(project, reduced, package, "command")
+                || reachable_package_mentions_ident(project, reduced, package, "arg")
+        }
+        _ => false,
+    }
+}
+
 fn dependency_code_name(alias: &str) -> String {
     alias.replace('-', "_")
+}
+
+fn dependency_name_matches(dependency: &crate::manifest::Dependency, name: &str) -> bool {
+    dependency.alias == name
+        || dependency.package == name
+        || dependency_code_name(&dependency.alias) == name
+        || dependency_code_name(&dependency.package) == name
 }
 
 fn token_stream_mentions_ident(tokens: &TokenStream, ident: &str) -> bool {
@@ -1067,10 +1206,21 @@ fn should_retain_macro_invocation(
     package: &str,
     item_macro: &syn::ItemMacro,
 ) -> bool {
-    item_macro.ident.is_none()
-        && ((macro_path_ends_with(&item_macro.mac.path, "setup_scaffolding")
-            && reachable_package_mentions_ident(project, reduced, package, "uniffi"))
-            || macro_invocation_feeds_reachable_code(project, reduced, package, item_macro))
+    if item_macro.ident.is_some() {
+        return false;
+    }
+
+    let is_uniffi = macro_path_starts_with(&item_macro.mac.path, "uniffi");
+    let is_uniffi_scaffolding = macro_path_ends_with(&item_macro.mac.path, "setup_scaffolding")
+        || macro_path_ends_with(&item_macro.mac.path, "include_scaffolding");
+    if is_uniffi_scaffolding {
+        return reachable_package_mentions_ident(project, reduced, package, "uniffi");
+    }
+    if is_uniffi && !reachable_package_mentions_ident(project, reduced, package, "uniffi") {
+        return false;
+    }
+
+    macro_invocation_feeds_reachable_code(project, reduced, package, item_macro)
 }
 
 fn retained_macro_definitions_for_generated_items(
@@ -1180,6 +1330,23 @@ fn macro_generated_reference_candidate(ident: &str) -> bool {
             | "use"
             | "where"
             | "while"
+            | "bool"
+            | "char"
+            | "str"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "f32"
+            | "f64"
             | "String"
             | "Vec"
             | "Result"
@@ -1196,6 +1363,12 @@ fn macro_path_ends_with(path: &syn::Path, name: &str) -> bool {
         .is_some_and(|segment| segment.ident == name)
 }
 
+fn macro_path_starts_with(path: &syn::Path, name: &str) -> bool {
+    path.segments
+        .first()
+        .is_some_and(|segment| segment.ident == name)
+}
+
 fn reachable_package_mentions_ident(
     project: &Project,
     reduced: &ReducedProject,
@@ -1207,6 +1380,9 @@ fn reachable_package_mentions_ident(
         .iter()
         .filter(|callable| callable.package() == package)
         .any(|callable| {
+            if callable_mentions_ident(callable, ident) {
+                return true;
+            }
             project.functions.get(callable).is_some_and(|record| {
                 token_stream_mentions_ident(&record.item.to_token_stream(), ident)
             }) || project.methods.get(callable).is_some_and(|record| {
@@ -1222,6 +1398,26 @@ fn reachable_package_mentions_ident(
                     token_stream_mentions_ident(&record.item.to_token_stream(), ident)
                 })
             })
+}
+
+fn callable_mentions_ident(callable: &CallableId, ident: &str) -> bool {
+    match callable {
+        CallableId::Free {
+            module_path, name, ..
+        } => name == ident || module_path.iter().any(|segment| segment == ident),
+        CallableId::Method {
+            type_path,
+            trait_path,
+            method,
+            ..
+        } => {
+            method == ident
+                || type_path.iter().any(|segment| segment == ident)
+                || trait_path
+                    .as_ref()
+                    .is_some_and(|path| path.iter().any(|segment| segment == ident))
+        }
+    }
 }
 
 fn strip_opensourced_attrs(attrs: &mut Vec<syn::Attribute>) {
@@ -1311,8 +1507,10 @@ fn prune_use_tree(
         }
         UseTree::Rename(rename) => {
             prefix.push(rename.ident.to_string());
-            (!use_target_should_drop(project, reduced, package, module_path, &prefix))
-                .then(|| UseTree::Rename(rename.clone()))
+            let alias = rename.rename.to_string();
+            (!use_target_should_drop(project, reduced, package, module_path, &prefix)
+                || reachable_package_mentions_ident(project, reduced, package, &alias))
+            .then(|| UseTree::Rename(rename.clone()))
         }
         UseTree::Group(group) => {
             let mut group = group.clone();
@@ -1350,7 +1548,14 @@ fn use_target_should_drop(
         .first()
         .is_some_and(|first| use_name_is_external_dependency(project, package, first))
     {
-        return false;
+        return external_use_target_should_drop(project, reduced, package, target);
+    }
+
+    if target
+        .first()
+        .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
+    {
+        return external_use_target_should_drop(project, reduced, package, target);
     }
 
     let Some((target_package, target_path)) =
@@ -1400,7 +1605,14 @@ fn use_prefix_should_drop(
         .first()
         .is_some_and(|first| use_name_is_external_dependency(project, package, first))
     {
-        return false;
+        return external_use_target_should_drop(project, reduced, package, prefix);
+    }
+
+    if prefix
+        .first()
+        .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
+    {
+        return external_use_target_should_drop(project, reduced, package, prefix);
     }
 
     resolve_use_target_path(project, package, module_path, prefix).is_some_and(
@@ -1409,6 +1621,38 @@ fn use_prefix_should_drop(
                 && !module_should_render(project, reduced, &target_package, &target_path)
         },
     )
+}
+
+fn external_use_target_should_drop(
+    project: &Project,
+    reduced: &ReducedProject,
+    _package: &str,
+    target: &[String],
+) -> bool {
+    if target.first().is_some_and(|first| {
+        known_macro_dependency_package_mentions(
+            project,
+            reduced,
+            _package,
+            &dependency_code_name(first),
+        )
+    }) {
+        return false;
+    }
+
+    let Some(leaf) = external_use_leaf(target) else {
+        return false;
+    };
+
+    !reachable_package_mentions_ident(project, reduced, _package, leaf)
+}
+
+fn external_use_leaf(target: &[String]) -> Option<&str> {
+    let leaf = target.last()?;
+    if leaf == "self" && target.len() >= 2 {
+        return target.get(target.len() - 2).map(String::as_str);
+    }
+    Some(leaf)
 }
 
 fn use_ident_is_pruned_local_dependency(
@@ -1431,7 +1675,7 @@ fn use_name_is_pruned_local_dependency(
         return false;
     };
     package_record.dependencies.iter().any(|dependency| {
-        (dependency.alias == name || dependency.package == name)
+        dependency_name_matches(dependency, name)
             && project.workspace.packages.contains_key(&dependency.package)
             && !reduced.packages.contains(&dependency.package)
     })
@@ -1442,7 +1686,7 @@ fn use_name_is_external_dependency(project: &Project, package: &str, name: &str)
         return false;
     };
     package_record.dependencies.iter().any(|dependency| {
-        (dependency.alias == name || dependency.package == name)
+        dependency_name_matches(dependency, name)
             && !project.workspace.packages.contains_key(&dependency.package)
     })
 }
@@ -1473,7 +1717,7 @@ fn resolve_use_target_path(
                 if let Some(dependency) = package_record
                     .dependencies
                     .iter()
-                    .find(|dependency| dependency.alias == name || dependency.package == name)
+                    .find(|dependency| dependency_name_matches(dependency, name))
                 {
                     if project.workspace.packages.contains_key(&dependency.package) {
                         return Some((dependency.package.clone(), target[1..].to_vec()));

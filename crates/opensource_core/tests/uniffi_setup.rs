@@ -43,6 +43,37 @@ fn retains_uniffi_setup_scaffolding_for_exported_surface() {
     );
 }
 
+#[test]
+fn drops_uniffi_scaffolding_for_plain_rust_custom_type_slice() {
+    let workspace = temp_path("custom-type-workspace");
+    let output = temp_path("custom-type-output");
+    write_custom_type_fixture_workspace(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(
+        source.contains("pub struct ApiTimestamp"),
+        "reachable Rust type should remain:\n{source}",
+    );
+    assert!(
+        !source.contains("uniffi::custom_type!"),
+        "plain Rust slices should not retain UniFFI-only custom type macros:\n{source}",
+    );
+    assert!(
+        !source.contains("uniffi::include_scaffolding!"),
+        "plain Rust slices should not retain full UDL scaffolding:\n{source}",
+    );
+    assert!(
+        !source.contains("DeadTimestamp"),
+        "dead custom types should still be pruned:\n{source}",
+    );
+}
+
 fn write_fixture_workspace(root: &Path) {
     if root.exists() {
         fs::remove_dir_all(root).unwrap();
@@ -99,6 +130,67 @@ pub fn dead_value() -> String {
 }
 
 uniffi::setup_scaffolding!();
+"#,
+    );
+}
+
+fn write_custom_type_fixture_workspace(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+uniffi = "0.31.0"
+"#,
+    );
+
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub struct ApiTimestamp(pub u64);
+
+pub struct DeadTimestamp(pub u64);
+
+#[opensourced]
+pub fn selected_timestamp() -> ApiTimestamp {
+    ApiTimestamp(1)
+}
+
+uniffi::custom_type!(ApiTimestamp, i64, {
+    lower: |obj| obj.0 as i64,
+    try_lift: |value| Ok(Self(value as u64)),
+});
+
+uniffi::include_scaffolding!("app");
+
+uniffi::custom_type!(DeadTimestamp, i64, {
+    lower: |obj| obj.0 as i64,
+    try_lift: |value| Ok(Self(value as u64)),
+});
 "#,
     );
 }

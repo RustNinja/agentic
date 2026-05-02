@@ -28,11 +28,16 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
 
     for package in workspace.packages.values() {
         if package.lib_path.exists() {
+            let module_dir = package
+                .lib_path
+                .parent()
+                .ok_or_else(|| format!("package {} source path has no parent", package.name))?
+                .to_path_buf();
             parser.parse_file(
                 &package.name,
                 Vec::new(),
                 &package.lib_path,
-                &package.root.join("src"),
+                &module_dir,
                 &package.root,
             )?;
         }
@@ -254,15 +259,17 @@ impl Parser {
         let file_path = module_dir.join(format!("{name}.rs"));
         let mod_path = module_dir.join(&name).join("mod.rs");
         let (next_file, next_dir) = if file_path.exists() {
-            let dir = file_path
-                .parent()
-                .expect("module file should have a parent")
-                .to_path_buf();
-            (file_path, dir)
+            (file_path, module_dir.join(&name))
         } else if mod_path.exists() {
             (mod_path, module_dir.join(&name))
         } else {
-            return Err(format!("module {name} has no matching source file").into());
+            return Err(format!(
+                "module {name} has no matching source file in package {package} at {} (looked for {} and {})",
+                module_dir.display(),
+                file_path.display(),
+                mod_path.display()
+            )
+            .into());
         };
 
         let mut child_path = module_path.to_vec();
