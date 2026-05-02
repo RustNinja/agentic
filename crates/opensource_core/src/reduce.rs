@@ -175,6 +175,7 @@ fn item_has_opensourced_attr(item: &Item) -> bool {
         Item::Const(item) => &item.attrs,
         Item::Enum(item) => &item.attrs,
         Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
         Item::Static(item) => &item.attrs,
         Item::Struct(item) => &item.attrs,
         Item::Trait(item) => &item.attrs,
@@ -824,6 +825,10 @@ fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
         return DependencySet::default();
     };
 
+    if item.kind == ItemKind::Mod {
+        return module_root_dependencies(project, item);
+    }
+
     let resolver = Resolver {
         project,
         package: &record.package,
@@ -835,6 +840,42 @@ fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
     visitor.visit_item(&record.item);
     visitor.dependencies.items.remove(item);
     visitor.dependencies
+}
+
+fn module_root_dependencies(project: &Project, item: &ItemId) -> DependencySet {
+    let mut module_path = item.module_path.clone();
+    module_path.push(item.name.clone());
+    let mut dependencies = DependencySet::default();
+
+    dependencies.callables.extend(
+        project
+            .functions
+            .iter()
+            .filter(|(_, record)| {
+                record.package == item.package && path_has_prefix(&record.module_path, &module_path)
+            })
+            .map(|(id, _)| id.clone()),
+    );
+    dependencies.callables.extend(
+        project
+            .methods
+            .iter()
+            .filter(|(id, record)| {
+                id.package() == item.package && path_has_prefix(&record.module_path, &module_path)
+            })
+            .map(|(id, _)| id.clone()),
+    );
+    dependencies.items.extend(
+        project
+            .items
+            .keys()
+            .filter(|id| {
+                id.package == item.package && path_has_prefix(&id.module_path, &module_path)
+            })
+            .cloned(),
+    );
+
+    dependencies
 }
 
 #[derive(Default)]

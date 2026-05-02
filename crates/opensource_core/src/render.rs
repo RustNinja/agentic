@@ -1408,6 +1408,7 @@ fn transform_items(
             }
             Item::Mod(item_mod) => {
                 let mut item_mod = item_mod.clone();
+                strip_opensourced_attrs(&mut item_mod.attrs);
                 let mut child_path = module_path.to_vec();
                 child_path.push(item_mod.ident.to_string());
                 if module_contains_root(project, reduced, package, &child_path) {
@@ -1464,7 +1465,7 @@ fn module_contains_root(
             }
         },
         RootId::Item(item) => {
-            item.package == package && path_has_prefix(&item.module_path, module_path)
+            item.package == package && path_has_prefix(&path_from_item(item), module_path)
         }
     })
 }
@@ -1514,6 +1515,7 @@ fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId>
         Item::Union(item) => (item.ident.to_string(), ItemKind::Union),
         Item::Type(item) => (item.ident.to_string(), ItemKind::Type),
         Item::Trait(item) => (item.ident.to_string(), ItemKind::Trait),
+        Item::Mod(item) => (item.ident.to_string(), ItemKind::Mod),
         Item::Const(item) => (item.ident.to_string(), ItemKind::Const),
         Item::Static(item) => (item.ident.to_string(), ItemKind::Static),
         Item::Macro(item) => (item.ident.as_ref()?.to_string(), ItemKind::Macro),
@@ -1526,6 +1528,12 @@ fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId>
         name,
         kind,
     })
+}
+
+fn path_from_item(item: &ItemId) -> Vec<String> {
+    let mut path = item.module_path.clone();
+    path.push(item.name.clone());
+    path
 }
 
 fn automod_macro_has_reduced_modules(
@@ -1964,6 +1972,7 @@ fn strip_opensourced_attrs_from_item(item: &mut Item) {
         Item::Const(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Enum(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Macro(item) => strip_opensourced_attrs(&mut item.attrs),
+        Item::Mod(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Static(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Struct(item) => strip_opensourced_attrs(&mut item.attrs),
         Item::Trait(item) => strip_opensourced_attrs(&mut item.attrs),

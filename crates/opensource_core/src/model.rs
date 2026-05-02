@@ -119,6 +119,7 @@ pub enum ItemKind {
     Union,
     Type,
     Trait,
+    Mod,
     Const,
     Static,
     Macro,

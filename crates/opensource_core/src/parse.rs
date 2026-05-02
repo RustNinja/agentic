@@ -184,6 +184,21 @@ impl Parser {
                     }
                 }
                 Item::Mod(item_mod) => {
+                    let id = ItemId {
+                        package: package.to_string(),
+                        module_path: module_path.to_vec(),
+                        name: item_mod.ident.to_string(),
+                        kind: ItemKind::Mod,
+                    };
+                    self.items.insert(
+                        id,
+                        ItemRecord {
+                            package: package.to_string(),
+                            module_path: module_path.to_vec(),
+                            item: item.clone(),
+                            aliases: aliases.clone(),
+                        },
+                    );
                     if let Some((_, items)) = &item_mod.content {
                         let mut child_path = module_path.to_vec();
                         child_path.push(item_mod.ident.to_string());
@@ -361,6 +376,7 @@ fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
         Item::Union(item) => Some((item.ident.to_string(), ItemKind::Union)),
         Item::Type(item) => Some((item.ident.to_string(), ItemKind::Type)),
         Item::Trait(item) => Some((item.ident.to_string(), ItemKind::Trait)),
+        Item::Mod(item) => Some((item.ident.to_string(), ItemKind::Mod)),
         Item::Const(item) => Some((item.ident.to_string(), ItemKind::Const)),
         Item::Static(item) => Some((item.ident.to_string(), ItemKind::Static)),
         Item::Macro(item) => item

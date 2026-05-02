@@ -163,6 +163,52 @@ fn slices_marked_data_item_roots() {
 }
 
 #[test]
+fn slices_marked_module_roots() {
+    let workspace = temp_path("module-root-workspace");
+    let output = temp_path("module-root-output");
+    let target_dir = temp_path("module-root-target");
+    write_module_root_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let roots = report
+        .roots
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(roots, ["module_root_like::api(Mod)"]);
+
+    let source = read(output.join("module_root_like/src/lib.rs"));
+    assert!(source.contains("pub mod api"));
+    assert!(source.contains("pub struct Request"));
+    assert!(source.contains("pub enum Mode"));
+    assert!(source.contains("pub fn run"));
+    assert!(source.contains("fn helper"));
+    assert!(!source.contains("pub mod dead"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated module-root slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn slices_binary_child_module_with_generated_items_and_pruned_stub_imports() {
     let workspace = temp_path("child-binary-workspace");
     let output = temp_path("child-binary-output");
@@ -1682,6 +1728,61 @@ pub struct Dead;
 
 pub fn dead_factory() -> Dead {
     Dead
+}
+"#,
+    );
+}
+
+fn write_module_root_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "module_root_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub mod api {
+    pub struct Request {
+        pub mode: Mode,
+    }
+
+    pub enum Mode {
+        Read,
+        Write,
+    }
+
+    pub fn run(request: Request) -> usize {
+        helper(request.mode)
+    }
+
+    fn helper(mode: Mode) -> usize {
+        match mode {
+            Mode::Read => 1,
+            Mode::Write => 2,
+        }
+    }
+}
+
+pub mod dead {
+    pub fn unused() -> usize {
+        0
+    }
 }
 "#,
     );
