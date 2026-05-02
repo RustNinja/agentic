@@ -499,6 +499,7 @@ fn rewrites_features_and_keeps_target_dependencies_and_build_script() {
     assert!(!app_manifest.contains("dead_dep"));
     assert!(!app_manifest.contains("dep:dead_dep"));
     assert!(!app_manifest.contains("dead_dep?/extra"));
+    assert!(!app_manifest.contains("dev_only/std"));
     assert!(output.join("app/build.rs").exists());
     assert!(output.join("app/assets/required.txt").exists());
     assert!(!output.join("app/docs/noise.md").exists());
@@ -517,6 +518,99 @@ fn rewrites_features_and_keeps_target_dependencies_and_build_script() {
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         app_manifest,
+    );
+}
+
+#[test]
+fn removes_test_and_runtime_benchmark_cfg_modules() {
+    let workspace = temp_path("cfg-benchmark-workspace");
+    let output = temp_path("cfg-benchmark-output");
+    let target_dir = temp_path("cfg-benchmark-target");
+    write_cfg_benchmark_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(source.contains("pub fn selected"));
+    assert!(source.contains("mod live"));
+    assert!(!source.contains("runtime-benchmarks"));
+    assert!(!source.contains("mod benchmarks"));
+    assert!(!output.join("app/src/benchmarks.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated cfg benchmark slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn resolves_associated_methods_across_crate_root_reexports() {
+    let workspace = temp_path("reexport-method-workspace");
+    let output = temp_path("reexport-method-output");
+    let target_dir = temp_path("reexport-method-target");
+    write_reexport_method_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let reachable = report
+        .reachable
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        reachable
+            .iter()
+            .any(|callable| callable == "app::inner::Service::selected"),
+        "missing selected method; got {reachable:?}",
+    );
+    assert!(
+        reachable
+            .iter()
+            .any(|callable| callable == "app::Service::helper"),
+        "missing helper method through crate-root reexport; got {reachable:?}",
+    );
+
+    let lib = read(output.join("app/src/lib.rs"));
+    let inner = read(output.join("app/src/inner.rs"));
+    let impls = read(output.join("app/src/impls.rs"));
+    assert!(lib.contains("mod impls"));
+    assert!(inner.contains("pub fn selected"));
+    assert!(impls.contains("pub fn helper"));
+    assert!(!impls.contains("dead_helper"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated reexport method slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nimpls.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        impls,
     );
 }
 
@@ -1465,7 +1559,7 @@ build = "build.rs"
 
 [features]
 default = ["dep:dead_dep", "dep:live_dep"]
-ffi = ["dep:live_dep", "dead_dep?/extra", "custom-flag"]
+ffi = ["dep:live_dep", "dead_dep?/extra", "dev_only/std", "custom-flag"]
 custom-flag = []
 
 [dependencies]
@@ -1475,6 +1569,9 @@ opensourced.workspace = true
 
 [target.'cfg(unix)'.dependencies]
 platform_dep = { path = "../platform_dep" }
+
+[dev-dependencies]
+dev_only = { path = "../dead_dep" }
 "#,
     );
     write(
@@ -1531,6 +1628,136 @@ pub fn platform() -> String {
         r#"
 pub fn dead() -> String {
     "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_cfg_benchmark_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+runtime-benchmarks = []
+
+[dependencies]
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[cfg(any(test, feature = "runtime-benchmarks"))]
+mod benchmarks;
+mod live;
+
+#[opensourced]
+pub fn selected() -> u32 {
+    live::value()
+}
+"#,
+    );
+    write(
+        root.join("app/src/live.rs"),
+        r#"pub fn value() -> u32 {
+    7
+}
+"#,
+    );
+    write(
+        root.join("app/src/benchmarks.rs"),
+        r#"pub fn set_timestamp() -> u64 {
+    42
+}
+"#,
+    );
+}
+
+fn write_reexport_method_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"mod impls;
+mod inner;
+
+pub use inner::*;
+"#,
+    );
+    write(
+        root.join("app/src/inner.rs"),
+        r#"use opensourced::opensourced;
+
+pub struct Service;
+
+impl Service {
+    #[opensourced]
+    pub fn selected() -> u32 {
+        Service::helper()
+    }
+}
+"#,
+    );
+    write(
+        root.join("app/src/impls.rs"),
+        r#"use crate::Service;
+
+impl Service {
+    pub fn helper() -> u32 {
+        11
+    }
+
+    pub fn dead_helper() -> u32 {
+        99
+    }
 }
 "#,
     );

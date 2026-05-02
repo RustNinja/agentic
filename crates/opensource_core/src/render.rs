@@ -860,10 +860,7 @@ fn package_dependency_tables(package: &Package) -> Vec<(&str, &Table)> {
 
 fn transformed_features(package: &Package, retained_aliases: &BTreeSet<String>) -> Option<Value> {
     let features = package.manifest.get("features")?.as_table()?;
-    let source_aliases = package_dependency_tables(package)
-        .into_iter()
-        .flat_map(|(_, table)| table.keys().cloned())
-        .collect::<BTreeSet<_>>();
+    let source_aliases = package_dependency_aliases(package);
 
     let mut transformed = Table::new();
     for (feature_name, value) in features {
@@ -884,6 +881,28 @@ fn transformed_features(package: &Package, retained_aliases: &BTreeSet<String>) 
     }
 
     Some(Value::Table(transformed))
+}
+
+fn package_dependency_aliases(package: &Package) -> BTreeSet<String> {
+    let mut aliases = BTreeSet::new();
+    for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        if let Some(table) = package.manifest.get(table_name).and_then(Value::as_table) {
+            aliases.extend(table.keys().cloned());
+        }
+    }
+    if let Some(targets) = package.manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                if let Some(table) = target.get(table_name).and_then(Value::as_table) {
+                    aliases.extend(table.keys().cloned());
+                }
+            }
+        }
+    }
+    aliases
 }
 
 fn feature_reference_should_remain(

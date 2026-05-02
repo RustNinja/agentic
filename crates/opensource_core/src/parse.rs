@@ -15,6 +15,7 @@ use crate::{
     model::{
         CallableId, FunctionRecord, ItemId, ItemKind, ItemRecord, MethodRecord, Project, SourceFile,
     },
+    reduce::is_cfg_test_attr,
 };
 
 pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::error::Error>> {
@@ -345,16 +346,6 @@ fn is_automod_dir_macro(path: &syn::Path) -> bool {
         (segments.next().as_deref(), segments.next().as_deref()),
         (Some("automod"), Some("dir"))
     )
-}
-
-fn is_cfg_test_attr(attribute: &syn::Attribute) -> bool {
-    if !attribute.path().is_ident("cfg") {
-        return false;
-    }
-
-    attribute
-        .parse_args::<syn::Ident>()
-        .is_ok_and(|ident| ident == "test")
 }
 
 fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {

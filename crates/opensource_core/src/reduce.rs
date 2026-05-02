@@ -6,7 +6,7 @@ use syn::{
     parse::Parser,
     visit::{self, Visit},
     Expr, ExprCall, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, FnArg, GenericArgument,
-    ImplItem, ItemMacro, Local, Macro, Member, Pat, PatTupleStruct, Path, PathArguments,
+    ImplItem, ItemMacro, Local, Macro, Member, Meta, Pat, PatTupleStruct, Path, PathArguments,
     ReturnType, Type, TypePath,
 };
 
@@ -140,8 +140,31 @@ pub fn is_cfg_test_attr(attribute: &syn::Attribute) -> bool {
     }
 
     attribute
-        .parse_args::<syn::Ident>()
-        .is_ok_and(|ident| ident == "test")
+        .parse_args::<Meta>()
+        .is_ok_and(|meta| cfg_meta_is_excluded(&meta))
+}
+
+fn cfg_meta_is_excluded(meta: &Meta) -> bool {
+    match meta {
+        Meta::Path(path) => path.is_ident("test"),
+        Meta::NameValue(name_value) => {
+            name_value.path.is_ident("feature")
+                && matches!(
+                    &name_value.value,
+                    Expr::Lit(expr_lit)
+                        if matches!(&expr_lit.lit, syn::Lit::Str(lit) if lit.value() == "runtime-benchmarks")
+                )
+        }
+        Meta::List(list) => {
+            if list.path.is_ident("not") {
+                return false;
+            }
+            let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
+            parser
+                .parse2(list.tokens.clone())
+                .is_ok_and(|nested| nested.iter().any(cfg_meta_is_excluded))
+        }
+    }
 }
 
 fn package_closure(project: &Project, root: &str) -> BTreeSet<String> {
@@ -1536,9 +1559,37 @@ impl Resolver<'_> {
             if let Some(alias_target) = self.type_alias_target(&candidate) {
                 queue.push_back(alias_target);
             }
+            if let Some(reexport_target) = self.crate_root_reexport_method_candidate(&candidate) {
+                queue.push_back(reexport_target);
+            }
             candidates.push(candidate);
         }
         candidates
+    }
+
+    fn crate_root_reexport_method_candidate(&self, type_ref: &TypeRef) -> Option<TypeRef> {
+        if type_ref.type_path.len() <= 1 {
+            return None;
+        }
+        let leaf = type_ref.type_path.last()?.clone();
+        let candidate = TypeRef {
+            package: type_ref.package.clone(),
+            type_path: vec![leaf],
+        };
+        self.project
+            .methods
+            .keys()
+            .any(|id| {
+                matches!(
+                    id,
+                    CallableId::Method {
+                        package,
+                        type_path,
+                        ..
+                    } if package == &candidate.package && type_path == &candidate.type_path
+                )
+            })
+            .then_some(candidate)
     }
 
     fn type_alias_target(&self, type_ref: &TypeRef) -> Option<TypeRef> {
