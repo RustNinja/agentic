@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use proc_macro2::{Span, TokenStream, TokenTree};
+use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::{parse_quote, ImplItem, Item, Type, UseTree};
 use toml::{value::Table, Value};
@@ -972,14 +972,8 @@ fn transform_items(
                 })
             }
             Item::Macro(item_macro) if is_automod_dir_macro(&item_macro.mac.path) => {
-                transformed.extend(automod_reduced_modules(
-                    project,
-                    reduced,
-                    package,
-                    module_path,
-                    item_macro,
-                ));
-                continue;
+                automod_macro_has_reduced_modules(project, reduced, package, module_path)
+                    .then(|| Item::Macro(item_macro.clone()))
             }
             Item::Macro(item_macro)
                 if macro_definition_should_remain(item_macro, &retained_macro_definitions) =>
@@ -1143,50 +1137,19 @@ fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId>
     })
 }
 
-fn automod_reduced_modules(
+fn automod_macro_has_reduced_modules(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
     module_path: &[String],
-    item_macro: &syn::ItemMacro,
-) -> Vec<Item> {
-    let mut modules = project
+) -> bool {
+    project
         .files
         .values()
         .filter(|source| source.package == package)
         .filter(|source| source.module_path.len() == module_path.len() + 1)
         .filter(|source| path_has_prefix(&source.module_path, module_path))
-        .filter(|source| module_should_render(project, reduced, package, &source.module_path))
-        .filter_map(|source| source.module_path.last().cloned())
-        .collect::<Vec<_>>();
-    modules.sort();
-    modules.dedup();
-
-    let public = automod_macro_is_public(item_macro);
-    modules
-        .iter()
-        .map(|module| {
-            let ident = syn::Ident::new(module, Span::call_site());
-            if public {
-                parse_quote! {
-                    pub mod #ident;
-                }
-            } else {
-                parse_quote! {
-                    mod #ident;
-                }
-            }
-        })
-        .collect()
-}
-
-fn automod_macro_is_public(item_macro: &syn::ItemMacro) -> bool {
-    item_macro
-        .mac
-        .tokens
-        .clone()
-        .into_iter()
-        .any(|token| matches!(token, TokenTree::Ident(ident) if ident == "pub"))
+        .any(|source| module_should_render(project, reduced, package, &source.module_path))
 }
 
 fn is_automod_dir_macro(path: &syn::Path) -> bool {

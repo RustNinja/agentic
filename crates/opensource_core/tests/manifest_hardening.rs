@@ -92,7 +92,7 @@ fn slices_binary_child_module_with_generated_items_and_pruned_stub_imports() {
 }
 
 #[test]
-fn slices_automod_directory_modules_into_explicit_reduced_modules() {
+fn slices_automod_directory_modules_without_expanding_macro_usage() {
     let workspace = temp_path("automod-workspace");
     let output = temp_path("automod-output");
     let target_dir = temp_path("automod-target");
@@ -105,9 +105,8 @@ fn slices_automod_directory_modules_into_explicit_reduced_modules() {
     .expect("reduction should succeed");
 
     let plugins_mod = read(output.join("automod_like/src/plugins/mod.rs"));
-    assert!(plugins_mod.contains("pub mod public_slice"));
+    assert!(plugins_mod.contains("automod::dir!(pub \"src/plugins\")"));
     assert!(!plugins_mod.contains("dead_slice"));
-    assert!(!plugins_mod.contains("automod::dir"));
     assert!(output
         .join("automod_like/src/plugins/public_slice.rs")
         .exists());
@@ -116,7 +115,7 @@ fn slices_automod_directory_modules_into_explicit_reduced_modules() {
         .exists());
 
     let package_manifest = read(output.join("automod_like/Cargo.toml"));
-    assert!(!package_manifest.contains("automod ="));
+    assert!(package_manifest.contains("automod ="));
 
     let cargo_check = Command::new("cargo")
         .arg("check")
