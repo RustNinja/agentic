@@ -21,6 +21,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Receiver calls, explicit `<Type as Trait>::method`, and `Trait::method(&receiver, ...)` |
 | Trait impl peers | `component_matrix.rs` | Required peer methods and associated type/const items are retained so trait impls compile |
 | Associated types/consts | `component_matrix.rs` | Associated type and associated const dependencies are followed from retained impls |
+| External trait imports | `manifest_hardening.rs` | Extension traits such as `tokio::io::AsyncReadExt` and trait-method imports without an `Ext` suffix such as `base64::Engine` are retained |
 | External modules | `module_reexports.rs`, `component_matrix.rs` | `mod file;`, `mod/name/mod.rs`, nested modules, and empty dead module pruning |
 | Inline modules | `module_reexports.rs`, `component_matrix.rs` | Inline modules with retained reexports are preserved |
 | Reexports | `module_reexports.rs`, `component_matrix.rs` | Reachable `pub use` targets are kept; dead grouped reexports are pruned |

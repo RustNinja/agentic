@@ -693,6 +693,40 @@ fn retains_external_extension_trait_imports_for_method_resolution() {
 }
 
 #[test]
+fn retains_external_trait_imports_without_ext_suffix_for_method_resolution() {
+    let workspace = temp_path("external-trait-workspace");
+    let output = temp_path("external-trait-output");
+    let target_dir = temp_path("external-trait-target");
+    write_external_trait_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("external_trait_like/src/lib.rs"));
+    assert!(source.contains("base64::Engine"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external trait slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn retains_std_trait_imports_for_method_resolution() {
     let workspace = temp_path("std-trait-import-workspace");
     let output = temp_path("std-trait-import-output");
@@ -2162,6 +2196,44 @@ pub async fn selected<R: AsyncRead + Unpin>(reader: &mut R) -> std::io::Result<S
 }
 
 pub async fn dead() -> &'static str {
+    "dead"
+}
+"#,
+    );
+}
+
+fn write_external_trait_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external_trait_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.22"
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use base64::Engine;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(input: &str) -> Option<Vec<u8>> {
+    let engine = base64::engine::general_purpose::STANDARD;
+    engine.decode(input).ok()
+}
+
+pub fn dead() -> &'static str {
     "dead"
 }
 "#,

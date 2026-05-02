@@ -1831,7 +1831,7 @@ fn external_use_target_should_drop(
         return false;
     };
 
-    if is_external_trait_import_candidate(target, leaf) {
+    if is_external_trait_import_candidate(leaf) {
         return false;
     }
 
@@ -1846,15 +1846,12 @@ fn external_use_leaf(target: &[String]) -> Option<&str> {
     Some(leaf)
 }
 
-fn is_external_trait_import_candidate(target: &[String], leaf: &str) -> bool {
+fn is_external_trait_import_candidate(leaf: &str) -> bool {
     leaf.ends_with("Ext")
-        || (target
-            .first()
-            .is_some_and(|root| matches!(root.as_str(), "std" | "core" | "alloc"))
-            && leaf
-                .chars()
-                .next()
-                .is_some_and(|first| first.is_ascii_uppercase()))
+        || leaf
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_uppercase())
 }
 
 fn use_ident_is_pruned_local_dependency(
