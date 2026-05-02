@@ -1,6 +1,7 @@
 use std::{fs, path::Path};
 
 use syn::{ImplItem, Item, Type, UseTree};
+use toml::{value::Table, Value};
 
 use crate::{
     model::{CallableId, ItemId, ItemKind, Project, ReducedProject},
@@ -42,7 +43,11 @@ pub fn write_reduced_workspace(
             .values()
             .filter(|source| &source.package == package_name)
         {
+            if !module_should_render(project, reduced, &source.package, &source.module_path) {
+                continue;
+            }
             let transformed = transform_file(
+                project,
                 reduced,
                 &source.package,
                 &source.module_path,
@@ -66,39 +71,53 @@ fn write_workspace_manifest(
     reduced: &ReducedProject,
     output_root: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let mut text = String::new();
-    text.push_str("[workspace]\n");
-    text.push_str("members = [\n");
-    for member in &project.workspace.members {
-        let Some(package_name) = project
-            .workspace
-            .packages
-            .values()
-            .find(|package| {
-                package.root
-                    == project
-                        .workspace
-                        .root
-                        .join(member)
-                        .canonicalize()
-                        .unwrap_or_default()
-            })
-            .map(|package| package.name.as_str())
-        else {
-            continue;
-        };
-        if reduced.packages.contains(package_name) {
-            text.push_str(&format!("    \"{package_name}\",\n"));
-        }
-    }
-    text.push_str("]\n");
-    text.push_str("resolver = \"2\"\n\n");
-    text.push_str("[workspace.package]\n");
-    text.push_str("edition = \"2021\"\n");
-    text.push_str("version = \"0.1.0\"\n");
-    text.push_str("license = \"MIT\"\n");
+    let mut root = Table::new();
+    let mut workspace = Table::new();
 
-    fs::write(output_root.join("Cargo.toml"), text)?;
+    workspace.insert(
+        "members".to_string(),
+        Value::Array(
+            reduced
+                .packages
+                .iter()
+                .map(|package| Value::String(package.clone()))
+                .collect(),
+        ),
+    );
+
+    if let Some(resolver) = project
+        .workspace
+        .manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("resolver"))
+    {
+        workspace.insert("resolver".to_string(), resolver.clone());
+    } else {
+        workspace.insert("resolver".to_string(), Value::String("2".to_string()));
+    }
+
+    let workspace_package = project
+        .workspace
+        .manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("package"))
+        .cloned()
+        .unwrap_or_else(default_workspace_package);
+    workspace.insert("package".to_string(), workspace_package);
+
+    let workspace_dependencies = retained_workspace_dependencies(project, reduced);
+    if !workspace_dependencies.is_empty() {
+        workspace.insert(
+            "dependencies".to_string(),
+            Value::Table(workspace_dependencies),
+        );
+    }
+
+    root.insert("workspace".to_string(), Value::Table(workspace));
+    fs::write(
+        output_root.join("Cargo.toml"),
+        toml::to_string_pretty(&Value::Table(root))?,
+    )?;
     Ok(())
 }
 
@@ -114,54 +133,186 @@ fn write_package_manifest(
         .get(package_name)
         .ok_or_else(|| format!("unknown package {package_name}"))?;
 
-    let mut text = String::new();
-    text.push_str("[package]\n");
-    text.push_str(&format!("name = \"{}\"\n", package.name));
-    text.push_str("version.workspace = true\n");
-    text.push_str("edition.workspace = true\n");
-    text.push_str("license.workspace = true\n");
+    let mut manifest = Table::new();
+    if let Some(package_table) = package.manifest.get("package").and_then(Value::as_table) {
+        manifest.insert("package".to_string(), Value::Table(package_table.clone()));
+    } else {
+        manifest.insert("package".to_string(), default_package(&package.name));
+    }
 
-    let dependencies = package
-        .dependencies
-        .iter()
-        .filter(|dependency| {
-            dependency.package != "opensourced" && reduced.packages.contains(&dependency.package)
-        })
-        .collect::<Vec<_>>();
+    for key in ["lib", "features"] {
+        if let Some(value) = package.manifest.get(key) {
+            manifest.insert(key.to_string(), value.clone());
+        }
+    }
 
+    let dependencies = transformed_dependencies(project, reduced, package_name)?;
     if !dependencies.is_empty() {
-        text.push_str("\n[dependencies]\n");
-        for dependency in dependencies {
-            if dependency.alias == dependency.package {
-                text.push_str(&format!(
-                    "{} = {{ path = \"../{}\" }}\n",
-                    dependency.alias, dependency.package
-                ));
-            } else {
-                text.push_str(&format!(
-                    "{} = {{ package = \"{}\", path = \"../{}\" }}\n",
-                    dependency.alias, dependency.package, dependency.package
-                ));
+        manifest.insert("dependencies".to_string(), Value::Table(dependencies));
+    }
+
+    fs::write(
+        output_path,
+        toml::to_string_pretty(&Value::Table(manifest))?,
+    )?;
+    Ok(())
+}
+
+fn default_workspace_package() -> Value {
+    let mut package = Table::new();
+    package.insert("edition".to_string(), Value::String("2021".to_string()));
+    package.insert("version".to_string(), Value::String("0.1.0".to_string()));
+    package.insert("license".to_string(), Value::String("MIT".to_string()));
+    Value::Table(package)
+}
+
+fn default_package(name: &str) -> Value {
+    let mut package = Table::new();
+    package.insert("name".to_string(), Value::String(name.to_string()));
+    package.insert("version".to_string(), workspace_reference_value());
+    package.insert("edition".to_string(), workspace_reference_value());
+    package.insert("license".to_string(), workspace_reference_value());
+    Value::Table(package)
+}
+
+fn workspace_reference_value() -> Value {
+    let mut table = Table::new();
+    table.insert("workspace".to_string(), Value::Boolean(true));
+    Value::Table(table)
+}
+
+fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) -> Table {
+    let Some(source_dependencies) = project
+        .workspace
+        .manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(Value::as_table)
+    else {
+        return Table::new();
+    };
+
+    let mut dependencies = Table::new();
+    for package_name in &reduced.packages {
+        let Some(package) = project.workspace.packages.get(package_name) else {
+            continue;
+        };
+        let Some(package_dependencies) = package
+            .manifest
+            .get("dependencies")
+            .and_then(Value::as_table)
+        else {
+            continue;
+        };
+
+        for (alias, value) in package_dependencies {
+            let dependency_package = dependency_package_name(alias, value);
+            if is_marker_dependency(alias, &dependency_package)
+                || project.workspace.packages.contains_key(&dependency_package)
+                || !dependency_uses_workspace(value)
+            {
+                continue;
+            }
+            if let Some(source) = source_dependencies.get(alias) {
+                dependencies.insert(alias.clone(), source.clone());
             }
         }
     }
 
-    fs::write(output_path, text)?;
-    Ok(())
+    dependencies
+}
+
+fn transformed_dependencies(
+    project: &Project,
+    reduced: &ReducedProject,
+    package_name: &str,
+) -> Result<Table, Box<dyn std::error::Error>> {
+    let package = project
+        .workspace
+        .packages
+        .get(package_name)
+        .ok_or_else(|| format!("unknown package {package_name}"))?;
+    let Some(source_dependencies) = package
+        .manifest
+        .get("dependencies")
+        .and_then(Value::as_table)
+    else {
+        return Ok(Table::new());
+    };
+
+    let mut dependencies = Table::new();
+    for (alias, value) in source_dependencies {
+        let dependency_package = dependency_package_name(alias, value);
+        if is_marker_dependency(alias, &dependency_package) {
+            continue;
+        }
+
+        if project.workspace.packages.contains_key(&dependency_package) {
+            if reduced.packages.contains(&dependency_package) {
+                dependencies.insert(
+                    alias.clone(),
+                    local_dependency_value(alias, &dependency_package, value),
+                );
+            }
+            continue;
+        }
+
+        dependencies.insert(alias.clone(), value.clone());
+    }
+
+    Ok(dependencies)
+}
+
+fn dependency_package_name(alias: &str, value: &Value) -> String {
+    value
+        .as_table()
+        .and_then(|table| table.get("package"))
+        .and_then(Value::as_str)
+        .unwrap_or(alias)
+        .to_string()
+}
+
+fn dependency_uses_workspace(value: &Value) -> bool {
+    value
+        .as_table()
+        .and_then(|table| table.get("workspace"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn is_marker_dependency(alias: &str, package: &str) -> bool {
+    alias == "opensourced" || package == "opensourced"
+}
+
+fn local_dependency_value(alias: &str, package: &str, original: &Value) -> Value {
+    let mut table = original.as_table().cloned().unwrap_or_default();
+    table.remove("version");
+    table.remove("workspace");
+    table.insert("path".to_string(), Value::String(format!("../{package}")));
+
+    if alias == package {
+        table.remove("package");
+    } else {
+        table.insert("package".to_string(), Value::String(package.to_string()));
+    }
+
+    Value::Table(table)
 }
 
 fn transform_file(
+    project: &Project,
     reduced: &ReducedProject,
     package: &str,
     module_path: &[String],
     syntax: &syn::File,
 ) -> syn::File {
     let mut transformed = syntax.clone();
-    transformed.items = transform_items(reduced, package, module_path, &syntax.items);
+    transformed.items = transform_items(project, reduced, package, module_path, &syntax.items);
     transformed
 }
 
 fn transform_items(
+    project: &Project,
     reduced: &ReducedProject,
     package: &str,
     module_path: &[String],
@@ -172,6 +323,18 @@ fn transform_items(
         .filter_map(|item| match item {
             _ if item_is_test(item) => None,
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
+            Item::Use(item_use) => {
+                let mut item_use = item_use.clone();
+                item_use.tree = prune_use_tree(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    &item_use.tree,
+                    Vec::new(),
+                )?;
+                Some(Item::Use(item_use))
+            }
             Item::Fn(function) => {
                 let id = CallableId::Free {
                     package: package.to_string(),
@@ -250,19 +413,63 @@ fn transform_items(
             }
             Item::Mod(item_mod) => {
                 let mut item_mod = item_mod.clone();
+                let mut child_path = module_path.to_vec();
+                child_path.push(item_mod.ident.to_string());
+                if !module_should_render(project, reduced, package, &child_path) {
+                    return None;
+                }
+
                 if let Some((brace, child_items)) = &item_mod.content {
-                    let mut child_path = module_path.to_vec();
-                    child_path.push(item_mod.ident.to_string());
-                    item_mod.content = Some((
-                        *brace,
-                        transform_items(reduced, package, &child_path, child_items),
-                    ));
+                    let child_items =
+                        transform_items(project, reduced, package, &child_path, child_items);
+                    if child_items.is_empty() {
+                        return None;
+                    }
+                    item_mod.content = Some((*brace, child_items));
                 }
                 Some(Item::Mod(item_mod))
             }
             _ => Some(item.clone()),
         })
         .collect()
+}
+
+fn module_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    if module_path.is_empty() {
+        return true;
+    }
+
+    reduced.reachable.iter().any(|callable| match callable {
+        CallableId::Free {
+            package: callable_package,
+            module_path: callable_module,
+            ..
+        } => callable_package == package && path_has_prefix(callable_module, module_path),
+        CallableId::Method {
+            package: callable_package,
+            type_path,
+            ..
+        } => {
+            callable_package == package
+                && project
+                    .methods
+                    .get(callable)
+                    .map(|record| path_has_prefix(&record.module_path, module_path))
+                    .unwrap_or_else(|| path_has_prefix(type_path, module_path))
+        }
+    }) || reduced
+        .reachable_items
+        .iter()
+        .any(|item| item.package == package && path_has_prefix(&item.module_path, module_path))
+}
+
+fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
+    path.len() >= prefix.len() && path.iter().zip(prefix).all(|(left, right)| left == right)
 }
 
 fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId> {
@@ -336,6 +543,249 @@ fn use_mentions_opensourced(tree: &UseTree) -> bool {
         UseTree::Group(group) => group.items.iter().any(use_mentions_opensourced),
         UseTree::Glob(_) => false,
     }
+}
+
+fn prune_use_tree(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+) -> Option<UseTree> {
+    match tree {
+        UseTree::Path(path) => {
+            if prefix.is_empty()
+                && use_ident_is_pruned_local_dependency(project, reduced, package, &path.ident)
+            {
+                return None;
+            }
+            prefix.push(path.ident.to_string());
+            let mut path = path.clone();
+            path.tree = Box::new(prune_use_tree(
+                project,
+                reduced,
+                package,
+                module_path,
+                &path.tree,
+                prefix,
+            )?);
+            Some(UseTree::Path(path))
+        }
+        UseTree::Name(name) => {
+            prefix.push(name.ident.to_string());
+            (!use_target_should_drop(project, reduced, package, module_path, &prefix))
+                .then(|| UseTree::Name(name.clone()))
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            (!use_target_should_drop(project, reduced, package, module_path, &prefix))
+                .then(|| UseTree::Rename(rename.clone()))
+        }
+        UseTree::Group(group) => {
+            let mut group = group.clone();
+            group.items = group
+                .items
+                .iter()
+                .filter_map(|item| {
+                    prune_use_tree(project, reduced, package, module_path, item, prefix.clone())
+                })
+                .collect();
+            (!group.items.is_empty()).then_some(UseTree::Group(group))
+        }
+        UseTree::Glob(glob) => {
+            (!use_prefix_should_drop(project, reduced, package, module_path, &prefix))
+                .then(|| UseTree::Glob(glob.clone()))
+        }
+    }
+}
+
+fn use_target_should_drop(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+) -> bool {
+    if target
+        .first()
+        .is_some_and(|first| use_name_is_pruned_local_dependency(project, reduced, package, first))
+    {
+        return true;
+    }
+
+    if target
+        .first()
+        .is_some_and(|first| use_name_is_external_dependency(project, package, first))
+    {
+        return false;
+    }
+
+    let Some((target_package, target_path)) =
+        resolve_use_target_path(project, package, module_path, target)
+    else {
+        return false;
+    };
+
+    if let Some(callable) = find_use_function(project, &target_package, &target_path) {
+        return !reduced.reachable.contains(&callable);
+    }
+    if let Some(item) = find_use_item(project, &target_package, &target_path) {
+        return !reduced.reachable_items.contains(&item);
+    }
+
+    project_has_module(project, &target_package, &target_path)
+        && !module_should_render(project, reduced, &target_package, &target_path)
+}
+
+fn use_prefix_should_drop(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    prefix: &[String],
+) -> bool {
+    if prefix
+        .first()
+        .is_some_and(|first| use_name_is_pruned_local_dependency(project, reduced, package, first))
+    {
+        return true;
+    }
+
+    if prefix
+        .first()
+        .is_some_and(|first| use_name_is_external_dependency(project, package, first))
+    {
+        return false;
+    }
+
+    resolve_use_target_path(project, package, module_path, prefix).is_some_and(
+        |(target_package, target_path)| {
+            project_has_module(project, &target_package, &target_path)
+                && !module_should_render(project, reduced, &target_package, &target_path)
+        },
+    )
+}
+
+fn use_ident_is_pruned_local_dependency(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &syn::Ident,
+) -> bool {
+    let ident = ident.to_string();
+    use_name_is_pruned_local_dependency(project, reduced, package, &ident)
+}
+
+fn use_name_is_pruned_local_dependency(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    name: &str,
+) -> bool {
+    let Some(package_record) = project.workspace.packages.get(package) else {
+        return false;
+    };
+    package_record.dependencies.iter().any(|dependency| {
+        (dependency.alias == name || dependency.package == name)
+            && project.workspace.packages.contains_key(&dependency.package)
+            && !reduced.packages.contains(&dependency.package)
+    })
+}
+
+fn use_name_is_external_dependency(project: &Project, package: &str, name: &str) -> bool {
+    let Some(package_record) = project.workspace.packages.get(package) else {
+        return false;
+    };
+    package_record.dependencies.iter().any(|dependency| {
+        (dependency.alias == name || dependency.package == name)
+            && !project.workspace.packages.contains_key(&dependency.package)
+    })
+}
+
+fn resolve_use_target_path(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+) -> Option<(String, Vec<String>)> {
+    let first = target.first()?;
+    match first.as_str() {
+        "crate" => Some((package.to_string(), target[1..].to_vec())),
+        "self" => {
+            let mut path = module_path.to_vec();
+            path.extend_from_slice(&target[1..]);
+            Some((package.to_string(), path))
+        }
+        "super" => {
+            let mut path = module_path.to_vec();
+            path.pop();
+            path.extend_from_slice(&target[1..]);
+            Some((package.to_string(), path))
+        }
+        name if name == package => Some((package.to_string(), target[1..].to_vec())),
+        name => {
+            if let Some(package_record) = project.workspace.packages.get(package) {
+                if let Some(dependency) = package_record
+                    .dependencies
+                    .iter()
+                    .find(|dependency| dependency.alias == name || dependency.package == name)
+                {
+                    if project.workspace.packages.contains_key(&dependency.package) {
+                        return Some((dependency.package.clone(), target[1..].to_vec()));
+                    }
+                    return None;
+                }
+            }
+
+            let mut path = module_path.to_vec();
+            path.extend_from_slice(target);
+            Some((package.to_string(), path))
+        }
+    }
+}
+
+fn find_use_function(project: &Project, package: &str, path: &[String]) -> Option<CallableId> {
+    let name = path.last()?.clone();
+    let module_path = path[..path.len() - 1].to_vec();
+    let id = CallableId::Free {
+        package: package.to_string(),
+        module_path,
+        name,
+    };
+    project.functions.contains_key(&id).then_some(id)
+}
+
+fn find_use_item(project: &Project, package: &str, path: &[String]) -> Option<ItemId> {
+    let name = path.last()?.clone();
+    let module_path = path[..path.len() - 1].to_vec();
+    [
+        ItemKind::Struct,
+        ItemKind::Enum,
+        ItemKind::Union,
+        ItemKind::Type,
+        ItemKind::Trait,
+        ItemKind::Const,
+        ItemKind::Static,
+    ]
+    .into_iter()
+    .find_map(|kind| {
+        let id = ItemId {
+            package: package.to_string(),
+            module_path: module_path.clone(),
+            name: name.clone(),
+            kind,
+        };
+        project.items.contains_key(&id).then_some(id)
+    })
+}
+
+fn project_has_module(project: &Project, package: &str, module_path: &[String]) -> bool {
+    module_path.is_empty()
+        || project
+            .files
+            .values()
+            .any(|source| source.package == package && source.module_path == module_path)
 }
 
 fn local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>> {

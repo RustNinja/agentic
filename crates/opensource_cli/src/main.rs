@@ -14,14 +14,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let workspace_root = args
         .next()
         .map(PathBuf::from)
-        .ok_or_else(|| "usage: opensource-reduce <workspace-root> <output-root>".to_string())?;
+        .ok_or_else(|| "usage: slicers <workspace-root> <output-root>".to_string())?;
     let output_root = args
         .next()
         .map(PathBuf::from)
-        .ok_or_else(|| "usage: opensource-reduce <workspace-root> <output-root>".to_string())?;
+        .ok_or_else(|| "usage: slicers <workspace-root> <output-root>".to_string())?;
 
     if args.next().is_some() {
-        return Err("usage: opensource-reduce <workspace-root> <output-root>".into());
+        return Err("usage: slicers <workspace-root> <output-root>".into());
     }
 
     let report = generate(GenerateOptions {

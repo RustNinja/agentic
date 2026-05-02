@@ -1,10 +1,12 @@
-# agentic
+# agentic-sg slicers
 
-## opensourced proof
+## Slicer Proof
 
 This workspace is a proof-of-concept for marking one Rust function with
 `#[opensourced]` and generating a reduced Rust workspace that keeps only the
-function-level dependency closure needed by that entry point.
+function-level dependency closure needed by that entry point. The intended use
+case is giving a human or AI agent a small, compilable slice of a large Rust
+workspace instead of the full source tree.
 
 ## Shape
 
@@ -13,6 +15,7 @@ function-level dependency closure needed by that entry point.
 - `crates/opensource_core`: `syn`-based parser, call-graph reducer, and source
   renderer.
 - `crates/opensource_cli`: command-line wrapper around `opensource_core`.
+  The primary binary is `slicers`.
 - `fixtures/a` through `fixtures/e`: five crates used as the proof workspace.
 
 The fixture dependency graph is:
@@ -32,8 +35,8 @@ pub fn open_source_entry(value: i32) -> i32 {
 ```
 
 The reducer finds that marker, walks reachable calls and type/API references
-through the workspace, and writes a new five-crate workspace without unreachable
-implementation code or unit tests.
+through the workspace, and writes a new workspace without unreachable
+implementation code, unused local crates, or unit tests.
 
 ## Why This Is Not Proc-Macro-Only
 
@@ -56,10 +59,15 @@ The fixture and tests cover:
 - trait method calls inferred from a local receiver, such as
   `worker.transform(...)`;
 - trait definitions and trait impl blocks needed by reachable methods;
+- borrowed trait UFCS calls such as `Trait::method(&receiver, ...)`;
 - enums, structs, type aliases, consts, and statics used in reachable
   signatures or implementations;
 - pruning unused data/API items such as an unreachable enum;
 - pruning public, private, and method functions that are not reachable;
+- pruning unused local path dependency crates from generated manifests;
+- pruning unused local dependency imports from retained source files;
+- skipping external module files with no reachable descendants;
+- preserving external and workspace dependencies such as `serde`;
 - dropping `#[cfg(test)]` modules and `#[test]` functions from generated output;
 - stripping the marker macro and its dependency from the generated workspace;
 - compiling the generated workspace with `cargo check`.
@@ -71,8 +79,8 @@ inside retained impl blocks so the reduced source keeps compiling.
 
 ```sh
 cargo test --workspace
-cargo run -p opensource_cli -- . /tmp/opensourced-proof
-cargo check --manifest-path /tmp/opensourced-proof/Cargo.toml
+cargo run -p opensource_cli --bin slicers -- . /tmp/slicers-proof
+cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
 
 ## Additional Generated Fixtures
@@ -88,6 +96,14 @@ with different source shapes and then run the reducer against them:
 - `trait_ufcs.rs`: explicit UFCS trait calls such as
   `<Thing as Describe>::describe(...)`, trait impl reachability, enum variants,
   tuple structs, and unreachable impl methods.
+- `uniffi_mobile.rs`: a Mozilla UniFFI/application-services-shaped mobile
+  bridge workspace with FFI-facing DTO structs/enums, `cfg_attr(...,
+  uniffi::...)` annotations, serde workspace dependencies, object-like impl
+  methods, trait calls, and an unused local diagnostics crate that must be
+  removed from the slice.
+
+See `docs/uniffi_slicer_experiment.md` for the UniFFI fixture rationale and
+verified result.
 
 Expected reachable callables for the fixture:
 
@@ -124,6 +140,7 @@ Expected reachable items include:
 
 ```text
 d::Mode(Enum)
+d::SALT(Const)
 d::Score(Type)
 d::Transform(Trait)
 d::Worker(Struct)
@@ -134,9 +151,10 @@ e::Score(Type)
 ## Current Boundaries
 
 This proof intentionally uses a syntactic call graph instead of rustc name
-resolution. It is useful for controlled workspaces and for proving the export
+resolution. It is useful for controlled workspaces and for proving the slice
 pipeline, but it is not a full compiler frontend. It now handles direct trait
-method calls when the receiver type can be inferred locally, but macro-expanded
-calls, complex function pointers, broad `cfg` feature matrices, build scripts,
-and dependency pruning beyond local path crates need more work before this can
-be treated as a production-grade Rust slicer.
+method calls when the receiver type can be inferred locally, borrowed UFCS trait
+calls, workspace member globs, external dependencies, and local path crate
+pruning. Macro-expanded calls, complex function pointers, broad `cfg` feature
+matrices, build scripts, and fine-grained external dependency pruning need more
+work before this can be treated as a production-grade Rust slicer.

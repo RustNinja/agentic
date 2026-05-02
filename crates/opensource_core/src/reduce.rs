@@ -29,7 +29,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
         .into());
     };
 
-    let packages = package_closure(project, root.package());
+    let candidate_packages = package_closure(project, root.package());
     let mut reachable = BTreeSet::new();
     let mut reachable_items = BTreeSet::new();
     let mut callable_queue = VecDeque::from([root.clone()]);
@@ -37,41 +37,50 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
 
     while !callable_queue.is_empty() || !item_queue.is_empty() {
         while let Some(callable) = callable_queue.pop_front() {
-            if !packages.contains(callable.package()) || !reachable.insert(callable.clone()) {
+            if !candidate_packages.contains(callable.package())
+                || !reachable.insert(callable.clone())
+            {
                 continue;
             }
 
             let dependencies = callable_dependencies(project, &callable);
             for dependency in dependencies.callables {
-                if packages.contains(dependency.package()) && !reachable.contains(&dependency) {
+                if candidate_packages.contains(dependency.package())
+                    && !reachable.contains(&dependency)
+                {
                     callable_queue.push_back(dependency);
                 }
             }
             for item in dependencies.items {
-                if packages.contains(item.package()) && !reachable_items.contains(&item) {
+                if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
                     item_queue.push_back(item);
                 }
             }
         }
 
         while let Some(item) = item_queue.pop_front() {
-            if !packages.contains(item.package()) || !reachable_items.insert(item.clone()) {
+            if !candidate_packages.contains(item.package()) || !reachable_items.insert(item.clone())
+            {
                 continue;
             }
 
             let dependencies = item_dependencies(project, &item);
             for dependency in dependencies.callables {
-                if packages.contains(dependency.package()) && !reachable.contains(&dependency) {
+                if candidate_packages.contains(dependency.package())
+                    && !reachable.contains(&dependency)
+                {
                     callable_queue.push_back(dependency);
                 }
             }
             for item in dependencies.items {
-                if packages.contains(item.package()) && !reachable_items.contains(&item) {
+                if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
                     item_queue.push_back(item);
                 }
             }
         }
     }
+
+    let packages = reachable_packages(root, &reachable, &reachable_items);
 
     Ok(ReducedProject {
         root: root.clone(),
@@ -126,6 +135,25 @@ fn package_closure(project: &Project, root: &str) -> BTreeSet<String> {
         }
     }
 
+    packages
+}
+
+fn reachable_packages(
+    root: &CallableId,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+) -> BTreeSet<String> {
+    let mut packages = BTreeSet::from([root.package().to_string()]);
+    packages.extend(
+        reachable
+            .iter()
+            .map(|callable| callable.package().to_string()),
+    );
+    packages.extend(
+        reachable_items
+            .iter()
+            .map(|item| item.package().to_string()),
+    );
     packages
 }
 
@@ -260,6 +288,8 @@ impl<'a> DependencyVisitor<'a> {
                 }
             }
             Expr::Struct(expr) => self.resolver.resolve_type_path(&expr.path),
+            Expr::Reference(reference) => self.receiver_type(&reference.expr),
+            Expr::Paren(paren) => self.receiver_type(&paren.expr),
             _ => None,
         }
     }

@@ -70,12 +70,15 @@ fn reduces_external_and_nested_modules_with_aliases() {
             "missing reachable item {expected}; got {reachable_items:?}",
         );
     }
-    assert!(
-        !reachable_items
-            .iter()
-            .any(|actual| actual == "core::domain::UnusedModel(Struct)"),
-        "unreachable struct was retained in item graph",
-    );
+    for not_expected in [
+        "core::domain::UnusedModel(Struct)",
+        "core::domain::nested::UnusedKind(Enum)",
+    ] {
+        assert!(
+            !reachable_items.iter().any(|actual| actual == not_expected),
+            "unreachable item {not_expected} was retained in item graph",
+        );
+    }
 
     let app_lib = read_output(&output, "app/src/lib.rs");
     assert!(app_lib.contains("mod service;"));
@@ -117,6 +120,7 @@ fn reduces_external_and_nested_modules_with_aliases() {
         &core_domain,
         [
             "UnusedModel",
+            "UnusedKind",
             "unused_domain_function",
             "unused_method",
             "cfg(test)",
@@ -129,7 +133,12 @@ fn reduces_external_and_nested_modules_with_aliases() {
     assert!(core_nested.contains("pub fn normalize_kind"));
     assert_not_present(
         &core_nested,
-        ["unused_nested_function", "cfg(test)", "nested_test_only"],
+        [
+            "UnusedKind",
+            "unused_nested_function",
+            "cfg(test)",
+            "nested_test_only",
+        ],
     );
 
     let core_worker = read_output(&output, "core/src/worker.rs");
@@ -268,7 +277,7 @@ pub fn core_test_only() -> u32 {
         &root.join("core/src/domain/mod.rs"),
         r#"mod nested;
 
-pub use nested::Kind;
+pub use nested::{Kind, UnusedKind};
 
 pub struct ReachableModel {
     pub value: u32,
@@ -307,6 +316,10 @@ pub fn domain_test_only() -> u32 {
 pub enum Kind {
     Even,
     Odd,
+}
+
+pub enum UnusedKind {
+    Never,
 }
 
 pub fn normalize_kind(value: u32) -> Kind {
