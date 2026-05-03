@@ -315,6 +315,7 @@ def run_batch(
     preflight_report_path = output_root / "slice-preflight.json"
     feedback_report_path = output_root / "slice-feedback.json"
     repair_report_path = output_root / "slice-repair.json"
+    validation_report_path = output_root / "slice-validation.json"
 
     baseline = None
     roots: list[Candidate] = []
@@ -341,6 +342,7 @@ def run_batch(
                     None,
                     None,
                     None,
+                    None,
                     "baseline_failed",
                 )
 
@@ -361,6 +363,7 @@ def run_batch(
             preflight_report_path,
             feedback_report_path,
             repair_report_path,
+            validation_report_path,
         )
         command_result = run_command(command, repo, args.case_timeout)
 
@@ -368,6 +371,7 @@ def run_batch(
         preflight = read_json(preflight_report_path)
         feedback = read_json(feedback_report_path)
         repair = read_json(repair_report_path)
+        validation_report = read_json(validation_report_path)
         classification = classify(command_result, preflight, feedback, baseline, args)
         return build_row(
             args,
@@ -383,6 +387,7 @@ def run_batch(
             preflight,
             feedback,
             repair,
+            validation_report,
             classification,
         )
     except Exception as error:
@@ -396,6 +401,7 @@ def run_batch(
             candidate_counts,
             baseline,
             command_result,
+            None,
             None,
             None,
             None,
@@ -685,6 +691,7 @@ def slicers_command(
     preflight_report_path: Path,
     feedback_report_path: Path,
     repair_report_path: Path,
+    validation_report_path: Path,
 ) -> list[str]:
     features = list(args.features)
     if args.analyzer == "ra-hir" and "ra-hir" not in features:
@@ -702,6 +709,8 @@ def slicers_command(
             str(slice_report_path),
             "--preflight-report",
             str(preflight_report_path),
+            "--validation-report",
+            str(validation_report_path),
         ]
     )
     if args.validation == "preflight":
@@ -872,6 +881,7 @@ def build_row(
     preflight: dict[str, Any] | None,
     feedback: dict[str, Any] | None,
     repair: dict[str, Any] | None,
+    validation_report: dict[str, Any] | None,
     classification: str,
     error: str | None = None,
 ) -> dict[str, Any]:
@@ -885,11 +895,14 @@ def build_row(
     preflight_diagnostics = (preflight or {}).get("diagnostics", [])
     production = (generation or {}).get("production") or {}
     production_hazards = production.get("hazards") or []
+    validation_status = (validation_report or {}).get("status")
     passed = classification in {
         "slice_check_passed",
         "slice_preflight_passed",
         "slice_baseline_limited_passed",
     }
+    if validation_status:
+        passed = validation_status == "accepted"
     if semantic_warnings or ((args.stop_on_warning or args.deny_warnings) and warnings):
         passed = False
 
@@ -907,6 +920,10 @@ def build_row(
             "allow_baseline_failures": args.allow_baseline_failures,
             "deny_warnings": args.deny_warnings,
             "stop_on_warning": args.stop_on_warning,
+            "report_status": validation_status,
+            "report_reason": (validation_report or {}).get("reason"),
+            "report_gates": validation_gate_statuses(validation_report),
+            "report_attempts": len((validation_report or {}).get("attempts") or []),
         },
         "roots": [candidate.display(source) for candidate in roots],
         "candidate_counts": candidate_counts,
@@ -1067,6 +1084,17 @@ def semantic_warning_is_hazard(diagnostic: dict[str, Any]) -> bool:
     if code == "non_snake_case" and "variable `" in message:
         return True
     return "unreachable pattern" in message or "irrefutable" in message
+
+
+def validation_gate_statuses(report: dict[str, Any] | None) -> dict[str, str]:
+    gates = (report or {}).get("gates") or []
+    statuses: dict[str, str] = {}
+    for gate in gates:
+        name = gate.get("name")
+        status = gate.get("status")
+        if name and status:
+            statuses[str(name)] = str(status)
+    return statuses
 
 
 def production_hazard_codes(hazards: list[dict[str, Any]]) -> list[str]:

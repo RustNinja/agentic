@@ -773,6 +773,8 @@ name = "opensource_cli"
 version = "0.1.0"
 dependencies = [
  "opensource_core",
+ "serde",
+ "serde_json",
 ]
 
 [[package]]

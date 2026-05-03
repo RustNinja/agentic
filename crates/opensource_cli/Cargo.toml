@@ -14,3 +14,5 @@ ra-hir = ["opensource_core/ra-hir"]
 
 [dependencies]
 opensource_core = { path = "../opensource_core" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"

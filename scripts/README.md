@@ -40,8 +40,8 @@ dependency builds across generated outputs. Use repeated `--cargo-check-arg`
 values to validate feature or target matrix cases such as `--all-features` or
 `--target wasm32-unknown-unknown`. Use `--deny-warnings` for production gates
 that require warning-free generated feedback. Each corpus row includes
-production-readiness status, production hazard codes, and compiler feedback
-widening candidate/hazard kinds.
+the slicer's authoritative validation verdict, production-readiness status,
+production hazard codes, and compiler feedback widening candidate/hazard kinds.
 
 ## Litter Feedback Loop
 

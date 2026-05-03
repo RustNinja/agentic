@@ -127,6 +127,10 @@ source repairs between attempts. The first repair tier only handles diagnostics
 that are safe to edit mechanically, such as `unused_imports`, item-level
 `dead_code`, and deferred dead-code allows for retained fields or enum variants.
 It stops on repeated diagnostics or no-progress rounds.
+Validation runs write `slice-validation.json` by default. That report is the
+authoritative gate verdict: final status, rejection reason when present,
+baseline/preflight/feedback gate states, cargo check arguments, and per-attempt
+feedback or repair outcomes.
 
 `--baseline-check` runs `cargo check --message-format=json` against the source
 workspace before slicing and writes `slice-baseline.json`. By default a failing
@@ -141,10 +145,10 @@ to override it.
 
 `--production` is the strict validation preset for release-style runs. It
 enables baseline checking, preflight, `--feedback-repair-loop 3`, and
-`--deny-warnings`, and writes `slice-report.json` by default, while still
-allowing explicit flags such as `--feedback-repair-loop 5`,
-`--feedback-timeout`, `--cargo-check-arg`, and target/report paths to override
-the preset where needed.
+`--deny-warnings`, and writes `slice-report.json` plus
+`slice-validation.json` by default, while still allowing explicit flags such as
+`--feedback-repair-loop 5`, `--feedback-timeout`, `--cargo-check-arg`, and
+target/report paths to override the preset where needed.
 
 This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A

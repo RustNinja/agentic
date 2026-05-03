@@ -1,10 +1,13 @@
 use std::{
     collections::BTreeSet,
     ffi::{OsStr, OsString},
+    fs,
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
 };
+
+use serde::Serialize;
 
 use opensource_core::{
     check_workspace, generate_with_analyzer, preflight_workspace, repair_workspace,
@@ -27,18 +30,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("output root must be different from workspace root".into());
     }
 
+    let mut validation = ValidationReport::new(&options);
+
     let baseline = if options.run_baseline_check {
         let report = run_baseline_check(&options)?;
+        let report_path = baseline_report_path(&options);
         if !report.success && !options.allow_baseline_failures {
             write_baseline_report(&options, &report)?;
-            print_baseline(
+            print_baseline(&report, options.feedback_limit, Some(&report_path));
+            validation.add_check_gate(
+                "baseline",
+                "failed",
+                "source workspace failed baseline cargo check",
                 &report,
-                options.feedback_limit,
-                Some(&baseline_report_path(&options)),
+                Some(report_path),
+                0,
             );
+            finish_validation(
+                &options,
+                &mut validation,
+                "rejected",
+                Some("source workspace failed baseline cargo check"),
+            )?;
             return Err("source workspace failed baseline cargo check".into());
         }
         print_baseline(&report, options.feedback_limit, None);
+        validation.add_check_gate(
+            "baseline",
+            if report.success {
+                "passed"
+            } else {
+                "baseline_allowed"
+            },
+            if report.success {
+                "source workspace cargo check passed"
+            } else {
+                "source workspace baseline failed but --allow-baseline-failures is enabled"
+            },
+            &report,
+            Some(report_path),
+            0,
+        );
         Some(report)
     } else {
         None
@@ -138,6 +170,27 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         write_generate_report(&report, &report_path)?;
         println!("slice report: {}", report_path.display());
     }
+    validation.gates.push(ValidationGateReport {
+        name: "generation".to_string(),
+        status: "passed".to_string(),
+        reason: "slice workspace was generated".to_string(),
+        report_path: slice_report_path(&options),
+        error_count: None,
+        warning_count: None,
+        semantic_warning_hazards: None,
+    });
+    validation.gates.push(ValidationGateReport {
+        name: "production_readiness".to_string(),
+        status: report.production.status.clone(),
+        reason: format!(
+            "{} production hazard(s) reported before compiler feedback",
+            report.production.hazards.len()
+        ),
+        report_path: slice_report_path(&options),
+        error_count: None,
+        warning_count: None,
+        semantic_warning_hazards: None,
+    });
     if let Some(report) = &baseline {
         write_baseline_report(&options, report)?;
         println!(
@@ -151,19 +204,47 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         || options.feedback_repair_iterations > 0
     {
         let report = run_preflight(&options)?;
+        validation.gates.push(ValidationGateReport {
+            name: "preflight".to_string(),
+            status: if report.success { "passed" } else { "failed" }.to_string(),
+            reason: if report.success {
+                "generated workspace passed fast structural validation".to_string()
+            } else {
+                "generated workspace failed fast structural validation".to_string()
+            },
+            report_path: Some(preflight_report_path(&options)),
+            error_count: Some(report.error_count()),
+            warning_count: Some(report.warning_count()),
+            semantic_warning_hazards: None,
+        });
         if !report.success {
+            finish_validation(
+                &options,
+                &mut validation,
+                "rejected",
+                Some("generated workspace failed fast preflight validation"),
+            )?;
             return Err("generated workspace failed fast preflight validation".into());
         }
     }
 
     if options.feedback_repair_iterations > 0 {
-        run_feedback_repair_loop(&options, baseline.as_ref())?;
+        if let Err(error) = run_feedback_repair_loop(&options, baseline.as_ref(), &mut validation) {
+            let reason = error.to_string();
+            finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+            return Err(reason.into());
+        }
     } else if options.feedback_iterations > 0 {
-        run_feedback_loop(&options, baseline.as_ref())?;
+        if let Err(error) = run_feedback_loop(&options, baseline.as_ref(), &mut validation) {
+            let reason = error.to_string();
+            finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+            return Err(reason.into());
+        }
     } else if options.run_check {
         run_plain_check(&options)?;
     }
 
+    finish_validation(&options, &mut validation, "accepted", None)?;
     Ok(())
 }
 
@@ -184,11 +265,101 @@ struct CliOptions {
     baseline_report: Option<PathBuf>,
     baseline_target_dir: Option<PathBuf>,
     slice_report: Option<PathBuf>,
+    validation_report: Option<PathBuf>,
     run_preflight: bool,
     preflight_report: Option<PathBuf>,
     production_preset: bool,
     workspace_root: PathBuf,
     output_root: PathBuf,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationReport {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    production_preset: bool,
+    workspace_root: PathBuf,
+    output_root: PathBuf,
+    cargo_check_args: Vec<String>,
+    deny_warnings: bool,
+    allow_baseline_failures: bool,
+    gates: Vec<ValidationGateReport>,
+    attempts: Vec<ValidationAttemptReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationGateReport {
+    name: String,
+    status: String,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    semantic_warning_hazards: Option<usize>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct ValidationAttemptReport {
+    stage: String,
+    attempt: usize,
+    status: String,
+    reason: String,
+    report_path: PathBuf,
+    cargo_success: bool,
+    baseline_limited: bool,
+    timed_out: bool,
+    error_count: usize,
+    warning_count: usize,
+    semantic_warning_hazards: usize,
+    repairable_warnings: usize,
+    widening_candidates: usize,
+    widening_hazards: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repair_report_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repair_total_changes: Option<usize>,
+}
+
+impl ValidationReport {
+    fn new(options: &CliOptions) -> Self {
+        Self {
+            status: "running".to_string(),
+            reason: None,
+            production_preset: options.production_preset,
+            workspace_root: options.workspace_root.clone(),
+            output_root: options.output_root.clone(),
+            cargo_check_args: options.cargo_check_args.clone(),
+            deny_warnings: options.deny_warnings,
+            allow_baseline_failures: options.allow_baseline_failures,
+            gates: Vec::new(),
+            attempts: Vec::new(),
+        }
+    }
+
+    fn add_check_gate(
+        &mut self,
+        name: &str,
+        status: &str,
+        reason: &str,
+        report: &CheckReport,
+        report_path: Option<PathBuf>,
+        semantic_warning_hazards: usize,
+    ) {
+        self.gates.push(ValidationGateReport {
+            name: name.to_string(),
+            status: status.to_string(),
+            reason: reason.to_string(),
+            report_path,
+            error_count: Some(report.error_count()),
+            warning_count: Some(report.warning_count()),
+            semantic_warning_hazards: Some(semantic_warning_hazards),
+        });
+    }
 }
 
 fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
@@ -215,6 +386,7 @@ where
     let mut baseline_report = None;
     let mut baseline_target_dir = None;
     let mut slice_report = None;
+    let mut validation_report = None;
     let mut run_preflight = false;
     let mut preflight_report = None;
     let mut production_preset = false;
@@ -299,6 +471,11 @@ where
                 args.next()
                     .ok_or("--slice-report requires a following path")?,
             ));
+        } else if arg == OsStr::new("--validation-report") {
+            validation_report = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--validation-report requires a following path")?,
+            ));
         } else if arg == OsStr::new("--preflight-report") {
             preflight_report = Some(PathBuf::from(
                 args.next()
@@ -333,6 +510,7 @@ where
         baseline_report,
         baseline_target_dir,
         slice_report,
+        validation_report,
         run_preflight,
         preflight_report,
         production_preset,
@@ -381,10 +559,7 @@ fn run_plain_check(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
 }
 
 fn run_preflight(options: &CliOptions) -> Result<PreflightReport, Box<dyn std::error::Error>> {
-    let report_path = options
-        .preflight_report
-        .clone()
-        .unwrap_or_else(|| options.output_root.join("slice-preflight.json"));
+    let report_path = preflight_report_path(options);
     let report = preflight_workspace(PreflightOptions {
         manifest_path: options.output_root.join("Cargo.toml"),
     })?;
@@ -425,9 +600,109 @@ fn slice_report_path(options: &CliOptions) -> Option<PathBuf> {
     })
 }
 
+fn preflight_report_path(options: &CliOptions) -> PathBuf {
+    options
+        .preflight_report
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("slice-preflight.json"))
+}
+
+fn validation_report_path(options: &CliOptions) -> Option<PathBuf> {
+    options.validation_report.clone().or_else(|| {
+        (options.production_preset
+            || options.run_baseline_check
+            || options.run_preflight
+            || options.feedback_iterations > 0
+            || options.feedback_repair_iterations > 0
+            || options.run_check)
+            .then(|| options.output_root.join("slice-validation.json"))
+    })
+}
+
+fn finish_validation(
+    options: &CliOptions,
+    report: &mut ValidationReport,
+    status: &str,
+    reason: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    report.status = status.to_string();
+    report.reason = reason.map(str::to_string);
+    if let Some(path) = validation_report_path(options) {
+        write_validation_report(report, &path)?;
+        println!("validation report: {}", path.display());
+    }
+    Ok(())
+}
+
+fn write_validation_report(
+    report: &ValidationReport,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(path, serde_json::to_string_pretty(report)?)?;
+    Ok(())
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_feedback_attempt(
+    validation: &mut ValidationReport,
+    stage: &str,
+    attempt: usize,
+    status: &str,
+    reason: &str,
+    report: &CheckReport,
+    report_path: PathBuf,
+    baseline_limited: bool,
+    semantic_warning_hazards: usize,
+    repairable_warnings: usize,
+    repair_report_path: Option<PathBuf>,
+    repair_total_changes: Option<usize>,
+) {
+    validation.attempts.push(ValidationAttemptReport {
+        stage: stage.to_string(),
+        attempt,
+        status: status.to_string(),
+        reason: reason.to_string(),
+        report_path,
+        cargo_success: report.success,
+        baseline_limited,
+        timed_out: report.timed_out,
+        error_count: report.error_count(),
+        warning_count: report.warning_count(),
+        semantic_warning_hazards,
+        repairable_warnings,
+        widening_candidates: report.widening.candidates.len(),
+        widening_hazards: report.widening.hazards.len(),
+        repair_report_path,
+        repair_total_changes,
+    });
+}
+
+fn record_feedback_gate(
+    validation: &mut ValidationReport,
+    name: &str,
+    status: &str,
+    reason: &str,
+    report: &CheckReport,
+    report_path: PathBuf,
+    semantic_warning_hazards: usize,
+) {
+    validation.add_check_gate(
+        name,
+        status,
+        reason,
+        report,
+        Some(report_path),
+        semantic_warning_hazards,
+    );
+}
+
 fn run_feedback_loop(
     options: &CliOptions,
     baseline: Option<&CheckReport>,
+    validation: &mut ValidationReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let report_path = options
         .feedback_report
@@ -451,6 +726,29 @@ fn run_feedback_loop(
 
         let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, baseline);
         if feedback_is_accepted(&report, baseline, options.deny_warnings) {
+            record_feedback_attempt(
+                validation,
+                "feedback",
+                attempt,
+                "accepted",
+                "generated workspace cargo check passed all feedback gates",
+                &report,
+                report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warning_count(&report.diagnostics),
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback",
+                "accepted",
+                "generated workspace cargo check passed all feedback gates",
+                &report,
+                report_path.clone(),
+                semantic_warnings,
+            );
             return Ok(());
         }
         if report.success && semantic_warnings > 0 {
@@ -465,19 +763,88 @@ fn run_feedback_loop(
             println!(
                 "feedback: generated errors match the source baseline; treating as baseline-limited pass"
             );
+            record_feedback_attempt(
+                validation,
+                "feedback",
+                attempt,
+                "baseline_limited",
+                "generated errors match the source baseline and remaining gates passed",
+                &report,
+                report_path.clone(),
+                true,
+                semantic_warnings,
+                repairable_warning_count(&report.diagnostics),
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback",
+                "baseline_limited",
+                "generated errors match the source baseline and remaining gates passed",
+                &report,
+                report_path.clone(),
+                semantic_warnings,
+            );
             return Ok(());
         }
 
         let signature = diagnostics_signature(&report.diagnostics);
         if !seen_diagnostics.insert(signature) {
+            record_feedback_attempt(
+                validation,
+                "feedback",
+                attempt,
+                "no_progress",
+                "feedback made no diagnostic progress",
+                &report,
+                report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warning_count(&report.diagnostics),
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback",
+                "failed",
+                "feedback made no diagnostic progress",
+                &report,
+                report_path.clone(),
+                semantic_warnings,
+            );
             return Err(format!(
                 "feedback made no diagnostic progress; report written to {}",
                 report_path.display()
             )
             .into());
         }
+        record_feedback_attempt(
+            validation,
+            "feedback",
+            attempt,
+            "retrying",
+            "generated workspace did not pass feedback gates",
+            &report,
+            report_path.clone(),
+            false,
+            semantic_warnings,
+            repairable_warning_count(&report.diagnostics),
+            None,
+            None,
+        );
     }
 
+    validation.gates.push(ValidationGateReport {
+        name: "feedback".to_string(),
+        status: "failed".to_string(),
+        reason: "generated workspace failed compiler feedback loop".to_string(),
+        report_path: Some(report_path.clone()),
+        error_count: None,
+        warning_count: None,
+        semantic_warning_hazards: None,
+    });
     Err(format!(
         "generated workspace failed compiler feedback loop; report written to {}",
         report_path.display()
@@ -488,6 +855,7 @@ fn run_feedback_loop(
 fn run_feedback_repair_loop(
     options: &CliOptions,
     baseline: Option<&CheckReport>,
+    validation: &mut ValidationReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let feedback_report_path = options
         .feedback_report
@@ -517,10 +885,56 @@ fn run_feedback_repair_loop(
         let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, baseline);
         let repairable_warnings = repairable_warning_count(&report.diagnostics);
         if feedback_is_accepted(&report, baseline, options.deny_warnings) {
+            record_feedback_attempt(
+                validation,
+                "feedback-repair",
+                attempt,
+                "accepted",
+                "generated workspace cargo check passed all feedback gates",
+                &report,
+                feedback_report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback-repair",
+                "accepted",
+                "generated workspace cargo check passed all feedback gates",
+                &report,
+                feedback_report_path.clone(),
+                semantic_warnings,
+            );
             return Ok(());
         }
         if report.success && semantic_warnings > 0 {
             println!("feedback: semantic warning gate rejected {semantic_warnings} new warning(s)");
+            record_feedback_attempt(
+                validation,
+                "feedback-repair",
+                attempt,
+                "rejected",
+                "semantic warning gate rejected generated workspace",
+                &report,
+                feedback_report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback-repair",
+                "failed",
+                "semantic warning gate rejected generated workspace",
+                &report,
+                feedback_report_path.clone(),
+                semantic_warnings,
+            );
             break;
         }
         if report.success && repairable_warnings > 0 {
@@ -530,6 +944,29 @@ fn run_feedback_repair_loop(
         }
         if report.success && options.deny_warnings && repairable_warnings == 0 && warnings > 0 {
             println!("feedback: warnings denied by --deny-warnings and no conservative repair is available");
+            record_feedback_attempt(
+                validation,
+                "feedback-repair",
+                attempt,
+                "rejected",
+                "warnings were denied and no conservative repair was available",
+                &report,
+                feedback_report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback-repair",
+                "failed",
+                "warnings were denied and no conservative repair was available",
+                &report,
+                feedback_report_path.clone(),
+                semantic_warnings,
+            );
             break;
         }
         if options.allow_baseline_failures
@@ -538,14 +975,83 @@ fn run_feedback_repair_loop(
             println!(
                 "feedback: generated errors match the source baseline; treating as baseline-limited pass"
             );
+            record_feedback_attempt(
+                validation,
+                "feedback-repair",
+                attempt,
+                "baseline_limited",
+                "generated errors match the source baseline and remaining gates passed",
+                &report,
+                feedback_report_path.clone(),
+                true,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback-repair",
+                "baseline_limited",
+                "generated errors match the source baseline and remaining gates passed",
+                &report,
+                feedback_report_path.clone(),
+                semantic_warnings,
+            );
             return Ok(());
         }
         if report.timed_out {
+            record_feedback_attempt(
+                validation,
+                "feedback-repair",
+                attempt,
+                "timed_out",
+                "feedback cargo check timed out",
+                &report,
+                feedback_report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback-repair",
+                "failed",
+                "feedback cargo check timed out",
+                &report,
+                feedback_report_path.clone(),
+                semantic_warnings,
+            );
             break;
         }
 
         let signature = diagnostics_signature(&report.diagnostics);
         if !seen_diagnostics.insert(signature) {
+            record_feedback_attempt(
+                validation,
+                "feedback-repair",
+                attempt,
+                "no_progress",
+                "feedback repair made no diagnostic progress",
+                &report,
+                feedback_report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback-repair",
+                "failed",
+                "feedback repair made no diagnostic progress",
+                &report,
+                feedback_report_path.clone(),
+                semantic_warnings,
+            );
             return Err(format!(
                 "feedback repair made no diagnostic progress; report written to {}",
                 feedback_report_path.display()
@@ -555,7 +1061,7 @@ fn run_feedback_repair_loop(
 
         let repair_report = repair_workspace(RepairOptions {
             output_root: options.output_root.clone(),
-            diagnostics: report.diagnostics,
+            diagnostics: report.diagnostics.clone(),
         })?;
         write_repair_report(&repair_report, &repair_report_path)?;
         println!(
@@ -569,7 +1075,31 @@ fn run_feedback_repair_loop(
             repair_report_path.display()
         );
 
-        if repair_report.total_changes() == 0 {
+        let repair_total_changes = repair_report.total_changes();
+        record_feedback_attempt(
+            validation,
+            "feedback-repair",
+            attempt,
+            if repair_total_changes > 0 {
+                "repaired"
+            } else {
+                "unrepaired"
+            },
+            if repair_total_changes > 0 {
+                "conservative repair changed the generated workspace"
+            } else {
+                "no conservative repair was available"
+            },
+            &report,
+            feedback_report_path.clone(),
+            false,
+            semantic_warnings,
+            repairable_warnings,
+            Some(repair_report_path.clone()),
+            Some(repair_total_changes),
+        );
+
+        if repair_total_changes == 0 {
             break;
         }
 
@@ -579,6 +1109,21 @@ fn run_feedback_repair_loop(
         }
     }
 
+    if !validation
+        .gates
+        .iter()
+        .any(|gate| gate.name == "feedback-repair")
+    {
+        validation.gates.push(ValidationGateReport {
+            name: "feedback-repair".to_string(),
+            status: "failed".to_string(),
+            reason: "generated workspace failed compiler repair loop".to_string(),
+            report_path: Some(feedback_report_path.clone()),
+            error_count: None,
+            warning_count: None,
+            semantic_warning_hazards: None,
+        });
+    }
     Err(format!(
         "generated workspace failed compiler repair loop; feedback report written to {}, repair report written to {}",
         feedback_report_path.display(),
@@ -940,7 +1485,8 @@ fn usage() -> String {
         "[--feedback-timeout <seconds>] [--deny-warnings] [--feedback-report <path>] ",
         "[--feedback-target-dir <path>] [--cargo-check-arg <arg>] [--repair-report <path>] ",
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
-        "[--baseline-target-dir <path>] [--slice-report <path>] [--preflight-report <path>] ",
+        "[--baseline-target-dir <path>] [--slice-report <path>] [--validation-report <path>] ",
+        "[--preflight-report <path>] ",
         "<workspace-root> <output-root>"
     )
     .to_string()
@@ -965,7 +1511,7 @@ mod tests {
     use super::{
         baseline_limited_feedback_is_accepted, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
-        semantic_hazard_warning_count, slice_report_path,
+        semantic_hazard_warning_count, slice_report_path, validation_report_path,
     };
 
     #[test]
@@ -1120,6 +1666,10 @@ mod tests {
             slice_report_path(&options),
             Some(PathBuf::from("out/slice-report.json"))
         );
+        assert_eq!(
+            validation_report_path(&options),
+            Some(PathBuf::from("out/slice-validation.json"))
+        );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
     }
@@ -1152,6 +1702,22 @@ mod tests {
         assert_eq!(
             slice_report_path(&options),
             Some(PathBuf::from("custom.json"))
+        );
+    }
+
+    #[test]
+    fn explicit_validation_report_overrides_default() {
+        let options = parse_options([
+            "--production",
+            "--validation-report",
+            "validation.json",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(
+            validation_report_path(&options),
+            Some(PathBuf::from("validation.json"))
         );
     }
 
