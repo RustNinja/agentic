@@ -172,12 +172,23 @@ fn package_name_from_manifest(manifest: &Value) -> String {
 fn metadata_marker_target(
     targets: &[MetadataTarget],
 ) -> Result<Option<MetadataTarget>, Box<dyn std::error::Error>> {
-    let mut marked_targets = targets
+    let marked_targets = targets
         .iter()
         .filter(|target| target_is_parse_candidate(target))
         .filter(|target| source_contains_opensourced_marker(&target.src_path))
         .cloned()
         .collect::<Vec<_>>();
+    let mut marked_targets = if marked_targets
+        .iter()
+        .any(|target| !metadata_target_uses_dev_dependencies(target))
+    {
+        marked_targets
+            .into_iter()
+            .filter(|target| !metadata_target_uses_dev_dependencies(target))
+            .collect()
+    } else {
+        marked_targets
+    };
     marked_targets.sort_by(|left, right| {
         left.src_path
             .cmp(&right.src_path)
@@ -200,10 +211,12 @@ fn metadata_marker_target(
 }
 
 fn target_is_parse_candidate(target: &MetadataTarget) -> bool {
-    target
-        .kind
-        .iter()
-        .any(|kind| matches!(kind.as_str(), "lib" | "proc-macro" | "bin" | "example"))
+    target.kind.iter().any(|kind| {
+        matches!(
+            kind.as_str(),
+            "lib" | "proc-macro" | "bin" | "example" | "test" | "bench"
+        )
+    })
 }
 
 fn source_contains_opensourced_marker(path: &Path) -> bool {
@@ -368,6 +381,13 @@ fn metadata_dependencies(
 }
 
 fn target_uses_dev_dependencies(target: &PackageTarget) -> bool {
+    target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "example" | "test" | "bench"))
+}
+
+fn metadata_target_uses_dev_dependencies(target: &MetadataTarget) -> bool {
     target
         .kind
         .iter()

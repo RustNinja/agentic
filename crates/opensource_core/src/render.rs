@@ -323,6 +323,7 @@ pub fn write_reduced_workspace(
                 &source.package,
                 &source.module_path,
                 &source.syntax,
+                package_target_preserves_test_items(package),
             );
             if is_main_like_entry_source(package, source) {
                 prune_stub_binary_root_uses(&mut transformed);
@@ -1197,7 +1198,7 @@ fn write_package_manifest(
         );
     }
 
-    for target_table in ["bin", "example"] {
+    for target_table in ["bin", "example", "test", "bench"] {
         if let Some(value) = transformed_named_targets(package, target_table)? {
             manifest.insert(target_table.to_string(), value);
         }
@@ -1290,6 +1291,14 @@ fn package_target_uses_dev_dependencies(package: &Package) -> bool {
         .kind
         .iter()
         .any(|kind| matches!(kind.as_str(), "example" | "test" | "bench"))
+}
+
+fn package_target_preserves_test_items(package: &Package) -> bool {
+    package
+        .entry_target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "test" | "bench"))
 }
 
 fn transformed_named_targets(
@@ -1390,6 +1399,14 @@ fn default_named_target_paths(package: &Package, target_table: &str, name: &str)
         "example" => vec![
             package.root.join("examples").join(format!("{name}.rs")),
             package.root.join("examples").join(name).join("main.rs"),
+        ],
+        "test" => vec![
+            package.root.join("tests").join(format!("{name}.rs")),
+            package.root.join("tests").join(name).join("main.rs"),
+        ],
+        "bench" => vec![
+            package.root.join("benches").join(format!("{name}.rs")),
+            package.root.join("benches").join(name).join("main.rs"),
         ],
         _ => Vec::new(),
     }
@@ -1854,6 +1871,11 @@ fn package_source_usage(
     package_name: &str,
 ) -> PackageSourceUsage {
     let mut usage = PackageSourceUsage::default();
+    let retain_test_items = project
+        .workspace
+        .packages
+        .get(package_name)
+        .is_some_and(package_target_preserves_test_items);
     for source in project
         .files
         .values()
@@ -1875,6 +1897,7 @@ fn package_source_usage(
             &source.package,
             &source.module_path,
             &source.syntax,
+            retain_test_items,
         );
         let target_names = module_cfg_target_names(project, &source.package, &source.module_path);
         usage.record_file(&file, &target_names);
@@ -2508,6 +2531,7 @@ fn transform_file(
     package: &str,
     module_path: &[String],
     syntax: &syn::File,
+    retain_test_items: bool,
 ) -> syn::File {
     let mut transformed = syntax.clone();
     transformed.items = transform_items(
@@ -2517,6 +2541,7 @@ fn transform_file(
         package,
         module_path,
         &syntax.items,
+        retain_test_items,
     );
     transformed
 }
@@ -2528,6 +2553,7 @@ fn transform_items(
     package: &str,
     module_path: &[String],
     items: &[Item],
+    retain_test_items: bool,
 ) -> Vec<Item> {
     let preserve_uniffi_surface = package_preserves_uniffi_surface(project, reduced, package);
     let retained_macro_definitions =
@@ -2536,7 +2562,7 @@ fn transform_items(
     let mut transformed = Vec::new();
     for item in items {
         let item = match item {
-            _ if item_is_test(item) => None,
+            _ if item_is_test(item) && !retain_test_items => None,
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
             Item::Use(item_use) => {
                 let mut item_use = item_use.clone();
@@ -2687,12 +2713,12 @@ fn transform_items(
                     && item_impl
                         .items
                         .iter()
-                        .filter(|impl_item| !impl_item_is_test(impl_item))
+                        .filter(|impl_item| retain_test_items || !impl_item_is_test(impl_item))
                         .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
 
                 for impl_item in &item_impl.items {
                     if let ImplItem::Fn(method) = impl_item {
-                        if attrs_are_test(&method.attrs) {
+                        if attrs_are_test(&method.attrs) && !retain_test_items {
                             continue;
                         }
                         let id = CallableId::Method {
@@ -2719,7 +2745,7 @@ fn transform_items(
                     if trait_path.is_some() {
                         kept_impl_items.clear();
                         for impl_item in &item_impl.items {
-                            if !impl_item_is_test(impl_item) {
+                            if retain_test_items || !impl_item_is_test(impl_item) {
                                 let mut impl_item = impl_item.clone();
                                 strip_opensourced_attrs_from_impl_item(&mut impl_item);
                                 if !preserve_uniffi_surface {
@@ -2732,7 +2758,7 @@ fn transform_items(
                     } else {
                         for impl_item in &item_impl.items {
                             if !matches!(impl_item, ImplItem::Fn(_))
-                                && !impl_item_is_test(impl_item)
+                                && (retain_test_items || !impl_item_is_test(impl_item))
                             {
                                 kept_impl_items.push(impl_item.clone());
                             }
@@ -2779,6 +2805,7 @@ fn transform_items(
                         package,
                         &child_path,
                         child_items,
+                        retain_test_items,
                     );
                     if child_items.is_empty()
                         && (module_item_is_reachable

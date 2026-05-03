@@ -653,29 +653,50 @@ fn uncovered_validation_targets(
 ) -> Vec<String> {
     targets
         .iter()
-        .filter(|target| target.kind.iter().any(|kind| kind == "example"))
-        .filter(|target| !example_target_is_covered(&target.name, cargo_args))
-        .map(|target| format!("{} example {}", target.package, target.name))
+        .filter_map(|target| {
+            let target_kind = validation_target_kind(target)?;
+            (!validation_target_is_covered(target_kind, &target.name, cargo_args))
+                .then(|| format!("{} {} {}", target.package, target_kind, target.name))
+        })
         .collect()
 }
 
-fn example_target_is_covered(name: &str, cargo_args: &[String]) -> bool {
+fn validation_target_kind(target: &GeneratedTargetReport) -> Option<&'static str> {
+    ["example", "test", "bench"]
+        .into_iter()
+        .find(|kind| target.kind.iter().any(|target_kind| target_kind == *kind))
+}
+
+fn validation_target_is_covered(kind: &str, name: &str, cargo_args: &[String]) -> bool {
+    if cargo_args.iter().any(|arg| arg == "--all-targets") {
+        return true;
+    }
     if cargo_args
         .iter()
-        .any(|arg| matches!(arg.as_str(), "--all-targets" | "--examples"))
+        .any(|arg| arg == target_kind_plural_flag(kind))
     {
         return true;
     }
+    let singular_flag = format!("--{kind}");
     for index in 0..cargo_args.len() {
         let arg = &cargo_args[index];
-        if arg == "--example" && cargo_args.get(index + 1).is_some_and(|value| value == name) {
+        if arg == &singular_flag && cargo_args.get(index + 1).is_some_and(|value| value == name) {
             return true;
         }
-        if arg == &format!("--example={name}") {
+        if arg == &format!("{singular_flag}={name}") {
             return true;
         }
     }
     false
+}
+
+fn target_kind_plural_flag(kind: &str) -> &'static str {
+    match kind {
+        "example" => "--examples",
+        "test" => "--tests",
+        "bench" => "--benches",
+        _ => "--all-targets",
+    }
 }
 
 fn finish_validation(
@@ -1821,22 +1842,45 @@ mod tests {
     }
 
     #[test]
-    fn example_targets_require_matching_validation_args() {
-        let targets = vec![GeneratedTargetReport {
-            package: "app".to_string(),
-            name: "demo".to_string(),
-            kind: vec!["example".to_string()],
-            src_path: PathBuf::from("/workspace/app/examples/demo.rs"),
-        }];
+    fn non_default_targets_require_matching_validation_args() {
+        let targets = vec![
+            GeneratedTargetReport {
+                package: "app".to_string(),
+                name: "demo".to_string(),
+                kind: vec!["example".to_string()],
+                src_path: PathBuf::from("/workspace/app/examples/demo.rs"),
+            },
+            GeneratedTargetReport {
+                package: "app".to_string(),
+                name: "behavior".to_string(),
+                kind: vec!["test".to_string()],
+                src_path: PathBuf::from("/workspace/app/tests/behavior.rs"),
+            },
+            GeneratedTargetReport {
+                package: "app".to_string(),
+                name: "throughput".to_string(),
+                kind: vec!["bench".to_string()],
+                src_path: PathBuf::from("/workspace/app/benches/throughput.rs"),
+            },
+        ];
 
         assert_eq!(
             uncovered_validation_targets(&targets, &[]),
-            ["app example demo"]
+            [
+                "app example demo",
+                "app test behavior",
+                "app bench throughput"
+            ]
         );
         assert!(uncovered_validation_targets(&targets, &["--all-targets".to_string()]).is_empty());
         assert!(uncovered_validation_targets(
             &targets,
-            &["--example".to_string(), "demo".to_string()]
+            &[
+                "--example".to_string(),
+                "demo".to_string(),
+                "--test=behavior".to_string(),
+                "--benches".to_string()
+            ]
         )
         .is_empty());
     }

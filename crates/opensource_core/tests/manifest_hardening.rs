@@ -176,6 +176,107 @@ fn slices_marked_example_target_and_preserves_manifest_entry() {
 }
 
 #[test]
+fn slices_marked_integration_test_target_and_preserves_manifest_entry() {
+    let workspace = temp_path("test-target-workspace");
+    let output = temp_path("test-target-output");
+    let target_dir = temp_path("test-target-build");
+    write_test_target_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "support"]);
+    let manifest = read(output.join("app/Cargo.toml"));
+    assert!(manifest.contains("[[test]]"));
+    assert!(manifest.contains("name = \"behavior\""));
+    assert!(manifest.contains("path = \"tests/behavior.rs\""));
+    assert!(manifest.contains("[dev-dependencies.support]"));
+
+    let source = read(output.join("app/tests/behavior.rs"));
+    let support = read(output.join("support/src/lib.rs"));
+    assert!(source.contains("#[test]"));
+    assert!(source.contains("fn selected_behavior"));
+    assert!(support.contains("pub fn format_value"));
+    assert!(!source.contains("dead_test"));
+    assert!(!support.contains("dead_support"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .arg("--package")
+        .arg("app")
+        .arg("--test")
+        .arg("behavior")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated test-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/tests/behavior.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        source,
+        support,
+    );
+}
+
+#[test]
+fn slices_marked_bench_target_and_preserves_manifest_entry() {
+    let workspace = temp_path("bench-target-workspace");
+    let output = temp_path("bench-target-output");
+    let target_dir = temp_path("bench-target-build");
+    write_bench_target_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "support"]);
+    let manifest = read(output.join("app/Cargo.toml"));
+    assert!(manifest.contains("[[bench]]"));
+    assert!(manifest.contains("name = \"throughput\""));
+    assert!(manifest.contains("path = \"benches/throughput.rs\""));
+    assert!(manifest.contains("[dev-dependencies.support]"));
+
+    let source = read(output.join("app/benches/throughput.rs"));
+    let support = read(output.join("support/src/lib.rs"));
+    assert!(source.contains("pub fn selected_bench_value"));
+    assert!(support.contains("pub fn format_value"));
+    assert!(!source.contains("dead_bench"));
+    assert!(!support.contains("dead_support"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .arg("--package")
+        .arg("app")
+        .arg("--bench")
+        .arg("throughput")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated bench-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/benches/throughput.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        source,
+        support,
+    );
+}
+
+#[test]
 fn slices_path_attributed_external_modules() {
     let workspace = temp_path("path-attr-workspace");
     let output = temp_path("path-attr-output");
@@ -2718,6 +2819,153 @@ edition = "2021"
         root.join("support/src/lib.rs"),
         r#"pub fn format_value(value: &str) -> String {
     format!("example:{value}")
+}
+
+pub fn dead_support() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_test_target_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "support"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[test]]
+name = "behavior"
+path = "tests/behavior.rs"
+
+[dev-dependencies]
+opensourced = {{ path = "{}" }}
+support = {{ path = "../support" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"pub fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("app/tests/behavior.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+#[test]
+fn selected_behavior() {
+    assert_eq!(support::format_value("runtime"), "test:runtime");
+}
+
+fn dead_test() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("support/Cargo.toml"),
+        r#"[package]
+name = "support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support/src/lib.rs"),
+        r#"pub fn format_value(value: &str) -> String {
+    format!("test:{value}")
+}
+
+pub fn dead_support() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_bench_target_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "support"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[bench]]
+name = "throughput"
+path = "benches/throughput.rs"
+
+[dev-dependencies]
+opensourced = {{ path = "{}" }}
+support = {{ path = "../support" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"pub fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("app/benches/throughput.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_bench_value(value: &str) -> String {
+    support::format_value(value)
+}
+
+fn dead_bench() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("support/Cargo.toml"),
+        r#"[package]
+name = "support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support/src/lib.rs"),
+        r#"pub fn format_value(value: &str) -> String {
+    format!("bench:{value}")
 }
 
 pub fn dead_support() -> String {
