@@ -137,36 +137,39 @@ impl Checker {
     }
 
     fn check_package_targets(&mut self, package_root: &Path, manifest: &Value) {
-        let mut entries = Vec::new();
+        let mut entries = BTreeSet::new();
         if let Some(path) = manifest
             .get("lib")
             .and_then(|lib| lib.get("path"))
             .and_then(Value::as_str)
         {
-            entries.push(package_root.join(path));
+            entries.insert(package_root.join(path));
         } else {
             let lib = package_root.join("src/lib.rs");
             let main = package_root.join("src/main.rs");
             if lib.exists() {
-                entries.push(lib);
+                entries.insert(lib);
             } else if main.exists() {
-                entries.push(main);
+                entries.insert(main);
             }
         }
 
         if let Some(bins) = manifest.get("bin").and_then(Value::as_array) {
             for bin in bins {
                 if let Some(path) = bin.get("path").and_then(Value::as_str) {
-                    entries.push(package_root.join(path));
+                    entries.insert(package_root.join(path));
+                } else if let Some(name) = bin.get("name").and_then(Value::as_str) {
+                    entries.extend(default_bin_entries(package_root, name));
                 }
             }
         }
+        entries.extend(auto_discovered_bin_entries(package_root));
 
         if entries.is_empty() {
             self.error(
                 "missing-package-entry",
                 format!(
-                    "package has no src/lib.rs, src/main.rs, or explicit target path under {}",
+                    "package has no src/lib.rs, src/main.rs, explicit target path, or auto-discovered bin under {}",
                     package_root.display()
                 ),
                 Some(package_root.to_path_buf()),
@@ -468,6 +471,40 @@ fn resolve_external_module(
     mod_module.exists().then_some(mod_module)
 }
 
+fn auto_discovered_bin_entries(package_root: &Path) -> BTreeSet<PathBuf> {
+    let bin_root = package_root.join("src/bin");
+    let Ok(entries) = fs::read_dir(bin_root) else {
+        return BTreeSet::new();
+    };
+
+    entries
+        .filter_map(Result::ok)
+        .filter_map(|entry| {
+            let path = entry.path();
+            let file_type = entry.file_type().ok()?;
+            if file_type.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+                return Some(path);
+            }
+            if file_type.is_dir() {
+                let main = path.join("main.rs");
+                return main.exists().then_some(main);
+            }
+            None
+        })
+        .collect()
+}
+
+fn default_bin_entries(package_root: &Path, name: &str) -> Vec<PathBuf> {
+    [
+        package_root.join("src/main.rs"),
+        package_root.join("src/bin").join(format!("{name}.rs")),
+        package_root.join("src/bin").join(name).join("main.rs"),
+    ]
+    .into_iter()
+    .filter(|path| path.exists())
+    .collect()
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -523,6 +560,32 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "missing-module-file"));
+    }
+
+    #[test]
+    fn accepts_auto_discovered_bin_targets() {
+        let root = temp_output("preflight-auto-bin");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("app/src/bin/tool.rs"),
+            "fn main() {\n    let _ = 1 + 1;\n}\n",
+        );
+
+        let report = preflight_workspace(PreflightOptions {
+            manifest_path: root.join("Cargo.toml"),
+        })
+        .expect("preflight should run");
+
+        assert!(report.success, "{:?}", report.diagnostics);
+        assert_eq!(report.error_count(), 0);
+        assert!(report.rust_files > 0);
     }
 
     fn workspace_root() -> PathBuf {
