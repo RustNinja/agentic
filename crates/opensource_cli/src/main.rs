@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     ffi::OsStr,
     path::{Path, PathBuf},
     process::Command,
@@ -25,6 +26,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if same_path(&options.workspace_root, &options.output_root) {
         return Err("output root must be different from workspace root".into());
     }
+
+    let baseline = if options.run_baseline_check {
+        let report = run_baseline_check(&options)?;
+        if !report.success && !options.allow_baseline_failures {
+            write_baseline_report(&options, &report)?;
+            print_baseline(
+                &report,
+                options.feedback_limit,
+                Some(&baseline_report_path(&options)),
+            );
+            return Err("source workspace failed baseline cargo check".into());
+        }
+        print_baseline(&report, options.feedback_limit, None);
+        Some(report)
+    } else {
+        None
+    };
 
     let report = generate_with_analyzer(
         GenerateOptions {
@@ -95,6 +113,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         write_generate_report(&report, report_path)?;
         println!("slice report: {}", report_path.display());
     }
+    if let Some(report) = &baseline {
+        write_baseline_report(&options, report)?;
+        println!(
+            "baseline report: {}",
+            baseline_report_path(&options).display()
+        );
+    }
 
     if options.run_preflight
         || options.feedback_iterations > 0
@@ -107,9 +132,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if options.feedback_repair_iterations > 0 {
-        run_feedback_repair_loop(&options)?;
+        run_feedback_repair_loop(&options, baseline.as_ref())?;
     } else if options.feedback_iterations > 0 {
-        run_feedback_loop(&options)?;
+        run_feedback_loop(&options, baseline.as_ref())?;
     } else if options.run_check {
         run_plain_check(&options.output_root)?;
     }
@@ -127,6 +152,10 @@ struct CliOptions {
     feedback_target_dir: Option<PathBuf>,
     feedback_timeout: Option<Duration>,
     repair_report: Option<PathBuf>,
+    run_baseline_check: bool,
+    allow_baseline_failures: bool,
+    baseline_report: Option<PathBuf>,
+    baseline_target_dir: Option<PathBuf>,
     slice_report: Option<PathBuf>,
     run_preflight: bool,
     preflight_report: Option<PathBuf>,
@@ -144,6 +173,10 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     let mut feedback_target_dir = None;
     let mut feedback_timeout = Some(Duration::from_secs(600));
     let mut repair_report = None;
+    let mut run_baseline_check = false;
+    let mut allow_baseline_failures = false;
+    let mut baseline_report = None;
+    let mut baseline_target_dir = None;
     let mut slice_report = None;
     let mut run_preflight = false;
     let mut preflight_report = None;
@@ -165,6 +198,11 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
             feedback_iterations = feedback_iterations.max(1);
         } else if arg == OsStr::new("--preflight") {
             run_preflight = true;
+        } else if arg == OsStr::new("--baseline-check") {
+            run_baseline_check = true;
+        } else if arg == OsStr::new("--allow-baseline-failures") {
+            allow_baseline_failures = true;
+            run_baseline_check = true;
         } else if arg == OsStr::new("--feedback-loop") {
             feedback_iterations = parse_usize_arg("--feedback-loop", args.next())?;
         } else if arg == OsStr::new("--feedback-repair-loop") {
@@ -188,6 +226,18 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
                 args.next()
                     .ok_or("--repair-report requires a following path")?,
             ));
+        } else if arg == OsStr::new("--baseline-report") {
+            baseline_report = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--baseline-report requires a following path")?,
+            ));
+            run_baseline_check = true;
+        } else if arg == OsStr::new("--baseline-target-dir") {
+            baseline_target_dir = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--baseline-target-dir requires a following path")?,
+            ));
+            run_baseline_check = true;
         } else if arg == OsStr::new("--slice-report") {
             slice_report = Some(PathBuf::from(
                 args.next()
@@ -220,6 +270,10 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
         feedback_target_dir,
         feedback_timeout,
         repair_report,
+        run_baseline_check,
+        allow_baseline_failures,
+        baseline_report,
+        baseline_target_dir,
         slice_report,
         run_preflight,
         preflight_report,
@@ -279,7 +333,33 @@ fn run_preflight(options: &CliOptions) -> Result<PreflightReport, Box<dyn std::e
     Ok(report)
 }
 
-fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+fn run_baseline_check(options: &CliOptions) -> Result<CheckReport, Box<dyn std::error::Error>> {
+    println!("baseline: cargo check --message-format=json");
+    check_workspace(CheckOptions {
+        manifest_path: options.workspace_root.join("Cargo.toml"),
+        target_dir: Some(baseline_target_dir(options)),
+        timeout: options.feedback_timeout,
+    })
+}
+
+fn write_baseline_report(
+    options: &CliOptions,
+    report: &CheckReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    write_report(report, &baseline_report_path(options))
+}
+
+fn baseline_report_path(options: &CliOptions) -> PathBuf {
+    options
+        .baseline_report
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("slice-baseline.json"))
+}
+
+fn run_feedback_loop(
+    options: &CliOptions,
+    baseline: Option<&CheckReport>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let report_path = options
         .feedback_report
         .clone()
@@ -301,6 +381,13 @@ fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Err
         if report.success {
             return Ok(());
         }
+        if options.allow_baseline_failures && feedback_errors_are_baseline_known(&report, baseline)
+        {
+            println!(
+                "feedback: generated errors match the source baseline; treating as baseline-limited pass"
+            );
+            return Ok(());
+        }
     }
 
     Err(format!(
@@ -310,7 +397,10 @@ fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Err
     .into())
 }
 
-fn run_feedback_repair_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+fn run_feedback_repair_loop(
+    options: &CliOptions,
+    baseline: Option<&CheckReport>,
+) -> Result<(), Box<dyn std::error::Error>> {
     let feedback_report_path = options
         .feedback_report
         .clone()
@@ -342,6 +432,13 @@ fn run_feedback_repair_loop(options: &CliOptions) -> Result<(), Box<dyn std::err
             println!(
                 "feedback: cargo check passed but {repairable_warnings} repairable warning(s) remain; attempting conservative repair"
             );
+        }
+        if options.allow_baseline_failures && feedback_errors_are_baseline_known(&report, baseline)
+        {
+            println!(
+                "feedback: generated errors match the source baseline; treating as baseline-limited pass"
+            );
+            return Ok(());
         }
         if report.timed_out {
             break;
@@ -395,6 +492,59 @@ fn feedback_target_dir(options: &CliOptions) -> PathBuf {
         .feedback_target_dir
         .clone()
         .unwrap_or_else(|| options.output_root.join("target-feedback"))
+}
+
+fn baseline_target_dir(options: &CliOptions) -> PathBuf {
+    options
+        .baseline_target_dir
+        .clone()
+        .unwrap_or_else(|| sibling_output_path(&options.output_root, "target-baseline"))
+}
+
+fn sibling_output_path(output_root: &Path, suffix: &str) -> PathBuf {
+    let Some(name) = output_root.file_name() else {
+        return output_root.join(format!(".{suffix}"));
+    };
+    output_root.with_file_name(format!("{}-{suffix}", name.to_string_lossy()))
+}
+
+fn feedback_errors_are_baseline_known(
+    report: &CheckReport,
+    baseline: Option<&CheckReport>,
+) -> bool {
+    let Some(baseline) = baseline else {
+        return false;
+    };
+    if baseline.success || report.success {
+        return false;
+    }
+
+    let baseline_errors = diagnostic_error_keys(&baseline.diagnostics);
+    if baseline_errors.is_empty() {
+        return false;
+    }
+    let generated_errors = diagnostic_error_keys(&report.diagnostics);
+    !generated_errors.is_empty()
+        && generated_errors
+            .iter()
+            .all(|error| baseline_errors.contains(error))
+}
+
+fn diagnostic_error_keys(diagnostics: &[CheckDiagnostic]) -> BTreeSet<String> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.level == "error")
+        .map(diagnostic_baseline_key)
+        .collect()
+}
+
+fn diagnostic_baseline_key(diagnostic: &CheckDiagnostic) -> String {
+    format!(
+        "{}|{}|{}",
+        diagnostic.level,
+        diagnostic.code.as_deref().unwrap_or(""),
+        diagnostic.message
+    )
 }
 
 fn repairable_warning_count(diagnostics: &[CheckDiagnostic]) -> usize {
@@ -509,6 +659,34 @@ fn print_preflight_diagnostic(diagnostic: &PreflightDiagnostic) {
     }
 }
 
+fn print_baseline(report: &CheckReport, limit: usize, report_path: Option<&Path>) {
+    let report_text = report_path
+        .map(|path| format!("; report: {}", path.display()))
+        .unwrap_or_default();
+    if report.success {
+        println!(
+            "baseline: source cargo check passed with {} warning(s){}",
+            report.warning_count(),
+            report_text
+        );
+        return;
+    }
+
+    println!(
+        "baseline: source cargo check failed with {} error(s), {} warning(s){}",
+        report.error_count(),
+        report.warning_count(),
+        report_text
+    );
+
+    for diagnostic in prioritized_diagnostics(&report.diagnostics)
+        .into_iter()
+        .take(limit)
+    {
+        print_diagnostic(diagnostic);
+    }
+}
+
 fn print_feedback(report: &CheckReport, limit: usize, report_path: &Path) {
     if report.success {
         println!(
@@ -574,7 +752,8 @@ fn usage() -> String {
         "[--feedback-loop <n>] [--feedback-repair-loop <n>] [--feedback-limit <n>] ",
         "[--feedback-timeout <seconds>] [--feedback-report <path>] ",
         "[--feedback-target-dir <path>] [--repair-report <path>] ",
-        "[--slice-report <path>] [--preflight-report <path>] ",
+        "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
+        "[--baseline-target-dir <path>] [--slice-report <path>] [--preflight-report <path>] ",
         "<workspace-root> <output-root>"
     )
     .to_string()
@@ -588,4 +767,67 @@ fn same_path(left: &Path, right: &Path) -> bool {
         return false;
     };
     left == right
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use opensource_core::{CheckDiagnostic, CheckReport};
+
+    use super::feedback_errors_are_baseline_known;
+
+    #[test]
+    fn recognizes_generated_errors_present_in_failed_source_baseline() {
+        let baseline = report(
+            false,
+            vec![diagnostic("E0425", "cannot find value `x` in this scope")],
+        );
+        let generated = report(
+            false,
+            vec![diagnostic("E0425", "cannot find value `x` in this scope")],
+        );
+
+        assert!(feedback_errors_are_baseline_known(
+            &generated,
+            Some(&baseline)
+        ));
+    }
+
+    #[test]
+    fn rejects_generated_errors_not_present_in_source_baseline() {
+        let baseline = report(
+            false,
+            vec![diagnostic("E0425", "cannot find value `x` in this scope")],
+        );
+        let generated = report(
+            false,
+            vec![diagnostic("E0432", "unresolved import `crate::missing`")],
+        );
+
+        assert!(!feedback_errors_are_baseline_known(
+            &generated,
+            Some(&baseline)
+        ));
+    }
+
+    fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {
+        CheckReport {
+            manifest_path: PathBuf::from("/tmp/Cargo.toml"),
+            success,
+            timed_out: false,
+            diagnostics,
+            stderr: String::new(),
+        }
+    }
+
+    fn diagnostic(code: &str, message: &str) -> CheckDiagnostic {
+        CheckDiagnostic {
+            level: "error".to_string(),
+            message: message.to_string(),
+            code: Some(code.to_string()),
+            rendered: None,
+            spans: Vec::new(),
+        }
+    }
 }

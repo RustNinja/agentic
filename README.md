@@ -85,6 +85,7 @@ cargo run -p opensource_cli --bin slicers -- --check . /tmp/slicers-proof
 cargo run -p opensource_cli --bin slicers -- --preflight . /tmp/slicers-preflight
 cargo run -p opensource_cli --bin slicers -- --feedback . /tmp/slicers-feedback
 cargo run -p opensource_cli --bin slicers -- --feedback-repair-loop 3 . /tmp/slicers-repair
+cargo run -p opensource_cli --bin slicers -- --baseline-check --feedback . /tmp/slicers-feedback
 cargo run -p opensource_cli --bin slicers -- --slice-report /tmp/slicers-report.json . /tmp/slicers-proof
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
@@ -108,6 +109,18 @@ source repairs between attempts. The first repair tier only handles diagnostics
 that are safe to edit mechanically, such as `unused_imports`, item-level
 `dead_code`, and deferred dead-code allows for retained fields or enum variants.
 It stops on repeated diagnostics or no-progress rounds.
+
+`--baseline-check` runs `cargo check --message-format=json` against the source
+workspace before slicing and writes `slice-baseline.json`. By default a failing
+source baseline stops the run, which prevents already-broken upstream projects
+from being misreported as slicer regressions. Use `--allow-baseline-failures`
+when validating against a known-broken source; generated compiler errors that
+match the source baseline are then treated as a baseline-limited pass, while new
+generated errors still fail feedback. The baseline Cargo target directory
+defaults to a sibling of the output root so baseline compilation never makes the
+slice output look user-owned before rendering starts; use `--baseline-target-dir`
+to override it.
+
 This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A
 rust-analyzer HIR or rustc-driver backend remains the next precision step for
