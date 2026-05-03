@@ -93,10 +93,11 @@ cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 
 `--preflight` is the fast prediction tier. It writes `slice-preflight.json` and
 validates the generated workspace without compiling dependencies: manifests,
-local path dependencies, Cargo target sources including explicit target tables
-and auto-discovered bins/examples/tests/benches, Rust syntax, external module
-files, and build-script paths. `--feedback` runs this preflight first and fails
-before `cargo check` when the generated shape is already structurally invalid.
+no-build `cargo metadata --no-deps`, local path dependencies, Cargo target
+sources including explicit target tables and auto-discovered
+bins/examples/tests/benches, Rust syntax, external module files, and
+build-script paths. `--feedback` runs this preflight first and fails before
+`cargo check` when the generated shape is already structurally invalid.
 
 `--feedback` runs `cargo check --message-format=json` against the generated
 workspace, prints prioritized compiler diagnostics, and writes

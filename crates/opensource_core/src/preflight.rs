@@ -2,6 +2,7 @@ use std::{
     collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
 use serde::{Deserialize, Serialize};
@@ -105,6 +106,7 @@ impl Checker {
         let workspace_root = manifest_path
             .parent()
             .ok_or_else(|| format!("manifest path has no parent: {}", manifest_path.display()))?;
+        self.check_cargo_metadata(manifest_path);
         let manifest = read_manifest(manifest_path, &mut self.report.diagnostics);
         self.check_dependency_sections(workspace_root, &manifest);
 
@@ -114,6 +116,36 @@ impl Checker {
         }
 
         Ok(())
+    }
+
+    fn check_cargo_metadata(&mut self, manifest_path: &Path) {
+        let output = Command::new("cargo")
+            .arg("metadata")
+            .arg("--format-version=1")
+            .arg("--no-deps")
+            .arg("--manifest-path")
+            .arg(manifest_path)
+            .output();
+
+        match output {
+            Ok(output) if output.status.success() => {}
+            Ok(output) => {
+                self.error(
+                    "cargo-metadata-failed",
+                    first_cargo_error_line(&output.stderr).unwrap_or_else(|| {
+                        format!("cargo metadata failed for {}", manifest_path.display())
+                    }),
+                    Some(manifest_path.to_path_buf()),
+                );
+            }
+            Err(error) => {
+                self.error(
+                    "cargo-metadata-unavailable",
+                    format!("failed to run cargo metadata: {error}"),
+                    Some(manifest_path.to_path_buf()),
+                );
+            }
+        }
     }
 
     fn check_package(&mut self, workspace_root: &Path, member: &str) {
@@ -500,6 +532,14 @@ fn read_manifest(path: &Path, diagnostics: &mut Vec<PreflightDiagnostic>) -> Val
     }
 }
 
+fn first_cargo_error_line(stderr: &[u8]) -> Option<String> {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("error:"))
+        .map(str::to_string)
+}
+
 fn workspace_members(manifest: &Value) -> Vec<String> {
     let members = manifest
         .get("workspace")
@@ -787,6 +827,31 @@ mod tests {
             .diagnostics
             .iter()
             .any(|diagnostic| diagnostic.code == "missing-module-file"));
+    }
+
+    #[test]
+    fn reports_cargo_metadata_manifest_failures_without_building() {
+        let root = temp_output("preflight-cargo-metadata");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"3021\"\n",
+        );
+        write(root.join("app/src/lib.rs"), "pub fn value() -> i32 { 1 }\n");
+
+        let report = preflight_workspace(PreflightOptions {
+            manifest_path: root.join("Cargo.toml"),
+        })
+        .expect("preflight should run");
+
+        assert!(!report.success);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "cargo-metadata-failed"));
     }
 
     #[test]
