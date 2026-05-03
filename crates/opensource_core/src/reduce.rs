@@ -1,6 +1,10 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::{
+    collections::{BTreeSet, HashMap, VecDeque},
+    fs,
+    path::{Component, PathBuf},
+};
 
-use proc_macro2::{Literal, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Literal, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::{
     parse::Parser,
@@ -1381,6 +1385,15 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
                     visitor.dependencies.items.insert(item);
                 }
             }
+            for type_path in &record.self_type_input_type_paths {
+                if let Some(item) =
+                    visitor
+                        .resolver
+                        .find_item(package, type_path, &type_like_kinds())
+                {
+                    visitor.dependencies.items.insert(item);
+                }
+            }
             for attr in &record.item.attrs {
                 visitor.visit_attribute(attr);
             }
@@ -1415,8 +1428,317 @@ fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
     };
     let mut visitor = DependencyVisitor::new(resolver);
     visitor.visit_item(&record.item);
+    if item.kind == ItemKind::Trait {
+        visitor
+            .dependencies
+            .extend(external_trait_impl_method_dependencies(project, item));
+    }
+    visitor
+        .dependencies
+        .extend(template_derive_dependencies(project, item, &record.item));
     visitor.dependencies.items.remove(item);
     visitor.dependencies
+}
+
+fn template_derive_dependencies(project: &Project, item: &ItemId, syntax: &Item) -> DependencySet {
+    let Some(template_names) = template_candidate_names(project, item, syntax) else {
+        return DependencySet::default();
+    };
+
+    let mut dependencies = DependencySet::default();
+    for callable in project.methods.keys() {
+        let CallableId::Method {
+            package, method, ..
+        } = callable
+        else {
+            continue;
+        };
+        if package == &item.package && template_names.contains(method) {
+            dependencies.callables.insert(callable.clone());
+        }
+    }
+    for callable in project.functions.keys() {
+        let CallableId::Free { package, name, .. } = callable else {
+            continue;
+        };
+        if package == &item.package && template_names.contains(name) {
+            dependencies.callables.insert(callable.clone());
+        }
+    }
+    dependencies
+}
+
+fn template_candidate_names(
+    project: &Project,
+    item: &ItemId,
+    syntax: &Item,
+) -> Option<BTreeSet<String>> {
+    if !item_has_template_derive(syntax) {
+        return None;
+    }
+
+    let mut names = BTreeSet::new();
+    let mut pending = VecDeque::from(item_template_paths(syntax));
+    let mut visited = BTreeSet::new();
+    while let Some(path) = pending.pop_front() {
+        if !visited.insert(path.clone()) {
+            continue;
+        }
+        let Some(contents) = read_template(project, &item.package, &path) else {
+            continue;
+        };
+        names.extend(template_call_candidate_names(&contents));
+        names.extend(template_filter_candidate_names(&contents));
+        for referenced in referenced_template_paths(&contents) {
+            if !visited.contains(&referenced) {
+                pending.push_back(referenced);
+            }
+        }
+    }
+
+    (!names.is_empty()).then_some(names)
+}
+
+fn item_attrs(item: &Item) -> &[syn::Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn token_stream_idents(tokens: &TokenStream) -> BTreeSet<String> {
+    let mut idents = BTreeSet::new();
+    collect_token_idents(tokens, &mut idents);
+    idents
+}
+
+fn item_has_template_derive(item: &Item) -> bool {
+    item_attrs(item).iter().any(|attribute| {
+        attribute.path().is_ident("template")
+            || (attribute.path().is_ident("derive")
+                && token_stream_idents(&attribute.to_token_stream()).contains("Template"))
+    })
+}
+
+fn item_template_paths(item: &Item) -> Vec<String> {
+    item_attrs(item)
+        .iter()
+        .filter_map(template_attr_path)
+        .collect()
+}
+
+fn template_attr_path(attribute: &syn::Attribute) -> Option<String> {
+    if !attribute.path().is_ident("template") {
+        return None;
+    }
+    let mut path = None;
+    let _ = attribute.parse_nested_meta(|meta| {
+        if meta.path.is_ident("path") {
+            let value = meta.value()?;
+            let literal: syn::LitStr = value.parse()?;
+            path = Some(literal.value());
+        } else if meta.input.peek(syn::Token![=]) {
+            let value = meta.value()?;
+            let _: Expr = value.parse()?;
+        }
+        Ok(())
+    });
+    path
+}
+
+fn read_template(project: &Project, package: &str, template_path: &str) -> Option<String> {
+    let package = project.workspace.packages.get(package)?;
+    for dir in askama_template_dirs(&package.root) {
+        let path = package.root.join(dir).join(template_path);
+        if let Ok(contents) = fs::read_to_string(path) {
+            return Some(contents);
+        }
+    }
+    None
+}
+
+fn askama_template_dirs(package_root: &std::path::Path) -> Vec<PathBuf> {
+    let config_path = package_root.join("askama.toml");
+    if !config_path.exists() {
+        return vec![PathBuf::from("templates")];
+    }
+    let Ok(text) = fs::read_to_string(config_path) else {
+        return vec![PathBuf::from("templates")];
+    };
+    let Ok(value) = text.parse::<Value>() else {
+        return vec![PathBuf::from("templates")];
+    };
+    let Some(general) = value.get("general").and_then(Value::as_table) else {
+        return vec![PathBuf::from("templates")];
+    };
+    let Some(dirs) = general.get("dirs").and_then(Value::as_array) else {
+        return vec![PathBuf::from("templates")];
+    };
+    let dirs = dirs
+        .iter()
+        .filter_map(Value::as_str)
+        .map(PathBuf::from)
+        .filter(|path| {
+            !path.is_absolute()
+                && !path
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+        })
+        .collect::<Vec<_>>();
+    if dirs.is_empty() {
+        vec![PathBuf::from("templates")]
+    } else {
+        dirs
+    }
+}
+
+fn template_call_candidate_names(contents: &str) -> BTreeSet<String> {
+    let bytes = contents.as_bytes();
+    let mut names = BTreeSet::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if !is_ident_start(bytes[index]) {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < bytes.len() && is_ident_continue(bytes[index]) {
+            index += 1;
+        }
+        let mut cursor = index;
+        while cursor < bytes.len() && bytes[cursor].is_ascii_whitespace() {
+            cursor += 1;
+        }
+        if cursor < bytes.len() && bytes[cursor] == b'(' {
+            let name = &contents[start..index];
+            if macro_generated_reference_candidate(name) {
+                names.insert(name.to_string());
+            }
+        }
+    }
+    names
+}
+
+fn template_filter_candidate_names(contents: &str) -> BTreeSet<String> {
+    let bytes = contents.as_bytes();
+    let mut names = BTreeSet::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'|' {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index >= bytes.len() || !is_ident_start(bytes[index]) {
+            continue;
+        }
+        let start = index;
+        index += 1;
+        while index < bytes.len() && is_ident_continue(bytes[index]) {
+            index += 1;
+        }
+        let name = &contents[start..index];
+        if macro_generated_reference_candidate(name) {
+            names.insert(name.to_string());
+        }
+    }
+    names
+}
+
+fn referenced_template_paths(contents: &str) -> BTreeSet<String> {
+    let bytes = contents.as_bytes();
+    let mut paths = BTreeSet::new();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'"' && bytes[index] != b'\'' {
+            index += 1;
+            continue;
+        }
+        let quote = bytes[index];
+        index += 1;
+        let start = index;
+        while index < bytes.len() && bytes[index] != quote {
+            index += 1;
+        }
+        if index >= bytes.len() {
+            break;
+        }
+        let value = &contents[start..index];
+        if is_template_path_literal(value) {
+            paths.insert(value.to_string());
+        }
+        index += 1;
+    }
+    paths
+}
+
+fn is_template_path_literal(value: &str) -> bool {
+    let Some(extension) = value.rsplit('.').next() else {
+        return false;
+    };
+    matches!(
+        extension,
+        "askama" | "html" | "htm" | "j2" | "jinja" | "kt" | "swift" | "tmpl" | "txt"
+    )
+}
+
+fn is_ident_start(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphabetic()
+}
+
+fn is_ident_continue(byte: u8) -> bool {
+    byte == b'_' || byte.is_ascii_alphanumeric()
+}
+
+fn external_trait_impl_method_dependencies(project: &Project, item: &ItemId) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    let trait_path = path_from_item(item);
+    let resolver = Resolver {
+        project,
+        package: &item.package,
+        module_path: &item.module_path,
+        aliases: &HashMap::new(),
+        self_type: None,
+    };
+    for callable in project.methods.keys() {
+        let CallableId::Method {
+            package,
+            type_path,
+            trait_path: Some(candidate_trait_path),
+            ..
+        } = callable
+        else {
+            continue;
+        };
+        if package != &item.package || candidate_trait_path != &trait_path {
+            continue;
+        }
+        if resolver
+            .find_item(package, type_path, &type_like_kinds())
+            .is_none()
+        {
+            dependencies.callables.insert(callable.clone());
+        }
+    }
+    dependencies
 }
 
 fn module_root_dependencies(project: &Project, item: &ItemId) -> DependencySet {
@@ -2208,12 +2530,42 @@ impl<'a> DependencyVisitor<'a> {
             matches.push(callable.clone());
         }
 
+        if !receiver_candidates.is_empty() && matches.is_empty() {
+            for callable in self.resolver.project.methods.keys() {
+                let CallableId::Method {
+                    package, method, ..
+                } = callable
+                else {
+                    continue;
+                };
+
+                if method == method_name && self.visible_packages.contains(package) {
+                    matches.push(callable.clone());
+                }
+            }
+        }
+
         if receiver_candidates.is_empty() && matches.len() > MAX_UNRESOLVED_METHOD_NAME_CANDIDATES {
+            return;
+        }
+        if !receiver_candidates.is_empty() && matches.len() > MAX_UNRESOLVED_METHOD_NAME_CANDIDATES
+        {
             return;
         }
 
         for callable in matches {
             self.add_method_dependency(&callable);
+        }
+    }
+
+    fn add_extension_traits_containing_method(&mut self, method_name: &str) {
+        for item in self.resolver.project.items.keys() {
+            if item.kind != ItemKind::Trait || !self.visible_packages.contains(&item.package) {
+                continue;
+            }
+            if trait_item_contains_method(self.resolver.project, item, method_name) {
+                self.dependencies.items.insert(item.clone());
+            }
         }
     }
 
@@ -2905,6 +3257,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             }
             if !has_resolved_method {
                 self.add_unresolved_method_candidates(&method, &receiver_candidates);
+                self.add_extension_traits_containing_method(&method);
                 self.add_trait_impls_for_type_named(&receiver, "Deref");
                 self.add_trait_impls_for_type_named(&receiver, "DerefMut");
                 self.add_extension_trait_dependencies_for_method(&receiver, &method);
@@ -2946,6 +3299,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_collect_method_trait_dependencies();
         } else {
             self.add_unresolved_method_candidates(&call.method.to_string(), &receiver_candidates);
+            self.add_extension_traits_containing_method(&call.method.to_string());
             self.add_external_method_arg_trait_impls(call);
         }
         visit::visit_expr_method_call(self, call);
@@ -3010,11 +3364,8 @@ impl DependencyVisitor<'_> {
 
     fn add_macro_token_dependencies(&mut self, tokens: &TokenStream) {
         let mut referenced_types = BTreeSet::new();
-        let mut candidate_method_names = BTreeSet::new();
+        let candidate_method_names = macro_method_call_candidates(tokens);
         for segments in token_path_candidates(tokens) {
-            if segments.len() == 1 {
-                candidate_method_names.insert(segments[0].clone());
-            }
             let Ok(path) = syn::parse_str::<Path>(&segments.join("::")) else {
                 continue;
             };
@@ -3035,6 +3386,11 @@ impl DependencyVisitor<'_> {
             for type_ref in &referenced_types {
                 self.add_trait_impls_for_type_named(type_ref, "Deref");
             }
+        }
+
+        for method in &candidate_method_names {
+            self.add_unresolved_method_candidates(method, &[]);
+            self.add_extension_traits_containing_method(method);
         }
 
         for type_ref in referenced_types {
@@ -4675,6 +5031,12 @@ fn token_path_candidates(tokens: &TokenStream) -> Vec<Vec<String>> {
     candidates
 }
 
+fn macro_method_call_candidates(tokens: &TokenStream) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    collect_macro_method_call_candidates(tokens, &mut candidates);
+    candidates
+}
+
 fn string_literal_path_candidates(tokens: &TokenStream) -> Vec<Vec<String>> {
     let mut candidates = Vec::new();
     collect_string_literal_path_candidates(tokens, &mut candidates);
@@ -4891,6 +5253,28 @@ fn collect_token_path_candidates(tokens: &TokenStream, candidates: &mut Vec<Vec<
         }
 
         index = cursor.max(index + 1);
+    }
+}
+
+fn collect_macro_method_call_candidates(tokens: &TokenStream, candidates: &mut BTreeSet<String>) {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            collect_macro_method_call_candidates(&group.stream(), candidates);
+        }
+    }
+
+    for window in token_trees.windows(3) {
+        let [TokenTree::Punct(dot), TokenTree::Ident(method), TokenTree::Group(arguments)] = window
+        else {
+            continue;
+        };
+        if dot.as_char() == '.'
+            && arguments.delimiter() == Delimiter::Parenthesis
+            && macro_generated_reference_candidate(&method.to_string())
+        {
+            candidates.insert(method.to_string());
+        }
     }
 }
 

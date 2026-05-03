@@ -706,6 +706,220 @@ fn retains_macro_generated_public_reexports_referenced_through_dependency_crate_
 }
 
 #[test]
+fn resolves_grouped_self_import_module_aliases() {
+    let workspace = temp_path("grouped-self-import-workspace");
+    let output = temp_path("grouped-self-import-output");
+    let target_dir = temp_path("grouped-self-import-target");
+    write_grouped_self_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let store = read(output.join("grouped_self_like/src/store.rs"));
+    let api = read(output.join("grouped_self_like/src/api.rs"));
+    assert!(store.contains("use crate::api::{self, Payload}"));
+    assert!(store.contains("pub fn selected"));
+    assert!(api.contains("pub fn make"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated grouped self import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/store.rs:\n{}\nsrc/api.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        store,
+        api,
+    );
+}
+
+#[test]
+fn retains_extension_trait_default_methods_for_external_receiver_types() {
+    let workspace = temp_path("external-extension-trait-workspace");
+    let output = temp_path("external-extension-trait-output");
+    let target_dir = temp_path("external-extension-trait-target");
+    write_external_extension_trait_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app = read(output.join("app/src/lib.rs"));
+    let ext = read(output.join("ext/src/lib.rs"));
+    assert!(app.contains("use ext::StrExt"));
+    assert!(ext.contains("pub trait StrExt"));
+    assert!(ext.contains("fn shout"));
+    assert!(ext.contains("impl StrExt for str"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external extension trait slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/src/lib.rs:\n{}\next/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app,
+        ext,
+    );
+}
+
+#[test]
+fn retains_self_type_generic_args_for_external_trait_impls() {
+    let workspace = temp_path("external-trait-impl-generics-workspace");
+    let output = temp_path("external-trait-impl-generics-output");
+    let target_dir = temp_path("external-trait-impl-generics-target");
+    write_external_trait_impl_generics_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("external_trait_impl_generics_like/src/lib.rs"));
+    assert!(source.contains("trait SchemaHash"));
+    assert!(source.contains("struct PropDef"));
+    assert!(source.contains("impl SchemaHash for Vec<PropDef>"));
+    assert!(source.contains("impl SchemaHash for PropDef"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external trait impl generics slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn retains_same_package_reexports_used_by_child_modules() {
+    let workspace = temp_path("same-package-reexport-workspace");
+    let output = temp_path("same-package-reexport-output");
+    let target_dir = temp_path("same-package-reexport-target");
+    write_same_package_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let schema = read(output.join("same_package_reexport_like/src/schema/mod.rs"));
+    assert!(schema.contains("pub(crate) use types::TypeQuery"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated same-package reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nschema/mod.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        schema,
+    );
+}
+
+#[test]
+fn retains_methods_referenced_only_inside_macro_tokens() {
+    let workspace = temp_path("macro-method-token-workspace");
+    let output = temp_path("macro-method-token-output");
+    let target_dir = temp_path("macro-method-token-target");
+    write_macro_method_token_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("macro_method_token_like/src/lib.rs"));
+    assert!(source.contains("pub fn repo_id"));
+    assert!(source.contains("pub fn git_ref"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro method token slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn copies_askama_template_assets_for_retained_template_derives() {
+    let workspace = temp_path("askama-template-assets-workspace");
+    let output = temp_path("askama-template-assets-output");
+    let target_dir = temp_path("askama-template-assets-target");
+    write_askama_template_assets_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output
+        .join("askama_template_assets_like/askama.toml")
+        .exists());
+    assert!(output
+        .join("askama_template_assets_like/src/views/templates/selected.html")
+        .exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated askama template slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+    );
+}
+
+#[test]
 fn slices_nested_modules_declared_from_file_modules() {
     let workspace = temp_path("nested-file-workspace");
     let output = temp_path("nested-file-output");
@@ -6355,6 +6569,329 @@ macro_rules! define_error {
     };
 }
 "#,
+    );
+}
+
+fn write_grouped_self_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "grouped_self_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+mod api;
+mod store;
+
+pub use store::selected;
+"#,
+    );
+    write(
+        root.join("src/store.rs"),
+        r#"use opensourced::opensourced;
+use crate::api::{self, Payload};
+
+#[opensourced]
+pub fn selected() -> Payload {
+    api::make()
+}
+"#,
+    );
+    write(
+        root.join("src/api.rs"),
+        r#"pub struct Payload;
+
+pub fn make() -> Payload {
+    Payload
+}
+
+pub fn dead() -> usize {
+    0
+}
+"#,
+    );
+}
+
+fn write_external_extension_trait_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "ext"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+ext = {{ path = "../ext" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use ext::StrExt;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    value.shout()
+}
+"#,
+    );
+    write(
+        root.join("ext/Cargo.toml"),
+        r#"[package]
+name = "ext"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("ext/src/lib.rs"),
+        r#"pub trait StrExt {
+    fn shout(&self) -> String {
+        "ok".to_string()
+    }
+}
+
+impl StrExt for str {}
+"#,
+    );
+}
+
+fn write_external_trait_impl_generics_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external_trait_impl_generics_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+trait SchemaHash {
+    fn schema_hash(&self, state: &mut u64);
+}
+
+struct PropDef {
+    name: String,
+}
+
+impl SchemaHash for Vec<PropDef> {
+    fn schema_hash(&self, state: &mut u64) {
+        let mut vec: Vec<_> = self.iter().collect();
+        vec.sort_by_key(|item| &item.name);
+        for item in vec {
+            item.schema_hash(state);
+        }
+    }
+}
+
+impl SchemaHash for PropDef {
+    fn schema_hash(&self, state: &mut u64) {
+        *state += self.name.len() as u64;
+    }
+}
+"#,
+    );
+}
+
+fn write_same_package_reexport_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "same_package_reexport_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"mod schema;
+
+pub use schema::hasher::selected;
+"#,
+    );
+    write(
+        root.join("src/schema/mod.rs"),
+        r#"pub mod hasher;
+mod types;
+
+pub(crate) use types::TypeQuery;
+"#,
+    );
+    write(
+        root.join("src/schema/hasher.rs"),
+        r#"use opensourced::opensourced;
+use super::TypeQuery;
+
+#[opensourced]
+pub fn selected() -> usize {
+    TypeQuery::new().value()
+}
+"#,
+    );
+    write(
+        root.join("src/schema/types.rs"),
+        r#"pub(crate) struct TypeQuery {
+    value: usize,
+}
+
+impl TypeQuery {
+    pub(crate) fn new() -> Self {
+        Self { value: 7 }
+    }
+
+    pub(crate) fn value(&self) -> usize {
+        self.value
+    }
+}
+"#,
+    );
+}
+
+fn write_macro_method_token_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "macro_method_token_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+macro_rules! passthrough {
+    ($value:expr) => {
+        $value
+    };
+}
+
+pub struct GitHubRepoFilePath {
+    repo_id: String,
+    git_ref: String,
+}
+
+impl GitHubRepoFilePath {
+    pub fn new(repo_id: &str, git_ref: &str) -> Self {
+        Self {
+            repo_id: repo_id.to_string(),
+            git_ref: git_ref.to_string(),
+        }
+    }
+
+    pub fn repo_id(&self) -> &str {
+        &self.repo_id
+    }
+
+    pub fn git_ref(&self) -> &str {
+        &self.git_ref
+    }
+}
+
+#[opensourced]
+pub fn selected(path: &GitHubRepoFilePath) -> String {
+    passthrough!(path.repo_id()).to_string() + passthrough!(path.git_ref())
+}
+"#,
+    );
+}
+
+fn write_askama_template_assets_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "askama_template_assets_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+askama = "0.14"
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("askama.toml"),
+        r#"[general]
+dirs = ["src/views/templates"]
+"#,
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use askama::Template;
+use opensourced::opensourced;
+
+#[derive(Template)]
+#[template(escape = "none", path = "selected.html")]
+struct SelectedView;
+
+impl SelectedView {
+    fn title(&self) -> &'static str {
+        "selected"
+    }
+}
+
+#[opensourced]
+pub fn selected() -> String {
+    SelectedView.render().unwrap()
+}
+"#,
+    );
+    write(
+        root.join("src/views/templates/selected.html"),
+        "{{ self.title() }}",
     );
 }
 

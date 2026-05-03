@@ -4,7 +4,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use proc_macro2::{TokenStream, TokenTree};
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::visit::{self, Visit};
 use syn::{parse_quote, GenericArgument, ImplItem, Item, PathArguments, TraitItem, Type, UseTree};
@@ -62,6 +62,7 @@ pub fn write_reduced_workspace(
             continue;
         }
 
+        let mut package_uses_askama_templates = false;
         for source in project
             .files
             .values()
@@ -88,8 +89,12 @@ pub fn write_reduced_workspace(
             }
             fs::write(output_path, prettyplease::unparse(&transformed))?;
             files_written += 1;
+            package_uses_askama_templates |= file_has_template_attr(&transformed);
             files_written +=
                 copy_source_include_assets(package, source, &transformed, &package_output)?;
+        }
+        if package_uses_askama_templates {
+            files_written += copy_askama_template_assets(package, &package_output)?;
         }
     }
 
@@ -420,6 +425,72 @@ fn copy_source_include_assets(
     }
 
     Ok(copied)
+}
+
+fn copy_askama_template_assets(
+    package: &Package,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut copied = 0;
+    let config_path = package.root.join("askama.toml");
+    if config_path.exists() {
+        copy_asset(package, &config_path, package_output)?;
+        copied += 1;
+        for dir in askama_template_dirs(&config_path)? {
+            let path = package.root.join(dir);
+            if path.exists() {
+                copied += copy_non_rust_path_assets(package, &path, package_output)?;
+            }
+        }
+    }
+
+    let default_templates = package.root.join("templates");
+    if default_templates.exists() {
+        copied += copy_non_rust_path_assets(package, &default_templates, package_output)?;
+    }
+
+    Ok(copied)
+}
+
+fn askama_template_dirs(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(path)?;
+    let value = text.parse::<Value>()?;
+    let Some(general) = value.get("general").and_then(Value::as_table) else {
+        return Ok(Vec::new());
+    };
+    let Some(dirs) = general.get("dirs").and_then(Value::as_array) else {
+        return Ok(Vec::new());
+    };
+    Ok(dirs
+        .iter()
+        .filter_map(Value::as_str)
+        .map(PathBuf::from)
+        .filter(|path| {
+            !path.is_absolute()
+                && !path
+                    .components()
+                    .any(|component| matches!(component, Component::ParentDir))
+        })
+        .collect())
+}
+
+fn file_has_template_attr(file: &syn::File) -> bool {
+    struct TemplateAttrVisitor {
+        found: bool,
+    }
+
+    impl<'ast> Visit<'ast> for TemplateAttrVisitor {
+        fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+            if attribute.path().is_ident("template") {
+                self.found = true;
+            }
+            visit::visit_attribute(self, attribute);
+        }
+    }
+
+    let mut visitor = TemplateAttrVisitor { found: false };
+    visitor.visit_file(file);
+    visitor.found
 }
 
 fn collect_include_macro_paths(tokens: &TokenStream, candidates: &mut BTreeSet<PathBuf>) {
@@ -1212,6 +1283,35 @@ fn token_stream_mentions_ident(tokens: &TokenStream, ident: &str) -> bool {
     })
 }
 
+fn item_has_template_attr(item: &Item) -> bool {
+    item_attrs(item).iter().any(|attribute| {
+        attribute.path().is_ident("template")
+            || (attribute.path().is_ident("derive")
+                && token_stream_mentions_ident(&attribute.to_token_stream(), "Template"))
+    })
+}
+
+fn item_attrs(item: &Item) -> &[syn::Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
 fn token_stream_mentions_dependency_public_name(
     project: &Project,
     caller_package: &str,
@@ -1560,7 +1660,7 @@ fn transform_items(
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
             Item::Use(item_use) => {
                 let mut item_use = item_use.clone();
-                let is_public_use = matches!(item_use.vis, syn::Visibility::Public(_));
+                let is_public_use = !matches!(item_use.vis, syn::Visibility::Inherited);
                 let tree = prune_use_tree(
                     project,
                     reduced,
@@ -1656,6 +1756,11 @@ fn transform_items(
                 let trait_impl_is_required = trait_path.as_ref().is_some_and(|trait_path| {
                     trait_impl_items_are_reachable(reduced, package, &type_path, trait_path)
                 });
+                let external_trait_impl_is_required =
+                    trait_path.as_ref().is_some_and(|trait_path| {
+                        path_item_is_reachable(reduced, package, trait_path, &[ItemKind::Trait])
+                            && find_type_like_item(project, package, &type_path).is_none()
+                    });
                 let marker_trait_impl_is_required = trait_path
                     .as_ref()
                     .and_then(|path| path.last())
@@ -1690,7 +1795,11 @@ fn transform_items(
                     }
                 }
 
-                if kept_method || trait_impl_is_required || marker_trait_impl_is_required {
+                if kept_method
+                    || trait_impl_is_required
+                    || external_trait_impl_is_required
+                    || marker_trait_impl_is_required
+                {
                     if trait_path.is_some() {
                         kept_impl_items.clear();
                         for impl_item in &item_impl.items {
@@ -2370,6 +2479,24 @@ fn reachable_module_mentions_ident(
         || retained_macro_invocations_mention_ident(project, reduced, package, module_path, ident)
 }
 
+fn reachable_module_has_template_attr(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    reduced
+        .reachable_items
+        .iter()
+        .filter(|item| item.package == package && item.module_path == module_path)
+        .any(|item| {
+            project
+                .items
+                .get(item)
+                .is_some_and(|record| item_has_template_attr(&record.item))
+        })
+}
+
 fn reachable_module_has_method_call(
     project: &Project,
     reduced: &ReducedProject,
@@ -2436,19 +2563,41 @@ fn reachable_module_has_associated_function_call(
 fn item_fn_has_method_call(item: &syn::ItemFn, method: &str) -> bool {
     let mut visitor = MethodCallVisitor::new(method);
     visitor.visit_item_fn(item);
-    visitor.found
+    visitor.found || token_stream_has_method_call(&item.to_token_stream(), method)
 }
 
 fn impl_item_fn_has_method_call(item: &syn::ImplItemFn, method: &str) -> bool {
     let mut visitor = MethodCallVisitor::new(method);
     visitor.visit_impl_item_fn(item);
-    visitor.found
+    visitor.found || token_stream_has_method_call(&item.to_token_stream(), method)
 }
 
 fn item_has_method_call(item: &Item, method: &str) -> bool {
     let mut visitor = MethodCallVisitor::new(method);
     visitor.visit_item(item);
-    visitor.found
+    visitor.found || token_stream_has_method_call(&item.to_token_stream(), method)
+}
+
+fn token_stream_has_method_call(tokens: &TokenStream, method: &str) -> bool {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            if token_stream_has_method_call(&group.stream(), method) {
+                return true;
+            }
+        }
+    }
+
+    token_trees.windows(3).any(|window| {
+        let [TokenTree::Punct(dot), TokenTree::Ident(candidate), TokenTree::Group(arguments)] =
+            window
+        else {
+            return false;
+        };
+        dot.as_char() == '.'
+            && candidate == method
+            && arguments.delimiter() == Delimiter::Parenthesis
+    })
 }
 
 fn item_fn_has_associated_function_call(item: &syn::ItemFn, function: &str) -> bool {
@@ -2599,6 +2748,28 @@ fn reachable_module_import_scope_mentions_ident(
         ident,
         None,
     )
+}
+
+fn reachable_package_import_scope_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .filter(|source| module_should_render(project, reduced, package, &source.module_path))
+        .any(|source| {
+            reachable_module_import_scope_mentions_ident(
+                project,
+                reduced,
+                package,
+                &source.module_path,
+                ident,
+            )
+        })
 }
 
 fn reachable_module_import_scope_mentions_ident_excluding(
@@ -3040,13 +3211,31 @@ fn prune_use_tree(
                 module_path,
                 &prefix,
                 is_public_use,
-            ) || (is_public_use
-                && public_reexport_name_is_referenced_by_reduced_package(
+            ) || (name.ident == "self"
+                && reachable_module_import_scope_mentions_ident(
                     project,
                     reduced,
                     package,
+                    module_path,
                     &visible_name,
-                )))
+                ))
+                || (is_public_use
+                    && (reachable_package_mentions_ident(
+                        project,
+                        reduced,
+                        package,
+                        &visible_name,
+                    ) || reachable_package_import_scope_mentions_ident(
+                        project,
+                        reduced,
+                        package,
+                        &visible_name,
+                    ) || public_reexport_name_is_referenced_by_reduced_package(
+                        project,
+                        reduced,
+                        package,
+                        &visible_name,
+                    ))))
             .then(|| UseTree::Name(name.clone()))
         }
         UseTree::Rename(rename) => {
@@ -3068,6 +3257,9 @@ fn prune_use_tree(
                 is_public_use,
             ) || (is_public_use
                 && (reachable_reduced_packages_mention_ident(project, reduced, &alias)
+                    || reachable_package_import_scope_mentions_ident(
+                        project, reduced, package, &alias,
+                    )
                     || public_reexport_name_is_referenced_by_reduced_package(
                         project, reduced, package, &alias,
                     ))))
@@ -3220,6 +3412,8 @@ fn use_target_should_drop(
 
     let leaf_is_used_in_module = target.last().is_some_and(|leaf| {
         reachable_module_import_scope_mentions_ident(project, reduced, package, module_path, leaf)
+            || (leaf == "filters"
+                && reachable_module_has_template_attr(project, reduced, package, module_path))
     });
 
     if let Some(callable) = find_use_function(project, &target_package, &target_path) {
@@ -3607,6 +3801,14 @@ fn external_trait_import_should_remain(
 fn known_trait_receiver_idents(target: &[String], leaf: &str) -> Option<&'static [&'static str]> {
     match (target.first().map(String::as_str), leaf) {
         (Some("sha1"), "Digest") => Some(&["Sha1"]),
+        (Some("sha2"), "Digest") => Some(&[
+            "Sha224",
+            "Sha256",
+            "Sha384",
+            "Sha512",
+            "Sha512_224",
+            "Sha512_256",
+        ]),
         _ => None,
     }
 }
@@ -3668,7 +3870,16 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
             "write_u128",
         ]),
         (Some("serde"), "Serialize") => Some(&["serialize"]),
-        (Some("sha1"), "Digest") => Some(&["chain_update", "finalize", "reset", "update"]),
+        (_, "Digest") => Some(&[
+            "chain_update",
+            "digest",
+            "finalize",
+            "finalize_reset",
+            "new",
+            "new_with_prefix",
+            "reset",
+            "update",
+        ]),
         (Some("base64"), "Engine") => Some(&[
             "decode",
             "decode_slice",
@@ -3725,7 +3936,7 @@ fn known_trait_associated_function_idents(
     match (target.first().map(String::as_str), leaf) {
         (Some("serde"), "Deserialize") => Some(&["deserialize"]),
         (Some("serde"), "Serialize") => Some(&["serialize"]),
-        (Some("sha1"), "Digest") => Some(&["digest", "new", "new_with_prefix"]),
+        (_, "Digest") => Some(&["digest", "new", "new_with_prefix"]),
         _ => None,
     }
 }

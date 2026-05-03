@@ -246,6 +246,7 @@ impl Parser {
             .as_ref()
             .map(|(_, path, _)| trait_input_type_paths(module_path, path, aliases))
             .unwrap_or_default();
+        let self_type_inputs = self_type_input_type_paths(module_path, &item_impl.self_ty, aliases);
 
         for impl_item in &item_impl.items {
             if let ImplItem::Fn(method) = impl_item {
@@ -262,6 +263,7 @@ impl Parser {
                         module_path: module_path.to_vec(),
                         item: method.clone(),
                         impl_items: item_impl.items.clone(),
+                        self_type_input_type_paths: self_type_inputs.clone(),
                         trait_input_type_paths: trait_input_type_paths.clone(),
                         aliases: aliases.clone(),
                     },
@@ -575,14 +577,22 @@ fn collect_use_tree(
             collect_use_tree(&path.tree, prefix, aliases);
         }
         UseTree::Name(name) => {
-            let ident = name.ident.to_string();
-            let mut target = prefix;
-            target.push(ident.clone());
-            aliases.insert(ident, target);
+            if name.ident == "self" {
+                if let Some(ident) = prefix.last().cloned() {
+                    aliases.insert(ident, prefix);
+                }
+            } else {
+                let ident = name.ident.to_string();
+                let mut target = prefix;
+                target.push(ident.clone());
+                aliases.insert(ident, target);
+            }
         }
         UseTree::Rename(rename) => {
             let mut target = prefix;
-            target.push(rename.ident.to_string());
+            if rename.ident != "self" {
+                target.push(rename.ident.to_string());
+            }
             aliases.insert(rename.rename.to_string(), target);
         }
         UseTree::Group(group) => {
@@ -691,6 +701,28 @@ fn trait_input_type_paths(
             for argument in &arguments.args {
                 if let GenericArgument::Type(ty) = argument {
                     collect_type_paths(module_path, ty, aliases, &mut type_paths);
+                }
+            }
+        }
+    }
+    type_paths.sort();
+    type_paths.dedup();
+    type_paths
+}
+
+fn self_type_input_type_paths(
+    module_path: &[String],
+    ty: &Type,
+    aliases: &HashMap<String, Vec<String>>,
+) -> Vec<Vec<String>> {
+    let mut type_paths = Vec::new();
+    if let Type::Path(type_path) = ty {
+        for segment in &type_path.path.segments {
+            if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                for argument in &arguments.args {
+                    if let GenericArgument::Type(ty) = argument {
+                        collect_type_paths(module_path, ty, aliases, &mut type_paths);
+                    }
                 }
             }
         }
