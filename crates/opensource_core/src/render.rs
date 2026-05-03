@@ -3191,7 +3191,17 @@ fn is_external_trait_import_candidate(target: &[String], leaf: &str) -> bool {
         return is_known_std_trait_import(leaf);
     }
 
-    is_known_external_trait_import(leaf)
+    is_known_external_trait_import(leaf) || is_probable_external_trait_import(target, leaf)
+}
+
+fn is_probable_external_trait_import(target: &[String], leaf: &str) -> bool {
+    target
+        .first()
+        .is_some_and(|first| !matches!(first.as_str(), "crate" | "self" | "super"))
+        && leaf
+            .chars()
+            .next()
+            .is_some_and(|first| first.is_ascii_uppercase())
 }
 
 fn is_known_std_trait_import(leaf: &str) -> bool {
@@ -3256,10 +3266,7 @@ fn is_known_std_trait_import(leaf: &str) -> bool {
 }
 
 fn is_known_external_trait_import(leaf: &str) -> bool {
-    matches!(
-        leaf,
-        "Deserialize" | "Digest" | "Engine" | "MapBackendError" | "Serialize"
-    )
+    matches!(leaf, "Deserialize" | "Digest" | "Engine" | "Serialize")
 }
 
 fn external_trait_import_should_remain(
@@ -3278,8 +3285,12 @@ fn external_trait_import_should_remain(
         if reachable_module_mentions_ident(project, reduced, package, module_path, leaf) {
             return true;
         }
-        let Some(methods) = known_trait_method_idents(target, leaf) else {
-            return true;
+        let method_candidates;
+        let methods = if let Some(methods) = known_trait_method_idents(target, leaf) {
+            methods.iter().copied().collect::<Vec<_>>()
+        } else {
+            method_candidates = generic_trait_method_name_candidates(leaf);
+            method_candidates.iter().map(String::as_str).collect()
         };
         return methods.iter().any(|method| {
             reachable_module_has_method_call(project, reduced, package, module_path, method)
@@ -3342,8 +3353,12 @@ fn external_trait_import_should_remain(
         }) {
             return true;
         }
-        let Some(methods) = known_trait_method_idents(target, leaf) else {
-            return true;
+        let method_candidates;
+        let methods = if let Some(methods) = known_trait_method_idents(target, leaf) {
+            methods.iter().copied().collect::<Vec<_>>()
+        } else {
+            method_candidates = generic_trait_method_name_candidates(leaf);
+            method_candidates.iter().map(String::as_str).collect()
         };
         return methods.iter().any(|method| {
             reachable_module_has_method_call(project, reduced, package, module_path, method)
@@ -3427,9 +3442,46 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
             "encode_slice",
             "encode_string",
         ]),
-        (Some("viaduct"), "MapBackendError") => Some(&["map_backend_error"]),
         _ => None,
     }
+}
+
+fn generic_trait_method_name_candidates(leaf: &str) -> Vec<String> {
+    let mut candidates = Vec::new();
+    let snake_case = camel_case_to_snake_case(leaf);
+    if !snake_case.is_empty() {
+        candidates.push(snake_case);
+    }
+    for suffix in ["Ext", "Trait"] {
+        if let Some(stem) = leaf.strip_suffix(suffix) {
+            let snake_case = camel_case_to_snake_case(stem);
+            if !snake_case.is_empty() {
+                candidates.push(snake_case);
+            }
+        }
+    }
+    candidates.sort();
+    candidates.dedup();
+    candidates
+}
+
+fn camel_case_to_snake_case(value: &str) -> String {
+    let mut output = String::new();
+    let mut previous_was_lowercase_or_digit = false;
+    for character in value.chars() {
+        if character.is_ascii_uppercase() {
+            if previous_was_lowercase_or_digit {
+                output.push('_');
+            }
+            output.push(character.to_ascii_lowercase());
+            previous_was_lowercase_or_digit = false;
+        } else {
+            previous_was_lowercase_or_digit =
+                character.is_ascii_lowercase() || character.is_ascii_digit();
+            output.push(character);
+        }
+    }
+    output
 }
 
 fn known_trait_associated_function_idents(

@@ -1215,6 +1215,43 @@ fn retains_inline_generated_modules_macro_deref_helpers_and_backend_bridges() {
 }
 
 #[test]
+fn resolves_arbitrary_untyped_closure_and_wrapper_trait_methods_without_name_allowlist() {
+    let workspace = temp_path("generic-method-recovery-workspace");
+    let output = temp_path("generic-method-recovery-output");
+    let target_dir = temp_path("generic-method-recovery-target");
+    write_generic_method_recovery_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(source.contains("fn persist_widget"));
+    assert!(source.contains("fn calculate_marker"));
+    assert!(source.contains("impl MarkerSum for Vec<Widget>"));
+    assert!(!source.contains("discarded_noise"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated generic method recovery slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn resolves_external_workspace_path_dependencies_from_original_root() {
     let workspace = temp_path("external-workspace-dep-workspace");
     let output = temp_path("external-workspace-dep-output");
@@ -4857,6 +4894,105 @@ pub fn selected(
     write(
         root.join("app/src/generated.rs"),
         r#"pub struct Message;
+"#,
+    );
+}
+
+fn write_generic_method_recovery_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub struct Processor {
+    widgets: Vec<Widget>,
+}
+
+impl Processor {
+    pub fn new() -> Self {
+        Self {
+            widgets: vec![Widget::new(1)],
+        }
+    }
+
+    fn with_writer(
+        &mut self,
+        op: impl FnOnce(&mut Writer) -> Result<usize, ()>,
+    ) -> Result<usize, ()> {
+        let mut writer = Writer { widgets: Vec::new() };
+        let written = op(&mut writer)?;
+        self.widgets.extend(writer.widgets);
+        Ok(written + self.widgets.calculate_marker())
+    }
+}
+
+pub struct Writer {
+    widgets: Vec<Widget>,
+}
+
+impl Writer {
+    fn persist_widget(&mut self, widget: Widget) -> Result<usize, ()> {
+        self.widgets.push(widget);
+        Ok(self.widgets.calculate_marker())
+    }
+
+    fn discarded_noise(&self) -> usize {
+        999
+    }
+}
+
+#[derive(Clone)]
+pub struct Widget {
+    value: usize,
+}
+
+impl Widget {
+    fn new(value: usize) -> Self {
+        Self { value }
+    }
+}
+
+trait MarkerSum {
+    fn calculate_marker(&self) -> usize;
+}
+
+impl MarkerSum for Vec<Widget> {
+    fn calculate_marker(&self) -> usize {
+        self.iter().map(|widget| widget.value).sum()
+    }
+}
+
+#[opensourced]
+pub fn selected(processor: &mut Processor) -> Result<usize, ()> {
+    processor.with_writer(|writer| writer.persist_widget(Widget::new(41)))
+}
 "#,
     );
 }

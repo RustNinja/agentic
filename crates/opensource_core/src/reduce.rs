@@ -12,6 +12,8 @@ use syn::{
 
 use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId};
 
+const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 24;
+
 pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::Error>> {
     let mut callable_roots = project
         .functions
@@ -1013,6 +1015,8 @@ struct DependencyVisitor<'a> {
     resolver: Resolver<'a>,
     dependencies: DependencySet,
     variables: HashMap<String, TypeRef>,
+    variable_candidates: HashMap<String, Vec<TypeRef>>,
+    visible_packages: BTreeSet<String>,
     expected_parse_types: BTreeSet<TypeRef>,
     expected_error_types: BTreeSet<TypeRef>,
     expected_collect_types: BTreeSet<TypeRef>,
@@ -1020,10 +1024,13 @@ struct DependencyVisitor<'a> {
 
 impl<'a> DependencyVisitor<'a> {
     fn new(resolver: Resolver<'a>) -> Self {
+        let visible_packages = package_closure(resolver.project, resolver.package);
         Self {
             resolver,
             dependencies: DependencySet::default(),
             variables: HashMap::new(),
+            variable_candidates: HashMap::new(),
+            visible_packages,
             expected_parse_types: BTreeSet::new(),
             expected_error_types: BTreeSet::new(),
             expected_collect_types: BTreeSet::new(),
@@ -1039,9 +1046,31 @@ impl<'a> DependencyVisitor<'a> {
                 continue;
             };
             if let Some(type_ref) = self.resolver.resolve_receiver_type(&input.ty) {
-                self.variables.insert(ident.ident.to_string(), type_ref);
+                let candidates = self.resolver.receiver_type_candidates_from_type(&input.ty);
+                self.insert_variable_candidates(ident.ident.to_string(), type_ref, candidates);
             }
         }
+    }
+
+    fn insert_variable_type(&mut self, name: String, type_ref: TypeRef) {
+        let candidates = self.resolver.type_ref_candidates(&type_ref);
+        self.insert_variable_candidates(name, type_ref, candidates);
+    }
+
+    fn insert_variable_candidates(
+        &mut self,
+        name: String,
+        type_ref: TypeRef,
+        mut candidates: Vec<TypeRef>,
+    ) {
+        candidates.push(type_ref.clone());
+        for candidate in self.resolver.type_ref_candidates(&type_ref) {
+            candidates.push(candidate);
+        }
+        candidates.sort();
+        candidates.dedup();
+        self.variables.insert(name.clone(), type_ref);
+        self.variable_candidates.insert(name, candidates);
     }
 
     fn add_call_path(&mut self, path: &Path) {
@@ -1107,17 +1136,101 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
-    fn local_binding_type(&self, local: &Local) -> Option<(String, TypeRef)> {
+    fn receiver_type_candidates(&self, expression: &Expr) -> Vec<TypeRef> {
+        let mut candidates = Vec::new();
+        match expression {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first().unwrap().ident.to_string();
+                if name == "self" {
+                    if let Some(self_type) = &self.resolver.self_type {
+                        candidates.extend(self.resolver.type_ref_candidates(self_type));
+                    }
+                } else if let Some(variable_candidates) = self.variable_candidates.get(&name) {
+                    candidates.extend(variable_candidates.clone());
+                }
+            }
+            Expr::Call(call) => {
+                if let Some(type_ref) = self.wrapper_constructor_arg_type(call).or_else(|| {
+                    if let Expr::Path(path) = call.func.as_ref() {
+                        self.resolver.type_from_expr_path_call(path)
+                    } else {
+                        None
+                    }
+                }) {
+                    candidates.extend(self.resolver.type_ref_candidates(&type_ref));
+                }
+            }
+            Expr::MethodCall(call) => {
+                if matches!(call.method.to_string().as_str(), "as_ref" | "clone") {
+                    candidates.extend(self.receiver_type_candidates(&call.receiver));
+                } else if call.method == "lock" && call.args.is_empty() {
+                    candidates.extend(
+                        self.receiver_type(&call.receiver)
+                            .into_iter()
+                            .flat_map(|type_ref| self.resolver.type_ref_candidates(&type_ref)),
+                    );
+                }
+
+                for receiver in self.receiver_type_candidates(&call.receiver) {
+                    for callable in self
+                        .resolver
+                        .resolve_methods(&receiver, &call.method.to_string())
+                    {
+                        if let Some(return_type) =
+                            self.resolver.return_type_from_callable(&callable)
+                        {
+                            candidates.extend(self.resolver.type_ref_candidates(&return_type));
+                        }
+                    }
+                }
+            }
+            Expr::Try(expr) => {
+                candidates.extend(self.expression_type_arguments(&expr.expr));
+                candidates.extend(self.receiver_type_candidates(&expr.expr));
+            }
+            Expr::Field(field) => {
+                for receiver in self.receiver_type_candidates(&field.base) {
+                    candidates.extend(
+                        self.resolver
+                            .field_type_candidates(&receiver, &field.member),
+                    );
+                }
+            }
+            Expr::Struct(expr) => {
+                if let Some(type_ref) = self.resolver.resolve_type_path(&expr.path) {
+                    candidates.extend(self.resolver.type_ref_candidates(&type_ref));
+                }
+            }
+            Expr::Reference(reference) => {
+                candidates.extend(self.receiver_type_candidates(&reference.expr))
+            }
+            Expr::Paren(paren) => candidates.extend(self.receiver_type_candidates(&paren.expr)),
+            _ => {}
+        }
+
+        if candidates.is_empty() {
+            if let Some(type_ref) = self.receiver_type(expression) {
+                candidates.extend(self.resolver.type_ref_candidates(&type_ref));
+            }
+        }
+        candidates.sort();
+        candidates.dedup();
+        candidates
+    }
+
+    fn local_binding_type(&self, local: &Local) -> Option<(String, TypeRef, Vec<TypeRef>)> {
         let (name, explicit_type) = binding_name_and_type(&local.pat)?;
         if let Some(ty) = explicit_type {
             if let Some(type_ref) = self.resolver.resolve_receiver_type(ty) {
-                return Some((name, type_ref));
+                let candidates = self.resolver.receiver_type_candidates_from_type(ty);
+                return Some((name, type_ref, candidates));
             }
         }
 
         let init = local.init.as_ref()?;
         let type_ref = self.infer_expr_type(&init.expr)?;
-        Some((name, type_ref))
+        let candidates = self.receiver_type_candidates(&init.expr);
+        Some((name, type_ref, candidates))
     }
 
     fn infer_expr_type(&self, expression: &Expr) -> Option<TypeRef> {
@@ -1263,15 +1376,13 @@ impl<'a> DependencyVisitor<'a> {
         let Some(Pat::Ident(ident)) = tuple.elems.first() else {
             return;
         };
-        self.variables
-            .insert(ident.ident.to_string(), type_ref.clone());
+        self.insert_variable_type(ident.ident.to_string(), type_ref.clone());
     }
 
     fn add_pattern_bindings_for_type(&mut self, pattern: &Pat, type_ref: &TypeRef) {
         match pattern {
             Pat::Ident(ident) => {
-                self.variables
-                    .insert(ident.ident.to_string(), type_ref.clone());
+                self.insert_variable_type(ident.ident.to_string(), type_ref.clone());
             }
             Pat::Reference(reference) => {
                 self.add_pattern_bindings_for_type(&reference.pat, type_ref);
@@ -1462,7 +1573,11 @@ impl<'a> DependencyVisitor<'a> {
             }) {
                 continue;
             }
-            let Some(trait_item) = self.resolver.resolve_local_trait_item(trait_path) else {
+            let Some(trait_item) = self
+                .resolver
+                .resolve_trait_item_in_package(package, trait_path)
+                .or_else(|| self.resolver.resolve_trait_item(trait_path))
+            else {
                 continue;
             };
             if !trait_item_contains_method(self.resolver.project, &trait_item, method_name) {
@@ -1550,47 +1665,107 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
-    fn add_unresolved_method_fallback(&mut self, method_name: &str) {
-        if !matches!(
-            method_name,
-            "allow_coenrollment"
-                | "config"
-                | "create_list"
-                | "defaults_hash"
-                | "is_connected"
-                | "is_valid_for_places"
-                | "is_valid_for_sync_server"
-                | "map_backend_error"
-                | "name"
-                | "schema_hash"
-                | "send"
-                | "set_value"
-                | "spawn_detached"
-        ) {
-            return;
+    fn add_method_dependency(&mut self, callable: &CallableId) {
+        if let CallableId::Method {
+            package,
+            trait_path: Some(trait_path),
+            ..
+        } = callable
+        {
+            if let Some(trait_item) = self
+                .resolver
+                .resolve_trait_item_in_package(package, trait_path)
+                .or_else(|| self.resolver.resolve_trait_item(trait_path))
+            {
+                self.dependencies.items.insert(trait_item);
+            }
         }
+        self.dependencies.callables.insert(callable.clone());
+    }
+
+    fn add_unresolved_method_fallback(&mut self, method_name: &str) {
+        self.add_unresolved_method_candidates(method_name, &[]);
+    }
+
+    fn add_unresolved_method_candidates(
+        &mut self,
+        method_name: &str,
+        receiver_candidates: &[TypeRef],
+    ) {
+        let receiver_candidates = receiver_candidates
+            .iter()
+            .flat_map(|type_ref| self.resolver.type_ref_candidates(type_ref))
+            .collect::<BTreeSet<_>>();
+        let mut matches = Vec::new();
         for callable in self.resolver.project.methods.keys() {
             let CallableId::Method {
                 package,
                 type_path,
                 method,
-                trait_path,
                 ..
             } = callable
             else {
                 continue;
             };
-            if method == method_name
-                && unresolved_method_fallback_type_matches(method_name, type_path)
-                && (package == self.resolver.package
-                    || unresolved_method_fallback_can_cross_packages(method_name))
+
+            if method != method_name || !self.visible_packages.contains(package) {
+                continue;
+            }
+
+            if !receiver_candidates.is_empty()
+                && !receiver_candidates.iter().any(|candidate| {
+                    package == &candidate.package
+                        && conversion_input_matches_receiver(type_path, candidate)
+                })
             {
-                if let Some(trait_path) = trait_path {
-                    if let Some(trait_item) = self.resolver.resolve_local_trait_item(trait_path) {
-                        self.dependencies.items.insert(trait_item);
-                    }
-                }
-                self.dependencies.callables.insert(callable.clone());
+                continue;
+            }
+
+            matches.push(callable.clone());
+        }
+
+        if receiver_candidates.is_empty() && matches.len() > MAX_UNRESOLVED_METHOD_NAME_CANDIDATES {
+            return;
+        }
+
+        for callable in matches {
+            self.add_method_dependency(&callable);
+        }
+    }
+
+    fn add_peer_trait_impls_for_resolved_methods(&mut self, resolved_methods: &[CallableId]) {
+        let resolved_traits = resolved_methods
+            .iter()
+            .filter_map(|callable| {
+                let CallableId::Method {
+                    package,
+                    trait_path: Some(trait_path),
+                    method,
+                    ..
+                } = callable
+                else {
+                    return None;
+                };
+                Some((package.clone(), trait_path.clone(), method.clone()))
+            })
+            .collect::<BTreeSet<_>>();
+
+        if resolved_traits.is_empty() {
+            return;
+        }
+
+        for callable in self.resolver.project.methods.keys() {
+            let CallableId::Method {
+                package,
+                trait_path: Some(trait_path),
+                method,
+                ..
+            } = callable
+            else {
+                continue;
+            };
+            if resolved_traits.contains(&(package.clone(), trait_path.clone(), method.clone())) {
+                self.add_method_dependency(callable);
             }
         }
     }
@@ -1794,18 +1969,53 @@ impl<'a> DependencyVisitor<'a> {
     fn bind_pattern_type(&mut self, pattern: &Pat, type_ref: &TypeRef) {
         match pattern {
             Pat::Ident(ident) => {
-                self.variables
-                    .insert(ident.ident.to_string(), type_ref.clone());
+                self.insert_variable_type(ident.ident.to_string(), type_ref.clone());
             }
             Pat::Reference(reference) => self.bind_pattern_type(&reference.pat, type_ref),
             Pat::Type(pat_type) => {
                 if let Some(explicit_type) = self.resolver.resolve_receiver_type(&pat_type.ty) {
-                    self.bind_pattern_type(&pat_type.pat, &explicit_type);
+                    let candidates = self
+                        .resolver
+                        .receiver_type_candidates_from_type(&pat_type.ty);
+                    self.bind_pattern_type_candidates(&pat_type.pat, &explicit_type, candidates);
                 } else {
                     self.bind_pattern_type(&pat_type.pat, type_ref);
                 }
             }
             _ => {}
+        }
+    }
+
+    fn bind_pattern_type_candidates(
+        &mut self,
+        pattern: &Pat,
+        type_ref: &TypeRef,
+        candidates: Vec<TypeRef>,
+    ) {
+        match pattern {
+            Pat::Ident(ident) => self.insert_variable_candidates(
+                ident.ident.to_string(),
+                type_ref.clone(),
+                candidates,
+            ),
+            Pat::Reference(reference) => {
+                self.bind_pattern_type_candidates(&reference.pat, type_ref, candidates)
+            }
+            Pat::Type(pat_type) => {
+                if let Some(explicit_type) = self.resolver.resolve_receiver_type(&pat_type.ty) {
+                    let explicit_candidates = self
+                        .resolver
+                        .receiver_type_candidates_from_type(&pat_type.ty);
+                    self.bind_pattern_type_candidates(
+                        &pat_type.pat,
+                        &explicit_type,
+                        explicit_candidates,
+                    );
+                } else {
+                    self.bind_pattern_type_candidates(&pat_type.pat, type_ref, candidates);
+                }
+            }
+            _ => self.bind_pattern_type(pattern, type_ref),
         }
     }
 
@@ -1866,6 +2076,39 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_closure_arg_dependencies(
+        &mut self,
+        call: &ExprMethodCall,
+        resolved_methods: &[CallableId],
+    ) {
+        for (arg_index, argument) in call.args.iter().enumerate() {
+            let Expr::Closure(closure) = argument else {
+                continue;
+            };
+            let input_types = resolved_methods
+                .iter()
+                .flat_map(|callable| {
+                    self.resolver
+                        .closure_argument_input_types(callable, arg_index)
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if input_types.is_empty() {
+                continue;
+            }
+
+            let variables = self.variables.clone();
+            let variable_candidates = self.variable_candidates.clone();
+            for (pattern, type_ref) in closure.inputs.iter().zip(input_types.iter()) {
+                self.bind_pattern_type(pattern, type_ref);
+            }
+            self.visit_expr(&closure.body);
+            self.variables = variables;
+            self.variable_candidates = variable_candidates;
+        }
+    }
+
     fn visit_fold_method_call(&mut self, call: &ExprMethodCall) -> bool {
         if call.method != "fold" || call.args.len() != 2 {
             return false;
@@ -1892,12 +2135,14 @@ impl<'a> DependencyVisitor<'a> {
         self.visit_expr(initial);
 
         let variables = self.variables.clone();
+        let variable_candidates = self.variable_candidates.clone();
         self.bind_pattern_type(accumulator_pat, &accumulator_type);
         for input in closure.inputs.iter().skip(1) {
             self.visit_pat(input);
         }
         self.visit_expr(&closure.body);
         self.variables = variables;
+        self.variable_candidates = variable_candidates;
         true
     }
 
@@ -1921,9 +2166,11 @@ impl<'a> DependencyVisitor<'a> {
 
         self.visit_expr(&call.receiver);
         let variables = self.variables.clone();
+        let variable_candidates = self.variable_candidates.clone();
         self.bind_pattern_type(payload_pat, &payload_type);
         self.visit_expr(&closure.body);
         self.variables = variables;
+        self.variable_candidates = variable_candidates;
         true
     }
 }
@@ -1985,7 +2232,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_local(&mut self, local: &'ast Local) {
-        if let Some((name, type_ref)) = self.local_binding_type(local) {
+        if let Some((name, type_ref, candidates)) = self.local_binding_type(local) {
             self.add_local_initializer_trait_dependencies(local, &type_ref);
             if local
                 .init
@@ -1994,7 +2241,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             {
                 self.add_trait_impls_for_type_named(&type_ref, "FromIterator");
             }
-            self.variables.insert(name, type_ref);
+            self.insert_variable_candidates(name, type_ref, candidates);
         }
         visit::visit_local(self, local);
     }
@@ -2043,6 +2290,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
         for arm in &expr_match.arms {
             let variables = self.variables.clone();
+            let variable_candidates = self.variable_candidates.clone();
             if let Some(ok_type) = &ok_type {
                 self.add_result_ok_binding_type(&arm.pat, ok_type);
             }
@@ -2055,11 +2303,13 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             }
             self.visit_expr(&arm.body);
             self.variables = variables;
+            self.variable_candidates = variable_candidates;
         }
     }
 
     fn visit_expr_if(&mut self, expr_if: &'ast syn::ExprIf) {
         let outer_variables = self.variables.clone();
+        let outer_variable_candidates = self.variable_candidates.clone();
         if let Expr::Let(expr_let) = expr_if.cond.as_ref() {
             let type_arguments = self.expression_type_arguments(&expr_let.expr);
             if let [type_ref] = type_arguments.as_slice() {
@@ -2073,11 +2323,13 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
         self.visit_block(&expr_if.then_branch);
         self.variables = outer_variables.clone();
+        self.variable_candidates = outer_variable_candidates.clone();
 
         if let Some((_, else_branch)) = &expr_if.else_branch {
             self.visit_expr(else_branch);
         }
         self.variables = outer_variables;
+        self.variable_candidates = outer_variable_candidates;
     }
 
     fn visit_expr_macro(&mut self, expr: &'ast ExprMacro) {
@@ -2148,20 +2400,35 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         if self.visit_single_payload_closure_method_call(call) {
             return;
         }
-        self.add_unresolved_method_fallback(&call.method.to_string());
         self.add_method_turbofish_trait_dependencies(call);
+        let receiver_candidates = self.receiver_type_candidates(&call.receiver);
         if let Some(receiver) = self.receiver_type(&call.receiver) {
             let method = call.method.to_string();
-            let resolved_methods = self.resolver.resolve_methods(&receiver, &method);
+            let mut resolved_methods = Vec::new();
+            for candidate in &receiver_candidates {
+                resolved_methods.extend(self.resolver.resolve_methods(candidate, &method));
+            }
+            resolved_methods.extend(self.resolver.resolve_methods(&receiver, &method));
+            resolved_methods.sort();
+            resolved_methods.dedup();
             let has_resolved_method = !resolved_methods.is_empty();
-            for callable in resolved_methods {
-                self.dependencies.callables.insert(callable);
+            for callable in &resolved_methods {
+                self.add_method_dependency(callable);
+            }
+            if has_resolved_method {
+                self.add_peer_trait_impls_for_resolved_methods(&resolved_methods);
+                self.add_closure_arg_dependencies(call, &resolved_methods);
             }
             if !has_resolved_method {
-                self.add_unresolved_method_fallback(&method);
+                self.add_unresolved_method_candidates(&method, &receiver_candidates);
                 self.add_trait_impls_for_type_named(&receiver, "Deref");
                 self.add_trait_impls_for_type_named(&receiver, "DerefMut");
                 self.add_extension_trait_dependencies_for_method(&receiver, &method);
+                for candidate in &receiver_candidates {
+                    self.add_trait_impls_for_type_named(candidate, "Deref");
+                    self.add_trait_impls_for_type_named(candidate, "DerefMut");
+                    self.add_extension_trait_dependencies_for_method(candidate, &method);
+                }
                 self.add_external_method_arg_trait_impls(call);
             }
             if call.method == "into" {
@@ -2194,7 +2461,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         } else if call.method == "collect" {
             self.add_collect_method_trait_dependencies();
         } else {
-            self.add_unresolved_method_fallback(&call.method.to_string());
+            self.add_unresolved_method_candidates(&call.method.to_string(), &receiver_candidates);
             self.add_external_method_arg_trait_impls(call);
         }
         visit::visit_expr_method_call(self, call);
@@ -2611,6 +2878,145 @@ impl Resolver<'_> {
         }
     }
 
+    fn closure_argument_input_types(
+        &self,
+        callable: &CallableId,
+        argument_index: usize,
+    ) -> Vec<TypeRef> {
+        let Some((input_type, resolver)) = self.callable_typed_input(callable, argument_index)
+        else {
+            return Vec::new();
+        };
+        resolver.closure_input_types_from_type(input_type)
+    }
+
+    fn callable_typed_input<'a>(
+        &'a self,
+        callable: &'a CallableId,
+        argument_index: usize,
+    ) -> Option<(&'a Type, Resolver<'a>)> {
+        match callable {
+            CallableId::Free { .. } => {
+                let record = self.project.functions.get(callable)?;
+                let input_type = record
+                    .item
+                    .sig
+                    .inputs
+                    .iter()
+                    .filter_map(|input| match input {
+                        FnArg::Typed(input) => Some(input.ty.as_ref()),
+                        FnArg::Receiver(_) => None,
+                    })
+                    .nth(argument_index)?;
+                Some((
+                    input_type,
+                    Resolver {
+                        project: self.project,
+                        package: &record.package,
+                        module_path: &record.module_path,
+                        aliases: &record.aliases,
+                        self_type: None,
+                    },
+                ))
+            }
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let record = self.project.methods.get(callable)?;
+                let input_type = record
+                    .item
+                    .sig
+                    .inputs
+                    .iter()
+                    .filter_map(|input| match input {
+                        FnArg::Typed(input) => Some(input.ty.as_ref()),
+                        FnArg::Receiver(_) => None,
+                    })
+                    .nth(argument_index)?;
+                Some((
+                    input_type,
+                    Resolver {
+                        project: self.project,
+                        package,
+                        module_path: &record.module_path,
+                        aliases: &record.aliases,
+                        self_type: Some(TypeRef {
+                            package: package.clone(),
+                            type_path: type_path.clone(),
+                        }),
+                    },
+                ))
+            }
+        }
+    }
+
+    fn closure_input_types_from_type(&self, ty: &Type) -> Vec<TypeRef> {
+        let mut type_refs = Vec::new();
+        self.collect_closure_input_types(ty, &mut type_refs);
+        type_refs.sort();
+        type_refs.dedup();
+        type_refs
+    }
+
+    fn collect_closure_input_types(&self, ty: &Type, type_refs: &mut Vec<TypeRef>) {
+        match ty {
+            Type::ImplTrait(impl_trait) => {
+                for bound in &impl_trait.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_closure_input_types_from_path(&trait_bound.path, type_refs);
+                }
+            }
+            Type::TraitObject(trait_object) => {
+                for bound in &trait_object.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_closure_input_types_from_path(&trait_bound.path, type_refs);
+                }
+            }
+            Type::Path(type_path) => {
+                self.collect_closure_input_types_from_path(&type_path.path, type_refs);
+                for segment in &type_path.path.segments {
+                    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                        continue;
+                    };
+                    for argument in &arguments.args {
+                        let GenericArgument::Type(ty) = argument else {
+                            continue;
+                        };
+                        self.collect_closure_input_types(ty, type_refs);
+                    }
+                }
+            }
+            Type::Reference(reference) => {
+                self.collect_closure_input_types(&reference.elem, type_refs)
+            }
+            Type::Group(group) => self.collect_closure_input_types(&group.elem, type_refs),
+            Type::Paren(paren) => self.collect_closure_input_types(&paren.elem, type_refs),
+            _ => {}
+        }
+    }
+
+    fn collect_closure_input_types_from_path(&self, path: &Path, type_refs: &mut Vec<TypeRef>) {
+        let Some(segment) = path.segments.last() else {
+            return;
+        };
+        if !matches!(
+            segment.ident.to_string().as_str(),
+            "Fn" | "FnMut" | "FnOnce"
+        ) {
+            return;
+        }
+        let PathArguments::Parenthesized(arguments) = &segment.arguments else {
+            return;
+        };
+        for input in &arguments.inputs {
+            type_refs.extend(self.receiver_type_candidates_from_type(input));
+        }
+    }
+
     fn type_from_return_type(&self, output: &ReturnType) -> Option<TypeRef> {
         let ReturnType::Type(_, ty) = output else {
             return None;
@@ -2724,6 +3130,36 @@ impl Resolver<'_> {
         })
     }
 
+    fn receiver_type_candidates_from_type(&self, ty: &Type) -> Vec<TypeRef> {
+        let mut type_refs = Vec::new();
+        if let Some(type_ref) = self.resolve_type(ty) {
+            type_refs.push(type_ref);
+        }
+        if let Some(type_ref) = self.resolve_receiver_type(ty) {
+            type_refs.push(type_ref);
+        }
+        if let Type::Path(type_path) = ty {
+            if let Some(type_ref) = self.syntactic_type_ref(&type_path.path) {
+                type_refs.push(type_ref);
+            }
+        }
+        self.collect_type_arguments(ty, &mut type_refs);
+        let expanded = type_refs
+            .iter()
+            .flat_map(|type_ref| self.type_ref_candidates(type_ref))
+            .collect::<Vec<_>>();
+        type_refs.extend(expanded);
+        type_refs.sort();
+        type_refs.dedup();
+        type_refs
+    }
+
+    fn syntactic_type_ref(&self, path: &Path) -> Option<TypeRef> {
+        let segments = self.apply_alias(path_segments(path));
+        let (package, type_path) = self.resolve_prefix(&segments)?;
+        Some(TypeRef { package, type_path })
+    }
+
     fn type_arguments_from_return_type(&self, output: &ReturnType) -> Vec<TypeRef> {
         let ReturnType::Type(_, ty) = output else {
             return Vec::new();
@@ -2736,14 +3172,7 @@ impl Resolver<'_> {
     }
 
     fn type_refs_in_type(&self, ty: &Type) -> Vec<TypeRef> {
-        let mut type_refs = Vec::new();
-        if let Some(type_ref) = self.resolve_receiver_type(ty) {
-            type_refs.push(type_ref);
-        }
-        self.collect_type_arguments(ty, &mut type_refs);
-        type_refs.sort();
-        type_refs.dedup();
-        type_refs
+        self.receiver_type_candidates_from_type(ty)
     }
 
     fn type_argument_refs_in_type(&self, ty: &Type) -> Vec<TypeRef> {
@@ -2772,10 +3201,48 @@ impl Resolver<'_> {
                     }
                 }
             }
+            Type::ImplTrait(impl_trait) => {
+                for bound in &impl_trait.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_path_argument_types(&trait_bound.path, type_refs);
+                }
+            }
+            Type::TraitObject(trait_object) => {
+                for bound in &trait_object.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_path_argument_types(&trait_bound.path, type_refs);
+                }
+            }
             Type::Reference(reference) => self.collect_type_arguments(&reference.elem, type_refs),
             Type::Group(group) => self.collect_type_arguments(&group.elem, type_refs),
             Type::Paren(paren) => self.collect_type_arguments(&paren.elem, type_refs),
+            Type::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    self.collect_type_arguments(elem, type_refs);
+                }
+            }
             _ => {}
+        }
+    }
+
+    fn collect_path_argument_types(&self, path: &Path, type_refs: &mut Vec<TypeRef>) {
+        for segment in &path.segments {
+            let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                continue;
+            };
+            for argument in &arguments.args {
+                let GenericArgument::Type(ty) = argument else {
+                    continue;
+                };
+                if let Some(type_ref) = self.resolve_receiver_type(ty) {
+                    type_refs.push(type_ref);
+                }
+                self.collect_type_arguments(ty, type_refs);
+            }
         }
     }
 
@@ -2985,6 +3452,40 @@ impl Resolver<'_> {
         None
     }
 
+    fn field_type_candidates(&self, receiver: &TypeRef, member: &Member) -> Vec<TypeRef> {
+        let mut type_refs = Vec::new();
+        for candidate in self.type_ref_candidates(receiver) {
+            let Some(item) = self.find_item(
+                &candidate.package,
+                &candidate.type_path,
+                &[ItemKind::Struct],
+            ) else {
+                continue;
+            };
+            let Some(record) = self.project.items.get(&item) else {
+                continue;
+            };
+            let syn::Item::Struct(item_struct) = &record.item else {
+                continue;
+            };
+            let Some(ty) = field_member_type(&item_struct.fields, member) else {
+                continue;
+            };
+            let resolver = Resolver {
+                project: self.project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            type_refs.extend(resolver.receiver_type_candidates_from_type(ty));
+        }
+
+        type_refs.sort();
+        type_refs.dedup();
+        type_refs
+    }
+
     fn enum_tuple_variant_field_types(
         &self,
         receiver: &TypeRef,
@@ -3106,6 +3607,30 @@ impl Resolver<'_> {
                 let segments = self.apply_alias(trait_path.to_vec());
                 self.resolve_item_segments(&segments)
                     .filter(|item| item.kind == ItemKind::Trait)
+            })
+    }
+
+    fn resolve_trait_item_in_package(
+        &self,
+        package: &str,
+        trait_path: &[String],
+    ) -> Option<ItemId> {
+        self.find_item(package, trait_path, &[ItemKind::Trait])
+            .or_else(|| {
+                let leaf = trait_path.last()?;
+                let mut matches = self
+                    .project
+                    .items
+                    .keys()
+                    .filter(|item| {
+                        item.package == package
+                            && item.kind == ItemKind::Trait
+                            && item.name == *leaf
+                    })
+                    .cloned()
+                    .collect::<Vec<_>>();
+                matches.sort();
+                matches.into_iter().next()
             })
     }
 
@@ -3622,35 +4147,6 @@ fn is_conversion_adapter_path(path: &Path, trait_name: &str, method_name: &str) 
         segments.as_slice(),
         [trait_segment, method_segment]
             if trait_segment == trait_name && method_segment == method_name
-    )
-}
-
-fn unresolved_method_fallback_type_matches(method_name: &str, type_path: &[String]) -> bool {
-    let Some(type_name) = type_path.last().map(String::as_str) else {
-        return false;
-    };
-    matches!(
-        (method_name, type_name),
-        ("config", "ServerSession")
-            | ("allow_coenrollment", "FeatureDef")
-            | ("create_list", "Dao")
-            | ("defaults_hash", "Vec")
-            | ("is_connected", "ReconnectingIpcClient")
-            | ("is_valid_for_places", "Guid")
-            | ("is_valid_for_sync_server", "Guid")
-            | ("map_backend_error", "Result")
-            | ("name", "FeatureDef")
-            | ("schema_hash", "Vec")
-            | ("send", "Arc")
-            | ("set_value", "Header")
-            | ("spawn_detached", "MobileClient")
-    )
-}
-
-fn unresolved_method_fallback_can_cross_packages(method_name: &str) -> bool {
-    matches!(
-        method_name,
-        "is_valid_for_places" | "is_valid_for_sync_server" | "map_backend_error"
     )
 }
 
