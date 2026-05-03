@@ -6,7 +6,7 @@ use std::{
 };
 
 use serde::Deserialize;
-use syn::{Expr, Item, Lit, Meta};
+use syn::{Expr, ImplItem, Item, Lit, Meta, TraitItem};
 use toml::Value;
 
 #[derive(Debug)]
@@ -172,23 +172,12 @@ fn package_name_from_manifest(manifest: &Value) -> String {
 fn metadata_marker_target(
     targets: &[MetadataTarget],
 ) -> Result<Option<MetadataTarget>, Box<dyn std::error::Error>> {
-    let marked_targets = targets
+    let mut marked_targets = targets
         .iter()
         .filter(|target| target_is_parse_candidate(target))
         .filter(|target| source_contains_opensourced_marker(&target.src_path))
         .cloned()
         .collect::<Vec<_>>();
-    let mut marked_targets = if marked_targets
-        .iter()
-        .any(|target| !metadata_target_uses_dev_dependencies(target))
-    {
-        marked_targets
-            .into_iter()
-            .filter(|target| !metadata_target_uses_dev_dependencies(target))
-            .collect()
-    } else {
-        marked_targets
-    };
     marked_targets.sort_by(|left, right| {
         left.src_path
             .cmp(&right.src_path)
@@ -240,16 +229,14 @@ fn source_tree_contains_opensourced_marker(
     let Ok(text) = fs::read_to_string(path) else {
         return false;
     };
-    if text.contains("#[opensourced")
-        || text.contains("#[ opensourced")
-        || text.contains("opensourced::opensourced")
-    {
+
+    let Ok(syntax) = syn::parse_file(&text) else {
+        return raw_text_contains_opensourced_attr(&text);
+    };
+    if syntax.items.iter().any(item_contains_opensourced_marker) {
         return true;
     }
 
-    let Ok(syntax) = syn::parse_file(&text) else {
-        return false;
-    };
     syntax.items.iter().any(|item| {
         let Item::Mod(item_mod) = item else {
             return false;
@@ -264,6 +251,82 @@ fn source_tree_contains_opensourced_marker(
             return false;
         };
         source_tree_contains_opensourced_marker(&child_path, &child_module_dir, visited)
+    })
+}
+
+fn raw_text_contains_opensourced_attr(text: &str) -> bool {
+    text.lines().any(|line| {
+        let line = line.trim_start();
+        line.starts_with("#[opensourced") || line.starts_with("#[ opensourced")
+    })
+}
+
+fn item_contains_opensourced_marker(item: &Item) -> bool {
+    if item_has_opensourced_attr(item) {
+        return true;
+    }
+    match item {
+        Item::Impl(item_impl) => item_impl.items.iter().any(impl_item_has_opensourced_attr),
+        Item::Mod(item_mod) => item_mod
+            .content
+            .as_ref()
+            .is_some_and(|(_, items)| items.iter().any(item_contains_opensourced_marker)),
+        Item::Trait(item_trait) => item_trait.items.iter().any(trait_item_has_opensourced_attr),
+        _ => false,
+    }
+}
+
+fn item_has_opensourced_attr(item: &Item) -> bool {
+    match item {
+        Item::Const(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Enum(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::ExternCrate(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Fn(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::ForeignMod(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Impl(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Macro(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Mod(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Static(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Struct(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Trait(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::TraitAlias(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Type(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Union(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Use(item) => attrs_contain_opensourced_marker(&item.attrs),
+        Item::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn impl_item_has_opensourced_attr(item: &ImplItem) -> bool {
+    match item {
+        ImplItem::Const(item) => attrs_contain_opensourced_marker(&item.attrs),
+        ImplItem::Fn(item) => attrs_contain_opensourced_marker(&item.attrs),
+        ImplItem::Macro(item) => attrs_contain_opensourced_marker(&item.attrs),
+        ImplItem::Type(item) => attrs_contain_opensourced_marker(&item.attrs),
+        ImplItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn trait_item_has_opensourced_attr(item: &TraitItem) -> bool {
+    match item {
+        TraitItem::Const(item) => attrs_contain_opensourced_marker(&item.attrs),
+        TraitItem::Fn(item) => attrs_contain_opensourced_marker(&item.attrs),
+        TraitItem::Macro(item) => attrs_contain_opensourced_marker(&item.attrs),
+        TraitItem::Type(item) => attrs_contain_opensourced_marker(&item.attrs),
+        TraitItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn attrs_contain_opensourced_marker(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attribute| {
+        attribute
+            .path()
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "opensourced")
     })
 }
 
@@ -381,13 +444,6 @@ fn metadata_dependencies(
 }
 
 fn target_uses_dev_dependencies(target: &PackageTarget) -> bool {
-    target
-        .kind
-        .iter()
-        .any(|kind| matches!(kind.as_str(), "example" | "test" | "bench"))
-}
-
-fn metadata_target_uses_dev_dependencies(target: &MetadataTarget) -> bool {
     target
         .kind
         .iter()

@@ -359,6 +359,26 @@ fn rejects_markers_spread_across_multiple_package_targets() {
 }
 
 #[test]
+fn rejects_markers_spread_across_lib_and_integration_test_targets() {
+    let workspace = temp_path("lib-test-marker-workspace");
+    let output = temp_path("lib-test-marker-output");
+    write_lib_and_test_marker_fixture(&workspace);
+
+    let error = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output,
+    })
+    .expect_err("markers across lib and integration test roots should fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("multiple package targets contain #[opensourced] markers"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn slices_multiple_marked_function_roots() {
     let workspace = temp_path("multi-root-workspace");
     let output = temp_path("multi-root-output");
@@ -3164,6 +3184,52 @@ pub fn lib_selected() -> i32 {
 #[opensourced]
 pub fn bin_selected() -> i32 {
     2
+}
+"#,
+    );
+}
+
+fn write_lib_and_test_marker_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "lib_test_marker_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+
+[[test]]
+name = "behavior"
+path = "tests/behavior.rs"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn lib_selected() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("tests/behavior.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+#[test]
+fn selected_behavior() {
+    assert_eq!(lib_test_marker_like::lib_selected(), 1);
 }
 "#,
     );
