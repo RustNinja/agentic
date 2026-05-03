@@ -6,6 +6,7 @@ use std::{
 };
 
 use serde::Deserialize;
+use syn::{Expr, Item, Lit, Meta};
 use toml::Value;
 
 #[derive(Debug)]
@@ -154,11 +155,103 @@ fn target_is_parse_candidate(target: &MetadataTarget) -> bool {
 }
 
 fn source_contains_opensourced_marker(path: &Path) -> bool {
-    fs::read_to_string(path).is_ok_and(|text| {
-        text.contains("#[opensourced")
-            || text.contains("#[ opensourced")
-            || text.contains("opensourced::opensourced")
+    let Some(module_dir) = entry_module_dir(path) else {
+        return false;
+    };
+    let mut visited = BTreeSet::new();
+    source_tree_contains_opensourced_marker(path, &module_dir, &mut visited)
+}
+
+fn source_tree_contains_opensourced_marker(
+    path: &Path,
+    module_dir: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+) -> bool {
+    let canonical = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    if !visited.insert(canonical) {
+        return false;
+    }
+
+    let Ok(text) = fs::read_to_string(path) else {
+        return false;
+    };
+    if text.contains("#[opensourced")
+        || text.contains("#[ opensourced")
+        || text.contains("opensourced::opensourced")
+    {
+        return true;
+    }
+
+    let Ok(syntax) = syn::parse_file(&text) else {
+        return false;
+    };
+    syntax.items.iter().any(|item| {
+        let Item::Mod(item_mod) = item else {
+            return false;
+        };
+        if item_mod.content.is_some() {
+            return false;
+        }
+        let name = item_mod.ident.to_string();
+        let Some((child_path, child_module_dir)) =
+            resolve_external_module(module_dir, &name, path_attr(item_mod))
+        else {
+            return false;
+        };
+        source_tree_contains_opensourced_marker(&child_path, &child_module_dir, visited)
     })
+}
+
+fn entry_module_dir(entry_path: &Path) -> Option<PathBuf> {
+    entry_path.parent().map(Path::to_path_buf)
+}
+
+fn path_attr(item_mod: &syn::ItemMod) -> Option<PathBuf> {
+    item_mod.attrs.iter().find_map(|attribute| {
+        if !attribute.path().is_ident("path") {
+            return None;
+        }
+        let Meta::NameValue(name_value) = &attribute.meta else {
+            return None;
+        };
+        let Expr::Lit(expr_lit) = &name_value.value else {
+            return None;
+        };
+        let Lit::Str(lit) = &expr_lit.lit else {
+            return None;
+        };
+        Some(PathBuf::from(lit.value()))
+    })
+}
+
+fn resolve_external_module(
+    module_dir: &Path,
+    name: &str,
+    path_attr: Option<PathBuf>,
+) -> Option<(PathBuf, PathBuf)> {
+    if let Some(path_attr) = path_attr {
+        let path = if path_attr.is_absolute() {
+            path_attr
+        } else {
+            module_dir.join(path_attr)
+        };
+        let next_dir = path.parent().unwrap_or(module_dir).to_path_buf();
+        return path.exists().then_some((path, next_dir));
+    }
+
+    let source_name = module_source_name(name);
+    let file_module = module_dir.join(format!("{source_name}.rs"));
+    if file_module.exists() {
+        return Some((file_module, module_dir.join(source_name)));
+    }
+    let mod_module = module_dir.join(source_name).join("mod.rs");
+    mod_module
+        .exists()
+        .then_some((mod_module, module_dir.join(source_name)))
+}
+
+fn module_source_name(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
 }
 
 fn metadata_entry_source_path(package_root: &Path, targets: &[MetadataTarget]) -> Option<PathBuf> {

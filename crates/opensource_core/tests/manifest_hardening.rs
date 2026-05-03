@@ -96,12 +96,15 @@ fn slices_marked_bin_target_when_package_also_has_lib_target() {
     .expect("reduction should succeed");
 
     assert_eq!(report.packages, ["app"]);
-    let source = read(output.join("app/src/bin/tool.rs"));
-    assert!(source.contains("pub fn selected"));
-    assert!(source.contains("fn helper"));
+    let source = read(output.join("app/src/bin/tool/main.rs"));
+    let command = read(output.join("app/src/bin/tool/command.rs"));
+    assert!(source.contains("mod command"));
     assert!(source.contains("fn main()"));
+    assert!(command.contains("pub fn selected"));
+    assert!(command.contains("fn helper"));
     assert!(!source.contains("dead_lib"));
     assert!(!source.contains("dead_bin"));
+    assert!(!command.contains("dead_command"));
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -112,11 +115,12 @@ fn slices_marked_bin_target_when_package_also_has_lib_target() {
         .expect("cargo check should start");
     assert!(
         cargo_check.status.success(),
-        "generated bin-with-lib slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/bin/tool.rs:\n{}",
+        "generated bin-with-lib slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/bin/tool/main.rs:\n{}\nsrc/bin/tool/command.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         source,
+        command,
     );
 }
 
@@ -2436,6 +2440,10 @@ edition = "2021"
 
 [dependencies]
 opensourced = {{ path = "{}" }}
+
+[[bin]]
+name = "tool"
+path = "src/bin/tool/main.rs"
 "#,
             manifest_path(&opensourced_path)
         ),
@@ -2502,7 +2510,16 @@ opensourced = {{ path = "{}" }}
 "#,
     );
     write(
-        root.join("app/src/bin/tool.rs"),
+        root.join("app/src/bin/tool/main.rs"),
+        r#"mod command;
+
+fn dead_bin() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("app/src/bin/tool/command.rs"),
         r#"use opensourced::opensourced;
 
 #[opensourced]
@@ -2514,7 +2531,7 @@ fn helper(value: &str) -> String {
     format!("bin:{value}")
 }
 
-fn dead_bin() -> String {
+fn dead_command() -> String {
     "dead".to_string()
 }
 "#,
