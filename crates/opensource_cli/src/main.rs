@@ -6,8 +6,9 @@ use std::{
 };
 
 use opensource_core::{
-    check_workspace, generate_with_analyzer, write_generate_report, write_report, AnalyzerMode,
-    CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions,
+    check_workspace, generate_with_analyzer, preflight_workspace, write_generate_report,
+    write_preflight_report, write_report, AnalyzerMode, CheckDiagnostic, CheckOptions, CheckReport,
+    GenerateOptions, PreflightDiagnostic, PreflightOptions, PreflightReport,
 };
 
 fn main() {
@@ -94,6 +95,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("slice report: {}", report_path.display());
     }
 
+    if options.run_preflight || options.feedback_iterations > 0 {
+        let report = run_preflight(&options)?;
+        if !report.success {
+            return Err("generated workspace failed fast preflight validation".into());
+        }
+    }
+
     if options.feedback_iterations > 0 {
         run_feedback_loop(&options)?;
     } else if options.run_check {
@@ -111,6 +119,8 @@ struct CliOptions {
     feedback_report: Option<PathBuf>,
     feedback_timeout: Option<Duration>,
     slice_report: Option<PathBuf>,
+    run_preflight: bool,
+    preflight_report: Option<PathBuf>,
     workspace_root: PathBuf,
     output_root: PathBuf,
 }
@@ -123,6 +133,8 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     let mut feedback_report = None;
     let mut feedback_timeout = Some(Duration::from_secs(600));
     let mut slice_report = None;
+    let mut run_preflight = false;
+    let mut preflight_report = None;
     let mut positional = Vec::new();
     let mut args = std::env::args_os().skip(1);
 
@@ -139,6 +151,8 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
             analyzer_mode = value.parse::<AnalyzerMode>()?;
         } else if arg == OsStr::new("--feedback") {
             feedback_iterations = feedback_iterations.max(1);
+        } else if arg == OsStr::new("--preflight") {
+            run_preflight = true;
         } else if arg == OsStr::new("--feedback-loop") {
             feedback_iterations = parse_usize_arg("--feedback-loop", args.next())?;
         } else if arg == OsStr::new("--feedback-limit") {
@@ -154,6 +168,11 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
             slice_report = Some(PathBuf::from(
                 args.next()
                     .ok_or("--slice-report requires a following path")?,
+            ));
+        } else if arg == OsStr::new("--preflight-report") {
+            preflight_report = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--preflight-report requires a following path")?,
             ));
         } else if arg == OsStr::new("--help") || arg == OsStr::new("-h") {
             println!("{}", usage());
@@ -175,6 +194,8 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
         feedback_report,
         feedback_timeout,
         slice_report,
+        run_preflight,
+        preflight_report,
         workspace_root: workspace_root.clone(),
         output_root: output_root.clone(),
     })
@@ -218,6 +239,19 @@ fn run_plain_check(output_root: &Path) -> Result<(), Box<dyn std::error::Error>>
     Ok(())
 }
 
+fn run_preflight(options: &CliOptions) -> Result<PreflightReport, Box<dyn std::error::Error>> {
+    let report_path = options
+        .preflight_report
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("slice-preflight.json"));
+    let report = preflight_workspace(PreflightOptions {
+        manifest_path: options.output_root.join("Cargo.toml"),
+    })?;
+    write_preflight_report(&report, &report_path)?;
+    print_preflight(&report, options.feedback_limit, &report_path);
+    Ok(report)
+}
+
 fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     let report_path = options
         .feedback_report
@@ -247,6 +281,57 @@ fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Err
         report_path.display()
     )
     .into())
+}
+
+fn print_preflight(report: &PreflightReport, limit: usize, report_path: &Path) {
+    if report.success {
+        println!(
+            "preflight: passed; packages={}, rust_files={}, local_path_deps={}, external_deps={}, build_scripts={}; report: {}",
+            report.packages,
+            report.rust_files,
+            report.local_path_dependencies,
+            report.external_dependencies,
+            report.build_scripts,
+            report_path.display()
+        );
+        return;
+    }
+
+    println!(
+        "preflight: failed with {} error(s), {} warning(s); report: {}",
+        report.error_count(),
+        report.warning_count(),
+        report_path.display()
+    );
+
+    for diagnostic in prioritized_preflight_diagnostics(&report.diagnostics)
+        .into_iter()
+        .take(limit)
+    {
+        print_preflight_diagnostic(diagnostic);
+    }
+}
+
+fn prioritized_preflight_diagnostics(
+    diagnostics: &[PreflightDiagnostic],
+) -> Vec<&PreflightDiagnostic> {
+    let mut prioritized = diagnostics.iter().collect::<Vec<_>>();
+    prioritized.sort_by_key(|diagnostic| match diagnostic.level.as_str() {
+        "error" => 0,
+        "warning" => 1,
+        _ => 2,
+    });
+    prioritized
+}
+
+fn print_preflight_diagnostic(diagnostic: &PreflightDiagnostic) {
+    println!(
+        "  {}[{}]: {}",
+        diagnostic.level, diagnostic.code, diagnostic.message
+    );
+    if let Some(path) = &diagnostic.path {
+        println!("    at {}", path.display());
+    }
 }
 
 fn print_feedback(report: &CheckReport, limit: usize, report_path: &Path) {
@@ -310,9 +395,10 @@ fn print_diagnostic(diagnostic: &CheckDiagnostic) {
 
 fn usage() -> String {
     concat!(
-        "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--feedback] [--feedback-loop <n>] ",
-        "[--feedback-limit <n>] [--feedback-timeout <seconds>] [--feedback-report <path>] ",
-        "[--slice-report <path>] <workspace-root> <output-root>"
+        "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--preflight] [--feedback] ",
+        "[--feedback-loop <n>] [--feedback-limit <n>] [--feedback-timeout <seconds>] ",
+        "[--feedback-report <path>] [--slice-report <path>] [--preflight-report <path>] ",
+        "<workspace-root> <output-root>"
     )
     .to_string()
 }

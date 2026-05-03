@@ -80,10 +80,17 @@ inside retained impl blocks so the reduced source keeps compiling.
 ```sh
 cargo test --workspace
 cargo run -p opensource_cli --bin slicers -- --check . /tmp/slicers-proof
+cargo run -p opensource_cli --bin slicers -- --preflight . /tmp/slicers-preflight
 cargo run -p opensource_cli --bin slicers -- --feedback . /tmp/slicers-feedback
 cargo run -p opensource_cli --bin slicers -- --slice-report /tmp/slicers-report.json . /tmp/slicers-proof
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
+
+`--preflight` is the fast prediction tier. It writes `slice-preflight.json` and
+validates the generated workspace without compiling dependencies: manifests,
+local path dependencies, package entry files, Rust syntax, external module
+files, and build-script paths. `--feedback` runs this preflight first and fails
+before `cargo check` when the generated shape is already structurally invalid.
 
 `--feedback` runs `cargo check --message-format=json` against the generated
 workspace, prints prioritized compiler diagnostics, and writes
@@ -107,6 +114,7 @@ scripts/corpus_feedback_loop.py \
   --source /path/to/rust/workspace \
   --output-prefix /tmp/slicers-corpus \
   --max-batches 20 \
+  --validation preflight \
   --roots-per-batch 5 \
   --feedback-loop 1 \
   --feedback-timeout 600 \
@@ -117,6 +125,8 @@ The corpus runner discovers package targets through `cargo metadata --no-deps`,
 injects the local marker dependency only into packages selected for that batch,
 restores git-backed sources before and after mutation by default, preserves
 failed outputs for debugging, and appends one JSONL metrics row per batch.
+Use `--validation preflight` for fast no-build corpus exploration, then rerun
+interesting or suspicious cases with `--validation feedback`.
 
 Workspace/package discovery is backed by `cargo metadata --no-deps`, so Cargo is
 the source of truth for workspace members, excludes, target entry paths,

@@ -3,6 +3,7 @@ mod feedback;
 mod manifest;
 mod model;
 mod parse;
+mod preflight;
 mod reduce;
 mod render;
 
@@ -14,6 +15,10 @@ use std::{
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport};
 pub use model::{CallableId, ItemId, RootId};
+pub use preflight::{
+    preflight_workspace, write_preflight_report, PreflightDiagnostic, PreflightOptions,
+    PreflightReport,
+};
 use serde::Serialize;
 
 #[derive(Debug, Clone)]

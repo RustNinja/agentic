@@ -169,6 +169,12 @@ def parse_args() -> argparse.Namespace:
         help="slicers --feedback-timeout seconds; use 0 to disable",
     )
     parser.add_argument(
+        "--validation",
+        choices=("preflight", "feedback"),
+        default="feedback",
+        help="validation tier: preflight is fast and does not build dependencies",
+    )
+    parser.add_argument(
         "--case-timeout",
         type=int,
         default=1200,
@@ -266,6 +272,7 @@ def run_batch(
     started = time.monotonic()
     output_root = args.output_prefix.resolve().with_name(f"{args.output_prefix.name}-{batch}")
     slice_report_path = output_root / "slice-report.json"
+    preflight_report_path = output_root / "slice-preflight.json"
     feedback_report_path = output_root / "slice-feedback.json"
 
     baseline = None
@@ -308,13 +315,15 @@ def run_batch(
             source,
             output_root,
             slice_report_path,
+            preflight_report_path,
             feedback_report_path,
         )
         command_result = run_command(command, repo, args.case_timeout)
 
         generation = read_json(slice_report_path)
+        preflight = read_json(preflight_report_path)
         feedback = read_json(feedback_report_path)
-        classification = classify(command_result, feedback, args.stop_on_warning)
+        classification = classify(command_result, preflight, feedback, args)
         return build_row(
             args,
             source,
@@ -326,6 +335,7 @@ def run_batch(
             baseline,
             command_result,
             generation,
+            preflight,
             feedback,
             classification,
         )
@@ -340,6 +350,7 @@ def run_batch(
             candidate_counts,
             baseline,
             command_result,
+            None,
             None,
             None,
             "slice_generation_failed",
@@ -624,6 +635,7 @@ def slicers_command(
     source: Path,
     output_root: Path,
     slice_report_path: Path,
+    preflight_report_path: Path,
     feedback_report_path: Path,
 ) -> list[str]:
     features = list(args.features)
@@ -638,14 +650,27 @@ def slicers_command(
             "--",
             "--analyzer",
             args.analyzer,
-            "--feedback-loop",
-            str(args.feedback_loop),
-            "--feedback-timeout",
-            str(args.feedback_timeout),
             "--slice-report",
             str(slice_report_path),
-            "--feedback-report",
-            str(feedback_report_path),
+            "--preflight-report",
+            str(preflight_report_path),
+        ]
+    )
+    if args.validation == "preflight":
+        command.append("--preflight")
+    else:
+        command.extend(
+            [
+                "--feedback-loop",
+                str(args.feedback_loop),
+                "--feedback-timeout",
+                str(args.feedback_timeout),
+                "--feedback-report",
+                str(feedback_report_path),
+            ]
+        )
+    command.extend(
+        [
             str(source),
             str(output_root),
         ]
@@ -708,10 +733,17 @@ def kill_process_tree(process: subprocess.Popen[str]) -> None:
 
 def classify(
     command_result: CommandResult | None,
+    preflight: dict[str, Any] | None,
     feedback: dict[str, Any] | None,
-    stop_on_warning: bool,
+    args: argparse.Namespace,
 ) -> str:
     if command_result is None or command_result.timed_out:
+        return "slice_generation_failed"
+    if preflight is not None and not preflight.get("success"):
+        return "slice_preflight_failed"
+    if args.validation == "preflight":
+        if command_result.exit_code == 0 and preflight and preflight.get("success"):
+            return "slice_preflight_passed"
         return "slice_generation_failed"
     if feedback is None:
         return "slice_generation_failed"
@@ -719,7 +751,7 @@ def classify(
     warnings = count_diagnostics(feedback.get("diagnostics", []), "warning")
     if command_result.exit_code != 0 or not feedback.get("success") or errors:
         return "slice_feedback_failed"
-    if stop_on_warning and warnings:
+    if args.stop_on_warning and warnings:
         return "slice_feedback_failed"
     return "slice_check_passed"
 
@@ -735,6 +767,7 @@ def build_row(
     baseline: dict[str, Any] | None,
     command_result: CommandResult | None,
     generation: dict[str, Any] | None,
+    preflight: dict[str, Any] | None,
     feedback: dict[str, Any] | None,
     classification: str,
     error: str | None = None,
@@ -742,7 +775,8 @@ def build_row(
     diagnostics = (feedback or {}).get("diagnostics", [])
     warnings = count_diagnostics(diagnostics, "warning")
     errors = count_diagnostics(diagnostics, "error")
-    passed = classification == "slice_check_passed"
+    preflight_diagnostics = (preflight or {}).get("diagnostics", [])
+    passed = classification in {"slice_check_passed", "slice_preflight_passed"}
     if args.stop_on_warning and warnings:
         passed = False
 
@@ -766,6 +800,18 @@ def build_row(
             "roots": (generation or {}).get("roots", []),
             "reachable_callables": len((generation or {}).get("reachable", [])),
             "reachable_items": len((generation or {}).get("reachable_items", [])),
+        },
+        "preflight": {
+            "success": (preflight or {}).get("success"),
+            "errors": count_diagnostics(preflight_diagnostics, "error"),
+            "warnings": count_diagnostics(preflight_diagnostics, "warning"),
+            "packages": (preflight or {}).get("packages"),
+            "rust_files": (preflight or {}).get("rust_files"),
+            "local_path_dependencies": (preflight or {}).get("local_path_dependencies"),
+            "external_dependencies": (preflight or {}).get("external_dependencies"),
+            "build_scripts": (preflight or {}).get("build_scripts"),
+            "diagnostic_codes": diagnostic_codes(preflight_diagnostics),
+            "first_diagnostics": summarize_diagnostics(preflight_diagnostics),
         },
         "feedback": {
             "success": (feedback or {}).get("success"),
@@ -860,16 +906,19 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 
 def print_batch_summary(row: dict[str, Any]) -> None:
     feedback = row["feedback"]
+    preflight = row["preflight"]
+    diagnostic_block = feedback if feedback["first_diagnostics"] else preflight
     print(
         "corpus batch "
         f"{row['iteration']}: {row['classification']} "
         f"passed={row['passed']} "
         f"files={row['slice']['files_written']} "
-        f"errors={feedback['errors']} warnings={feedback['warnings']} "
+        f"preflight_errors={preflight['errors']} "
+        f"feedback_errors={feedback['errors']} warnings={feedback['warnings']} "
         f"output={row['slice']['output']}",
         flush=True,
     )
-    for diagnostic in feedback["first_diagnostics"][:5]:
+    for diagnostic in diagnostic_block["first_diagnostics"][:5]:
         code = diagnostic.get("code")
         code_text = f"[{code}]" if code else ""
         location = ""

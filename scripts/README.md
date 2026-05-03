@@ -5,14 +5,15 @@
 `corpus_feedback_loop.py` is the project-agnostic production verification
 harness. It discovers local Rust package targets with `cargo metadata`, selects
 random candidate roots, injects `#[opensourced::opensourced]`, runs `slicers`
-with `--slice-report` and compiler feedback, then appends one JSONL metrics row
-per batch.
+with `--slice-report` plus either fast preflight or compiler feedback, then
+appends one JSONL metrics row per batch.
 
 ```sh
 scripts/corpus_feedback_loop.py \
   --source /path/to/rust/workspace \
   --output-prefix /tmp/slicers-corpus \
   --max-batches 20 \
+  --validation preflight \
   --roots-per-batch 5 \
   --feedback-loop 1 \
   --feedback-timeout 600 \
@@ -23,6 +24,9 @@ By default it restores and cleans git-backed sources before and after each
 batch, keeps failed outputs for debugging, removes generated `target-feedback`,
 and prunes older successful outputs. Use `--baseline-check` to separate source
 environment failures from slicer failures, and `--continuous` for soak runs.
+Use `--validation preflight` when build time is the bottleneck; it validates the
+predicted generated shape without compiling dependencies. Use
+`--validation feedback` for slower compiler-confirmed runs.
 
 ## Litter Feedback Loop
 
