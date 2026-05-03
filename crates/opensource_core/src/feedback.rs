@@ -71,13 +71,19 @@ pub fn check_workspace(options: CheckOptions) -> Result<CheckReport, Box<dyn std
 
     let output = command.output()?;
     let stdout = String::from_utf8_lossy(&output.stdout);
-    let diagnostics = parse_cargo_messages(&stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
+    let mut diagnostics = parse_cargo_messages(&stdout);
+    if !output.status.success() && diagnostics.is_empty() {
+        if let Some(diagnostic) = stderr_failure_diagnostic(&stderr) {
+            diagnostics.push(diagnostic);
+        }
+    }
 
     Ok(CheckReport {
         manifest_path: options.manifest_path,
         success: output.status.success(),
         diagnostics,
-        stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        stderr,
     })
 }
 
@@ -125,6 +131,22 @@ fn diagnostic_from_value(message: &Value) -> Option<CheckDiagnostic> {
     })
 }
 
+fn stderr_failure_diagnostic(stderr: &str) -> Option<CheckDiagnostic> {
+    let message = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())?
+        .to_string();
+
+    Some(CheckDiagnostic {
+        level: "error".to_string(),
+        message,
+        code: Some("cargo-stderr".to_string()),
+        rendered: Some(stderr.to_string()),
+        spans: Vec::new(),
+    })
+}
+
 fn span_from_value(span: &Value) -> Option<CheckSpan> {
     let text = span
         .get("text")
@@ -151,7 +173,7 @@ fn span_from_value(span: &Value) -> Option<CheckSpan> {
 
 #[cfg(test)]
 mod tests {
-    use super::parse_cargo_messages;
+    use super::{parse_cargo_messages, stderr_failure_diagnostic};
 
     #[test]
     fn parses_compiler_message_diagnostics() {
@@ -168,5 +190,22 @@ mod tests {
         );
         assert_eq!(diagnostics[0].spans[0].file_name, "src/lib.rs");
         assert!(diagnostics[0].spans[0].is_primary);
+    }
+
+    #[test]
+    fn turns_stderr_only_cargo_failure_into_error_diagnostic() {
+        let diagnostic = stderr_failure_diagnostic(
+            "\nerror: failed to load manifest for workspace member `/tmp/out/member`\n\nCaused by:\n  missing dependency\n",
+        )
+        .expect("stderr should produce a diagnostic");
+
+        assert_eq!(diagnostic.level, "error");
+        assert_eq!(diagnostic.code.as_deref(), Some("cargo-stderr"));
+        assert_eq!(
+            diagnostic.message,
+            "error: failed to load manifest for workspace member `/tmp/out/member`"
+        );
+        assert!(diagnostic.rendered.unwrap().contains("missing dependency"));
+        assert!(diagnostic.spans.is_empty());
     }
 }
