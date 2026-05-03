@@ -182,10 +182,22 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
 
     let mut packages = reachable_packages(&roots, &reachable, &reachable_items);
     add_source_mentioned_dependency_packages(project, &mut packages, &reachable, &reachable_items);
+    retain_referenced_public_reexport_dependencies(
+        project,
+        &mut packages,
+        &mut reachable,
+        &mut reachable_items,
+    );
     let build_dependency_packages = add_local_build_dependency_packages(project, &mut packages);
     retain_entire_packages(
         project,
         &build_dependency_packages,
+        &mut reachable,
+        &mut reachable_items,
+    );
+    retain_referenced_public_reexport_dependencies(
+        project,
+        &mut packages,
         &mut reachable,
         &mut reachable_items,
     );
@@ -350,6 +362,7 @@ fn retained_item_macro_dependencies(
                 self_type: None,
             };
             let mut visitor = DependencyVisitor::new(resolver);
+            visitor.add_macro_path(&item_macro.mac.path);
             visitor.add_macro_token_dependencies(&item_macro.mac.tokens);
             dependencies.extend(visitor.dependencies);
         }
@@ -495,12 +508,163 @@ fn externally_referenced_public_reexport_dependencies(
             );
             for path in named_paths {
                 if public_idents.contains(&path.visible_name) {
-                    dependencies.extend(resolve_use_named_dependency(&resolver, &path.segments));
+                    let mut path_dependencies =
+                        resolve_use_named_dependency(&resolver, &path.segments);
+                    if path_dependencies.is_empty() {
+                        path_dependencies.extend(unresolved_public_reexport_macro_dependencies(
+                            project,
+                            &resolver,
+                            &path.segments,
+                        ));
+                    }
+                    dependencies.extend(path_dependencies);
                 }
             }
         }
     }
     dependencies
+}
+
+fn unresolved_public_reexport_macro_dependencies(
+    project: &Project,
+    resolver: &Resolver<'_>,
+    path: &[String],
+) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    if path.len() < 2 {
+        return dependencies;
+    }
+    let Some((package, module_path)) = resolver.resolve_value_prefix(&path[..path.len() - 1])
+    else {
+        return dependencies;
+    };
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return dependencies;
+    };
+    let aliases = project
+        .module_aliases
+        .get(&(source.package.clone(), source.module_path.clone()))
+        .cloned()
+        .unwrap_or_default();
+    let resolver = Resolver {
+        project,
+        package: &source.package,
+        module_path: &source.module_path,
+        aliases: &aliases,
+        self_type: None,
+    };
+    for item in &source.syntax.items {
+        let syn::Item::Macro(item_macro) = item else {
+            continue;
+        };
+        if item_macro.ident.is_some() {
+            continue;
+        }
+        let mut visitor = DependencyVisitor::new(resolver.clone());
+        visitor.add_macro_path(&item_macro.mac.path);
+        visitor.add_macro_token_dependencies(&item_macro.mac.tokens);
+        dependencies.extend(visitor.dependencies);
+    }
+    dependencies
+}
+
+fn retain_referenced_public_reexport_dependencies(
+    project: &Project,
+    packages: &mut BTreeSet<String>,
+    reachable: &mut BTreeSet<CallableId>,
+    reachable_items: &mut BTreeSet<ItemId>,
+) {
+    loop {
+        let package_count = packages.len();
+        add_source_mentioned_dependency_packages(project, packages, reachable, reachable_items);
+        let packages_changed = packages.len() != package_count;
+        let dependencies = externally_referenced_public_reexport_dependencies(
+            project,
+            packages,
+            reachable,
+            reachable_items,
+        );
+        let changed =
+            retain_dependency_set(project, packages, reachable, reachable_items, dependencies);
+        if !changed && !packages_changed {
+            break;
+        }
+    }
+}
+
+fn retain_dependency_set(
+    project: &Project,
+    candidate_packages: &BTreeSet<String>,
+    reachable: &mut BTreeSet<CallableId>,
+    reachable_items: &mut BTreeSet<ItemId>,
+    dependencies: DependencySet,
+) -> bool {
+    let mut changed = false;
+    let mut callable_queue = dependencies
+        .callables
+        .into_iter()
+        .filter(|callable| {
+            candidate_packages.contains(callable.package()) && !reachable.contains(callable)
+        })
+        .collect::<VecDeque<_>>();
+    let mut item_queue = dependencies
+        .items
+        .into_iter()
+        .filter(|item| {
+            candidate_packages.contains(item.package()) && !reachable_items.contains(item)
+        })
+        .collect::<VecDeque<_>>();
+
+    while !callable_queue.is_empty() || !item_queue.is_empty() {
+        while let Some(callable) = callable_queue.pop_front() {
+            if !candidate_packages.contains(callable.package())
+                || !reachable.insert(callable.clone())
+            {
+                continue;
+            }
+            changed = true;
+            let dependencies = callable_dependencies(project, &callable);
+            for dependency in dependencies.callables {
+                if candidate_packages.contains(dependency.package())
+                    && !reachable.contains(&dependency)
+                {
+                    callable_queue.push_back(dependency);
+                }
+            }
+            for item in dependencies.items {
+                if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
+                    item_queue.push_back(item);
+                }
+            }
+        }
+
+        while let Some(item) = item_queue.pop_front() {
+            if !candidate_packages.contains(item.package()) || !reachable_items.insert(item.clone())
+            {
+                continue;
+            }
+            changed = true;
+            let dependencies = item_dependencies(project, &item);
+            for dependency in dependencies.callables {
+                if candidate_packages.contains(dependency.package())
+                    && !reachable.contains(&dependency)
+                {
+                    callable_queue.push_back(dependency);
+                }
+            }
+            for item in dependencies.items {
+                if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
+                    item_queue.push_back(item);
+                }
+            }
+        }
+    }
+
+    changed
 }
 
 fn reachable_source_idents(
@@ -1321,6 +1485,10 @@ struct DependencySet {
 }
 
 impl DependencySet {
+    fn is_empty(&self) -> bool {
+        self.callables.is_empty() && self.items.is_empty()
+    }
+
     fn extend(&mut self, other: Self) {
         self.callables.extend(other.callables);
         self.items.extend(other.items);

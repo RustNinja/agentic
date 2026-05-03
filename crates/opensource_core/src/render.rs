@@ -1582,14 +1582,7 @@ fn transform_items(
                     module_path: module_path.to_vec(),
                     name: function.sig.ident.to_string(),
                 };
-                (reduced.reachable.contains(&id)
-                    || public_reexport_targets_item(
-                        project,
-                        package,
-                        module_path,
-                        &function.sig.ident.to_string(),
-                    ))
-                .then(|| {
+                reduced.reachable.contains(&id).then(|| {
                     let mut function = function.clone();
                     strip_opensourced_attrs(&mut function.attrs);
                     allow_dead_code_if_not_public(&function.vis, &mut function.attrs);
@@ -1627,9 +1620,7 @@ fn transform_items(
             | Item::Const(_)
             | Item::Static(_)
             | Item::Macro(_) => item_id(package, module_path, item).and_then(|id| {
-                (reduced.reachable_items.contains(&id)
-                    || public_reexport_targets_item(project, package, module_path, &id.name))
-                .then(|| {
+                reduced.reachable_items.contains(&id).then(|| {
                     let mut item = item.clone();
                     strip_opensourced_attrs_from_item(&mut item);
                     allow_dead_code_for_non_public_item(&mut item);
@@ -1853,7 +1844,6 @@ fn module_should_render(
         .reachable_items
         .iter()
         .any(|item| item.package == package && path_has_prefix(&item.module_path, module_path))
-        || public_reexport_targets_module(project, package, module_path)
 }
 
 fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
@@ -3173,123 +3163,6 @@ fn public_reexport_name_is_referenced_by_reduced_package(
                     )
                 })
             })
-}
-
-fn public_reexport_targets_module(
-    project: &Project,
-    package: &str,
-    module_path: &[String],
-) -> bool {
-    if module_path.is_empty() {
-        return false;
-    }
-
-    public_reexport_target_paths(project, package)
-        .iter()
-        .any(|target_path| path_has_prefix(target_path, module_path))
-}
-
-fn public_reexport_targets_item(
-    project: &Project,
-    package: &str,
-    module_path: &[String],
-    name: &str,
-) -> bool {
-    let mut expected = module_path.to_vec();
-    expected.push(name.to_string());
-    public_reexport_target_paths(project, package)
-        .iter()
-        .any(|target_path| target_path == &expected)
-}
-
-fn public_reexport_target_paths(project: &Project, package: &str) -> Vec<Vec<String>> {
-    let mut paths = Vec::new();
-    for source in project
-        .files
-        .values()
-        .filter(|source| source.package == package)
-    {
-        for item in &source.syntax.items {
-            let Item::Use(item_use) = item else {
-                continue;
-            };
-            if !matches!(item_use.vis, syn::Visibility::Public(_)) {
-                continue;
-            }
-            collect_public_reexport_target_paths(
-                project,
-                package,
-                &source.module_path,
-                &item_use.tree,
-                Vec::new(),
-                &mut paths,
-            );
-        }
-    }
-    paths.sort();
-    paths.dedup();
-    paths
-}
-
-fn collect_public_reexport_target_paths(
-    project: &Project,
-    package: &str,
-    use_module_path: &[String],
-    tree: &UseTree,
-    mut prefix: Vec<String>,
-    paths: &mut Vec<Vec<String>>,
-) {
-    match tree {
-        UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
-            collect_public_reexport_target_paths(
-                project,
-                package,
-                use_module_path,
-                &path.tree,
-                prefix,
-                paths,
-            );
-        }
-        UseTree::Name(name) => {
-            prefix.push(name.ident.to_string());
-            collect_public_reexport_target_path(project, package, use_module_path, &prefix, paths);
-        }
-        UseTree::Rename(rename) => {
-            prefix.push(rename.ident.to_string());
-            collect_public_reexport_target_path(project, package, use_module_path, &prefix, paths);
-        }
-        UseTree::Group(group) => {
-            for item in &group.items {
-                collect_public_reexport_target_paths(
-                    project,
-                    package,
-                    use_module_path,
-                    item,
-                    prefix.clone(),
-                    paths,
-                );
-            }
-        }
-        UseTree::Glob(_) => {}
-    }
-}
-
-fn collect_public_reexport_target_path(
-    project: &Project,
-    package: &str,
-    use_module_path: &[String],
-    use_path: &[String],
-    paths: &mut Vec<Vec<String>>,
-) {
-    let Some((target_package, target_path)) =
-        resolve_use_target_path(project, package, use_module_path, use_path)
-    else {
-        return;
-    };
-    if target_package == package {
-        paths.push(target_path);
-    }
 }
 
 fn use_target_should_drop(

@@ -630,6 +630,82 @@ fn retains_local_public_reexports_referenced_through_dependency_crate_paths() {
 }
 
 #[test]
+fn closes_public_reexports_referenced_from_retained_build_dependencies() {
+    let workspace = temp_path("build-reexport-workspace");
+    let output = temp_path("build-reexport-output");
+    let target_dir = temp_path("build-reexport-target");
+    write_build_dependency_public_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider = read(output.join("provider/src/lib.rs"));
+    assert!(provider.contains("mod error"));
+    assert!(provider.contains("pub use crate::error::Error"));
+    assert!(output.join("provider/src/error.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated build dependency public reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider,
+    );
+}
+
+#[test]
+fn retains_macro_generated_public_reexports_referenced_through_dependency_crate_paths() {
+    let workspace = temp_path("macro-public-reexport-workspace");
+    let output = temp_path("macro-public-reexport-output");
+    let target_dir = temp_path("macro-public-reexport-target");
+    write_macro_generated_public_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider = read(output.join("provider/src/lib.rs"));
+    let error = read(output.join("provider/src/error.rs"));
+    let macro_provider = read(output.join("macro-provider/src/lib.rs"));
+    assert!(provider.contains("mod error"));
+    assert!(provider.contains("pub use crate::error::Error"));
+    assert!(error.contains("pub enum ErrorKind"));
+    assert!(error.contains("macro_provider::define_error!"));
+    assert!(macro_provider.contains("macro_rules! define_error"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro public reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}\nprovider/src/error.rs:\n{}\nmacro-provider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider,
+        error,
+        macro_provider,
+    );
+}
+
+#[test]
 fn slices_nested_modules_declared_from_file_modules() {
     let workspace = temp_path("nested-file-workspace");
     let output = temp_path("nested-file-output");
@@ -6112,6 +6188,171 @@ pub fn dead() -> usize {
         r#"#[derive(Debug)]
 pub enum Error {
     Bad,
+}
+"#,
+    );
+}
+
+fn write_build_dependency_public_reexport_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "bridge", "provider"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+
+[build-dependencies]
+bridge = {{ path = "../bridge" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    7
+}
+"#,
+    );
+    write(
+        root.join("bridge/Cargo.toml"),
+        r#"[package]
+name = "bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+provider = { path = "../provider", optional = true }
+
+[features]
+default = []
+with-provider = ["provider"]
+"#,
+    );
+    write(
+        root.join("bridge/src/lib.rs"),
+        r#"#[cfg(feature = "with-provider")]
+pub enum BridgeError {
+    Provider(provider::Error),
+}
+"#,
+    );
+    write(
+        root.join("provider/Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("provider/src/lib.rs"),
+        r#"mod error;
+pub use crate::error::{Error};
+"#,
+    );
+    write(
+        root.join("provider/src/error.rs"),
+        r#"#[derive(Debug)]
+pub enum Error {
+    Bad,
+}
+"#,
+    );
+}
+
+fn write_macro_generated_public_reexport_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "macro-provider", "provider"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "../provider" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> Result<(), provider::Error> {
+    unreachable!()
+}
+"#,
+    );
+    write(
+        root.join("provider/Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macro-provider = { path = "../macro-provider" }
+"#,
+    );
+    write(
+        root.join("provider/src/lib.rs"),
+        r#"mod error;
+pub use crate::error::Error;
+"#,
+    );
+    write(
+        root.join("provider/src/error.rs"),
+        r#"#[derive(Debug)]
+pub enum ErrorKind {
+    Bad,
+}
+
+macro_provider::define_error!(ErrorKind);
+"#,
+    );
+    write(
+        root.join("macro-provider/Cargo.toml"),
+        r#"[package]
+name = "macro-provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("macro-provider/src/lib.rs"),
+        r#"#[macro_export]
+macro_rules! define_error {
+    ($kind:ident) => {
+        #[derive(Debug)]
+        pub struct Error(pub $kind);
+    };
 }
 "#,
     );
