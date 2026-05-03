@@ -18,6 +18,7 @@ pub struct CheckOptions {
     pub manifest_path: PathBuf,
     pub target_dir: Option<PathBuf>,
     pub timeout: Option<Duration>,
+    pub cargo_args: Vec<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -109,6 +110,7 @@ fn check_workspace_with_program(
         .arg("--manifest-path")
         .arg(&options.manifest_path)
         .arg("--message-format=json");
+    command.args(&options.cargo_args);
 
     if let Some(target_dir) = &options.target_dir {
         command.env("CARGO_TARGET_DIR", target_dir);
@@ -466,7 +468,10 @@ fn span_from_value(span: &Value) -> Option<CheckSpan> {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, time::Duration};
+    use std::{
+        fs,
+        time::{Duration, SystemTime, UNIX_EPOCH},
+    };
 
     use super::{
         check_workspace_with_program, classify_feedback, parse_cargo_messages,
@@ -615,6 +620,7 @@ mod tests {
                 manifest_path: root.join("Cargo.toml"),
                 target_dir: None,
                 timeout: Some(Duration::from_millis(50)),
+                cargo_args: Vec::new(),
             },
         )
         .expect("fake cargo should run");
@@ -622,6 +628,55 @@ mod tests {
         assert!(report.timed_out);
         assert!(!report.success);
         assert_eq!(report.diagnostics[0].code.as_deref(), Some("cargo-timeout"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn passes_extra_cargo_check_arguments_to_command() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("opensourced-feedback-args-{unique}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let fake_cargo = root.join("fake-cargo");
+        let args_path = root.join("args.txt");
+        fs::write(
+            &fake_cargo,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho '{{\"reason\":\"build-finished\",\"success\":true}}'\n",
+                args_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_cargo).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_cargo, permissions).unwrap();
+
+        let report = check_workspace_with_program(
+            fake_cargo.as_os_str(),
+            CheckOptions {
+                manifest_path: root.join("Cargo.toml"),
+                target_dir: None,
+                timeout: Some(Duration::from_secs(1)),
+                cargo_args: vec![
+                    "--all-features".to_string(),
+                    "--target".to_string(),
+                    "wasm32-unknown-unknown".to_string(),
+                ],
+            },
+        )
+        .expect("fake cargo should run");
+
+        let args = fs::read_to_string(&args_path).unwrap();
+        assert!(report.success);
+        assert!(args.contains("--all-features"));
+        assert!(args.contains("--target\nwasm32-unknown-unknown"));
 
         let _ = fs::remove_dir_all(root);
     }

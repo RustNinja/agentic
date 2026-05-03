@@ -177,6 +177,16 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--cargo-check-arg",
+        action="append",
+        default=[],
+        help=(
+            "extra argument to forward to slicers --cargo-check-arg for "
+            "feedback/repair/production cargo check runs; repeat for flags "
+            "that take values"
+        ),
+    )
+    parser.add_argument(
         "--validation",
         choices=("preflight", "feedback", "repair", "production"),
         default="feedback",
@@ -741,6 +751,9 @@ def slicers_command(
                 str(args.feedback_target_dir.resolve()),
             ]
         )
+    if args.validation != "preflight":
+        for cargo_arg in args.cargo_check_arg:
+            command.extend(["--cargo-check-arg", cargo_arg])
     if args.validation != "preflight" and args.deny_warnings:
         command.append("--deny-warnings")
     command.extend(
@@ -890,6 +903,7 @@ def build_row(
             "tier": args.validation,
             "feedback_loop": args.feedback_loop,
             "feedback_timeout": args.feedback_timeout,
+            "cargo_check_args": args.cargo_check_arg,
             "allow_baseline_failures": args.allow_baseline_failures,
             "deny_warnings": args.deny_warnings,
             "stop_on_warning": args.stop_on_warning,

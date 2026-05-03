@@ -36,10 +36,12 @@ predicted generated shape without compiling dependencies. Use
 `--validation repair` to run the bounded compiler repair loop, or
 `--validation production` to run the strict slicers production preset. Use
 `--feedback-target-dir` on feedback, repair, or production corpus runs to reuse
-dependency builds across generated outputs. Use `--deny-warnings` for
-production gates that require warning-free generated feedback. Each corpus row
-includes production-readiness status, production hazard codes, and compiler
-feedback widening candidate/hazard kinds.
+dependency builds across generated outputs. Use repeated `--cargo-check-arg`
+values to validate feature or target matrix cases such as `--all-features` or
+`--target wasm32-unknown-unknown`. Use `--deny-warnings` for production gates
+that require warning-free generated feedback. Each corpus row includes
+production-readiness status, production hazard codes, and compiler feedback
+widening candidate/hazard kinds.
 
 ## Litter Feedback Loop
 

@@ -109,6 +109,10 @@ checks have a 600-second timeout by default; use
 `--feedback-timeout 0` to disable it or pass another second count.
 Use `--feedback-target-dir <path>` to reuse a Cargo target directory across
 repeated generated slices when dependency build time dominates validation.
+Use repeated `--cargo-check-arg <arg>` flags to pass feature or target matrix
+arguments through to baseline and generated `cargo check` runs, for example
+`--cargo-check-arg --all-features` or `--cargo-check-arg --target
+--cargo-check-arg wasm32-unknown-unknown`.
 Feedback reports also classify unresolved compiler diagnostics into widening
 candidates and production hazards, so missing paths, items, methods, crates,
 module files, timeouts, and manifest-shape failures can be triaged without
@@ -136,8 +140,8 @@ to override it.
 enables baseline checking, preflight, `--feedback-repair-loop 3`, and
 `--deny-warnings`, and writes `slice-report.json` by default, while still
 allowing explicit flags such as `--feedback-repair-loop 5`,
-`--feedback-timeout`, and target/report paths to override the preset where
-needed.
+`--feedback-timeout`, `--cargo-check-arg`, and target/report paths to override
+the preset where needed.
 
 This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A

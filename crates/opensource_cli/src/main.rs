@@ -161,7 +161,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     } else if options.feedback_iterations > 0 {
         run_feedback_loop(&options, baseline.as_ref())?;
     } else if options.run_check {
-        run_plain_check(&options.output_root)?;
+        run_plain_check(&options)?;
     }
 
     Ok(())
@@ -176,6 +176,7 @@ struct CliOptions {
     feedback_report: Option<PathBuf>,
     feedback_target_dir: Option<PathBuf>,
     feedback_timeout: Option<Duration>,
+    cargo_check_args: Vec<String>,
     deny_warnings: bool,
     repair_report: Option<PathBuf>,
     run_baseline_check: bool,
@@ -206,6 +207,7 @@ where
     let mut feedback_report = None;
     let mut feedback_target_dir = None;
     let mut feedback_timeout = Some(Duration::from_secs(600));
+    let mut cargo_check_args = Vec::new();
     let mut deny_warnings = false;
     let mut repair_report = None;
     let mut run_baseline_check = false;
@@ -253,6 +255,16 @@ where
             feedback_limit = parse_usize_arg("--feedback-limit", args.next())?;
         } else if arg == OsStr::new("--feedback-timeout") {
             feedback_timeout = parse_feedback_timeout(args.next())?;
+        } else if arg == OsStr::new("--cargo-check-arg") {
+            let value = args
+                .next()
+                .ok_or("--cargo-check-arg requires a following cargo check argument")?;
+            cargo_check_args.push(
+                value
+                    .to_str()
+                    .ok_or("--cargo-check-arg value must be valid UTF-8")?
+                    .to_string(),
+            );
         } else if arg == OsStr::new("--deny-warnings") {
             deny_warnings = true;
         } else if arg == OsStr::new("--feedback-report") {
@@ -313,6 +325,7 @@ where
         feedback_report,
         feedback_target_dir,
         feedback_timeout,
+        cargo_check_args,
         deny_warnings,
         repair_report,
         run_baseline_check,
@@ -354,11 +367,12 @@ fn parse_feedback_timeout(
     Ok((seconds > 0).then(|| Duration::from_secs(seconds)))
 }
 
-fn run_plain_check(output_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
+fn run_plain_check(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("cargo")
         .arg("check")
         .arg("--manifest-path")
-        .arg(output_root.join("Cargo.toml"))
+        .arg(options.output_root.join("Cargo.toml"))
+        .args(&options.cargo_check_args)
         .status()?;
     if !status.success() {
         return Err(format!("generated workspace failed cargo check with {status}").into());
@@ -385,6 +399,7 @@ fn run_baseline_check(options: &CliOptions) -> Result<CheckReport, Box<dyn std::
         manifest_path: options.workspace_root.join("Cargo.toml"),
         target_dir: Some(baseline_target_dir(options)),
         timeout: options.feedback_timeout,
+        cargo_args: options.cargo_check_args.clone(),
     })
 }
 
@@ -429,6 +444,7 @@ fn run_feedback_loop(
             manifest_path: options.output_root.join("Cargo.toml"),
             target_dir: Some(feedback_target_dir(options)),
             timeout: options.feedback_timeout,
+            cargo_args: options.cargo_check_args.clone(),
         })?;
         write_report(&report, &report_path)?;
         print_feedback(&report, options.feedback_limit, &report_path);
@@ -492,6 +508,7 @@ fn run_feedback_repair_loop(
             manifest_path: options.output_root.join("Cargo.toml"),
             target_dir: Some(feedback_target_dir(options)),
             timeout: options.feedback_timeout,
+            cargo_args: options.cargo_check_args.clone(),
         })?;
         write_report(&report, &feedback_report_path)?;
         print_feedback(&report, options.feedback_limit, &feedback_report_path);
@@ -921,7 +938,7 @@ fn usage() -> String {
         "usage: slicers [--analyzer <syn|ra-hir>] [--production] [--check] [--preflight] [--feedback] ",
         "[--feedback-loop <n>] [--feedback-repair-loop <n>] [--feedback-limit <n>] ",
         "[--feedback-timeout <seconds>] [--deny-warnings] [--feedback-report <path>] ",
-        "[--feedback-target-dir <path>] [--repair-report <path>] ",
+        "[--feedback-target-dir <path>] [--cargo-check-arg <arg>] [--repair-report <path>] ",
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
         "[--baseline-target-dir <path>] [--slice-report <path>] [--preflight-report <path>] ",
         "<workspace-root> <output-root>"
@@ -1136,6 +1153,21 @@ mod tests {
             slice_report_path(&options),
             Some(PathBuf::from("custom.json"))
         );
+    }
+
+    #[test]
+    fn repeated_cargo_check_args_are_preserved() {
+        let options = parse_options([
+            "--feedback",
+            "--cargo-check-arg",
+            "--all-features",
+            "--cargo-check-arg",
+            "--target",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(options.cargo_check_args, ["--all-features", "--target"]);
     }
 
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {
