@@ -263,6 +263,96 @@ fn moves_cfg_gated_dependencies_to_matching_target_table() {
     );
 }
 
+#[test]
+fn prunes_trait_methods_when_trait_is_only_used_as_object_type() {
+    let workspace = temp_path("trait-surface-workspace");
+    let output = temp_path("trait-surface-output");
+    write_trait_surface_fixture_workspace(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let manifest = read_output(&output, "app/Cargo.toml");
+    assert!(
+        !manifest.contains("async-trait"),
+        "method-only macro dependency should be pruned:\n{manifest}",
+    );
+    assert!(
+        !manifest.contains("heavy"),
+        "method-only parameter dependency should be pruned:\n{manifest}",
+    );
+
+    let api = read_output(&output, "app/src/api.rs");
+    assert!(
+        api.contains("pub trait Handler: Send + Sync {}"),
+        "trait retained only as a type surface should have no method-only dependencies:\n{api}",
+    );
+    assert_not_present(&api, ["async_trait", "heavy::Request", "handle"]);
+
+    let target_dir = temp_path("trait-surface-build");
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .output()
+        .expect("cargo check should start");
+
+    assert!(
+        output.status.success(),
+        "generated workspace did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+#[test]
+fn prunes_unused_private_fields_from_public_struct_surface() {
+    let workspace = temp_path("public-struct-surface-workspace");
+    let output = temp_path("public-struct-surface-output");
+    write_public_struct_surface_fixture_workspace(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let manifest = read_output(&output, "app/Cargo.toml");
+    assert!(
+        !manifest.contains("heavy"),
+        "unused private field dependency should be pruned:\n{manifest}",
+    );
+
+    let lib = read_output(&output, "app/src/lib.rs");
+    assert!(
+        lib.contains("handler: Handler"),
+        "reachable private field should remain:\n{lib}",
+    );
+    assert_not_present(&lib, ["heavy::Envelope", "unused_tx", "unused_envelope"]);
+
+    let target_dir = temp_path("public-struct-surface-build");
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .output()
+        .expect("cargo check should start");
+
+    assert!(
+        output.status.success(),
+        "generated workspace did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 fn write_fixture_workspace(root: &Path) {
     let opensourced_path = repo_root().join("crates/opensourced");
     let opensourced_path = toml_path(&opensourced_path);
@@ -492,6 +582,164 @@ pub fn unused_math() -> u32 {
 pub fn math_test_only() -> u32 {
     5
 }
+"#,
+    );
+}
+
+fn write_trait_surface_fixture_workspace(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    let opensourced_path = toml_path(&opensourced_path);
+    let heavy_root = root.with_file_name(format!(
+        "{}-heavy",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let heavy_path = toml_path(&heavy_root);
+
+    write_file(
+        &root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = { path = "OPEN_SOURCED_PATH" }
+"#
+        .replace("OPEN_SOURCED_PATH", &opensourced_path)
+        .as_str(),
+    );
+
+    write_file(
+        &root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+async-trait = "0.1"
+heavy = {{ path = "{heavy_path}" }}
+"#,
+        ),
+    );
+
+    write_file(
+        &root.join("app/src/lib.rs"),
+        r#"pub mod api;
+
+use std::sync::Arc;
+
+#[opensourced::opensourced]
+pub fn selected(handler: &Arc<dyn api::Handler>) -> &Arc<dyn api::Handler> {
+    handler
+}
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/api.rs"),
+        r#"use heavy::Request;
+
+#[async_trait::async_trait]
+pub trait Handler: Send + Sync {
+    async fn handle(&self, request: Request) -> String;
+}
+"#,
+    );
+
+    write_file(
+        &heavy_root.join("Cargo.toml"),
+        r#"[package]
+name = "heavy"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write_file(
+        &heavy_root.join("src/lib.rs"),
+        r#"compile_error!("method-only trait dependency was built");
+
+pub struct Request;
+"#,
+    );
+}
+
+fn write_public_struct_surface_fixture_workspace(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    let opensourced_path = toml_path(&opensourced_path);
+    let heavy_root = root.with_file_name(format!(
+        "{}-heavy",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let heavy_path = toml_path(&heavy_root);
+
+    write_file(
+        &root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = { path = "OPEN_SOURCED_PATH" }
+"#
+        .replace("OPEN_SOURCED_PATH", &opensourced_path)
+        .as_str(),
+    );
+
+    write_file(
+        &root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+heavy = {{ path = "{heavy_path}" }}
+"#,
+        ),
+    );
+
+    write_file(
+        &root.join("app/src/lib.rs"),
+        r#"use heavy::Envelope;
+
+pub struct Handler;
+
+pub struct Connection {
+    unused_tx: Envelope,
+    handler: Handler,
+}
+
+impl Connection {
+    #[opensourced::opensourced]
+    pub fn handler(&self) -> &Handler {
+        &self.handler
+    }
+
+    pub fn unused_envelope(&self) -> &Envelope {
+        &self.unused_tx
+    }
+}
+"#,
+    );
+
+    write_file(
+        &heavy_root.join("Cargo.toml"),
+        r#"[package]
+name = "heavy"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+
+    write_file(
+        &heavy_root.join("src/lib.rs"),
+        r#"compile_error!("unused private field dependency was built");
+
+pub struct Envelope;
 "#,
     );
 }

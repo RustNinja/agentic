@@ -22,6 +22,55 @@ use crate::{
 
 const OUTPUT_MARKER: &str = ".slicers-output";
 
+struct RenderPlan {
+    reachable_items: BTreeSet<ItemId>,
+}
+
+impl RenderPlan {
+    fn build(project: &Project, reduced: &ReducedProject) -> Self {
+        let mut reachable_items = BTreeSet::new();
+
+        for item in &reduced.reachable_items {
+            if root_item_should_render(reduced, item)
+                || !package_has_reachable_callables(reduced, &item.package)
+                || matches!(item.kind, ItemKind::Const | ItemKind::Static)
+                || reachable_reduced_callables_mention_ident(project, reduced, &item.name)
+                || retained_impl_surfaces_mention_ident(project, reduced, &item.package, &item.name)
+                || retained_macro_surfaces_mention_ident(
+                    project,
+                    reduced,
+                    &item.package,
+                    &item.name,
+                )
+            {
+                reachable_items.insert(item.clone());
+            }
+        }
+
+        loop {
+            let mut added = false;
+            for item in &reduced.reachable_items {
+                if reachable_items.contains(item) {
+                    continue;
+                }
+                if rendered_items_mention_ident(project, reduced, &reachable_items, &item.name) {
+                    reachable_items.insert(item.clone());
+                    added = true;
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+
+        Self { reachable_items }
+    }
+
+    fn item_should_render(&self, item: &ItemId) -> bool {
+        self.reachable_items.contains(item)
+    }
+}
+
 pub fn write_reduced_workspace(
     project: &Project,
     reduced: &ReducedProject,
@@ -30,7 +79,8 @@ pub fn write_reduced_workspace(
     prepare_output_root(&project.workspace.root, output_root)?;
     write_output_marker(output_root)?;
 
-    let package_usages = package_source_usages(project, reduced);
+    let render_plan = RenderPlan::build(project, reduced);
+    let package_usages = package_source_usages(project, reduced, &render_plan);
 
     write_workspace_manifest(project, reduced, output_root, &package_usages)?;
 
@@ -77,12 +127,19 @@ pub fn write_reduced_workspace(
             .values()
             .filter(|source| &source.package == package_name)
         {
-            if !module_should_render(project, reduced, &source.package, &source.module_path) {
+            if !module_should_render(
+                project,
+                reduced,
+                &render_plan,
+                &source.package,
+                &source.module_path,
+            ) {
                 continue;
             }
             let mut transformed = transform_file(
                 project,
                 reduced,
+                &render_plan,
                 &source.package,
                 &source.module_path,
                 &source.syntax,
@@ -257,6 +314,100 @@ fn package_has_unparsed_source_files(project: &Project, package: &Package) -> bo
     package.root.join("src").exists()
         && source_tree_rs_files(&package.root.join("src"))
             .is_ok_and(|files| files.into_iter().any(|file| !parsed.contains(&file)))
+}
+
+fn root_item_should_render(reduced: &ReducedProject, item: &ItemId) -> bool {
+    reduced
+        .roots
+        .iter()
+        .any(|root| matches!(root, RootId::Item(root_item) if root_item == item))
+}
+
+fn package_has_reachable_callables(reduced: &ReducedProject, package: &str) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .any(|callable| callable.package() == package)
+}
+
+fn rendered_items_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    rendered_items: &BTreeSet<ItemId>,
+    ident: &str,
+) -> bool {
+    rendered_items.iter().any(|item| {
+        project.items.get(item).is_some_and(|record| {
+            reachable_item_mentions_ident(project, reduced, &item.package, item, record, ident)
+        })
+    })
+}
+
+fn reachable_reduced_callables_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    ident: &str,
+) -> bool {
+    reduced.reachable.iter().any(|callable| {
+        if callable_mentions_ident(callable, ident) {
+            return true;
+        }
+        project.functions.get(callable).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+        }) || project.methods.get(callable).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+        })
+    })
+}
+
+fn retained_impl_surfaces_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .any(|source| {
+            retained_impl_attrs_mention_ident(project, reduced, package, &source.module_path, ident)
+                || retained_impl_non_fn_items_mention_ident(
+                    project,
+                    reduced,
+                    package,
+                    &source.module_path,
+                    ident,
+                )
+                || retained_impl_items_mention_ident(
+                    project,
+                    reduced,
+                    package,
+                    &source.module_path,
+                    ident,
+                )
+        })
+}
+
+fn retained_macro_surfaces_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .any(|source| {
+            retained_macro_invocations_mention_ident(
+                project,
+                reduced,
+                package,
+                &source.module_path,
+                ident,
+            )
+        })
 }
 
 fn source_tree_rs_files(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -1313,6 +1464,7 @@ impl TokenUsage {
 fn package_source_usage(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package_name: &str,
 ) -> PackageSourceUsage {
     let mut usage = PackageSourceUsage::default();
@@ -1321,12 +1473,19 @@ fn package_source_usage(
         .values()
         .filter(|source| source.package == package_name)
         .filter(|source| {
-            module_should_render(project, reduced, &source.package, &source.module_path)
+            module_should_render(
+                project,
+                reduced,
+                render_plan,
+                &source.package,
+                &source.module_path,
+            )
         })
     {
         let file = transform_file(
             project,
             reduced,
+            render_plan,
             &source.package,
             &source.module_path,
             &source.syntax,
@@ -1451,6 +1610,7 @@ fn compact_token_stream(tokens: &TokenStream) -> String {
 fn package_source_usages(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
 ) -> HashMap<String, PackageSourceUsage> {
     reduced
         .packages
@@ -1458,7 +1618,7 @@ fn package_source_usages(
         .map(|package| {
             (
                 package.clone(),
-                package_source_usage(project, reduced, package.as_str()),
+                package_source_usage(project, reduced, render_plan, package.as_str()),
             )
         })
         .collect()
@@ -1958,18 +2118,27 @@ fn local_dependency_value(alias: &str, package: &str, original: &Value) -> Value
 fn transform_file(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     syntax: &syn::File,
 ) -> syn::File {
     let mut transformed = syntax.clone();
-    transformed.items = transform_items(project, reduced, package, module_path, &syntax.items);
+    transformed.items = transform_items(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        &syntax.items,
+    );
     transformed
 }
 
 fn transform_items(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     items: &[Item],
@@ -1989,6 +2158,7 @@ fn transform_items(
                 let tree = prune_use_tree(
                     project,
                     reduced,
+                    render_plan,
                     package,
                     module_path,
                     &item_use.tree,
@@ -2018,8 +2188,14 @@ fn transform_items(
                 })
             }
             Item::Macro(item_macro) if is_automod_dir_macro(&item_macro.mac.path) => {
-                automod_macro_has_reduced_modules(project, reduced, package, module_path)
-                    .then(|| Item::Macro(item_macro.clone()))
+                automod_macro_has_reduced_modules(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                )
+                .then(|| Item::Macro(item_macro.clone()))
             }
             Item::Macro(item_macro)
                 if macro_definition_should_remain(item_macro, &retained_macro_definitions) =>
@@ -2032,27 +2208,51 @@ fn transform_items(
                 Some(Item::Macro(item_macro.clone()))
             }
             Item::Struct(item_struct) => item_id(package, module_path, item).and_then(|id| {
-                reduced.reachable_items.contains(&id).then(|| {
+                render_plan.item_should_render(&id).then(|| {
                     let mut item_struct = item_struct.clone();
                     strip_opensourced_attrs(&mut item_struct.attrs);
                     if !preserve_uniffi_surface {
                         strip_uniffi_attrs_from_fields(&mut item_struct.fields);
                         strip_uniffi_attrs(&mut item_struct.attrs);
                     }
-                    prune_private_struct_fields(project, reduced, package, &mut item_struct);
+                    let preserve_private_fields = root_item_should_render(reduced, &id);
+                    prune_private_struct_fields(
+                        project,
+                        reduced,
+                        package,
+                        &mut item_struct,
+                        preserve_private_fields,
+                    );
                     allow_dead_code_for_private_struct_fields(&mut item_struct);
                     allow_dead_code_if_not_public(&item_struct.vis, &mut item_struct.attrs);
                     Item::Struct(item_struct)
                 })
             }),
+            Item::Trait(item_trait) => item_id(package, module_path, item).and_then(|id| {
+                render_plan.item_should_render(&id).then(|| {
+                    let mut item_trait = item_trait.clone();
+                    strip_opensourced_attrs(&mut item_trait.attrs);
+                    if !preserve_uniffi_surface {
+                        strip_uniffi_attrs(&mut item_trait.attrs);
+                    }
+                    prune_trait_items_if_only_type_surface(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        &mut item_trait,
+                    );
+                    allow_dead_code_if_not_public(&item_trait.vis, &mut item_trait.attrs);
+                    Item::Trait(item_trait)
+                })
+            }),
             Item::Enum(_)
             | Item::Union(_)
             | Item::Type(_)
-            | Item::Trait(_)
             | Item::Const(_)
             | Item::Static(_)
             | Item::Macro(_) => item_id(package, module_path, item).and_then(|id| {
-                reduced.reachable_items.contains(&id).then(|| {
+                render_plan.item_should_render(&id).then(|| {
                     let mut item = item.clone();
                     strip_opensourced_attrs_from_item(&mut item);
                     if !preserve_uniffi_surface {
@@ -2174,7 +2374,7 @@ fn transform_items(
                 }
                 let mut child_path = module_path.to_vec();
                 child_path.push(item_mod.ident.to_string());
-                let module_item_is_reachable = reduced.reachable_items.contains(&ItemId {
+                let module_item_is_reachable = render_plan.item_should_render(&ItemId {
                     package: package.to_string(),
                     module_path: module_path.to_vec(),
                     name: item_mod.ident.to_string(),
@@ -2185,8 +2385,14 @@ fn transform_items(
                 }
 
                 if let Some((brace, child_items)) = &item_mod.content {
-                    let mut child_items =
-                        transform_items(project, reduced, package, &child_path, child_items);
+                    let mut child_items = transform_items(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        &child_path,
+                        child_items,
+                    );
                     if child_items.is_empty()
                         && (module_item_is_reachable
                             || reachable_package_mentions_ident(
@@ -2214,7 +2420,8 @@ fn transform_items(
                         continue;
                     }
                     item_mod.content = Some((*brace, child_items));
-                } else if !module_should_render(project, reduced, package, &child_path) {
+                } else if !module_should_render(project, reduced, render_plan, package, &child_path)
+                {
                     continue;
                 }
                 Some(Item::Mod(item_mod))
@@ -2228,6 +2435,74 @@ fn transform_items(
     }
 
     transformed
+}
+
+fn prune_trait_items_if_only_type_surface(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    item_trait: &mut syn::ItemTrait,
+) {
+    if trait_has_reachable_impl_methods(
+        reduced,
+        package,
+        module_path,
+        &item_trait.ident.to_string(),
+    ) {
+        return;
+    }
+    if trait_items_are_referenced_by_reachable_surfaces(project, reduced, package, item_trait) {
+        return;
+    }
+
+    item_trait.items.clear();
+    item_trait.attrs.retain(is_inert_type_surface_attr);
+}
+
+fn trait_items_are_referenced_by_reachable_surfaces(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    item_trait: &syn::ItemTrait,
+) -> bool {
+    item_trait.items.iter().any(|item| {
+        let TraitItem::Fn(method) = item else {
+            return false;
+        };
+        let name = method.sig.ident.to_string();
+        reachable_reduced_callables_mention_ident(project, reduced, &name)
+            || retained_impl_surfaces_mention_ident(project, reduced, package, &name)
+    })
+}
+
+fn trait_has_reachable_impl_methods(
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    trait_name: &str,
+) -> bool {
+    let mut trait_path = module_path.to_vec();
+    trait_path.push(trait_name.to_string());
+    reduced.reachable.iter().any(|callable| {
+        matches!(
+            callable,
+            CallableId::Method {
+                package: callable_package,
+                trait_path: Some(callable_trait_path),
+                ..
+            } if callable_package == package && callable_trait_path == &trait_path
+        )
+    })
+}
+
+fn is_inert_type_surface_attr(attr: &syn::Attribute) -> bool {
+    let path = attr.path();
+    path.is_ident("cfg")
+        || path.is_ident("allow")
+        || path.is_ident("deny")
+        || path.is_ident("doc")
+        || path.is_ident("deprecated")
 }
 
 fn module_contains_root(
@@ -2265,6 +2540,7 @@ fn module_contains_root(
 fn module_should_render(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
 ) -> bool {
@@ -2290,10 +2566,11 @@ fn module_should_render(
                     .map(|record| path_has_prefix(&record.module_path, module_path))
                     .unwrap_or_else(|| path_has_prefix(type_path, module_path))
         }
-    }) || reduced
-        .reachable_items
-        .iter()
-        .any(|item| item.package == package && path_has_prefix(&item.module_path, module_path))
+    }) || render_plan.reachable_items.iter().any(|item| {
+        item.package == package
+            && (path_has_prefix(&item.module_path, module_path)
+                || path_has_prefix(&path_from_item(item), module_path))
+    })
 }
 
 fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
@@ -2331,6 +2608,7 @@ fn path_from_item(item: &ItemId) -> Vec<String> {
 fn automod_macro_has_reduced_modules(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
 ) -> bool {
@@ -2340,7 +2618,9 @@ fn automod_macro_has_reduced_modules(
         .filter(|source| source.package == package)
         .filter(|source| source.module_path.len() == module_path.len() + 1)
         .filter(|source| path_has_prefix(&source.module_path, module_path))
-        .any(|source| module_should_render(project, reduced, package, &source.module_path))
+        .any(|source| {
+            module_should_render(project, reduced, render_plan, package, &source.module_path)
+        })
 }
 
 fn is_automod_dir_macro(path: &syn::Path) -> bool {
@@ -2706,6 +2986,43 @@ fn retained_impl_non_fn_items_mention_ident(
     })
 }
 
+fn retained_impl_items_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+
+    source.syntax.items.iter().any(|item| {
+        let Item::Impl(item_impl) = item else {
+            return false;
+        };
+        if item_impl.trait_.is_none() {
+            return false;
+        }
+        if !impl_should_render(project, reduced, package, module_path, item_impl, &aliases) {
+            return false;
+        }
+        item_impl.items.iter().any(|impl_item| {
+            !impl_item_is_test(impl_item)
+                && token_stream_mentions_ident(&impl_item.to_token_stream(), ident)
+        })
+    })
+}
+
 fn retained_macro_invocations_mention_ident(
     project: &Project,
     _reduced: &ReducedProject,
@@ -2765,6 +3082,44 @@ fn impl_has_reachable_method(
         };
         reduced.reachable.contains(&id)
     })
+}
+
+fn impl_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    item_impl: &syn::ItemImpl,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> bool {
+    if impl_has_reachable_method(project, reduced, package, module_path, item_impl, aliases) {
+        return true;
+    }
+    let Some(type_path) =
+        resolved_local_type_path(project, package, module_path, &item_impl.self_ty, aliases)
+    else {
+        return false;
+    };
+    let trait_path = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| normalized_path(module_path, path, aliases));
+    let trait_impl_is_required = trait_path.as_ref().is_some_and(|trait_path| {
+        trait_impl_items_are_reachable(reduced, package, &type_path, trait_path)
+    });
+    let marker_trait_impl_is_required = trait_path
+        .as_ref()
+        .and_then(|path| path.last())
+        .is_some_and(|trait_name| {
+            marker_trait_impl_should_remain(reduced, package, &type_path, trait_name)
+        })
+        && item_impl
+            .items
+            .iter()
+            .filter(|impl_item| !impl_item_is_test(impl_item))
+            .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
+
+    trait_impl_is_required || marker_trait_impl_is_required
 }
 
 fn trait_impl_items_are_reachable(
@@ -3052,12 +3407,16 @@ fn reachable_item_mentions_ident(
     record: &crate::model::ItemRecord,
     ident: &str,
 ) -> bool {
+    if let Item::Trait(item_trait) = &record.item {
+        if trait_has_reachable_impl_methods(reduced, package, &item_id.module_path, &item_id.name) {
+            return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
+        }
+        return trait_type_surface_mentions_ident(item_id, item_trait, ident);
+    }
+
     let Item::Struct(item_struct) = &record.item else {
         return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
     };
-    if matches!(item_struct.vis, syn::Visibility::Public(_)) {
-        return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
-    }
     if item_id.name == ident || item_id.module_path.iter().any(|segment| segment == ident) {
         return true;
     }
@@ -3068,17 +3427,39 @@ fn reachable_item_mentions_ident(
     {
         return true;
     }
+    if root_item_should_render(reduced, item_id) {
+        return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
+    }
 
     let syn::Fields::Named(fields) = &item_struct.fields else {
         return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
     };
     fields.named.iter().any(|field| {
-        let Some(name) = field.ident.as_ref() else {
-            return true;
-        };
-        reachable_callables_mention_ident(project, reduced, package, &name.to_string())
+        struct_field_should_remain(project, reduced, package, item_struct, field)
             && token_stream_mentions_ident(&field.to_token_stream(), ident)
     })
+}
+
+fn trait_type_surface_mentions_ident(
+    item_id: &ItemId,
+    item_trait: &syn::ItemTrait,
+    ident: &str,
+) -> bool {
+    if item_id.name == ident || item_id.module_path.iter().any(|segment| segment == ident) {
+        return true;
+    }
+    if item_trait
+        .supertraits
+        .iter()
+        .any(|bound| token_stream_mentions_ident(&bound.to_token_stream(), ident))
+    {
+        return true;
+    }
+    item_trait
+        .attrs
+        .iter()
+        .filter(|attr| is_inert_type_surface_attr(attr))
+        .any(|attr| token_stream_mentions_ident(&attr.to_token_stream(), ident))
 }
 
 fn reachable_callables_mention_ident(
@@ -3106,6 +3487,7 @@ fn reachable_callables_mention_ident(
 fn reachable_module_import_scope_mentions_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     ident: &str,
@@ -3113,6 +3495,7 @@ fn reachable_module_import_scope_mentions_ident(
     reachable_module_import_scope_mentions_ident_excluding(
         project,
         reduced,
+        render_plan,
         package,
         module_path,
         ident,
@@ -3123,6 +3506,7 @@ fn reachable_module_import_scope_mentions_ident(
 fn reachable_module_import_scope_mentions_ident_excluding(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     ident: &str,
@@ -3140,6 +3524,7 @@ fn reachable_module_import_scope_mentions_ident_excluding(
             inline_child_modules_import_scope_mentions_ident(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 &source.syntax.items,
@@ -3158,11 +3543,14 @@ fn reachable_module_import_scope_mentions_ident_excluding(
         .filter(|source| source.module_path.len() == module_path.len() + 1)
         .filter(|source| path_has_prefix(&source.module_path, module_path))
         .filter(|source| excluded_module_path != Some(source.module_path.as_slice()))
-        .filter(|source| module_should_render(project, reduced, package, &source.module_path))
+        .filter(|source| {
+            module_should_render(project, reduced, render_plan, package, &source.module_path)
+        })
         .any(|source| {
             child_module_import_scope_mentions_parent_ident(
                 project,
                 reduced,
+                render_plan,
                 package,
                 source.module_path.as_slice(),
                 &source.syntax.items,
@@ -3181,9 +3569,11 @@ fn items_have_super_glob_import(items: &[Item]) -> bool {
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn inline_child_modules_import_scope_mentions_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     items: &[Item],
@@ -3203,13 +3593,14 @@ fn inline_child_modules_import_scope_mentions_ident(
         if excluded_module_path.is_some_and(|excluded| child_path == excluded) {
             return false;
         }
-        if !module_should_render(project, reduced, package, &child_path) {
+        if !module_should_render(project, reduced, render_plan, package, &child_path) {
             return false;
         }
 
         child_module_import_scope_mentions_parent_ident(
             project,
             reduced,
+            render_plan,
             package,
             &child_path,
             child_items,
@@ -3219,9 +3610,11 @@ fn inline_child_modules_import_scope_mentions_ident(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn child_module_import_scope_mentions_parent_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     child_module_path: &[String],
     child_items: &[Item],
@@ -3233,6 +3626,7 @@ fn child_module_import_scope_mentions_parent_ident(
         reachable_module_import_scope_mentions_ident_excluding(
             project,
             reduced,
+            render_plan,
             package,
             child_module_path,
             visible_name,
@@ -3246,6 +3640,7 @@ fn child_module_import_scope_mentions_parent_ident(
         && reachable_module_import_scope_mentions_ident_excluding(
             project,
             reduced,
+            render_plan,
             package,
             child_module_path,
             ident,
@@ -3330,6 +3725,7 @@ fn use_tree_contains_glob(tree: &UseTree) -> bool {
 fn module_glob_is_used_in_module(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     target_package: &str,
@@ -3350,6 +3746,7 @@ fn module_glob_is_used_in_module(
             && reachable_module_import_scope_mentions_ident_excluding(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 name,
@@ -3358,10 +3755,11 @@ fn module_glob_is_used_in_module(
     }) || project.items.keys().any(|item| {
         item.package == target_package
             && item.module_path == target_path
-            && reduced.reachable_items.contains(item)
+            && render_plan.item_should_render(item)
             && reachable_module_import_scope_mentions_ident_excluding(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 &item.name,
@@ -3633,11 +4031,12 @@ fn prune_private_struct_fields(
     reduced: &ReducedProject,
     package: &str,
     item_struct: &mut syn::ItemStruct,
+    preserve_private_fields: bool,
 ) {
-    if matches!(item_struct.vis, syn::Visibility::Public(_)) {
+    if preserve_private_fields {
         return;
     }
-
+    let original_struct = item_struct.clone();
     let syn::Fields::Named(fields) = &mut item_struct.fields else {
         return;
     };
@@ -3646,13 +4045,52 @@ fn prune_private_struct_fields(
         .named
         .iter()
         .filter(|field| {
-            let Some(name) = field.ident.as_ref() else {
-                return true;
-            };
-            reachable_callables_mention_ident(project, reduced, package, &name.to_string())
+            struct_field_should_remain(project, reduced, package, &original_struct, field)
         })
         .cloned()
         .collect();
+}
+
+fn struct_field_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    item_struct: &syn::ItemStruct,
+    field: &Field,
+) -> bool {
+    if matches!(item_struct.vis, syn::Visibility::Public(_))
+        && matches!(field.vis, syn::Visibility::Public(_))
+    {
+        return true;
+    }
+    if field_mentions_struct_type_params(item_struct, field) {
+        return true;
+    }
+    if field_attrs_require_field(field) {
+        return true;
+    }
+    let Some(name) = field.ident.as_ref() else {
+        return true;
+    };
+    reachable_callables_mention_ident(project, reduced, package, &name.to_string())
+        || retained_impl_surfaces_mention_ident(project, reduced, package, &name.to_string())
+}
+
+fn field_attrs_require_field(field: &Field) -> bool {
+    field.attrs.iter().any(|attr| {
+        let path = attr.path();
+        !(path.is_ident("cfg")
+            || path.is_ident("allow")
+            || path.is_ident("deny")
+            || path.is_ident("doc")
+            || path.is_ident("deprecated"))
+    })
+}
+
+fn field_mentions_struct_type_params(item_struct: &syn::ItemStruct, field: &Field) -> bool {
+    item_struct.generics.type_params().any(|param| {
+        token_stream_mentions_ident(&field.to_token_stream(), &param.ident.to_string())
+    })
 }
 
 fn item_is_test(item: &Item) -> bool {
@@ -3704,9 +4142,11 @@ fn use_mentions_opensourced(tree: &UseTree) -> bool {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn prune_use_tree(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     tree: &UseTree,
@@ -3731,6 +4171,7 @@ fn prune_use_tree(
             path.tree = Box::new(prune_use_tree(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 &path.tree,
@@ -3752,6 +4193,7 @@ fn prune_use_tree(
             (!use_target_should_drop(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 &prefix,
@@ -3771,6 +4213,7 @@ fn prune_use_tree(
             (!use_target_should_drop(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 &prefix,
@@ -3778,6 +4221,7 @@ fn prune_use_tree(
             ) || renamed_use_alias_is_reachable(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 &alias,
@@ -3798,6 +4242,7 @@ fn prune_use_tree(
                     prune_use_tree(
                         project,
                         reduced,
+                        render_plan,
                         package,
                         module_path,
                         item,
@@ -3811,6 +4256,7 @@ fn prune_use_tree(
         UseTree::Glob(glob) => (!use_prefix_should_drop(
             project,
             reduced,
+            render_plan,
             package,
             module_path,
             &prefix,
@@ -3823,12 +4269,20 @@ fn prune_use_tree(
 fn renamed_use_alias_is_reachable(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     alias: &str,
     is_public_use: bool,
 ) -> bool {
-    if reachable_module_import_scope_mentions_ident(project, reduced, package, module_path, alias) {
+    if reachable_module_import_scope_mentions_ident(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        alias,
+    ) {
         return true;
     }
 
@@ -3884,6 +4338,7 @@ fn public_reexport_name_is_referenced_by_reduced_package(
 fn use_target_should_drop(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     target: &[String],
@@ -3907,6 +4362,7 @@ fn use_target_should_drop(
         return external_use_target_should_drop(
             project,
             reduced,
+            render_plan,
             package,
             module_path,
             target,
@@ -3921,6 +4377,7 @@ fn use_target_should_drop(
         return external_use_target_should_drop(
             project,
             reduced,
+            render_plan,
             package,
             module_path,
             target,
@@ -3935,7 +4392,14 @@ fn use_target_should_drop(
     };
 
     let leaf_is_used_in_module = target.last().is_some_and(|leaf| {
-        reachable_module_import_scope_mentions_ident(project, reduced, package, module_path, leaf)
+        reachable_module_import_scope_mentions_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            leaf,
+        )
     });
 
     if let Some(callable) = find_use_function(project, &target_package, &target_path) {
@@ -3951,7 +4415,7 @@ fn use_target_should_drop(
         if (is_public_use || leaf_is_used_in_module) && item.kind == ItemKind::Mod {
             return false;
         }
-        return !reduced.reachable_items.contains(&item);
+        return !render_plan.item_should_render(&item);
     }
     if let Some((alias_package, alias_path)) =
         resolve_reexported_use_path(project, &target_package, &target_path)
@@ -3969,18 +4433,18 @@ fn use_target_should_drop(
             if (is_public_use || leaf_is_used_in_module) && item.kind == ItemKind::Mod {
                 return false;
             }
-            return !reduced.reachable_items.contains(&item);
+            return !render_plan.item_should_render(&item);
         }
         return project_has_module(project, &alias_package, &alias_path)
-            && !module_should_render(project, reduced, &alias_package, &alias_path);
+            && !module_should_render(project, reduced, render_plan, &alias_package, &alias_path);
     }
 
     if project_has_module(project, &target_package, &target_path) {
-        return !module_should_render(project, reduced, &target_package, &target_path);
+        return !module_should_render(project, reduced, render_plan, &target_package, &target_path);
     }
 
     if target.last().is_some_and(|leaf| {
-        reduced.reachable_items.iter().any(|item| {
+        render_plan.reachable_items.iter().any(|item| {
             item.package == package && item.kind == ItemKind::Trait && item.name == *leaf
         })
     }) {
@@ -3994,6 +4458,7 @@ fn use_target_should_drop(
             !reachable_module_import_scope_mentions_ident(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 leaf,
@@ -4005,6 +4470,7 @@ fn use_target_should_drop(
 fn use_prefix_should_drop(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     prefix: &[String],
@@ -4024,6 +4490,7 @@ fn use_prefix_should_drop(
         return external_use_target_should_drop(
             project,
             reduced,
+            render_plan,
             package,
             module_path,
             prefix,
@@ -4038,6 +4505,7 @@ fn use_prefix_should_drop(
         return external_use_target_should_drop(
             project,
             reduced,
+            render_plan,
             package,
             module_path,
             prefix,
@@ -4050,7 +4518,7 @@ fn use_prefix_should_drop(
             if !project_has_module(project, &target_package, &target_path) {
                 return false;
             }
-            if !module_should_render(project, reduced, &target_package, &target_path) {
+            if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {
                 return true;
             }
             !is_public_use
@@ -4058,6 +4526,7 @@ fn use_prefix_should_drop(
                 && !module_glob_is_used_in_module(
                     project,
                     reduced,
+                    render_plan,
                     package,
                     module_path,
                     &target_package,
@@ -4070,6 +4539,7 @@ fn use_prefix_should_drop(
 fn external_use_target_should_drop(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     _package: &str,
     module_path: &[String],
     target: &[String],
@@ -4117,7 +4587,14 @@ fn external_use_target_should_drop(
     if is_public_use {
         !reachable_package_mentions_ident(project, reduced, _package, leaf)
     } else {
-        !reachable_module_import_scope_mentions_ident(project, reduced, _package, module_path, leaf)
+        !reachable_module_import_scope_mentions_ident(
+            project,
+            reduced,
+            render_plan,
+            _package,
+            module_path,
+            leaf,
+        )
     }
 }
 
