@@ -297,8 +297,17 @@ pub fn write_reduced_workspace(
             files_written += copy_build_script_assets(package, &build_script, &package_output)?;
         }
 
+        let copied_support_source_tree = if package_should_copy_library_support_source(package) {
+            files_written += copy_library_support_source_tree(package, &package_output)?;
+            true
+        } else {
+            false
+        };
+
         if package_should_preserve_source_tree(project, reduced, package) {
-            files_written += copy_source_tree(package, &package_output)?;
+            if !copied_support_source_tree {
+                files_written += copy_source_tree(package, &package_output)?;
+            }
             continue;
         }
 
@@ -745,6 +754,21 @@ fn copy_source_tree(
     copy_source_tree_path(package, &package.root.join("src"), package_output)
 }
 
+fn copy_library_support_source_tree(
+    package: &Package,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let Some(lib_path) = package_library_source_path(package) else {
+        return Ok(0);
+    };
+    let src_dir = package.root.join("src");
+    if lib_path.starts_with(&src_dir) {
+        return copy_source_tree_path(package, &src_dir, package_output);
+    }
+    let source_root = lib_path.parent().unwrap_or(&lib_path);
+    copy_source_tree_path(package, source_root, package_output)
+}
+
 fn copy_source_tree_path(
     package: &Package,
     path: &Path,
@@ -769,6 +793,32 @@ fn copy_source_tree_path(
         copied += copy_source_tree_path(package, &entry.path(), package_output)?;
     }
     Ok(copied)
+}
+
+fn package_should_copy_library_support_source(package: &Package) -> bool {
+    package_target_uses_dev_dependencies(package) && package_library_source_path(package).is_some()
+}
+
+fn package_library_source_path(package: &Package) -> Option<PathBuf> {
+    if package
+        .entry_target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "lib" | "proc-macro"))
+    {
+        return None;
+    }
+    if let Some(path) = package
+        .manifest
+        .get("lib")
+        .and_then(|lib| lib.get("path"))
+        .and_then(Value::as_str)
+    {
+        let path = package.root.join(path);
+        return path.exists().then_some(path);
+    }
+    let path = package.root.join("src/lib.rs");
+    path.exists().then_some(path)
 }
 
 fn build_script_path(package: &Package) -> Option<PathBuf> {
@@ -1466,6 +1516,8 @@ fn retained_workspace_dependencies(
             } else {
                 DependencyRetention::SourceMentioned
             };
+            let retain_for_copied_support_source =
+                table_name == "dependencies" && package_should_copy_library_support_source(package);
 
             for (alias, value) in table {
                 let dependency_package = dependency_package_name(alias, value);
@@ -1480,6 +1532,7 @@ fn retained_workspace_dependencies(
                         retention,
                         DependencyUsageScope::Any,
                         package_usage,
+                        retain_for_copied_support_source,
                     )
                 {
                     continue;
@@ -1531,6 +1584,8 @@ fn transformed_dependencies(
     else {
         return Ok(Table::new());
     };
+    let retain_for_copied_support_source =
+        table_name == "dependencies" && package_should_copy_library_support_source(package);
 
     let mut dependencies = Table::new();
     for (alias, value) in source_dependencies {
@@ -1565,6 +1620,7 @@ fn transformed_dependencies(
             retention,
             usage_scope,
             package_usage,
+            retain_for_copied_support_source,
         ) || is_feature_required
         {
             retained_aliases.insert(alias.clone());
@@ -1591,6 +1647,7 @@ fn transformed_target_dependencies(
         .packages
         .get(package_name)
         .ok_or_else(|| format!("unknown package {package_name}"))?;
+    let retain_for_copied_support_source = package_should_copy_library_support_source(package);
 
     let source_targets = package.manifest.get("target").and_then(Value::as_table);
     let mut target_names = package_usage
@@ -1625,6 +1682,7 @@ fn transformed_target_dependencies(
                 package_usage,
                 feature_required_aliases,
                 retained_aliases,
+                retain_for_copied_support_source,
             );
             rendered_dependencies.extend(dependencies);
         }
@@ -1645,6 +1703,7 @@ fn transformed_target_dependencies(
                 package_usage,
                 feature_required_aliases,
                 &mut promoted_retained_aliases,
+                retain_for_copied_support_source,
             );
             for (alias, value) in promoted_dependencies {
                 if package_usage.mentions_dependency_in_scope(
@@ -1683,6 +1742,7 @@ fn transformed_target_dependencies(
                     package_usage,
                     feature_required_aliases,
                     retained_aliases,
+                    retain_for_copied_support_source,
                 );
                 if !build_dependencies.is_empty() {
                     rendered_target.insert(
@@ -1712,6 +1772,7 @@ fn transformed_dependency_table(
     package_usage: &PackageSourceUsage,
     feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
+    retain_for_copied_support_source: bool,
 ) -> Table {
     let Some(package) = project.workspace.packages.get(package_name) else {
         return Table::new();
@@ -1749,6 +1810,7 @@ fn transformed_dependency_table(
             retention,
             usage_scope,
             package_usage,
+            retain_for_copied_support_source,
         ) || is_feature_required
         {
             retained_aliases.insert(alias.clone());
@@ -1765,6 +1827,7 @@ fn transformed_dependency_table(
     dependencies
 }
 
+#[allow(clippy::too_many_arguments)]
 fn dependency_should_render(
     project: &Project,
     reduced: &ReducedProject,
@@ -1773,6 +1836,7 @@ fn dependency_should_render(
     retention: DependencyRetention,
     usage_scope: DependencyUsageScope<'_>,
     package_usage: &PackageSourceUsage,
+    retain_for_copied_support_source: bool,
 ) -> bool {
     retention == DependencyRetention::BuildScript
         || project
@@ -1780,6 +1844,7 @@ fn dependency_should_render(
             .packages
             .get(package_name)
             .is_some_and(|package| package_should_preserve_source_tree(project, reduced, package))
+        || retain_for_copied_support_source
         || package_usage.mentions_dependency_in_scope(alias, usage_scope)
 }
 
