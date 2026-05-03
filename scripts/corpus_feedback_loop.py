@@ -27,6 +27,8 @@ from typing import Any
 
 DEFAULT_OUTPUT_PREFIX = Path("/tmp/slicers-corpus")
 DEFAULT_KINDS = ("fn", "mod", "trait", "struct", "enum")
+PARSE_TARGET_KINDS = {"lib", "proc-macro", "bin", "example", "test", "bench"}
+DEV_TARGET_KINDS = {"example", "test", "bench"}
 
 FN_RE = re.compile(
     r"^(?:(?:pub(?:\([^)]*\))?|async|const|unsafe|extern\s+\"[^\"]+\"|extern)\s+)*"
@@ -53,6 +55,8 @@ class Package:
     name: str
     root: Path
     entry: Path
+    target_name: str
+    target_kinds: tuple[str, ...]
 
 
 @dataclass(frozen=True)
@@ -74,7 +78,11 @@ class Candidate:
         except ValueError:
             relative = self.path
         module = "::".join((self.package.name, *self.module_path, self.name))
-        return f"{relative}:{self.line}:{self.kind}:{self.name} ({module})"
+        target = "+".join(self.package.target_kinds)
+        return (
+            f"{relative}:{self.line}:{self.kind}:{self.name} "
+            f"({module}; target={target}:{self.package.target_name})"
+        )
 
 
 @dataclass(frozen=True)
@@ -449,8 +457,19 @@ def run_batch(
     try:
         if not args.no_git_restore:
             restore_source(cargo_source.cargo_root)
+
+        packages = load_packages(cargo_source)
+        candidates = discover_candidates(packages, args.public_only)
+        candidate_counts = count_candidates(candidates)
+        roots = select_roots(candidates, args.kinds, args.roots_per_batch, rng)
+        cargo_check_args = validation_cargo_check_args(args, roots)
+
         if args.baseline_check:
-            baseline = run_baseline_check(cargo_source.manifest_path, args.case_timeout)
+            baseline = run_baseline_check(
+                cargo_source.manifest_path,
+                args.case_timeout,
+                cargo_check_args,
+            )
             if not baseline["success"] and not args.allow_baseline_failures:
                 return build_row(
                     args,
@@ -470,11 +489,6 @@ def run_batch(
                     "baseline_failed",
                 )
 
-        packages = load_packages(cargo_source)
-        candidates = discover_candidates(packages, args.public_only)
-        candidate_counts = count_candidates(candidates)
-        roots = select_roots(candidates, args.kinds, args.roots_per_batch, rng)
-
         uses_workspace_dependency = source_uses_workspace_dependencies(cargo_source.cargo_root)
         inject_opensourced_dependency(
             cargo_source.cargo_root,
@@ -493,6 +507,7 @@ def run_batch(
             feedback_report_path,
             repair_report_path,
             validation_report_path,
+            cargo_check_args,
         )
         command_result = run_command(command, repo, args.case_timeout)
 
@@ -553,17 +568,32 @@ def load_packages(cargo_source: CargoSource) -> list[Package]:
         manifest_path = Path(package["manifest_path"]).resolve()
         root = manifest_path.parent
         for target in package.get("targets", []):
-            kinds = set(target.get("kind", []))
-            if not ({"lib", "bin"} & kinds):
+            kinds = tuple(str(kind) for kind in target.get("kind", []))
+            if not (set(kinds) & PARSE_TARGET_KINDS):
                 continue
             entry = Path(target["src_path"]).resolve()
             if entry.exists():
-                packages.append(Package(package["name"], root, entry))
+                packages.append(
+                    Package(
+                        package["name"],
+                        root,
+                        entry,
+                        str(target.get("name") or package["name"]),
+                        kinds,
+                    )
+                )
 
-    packages.sort(key=lambda package: (package.name, str(package.entry)))
+    packages.sort(
+        key=lambda package: (
+            package.name,
+            package.target_kinds,
+            package.target_name,
+            str(package.entry),
+        )
+    )
     if not packages:
         raise RuntimeError(
-            f"no local lib/bin package targets found under {cargo_source.manifest_path}"
+            f"no local parse-candidate package targets found under {cargo_source.manifest_path}"
         )
     return packages
 
@@ -811,6 +841,7 @@ def slicers_command(
     feedback_report_path: Path,
     repair_report_path: Path,
     validation_report_path: Path,
+    cargo_check_args: list[str],
 ) -> list[str]:
     features = list(args.features)
     if args.analyzer == "ra-hir" and "ra-hir" not in features:
@@ -880,7 +911,7 @@ def slicers_command(
             ]
         )
     if args.validation != "preflight":
-        for cargo_arg in args.cargo_check_arg:
+        for cargo_arg in cargo_check_args:
             command.extend(["--cargo-check-arg", cargo_arg])
     if args.validation != "preflight" and args.deny_warnings:
         command.append("--deny-warnings")
@@ -893,7 +924,51 @@ def slicers_command(
     return command
 
 
-def run_baseline_check(manifest_path: Path, timeout_seconds: int) -> dict[str, Any]:
+def validation_cargo_check_args(
+    args: argparse.Namespace,
+    roots: list[Candidate],
+) -> list[str]:
+    cargo_args = list(args.cargo_check_arg)
+    if args.validation == "preflight":
+        return cargo_args
+    selected_dev_kinds = selected_root_dev_kinds(roots)
+    if selected_dev_kinds and not cargo_args_cover_dev_targets(cargo_args, selected_dev_kinds):
+        cargo_args.append("--all-targets")
+    return cargo_args
+
+
+def selected_root_dev_kinds(roots: list[Candidate]) -> set[str]:
+    kinds: set[str] = set()
+    for candidate in roots:
+        kinds.update(set(candidate.package.target_kinds) & DEV_TARGET_KINDS)
+    return kinds
+
+
+def cargo_args_cover_dev_targets(cargo_args: list[str], selected_kinds: set[str]) -> bool:
+    if "--all-targets" in cargo_args:
+        return True
+    coverage = {
+        "example": any(
+            arg == "--examples" or arg == "--example" or arg.startswith("--example=")
+            for arg in cargo_args
+        ),
+        "test": any(
+            arg == "--tests" or arg == "--test" or arg.startswith("--test=")
+            for arg in cargo_args
+        ),
+        "bench": any(
+            arg == "--benches" or arg == "--bench" or arg.startswith("--bench=")
+            for arg in cargo_args
+        ),
+    }
+    return all(coverage[kind] for kind in selected_kinds)
+
+
+def run_baseline_check(
+    manifest_path: Path,
+    timeout_seconds: int,
+    cargo_check_args: list[str],
+) -> dict[str, Any]:
     result = run_command(
         [
             "cargo",
@@ -901,6 +976,7 @@ def run_baseline_check(manifest_path: Path, timeout_seconds: int) -> dict[str, A
             "--manifest-path",
             str(manifest_path),
             "--message-format=json",
+            *cargo_check_args,
         ],
         manifest_path.parent,
         timeout_seconds=timeout_seconds,
@@ -1021,6 +1097,7 @@ def build_row(
     production = (generation or {}).get("production") or {}
     production_hazards = production.get("hazards") or []
     validation_status = (validation_report or {}).get("status")
+    cargo_check_args = validation_cargo_check_args(args, roots)
     passed = classification in {
         "slice_check_passed",
         "slice_preflight_passed",
@@ -1043,7 +1120,8 @@ def build_row(
             "tier": args.validation,
             "feedback_loop": args.feedback_loop,
             "feedback_timeout": args.feedback_timeout,
-            "cargo_check_args": args.cargo_check_arg,
+            "cargo_check_args": cargo_check_args,
+            "user_cargo_check_args": args.cargo_check_arg,
             "allow_baseline_failures": args.allow_baseline_failures,
             "deny_warnings": args.deny_warnings,
             "stop_on_warning": args.stop_on_warning,
