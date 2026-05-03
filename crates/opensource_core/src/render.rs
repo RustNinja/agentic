@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     env, fs,
     path::{Component, Path, PathBuf},
 };
@@ -26,7 +26,9 @@ pub fn write_reduced_workspace(
     prepare_output_root(&project.workspace.root, output_root)?;
     write_output_marker(output_root)?;
 
-    write_workspace_manifest(project, reduced, output_root)?;
+    let package_usages = package_source_usages(project, reduced);
+
+    write_workspace_manifest(project, reduced, output_root, &package_usages)?;
 
     let mut files_written = 1 + copy_workspace_lockfile(project, output_root)?;
     for package_name in &reduced.packages {
@@ -35,6 +37,9 @@ pub fn write_reduced_workspace(
             .packages
             .get(package_name)
             .ok_or_else(|| format!("unknown package {package_name}"))?;
+        let package_usage = package_usages
+            .get(package_name)
+            .ok_or_else(|| format!("missing source usage for package {package_name}"))?;
 
         let package_output = output_root.join(package_name);
         fs::create_dir_all(package_output.join("src"))?;
@@ -43,10 +48,11 @@ pub fn write_reduced_workspace(
             reduced,
             package_name,
             &package_output.join("Cargo.toml"),
+            package_usage,
         )?;
         files_written += 1;
 
-        if let Some(build_script) = build_script_to_render(project, reduced, package) {
+        if let Some(build_script) = build_script_to_render(package, package_usage) {
             let relative_path = build_script.strip_prefix(&package.root)?;
             let output_path = package_output.join(relative_path);
             if let Some(parent) = output_path.parent() {
@@ -315,20 +321,11 @@ fn build_script_path(package: &Package) -> Option<PathBuf> {
 }
 
 fn build_script_to_render(
-    project: &Project,
-    reduced: &ReducedProject,
     package: &Package,
+    package_usage: &PackageSourceUsage,
 ) -> Option<PathBuf> {
-    build_script_should_render(project, reduced, package).then(|| build_script_path(package))?
-}
-
-fn build_script_should_render(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &Package,
-) -> bool {
-    let package_usage = package_source_usage(project, reduced, &package.name);
-    build_script_should_render_with_usage(package, &package_usage)
+    build_script_should_render_with_usage(package, package_usage)
+        .then(|| build_script_path(package))?
 }
 
 fn build_script_should_render_with_usage(
@@ -607,6 +604,7 @@ fn write_workspace_manifest(
     project: &Project,
     reduced: &ReducedProject,
     output_root: &Path,
+    package_usages: &HashMap<String, PackageSourceUsage>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut root = Table::new();
     let mut workspace = Table::new();
@@ -642,7 +640,7 @@ fn write_workspace_manifest(
         .unwrap_or_else(default_workspace_package);
     workspace.insert("package".to_string(), workspace_package);
 
-    let workspace_dependencies = retained_workspace_dependencies(project, reduced);
+    let workspace_dependencies = retained_workspace_dependencies(project, reduced, package_usages);
     if !workspace_dependencies.is_empty() {
         workspace.insert(
             "dependencies".to_string(),
@@ -688,6 +686,7 @@ fn write_package_manifest(
     reduced: &ReducedProject,
     package_name: &str,
     output_path: &Path,
+    package_usage: &PackageSourceUsage,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let package = project
         .workspace
@@ -710,7 +709,6 @@ fn write_package_manifest(
         manifest.insert("bin".to_string(), value);
     }
 
-    let package_usage = package_source_usage(project, reduced, package_name);
     let requested_features = requested_local_features(project, reduced, package_name);
     let feature_required_aliases =
         dependency_aliases_required_by_features(package, &requested_features);
@@ -721,7 +719,7 @@ fn write_package_manifest(
         package_name,
         "dependencies",
         DependencyRetention::SourceMentioned,
-        &package_usage,
+        package_usage,
         &feature_required_aliases,
         &mut retained_dependency_aliases,
     )?;
@@ -729,14 +727,14 @@ fn write_package_manifest(
         manifest.insert("dependencies".to_string(), Value::Table(dependencies));
     }
 
-    if build_script_should_render_with_usage(package, &package_usage) {
+    if build_script_should_render_with_usage(package, package_usage) {
         let build_dependencies = transformed_dependencies(
             project,
             reduced,
             package_name,
             "build-dependencies",
             DependencyRetention::BuildScript,
-            &package_usage,
+            package_usage,
             &feature_required_aliases,
             &mut retained_dependency_aliases,
         )?;
@@ -752,7 +750,7 @@ fn write_package_manifest(
         project,
         reduced,
         package_name,
-        &package_usage,
+        package_usage,
         &feature_required_aliases,
         &mut retained_dependency_aliases,
     )? {
@@ -837,7 +835,11 @@ fn workspace_reference_value() -> Value {
     Value::Table(table)
 }
 
-fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) -> Table {
+fn retained_workspace_dependencies(
+    project: &Project,
+    reduced: &ReducedProject,
+    package_usages: &HashMap<String, PackageSourceUsage>,
+) -> Table {
     let Some(source_dependencies) = project
         .workspace
         .manifest
@@ -853,10 +855,12 @@ fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) 
         let Some(package) = project.workspace.packages.get(package_name) else {
             continue;
         };
-        let package_usage = package_source_usage(project, reduced, package_name);
+        let Some(package_usage) = package_usages.get(package_name) else {
+            continue;
+        };
         for (table_name, table) in package_dependency_tables(package) {
             let retention = if table_name == "build-dependencies"
-                && build_script_should_render_with_usage(package, &package_usage)
+                && build_script_should_render_with_usage(package, package_usage)
             {
                 DependencyRetention::BuildScript
             } else {
@@ -874,7 +878,7 @@ fn retained_workspace_dependencies(project: &Project, reduced: &ReducedProject) 
                         package_name,
                         alias,
                         retention,
-                        &package_usage,
+                        package_usage,
                     )
                 {
                     continue;
@@ -986,28 +990,53 @@ fn transformed_target_dependencies(
         let Some(target_table) = target_value.as_table() else {
             continue;
         };
-        let Some(source_dependencies) = target_table.get("dependencies").and_then(Value::as_table)
-        else {
-            continue;
-        };
+        let mut rendered_target = Table::new();
 
-        let dependencies = transformed_dependency_table(
-            project,
-            reduced,
-            package_name,
-            source_dependencies,
-            DependencyRetention::SourceMentioned,
-            package_usage,
-            feature_required_aliases,
-            retained_aliases,
-        );
-        if dependencies.is_empty() {
-            continue;
+        if let Some(source_dependencies) =
+            target_table.get("dependencies").and_then(Value::as_table)
+        {
+            let dependencies = transformed_dependency_table(
+                project,
+                reduced,
+                package_name,
+                source_dependencies,
+                DependencyRetention::SourceMentioned,
+                package_usage,
+                feature_required_aliases,
+                retained_aliases,
+            );
+            if !dependencies.is_empty() {
+                rendered_target.insert("dependencies".to_string(), Value::Table(dependencies));
+            }
         }
 
-        let mut rendered_target = Table::new();
-        rendered_target.insert("dependencies".to_string(), Value::Table(dependencies));
-        rendered_targets.insert(target_name.clone(), Value::Table(rendered_target));
+        if build_script_should_render_with_usage(package, package_usage) {
+            if let Some(source_dependencies) = target_table
+                .get("build-dependencies")
+                .and_then(Value::as_table)
+            {
+                let build_dependencies = transformed_dependency_table(
+                    project,
+                    reduced,
+                    package_name,
+                    source_dependencies,
+                    DependencyRetention::BuildScript,
+                    package_usage,
+                    feature_required_aliases,
+                    retained_aliases,
+                );
+                if !build_dependencies.is_empty() {
+                    rendered_target.insert(
+                        "build-dependencies".to_string(),
+                        Value::Table(build_dependencies),
+                    );
+                }
+            }
+        }
+
+        if !rendered_target.is_empty() {
+            rendered_targets.insert(target_name.clone(), Value::Table(rendered_target));
+        }
     }
 
     Ok((!rendered_targets.is_empty()).then_some(rendered_targets))
@@ -1147,6 +1176,22 @@ fn package_source_usage(
         usage.record_file(&file);
     }
     usage
+}
+
+fn package_source_usages(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> HashMap<String, PackageSourceUsage> {
+    reduced
+        .packages
+        .iter()
+        .map(|package| {
+            (
+                package.clone(),
+                package_source_usage(project, reduced, package.as_str()),
+            )
+        })
+        .collect()
 }
 
 fn collect_token_usage(tokens: &TokenStream, usage: &mut PackageSourceUsage) {
@@ -1471,8 +1516,10 @@ fn package_dependency_tables(package: &Package) -> Vec<(&str, &Table)> {
             let Some(target) = target.as_table() else {
                 continue;
             };
-            if let Some(table) = target.get("dependencies").and_then(Value::as_table) {
-                tables.push(("dependencies", table));
+            for table_name in ["dependencies", "build-dependencies"] {
+                if let Some(table) = target.get(table_name).and_then(Value::as_table) {
+                    tables.push((table_name, table));
+                }
             }
         }
     }

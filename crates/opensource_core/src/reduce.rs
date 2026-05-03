@@ -382,6 +382,9 @@ fn retained_rendered_use_dependencies(
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
+    let mut module_ident_cache = HashMap::new();
+    let mut package_ident_cache = HashMap::new();
+    let mut public_reexport_ident_cache = HashMap::new();
     for source in project
         .files
         .values()
@@ -409,21 +412,36 @@ fn retained_rendered_use_dependencies(
             aliases: &aliases,
             self_type: None,
         };
-        let module_idents = reachable_import_scope_source_idents(
+        let module_idents = reachable_import_scope_source_idents_cached(
             project,
             reachable,
             reachable_items,
             &source.package,
             &source.module_path,
+            &mut module_ident_cache,
         );
-        let mut package_idents =
-            reachable_package_source_idents(project, reachable, reachable_items, &source.package);
-        package_idents.extend(public_reexport_idents_referenced_by_reachable_packages(
-            project,
-            reachable,
-            reachable_items,
-            &source.package,
-        ));
+        let mut package_idents = package_ident_cache
+            .entry(source.package.clone())
+            .or_insert_with(|| {
+                reachable_package_source_idents(
+                    project,
+                    reachable,
+                    reachable_items,
+                    &source.package,
+                )
+            })
+            .clone();
+        let public_reexport_idents = public_reexport_ident_cache
+            .entry(source.package.clone())
+            .or_insert_with(|| {
+                public_reexport_idents_referenced_by_reachable_packages(
+                    project,
+                    reachable,
+                    reachable_items,
+                    &source.package,
+                )
+            });
+        package_idents.extend(public_reexport_idents.iter().cloned());
 
         for item in &source.syntax.items {
             let syn::Item::Use(item_use) = item else {
@@ -467,17 +485,22 @@ fn externally_referenced_public_reexport_dependencies(
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
+    let mut public_ident_cache = HashMap::new();
     for source in project
         .files
         .values()
         .filter(|source| candidate_packages.contains(&source.package))
     {
-        let public_idents = public_reexport_idents_referenced_by_reachable_packages(
-            project,
-            reachable,
-            reachable_items,
-            &source.package,
-        );
+        let public_idents = public_ident_cache
+            .entry(source.package.clone())
+            .or_insert_with(|| {
+                public_reexport_idents_referenced_by_reachable_packages(
+                    project,
+                    reachable,
+                    reachable_items,
+                    &source.package,
+                )
+            });
         if public_idents.is_empty() {
             continue;
         }
@@ -713,29 +736,41 @@ fn reachable_package_source_idents(
     package: &str,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
-    for source in project
-        .files
-        .values()
-        .filter(|source| source.package == package)
+    for callable in reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
     {
-        idents.extend(reachable_source_idents(
-            project,
-            reachable,
-            reachable_items,
-            package,
-            &source.module_path,
-        ));
+        if let Some(record) = project.functions.get(callable) {
+            collect_token_idents(&record.item.to_token_stream(), &mut idents);
+        }
+        if let Some(record) = project.methods.get(callable) {
+            collect_token_idents(&record.item.to_token_stream(), &mut idents);
+        }
+    }
+    for item in reachable_items
+        .iter()
+        .filter(|item| item.package == package)
+    {
+        if let Some(record) = project.items.get(item) {
+            collect_token_idents(&record.item.to_token_stream(), &mut idents);
+        }
     }
     idents
 }
 
-fn reachable_import_scope_source_idents(
+fn reachable_import_scope_source_idents_cached(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
     module_path: &[String],
+    cache: &mut HashMap<(String, Vec<String>), BTreeSet<String>>,
 ) -> BTreeSet<String> {
+    let key = (package.to_string(), module_path.to_vec());
+    if let Some(idents) = cache.get(&key) {
+        return idents.clone();
+    }
+
     let mut idents =
         reachable_source_idents(project, reachable, reachable_items, package, module_path);
     for source in project
@@ -747,14 +782,17 @@ fn reachable_import_scope_source_idents(
         .filter(|source| module_has_reachable_code(project, reachable, reachable_items, source))
         .filter(|source| file_has_super_glob_import(&source.syntax))
     {
-        idents.extend(reachable_import_scope_source_idents(
+        idents.extend(reachable_import_scope_source_idents_cached(
             project,
             reachable,
             reachable_items,
             package,
             &source.module_path,
+            cache,
         ));
     }
+
+    cache.insert(key, idents.clone());
     idents
 }
 
