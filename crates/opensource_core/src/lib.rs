@@ -16,7 +16,7 @@ use std::{
 
 use model::{Project, ReducedProject};
 use serde::Serialize;
-use syn::{parse::Parser, punctuated::Punctuated, visit::Visit, Attribute, Macro, Meta};
+use syn::{parse::Parser, punctuated::Punctuated, visit::Visit, Attribute, Item, Macro, Meta};
 
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{
@@ -224,6 +224,7 @@ fn production_readiness_report(
 ) -> ProductionReadinessReport {
     let mut hazards = Vec::new();
     add_workspace_production_hazards(project, reduced, &mut hazards);
+    add_cfg_gated_root_production_hazards(project, reduced, &mut hazards);
     add_syntactic_production_hazards(project, reduced, &mut hazards);
     add_reduction_evidence_production_hazards(reduced, &mut hazards);
 
@@ -343,6 +344,125 @@ fn add_workspace_production_hazards(
             ),
         ));
     }
+}
+
+fn add_cfg_gated_root_production_hazards(
+    project: &Project,
+    reduced: &ReducedProject,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    let cfg_gated_roots = reduced
+        .roots
+        .iter()
+        .filter(|root| root_has_cfg_gate(project, root))
+        .count();
+    if cfg_gated_roots > 0 {
+        hazards.push(production_hazard(
+            "cfg_gated_roots",
+            "error",
+            format!(
+                "{} selected root(s) are behind cfg/cfg_attr gates; production validation must prove the exact feature and target matrix before accepting the slice",
+                cfg_gated_roots
+            ),
+        ));
+    }
+}
+
+fn root_has_cfg_gate(project: &Project, root: &RootId) -> bool {
+    let Some((package, module_path)) = root_module_location(project, root) else {
+        return false;
+    };
+    root_direct_attrs(project, root).is_some_and(attrs_have_non_test_cfg_gate)
+        || module_path_has_cfg_gate(project, package, module_path)
+}
+
+fn root_module_location<'a>(
+    project: &'a Project,
+    root: &'a RootId,
+) -> Option<(&'a str, &'a [String])> {
+    match root {
+        RootId::Callable(callable) => project
+            .functions
+            .get(callable)
+            .map(|record| (record.package.as_str(), record.module_path.as_slice()))
+            .or_else(|| {
+                project
+                    .methods
+                    .get(callable)
+                    .map(|record| (callable.package(), record.module_path.as_slice()))
+            }),
+        RootId::Item(item) => project
+            .items
+            .get(item)
+            .map(|record| (record.package.as_str(), record.module_path.as_slice())),
+    }
+}
+
+fn root_direct_attrs<'a>(project: &'a Project, root: &RootId) -> Option<&'a [Attribute]> {
+    match root {
+        RootId::Callable(callable) => project
+            .functions
+            .get(callable)
+            .map(|record| record.item.attrs.as_slice())
+            .or_else(|| {
+                project
+                    .methods
+                    .get(callable)
+                    .map(|record| record.item.attrs.as_slice())
+            }),
+        RootId::Item(item) => project
+            .items
+            .get(item)
+            .map(|record| item_attrs(&record.item)),
+    }
+}
+
+fn item_attrs(item: &Item) -> &[Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn module_path_has_cfg_gate(project: &Project, package: &str, module_path: &[String]) -> bool {
+    for depth in 1..=module_path.len() {
+        let parent_path = &module_path[..depth - 1];
+        let module_name = &module_path[depth - 1];
+        let Some(source) = project
+            .files
+            .values()
+            .find(|source| source.package == package && source.module_path == parent_path)
+        else {
+            continue;
+        };
+        let Some(item_mod) = source.syntax.items.iter().find_map(|item| {
+            let Item::Mod(item_mod) = item else {
+                return None;
+            };
+            (item_mod.ident == module_name.as_str()).then_some(item_mod)
+        }) else {
+            continue;
+        };
+        if attrs_have_non_test_cfg_gate(&item_mod.attrs) {
+            return true;
+        }
+    }
+    false
+}
+
+fn attrs_have_non_test_cfg_gate(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attribute| {
+        (attribute.path().is_ident("cfg") && !reduce::is_cfg_test_attr(attribute))
+            || attribute.path().is_ident("cfg_attr")
+    })
 }
 
 fn package_build_script_path(package: &crate::manifest::Package) -> Option<PathBuf> {
@@ -1506,6 +1626,93 @@ pub struct Payload {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "conditional_compilation_attrs"));
+    }
+
+    #[test]
+    fn reports_error_hazard_for_cfg_gated_root_function() {
+        let root = temp_output("cfg-root-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nselected = []\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[cfg(feature = "selected")]
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("cfg-root-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert_eq!(report.production.status, "hazards_detected");
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| { hazard.code == "cfg_gated_roots" && hazard.severity == "error" }));
+    }
+
+    #[test]
+    fn reports_error_hazard_for_root_inside_cfg_gated_module() {
+        let root = temp_output("cfg-module-root-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nselected = []\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"#[cfg(feature = "selected")]
+pub mod gated;
+"#,
+        );
+        write(
+            root.join("app/src/gated.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("cfg-module-root-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert_eq!(report.production.status, "hazards_detected");
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| { hazard.code == "cfg_gated_roots" && hazard.severity == "error" }));
     }
 
     #[test]
