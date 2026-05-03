@@ -14,6 +14,10 @@ use std::{
     time::Instant,
 };
 
+use model::{Project, ReducedProject};
+use serde::Serialize;
+use syn::{visit::Visit, Macro};
+
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{
     check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport, CheckSpan,
@@ -25,7 +29,6 @@ pub use preflight::{
     PreflightReport,
 };
 pub use repair::{repair_workspace, write_repair_report, RepairOptions, RepairReport};
-use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
@@ -136,7 +139,7 @@ pub fn generate_with_analyzer(
     let mut reachable_items = reduced.reachable_items.iter().cloned().collect::<Vec<_>>();
     reachable_items.sort();
     let source_map = source_map_report(&project, &reduced);
-    let production = production_readiness_report(&analyzer);
+    let production = production_readiness_report(&analyzer, &project, &reduced);
 
     Ok(GenerateReport {
         analyzer,
@@ -187,8 +190,14 @@ fn source_map_report(project: &model::Project, reduced: &model::ReducedProject) 
     SourceMapReport { callables, items }
 }
 
-fn production_readiness_report(analyzer: &AnalyzerReport) -> ProductionReadinessReport {
+fn production_readiness_report(
+    analyzer: &AnalyzerReport,
+    project: &Project,
+    reduced: &ReducedProject,
+) -> ProductionReadinessReport {
     let mut hazards = Vec::new();
+    add_syntactic_production_hazards(project, reduced, &mut hazards);
+
     if !analyzer.loaded {
         hazards.push(production_hazard(
             "analyzer_unavailable",
@@ -268,6 +277,91 @@ fn production_readiness_report(analyzer: &AnalyzerReport) -> ProductionReadiness
     }
 
     production_readiness_status(hazards)
+}
+
+fn add_syntactic_production_hazards(
+    project: &Project,
+    reduced: &ReducedProject,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    let counts = syntactic_hazard_counts(project, reduced);
+    if counts.source_include_macros > 0 {
+        hazards.push(production_hazard(
+            "source_include_macros",
+            "warning",
+            format!(
+                "{} retained include! macro(s) may inject Rust source outside the static parse tree",
+                counts.source_include_macros
+            ),
+        ));
+    }
+    if counts.nonliteral_file_include_macros > 0 {
+        hazards.push(production_hazard(
+            "nonliteral_file_include_macros",
+            "warning",
+            format!(
+                "{} retained include_str!/include_bytes! macro(s) use non-literal paths; asset copying needs compiler feedback validation",
+                counts.nonliteral_file_include_macros
+            ),
+        ));
+    }
+}
+
+#[derive(Default)]
+struct SyntacticHazardCounts {
+    source_include_macros: usize,
+    nonliteral_file_include_macros: usize,
+}
+
+fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
+    let mut visitor = SyntacticHazardVisitor::default();
+
+    for callable in &reduced.reachable {
+        if let Some(record) = project.functions.get(callable) {
+            visitor.visit_item_fn(&record.item);
+        } else if let Some(record) = project.methods.get(callable) {
+            visitor.visit_impl_item_fn(&record.item);
+        }
+    }
+
+    for item in &reduced.reachable_items {
+        if let Some(record) = project.items.get(item) {
+            visitor.visit_item(&record.item);
+        }
+    }
+
+    visitor.counts
+}
+
+#[derive(Default)]
+struct SyntacticHazardVisitor {
+    counts: SyntacticHazardCounts,
+}
+
+impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
+    fn visit_macro(&mut self, mac: &'ast Macro) {
+        if macro_path_ends_with(mac, "include") {
+            self.counts.source_include_macros += 1;
+        } else if (macro_path_ends_with(mac, "include_str")
+            || macro_path_ends_with(mac, "include_bytes"))
+            && !macro_has_literal_path(mac)
+        {
+            self.counts.nonliteral_file_include_macros += 1;
+        }
+
+        syn::visit::visit_macro(self, mac);
+    }
+}
+
+fn macro_path_ends_with(mac: &Macro, name: &str) -> bool {
+    mac.path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == name)
+}
+
+fn macro_has_literal_path(mac: &Macro) -> bool {
+    syn::parse2::<syn::LitStr>(mac.tokens.clone()).is_ok()
 }
 
 fn production_hazard(
@@ -679,6 +773,51 @@ mod tests {
     }
 
     #[test]
+    fn reports_reachable_include_macro_production_hazards() {
+        let root = temp_output("include-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> &'static str {
+    let _generated = include!("generated_expr.rs");
+    include_str!(concat!("data", ".txt"))
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("include-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "source_include_macros"));
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "nonliteral_file_include_macros"));
+    }
+
+    #[test]
     fn refuses_to_overwrite_unmarked_nonempty_output() {
         let output = temp_output("unmarked-output");
         fs::create_dir_all(&output).unwrap();
@@ -765,5 +904,12 @@ mod tests {
             fs::remove_dir_all(&path).unwrap();
         }
         path
+    }
+
+    fn write(path: PathBuf, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
     }
 }
