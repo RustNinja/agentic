@@ -9,6 +9,7 @@ recording compiler-feedback metrics as JSONL.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import random
@@ -1167,15 +1168,37 @@ def diagnostic_key(diagnostic: dict[str, Any]) -> str:
     code = diagnostic.get("code")
     if isinstance(code, dict):
         code = code.get("code")
+    primary_files = diagnostic_primary_files(diagnostic)
+    rendered_fingerprint = (
+        diagnostic_rendered_fingerprint(diagnostic) if not primary_files else ""
+    )
     return "|".join(
         [
             str(diagnostic.get("level") or ""),
             str(code or ""),
             str(diagnostic.get("package_id") or ""),
             diagnostic_target_key(diagnostic.get("target")),
+            ",".join(primary_files),
+            rendered_fingerprint,
             str(diagnostic.get("message") or ""),
         ]
     )
+
+
+def diagnostic_primary_files(diagnostic: dict[str, Any]) -> list[str]:
+    files = {
+        str(span.get("file_name"))
+        for span in diagnostic.get("spans", [])
+        if isinstance(span, dict) and span.get("is_primary") and span.get("file_name")
+    }
+    return sorted(files)
+
+
+def diagnostic_rendered_fingerprint(diagnostic: dict[str, Any]) -> str:
+    rendered = diagnostic.get("rendered")
+    if not isinstance(rendered, str) or not rendered:
+        return ""
+    return hashlib.sha256(rendered.encode("utf-8")).hexdigest()[:16]
 
 
 def diagnostic_target_key(target: Any) -> str:

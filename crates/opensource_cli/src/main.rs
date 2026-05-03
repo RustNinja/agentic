@@ -1337,14 +1337,47 @@ fn diagnostic_baseline_key(diagnostic: &CheckDiagnostic) -> String {
         .as_ref()
         .map(|target| format!("{}:{}", target.kind.join(","), target.name))
         .unwrap_or_default();
+    let primary_files = diagnostic_primary_files(diagnostic);
+    let rendered_fingerprint = if primary_files.is_empty() {
+        diagnostic
+            .rendered
+            .as_deref()
+            .map(stable_text_fingerprint)
+            .unwrap_or_default()
+    } else {
+        String::new()
+    };
     format!(
-        "{}|{}|{}|{}|{}",
+        "{}|{}|{}|{}|{}|{}|{}",
         diagnostic.level,
         diagnostic.code.as_deref().unwrap_or(""),
         diagnostic.package_id.as_deref().unwrap_or(""),
         target,
+        primary_files,
+        rendered_fingerprint,
         diagnostic.message
     )
+}
+
+fn diagnostic_primary_files(diagnostic: &CheckDiagnostic) -> String {
+    let mut files = diagnostic
+        .spans
+        .iter()
+        .filter(|span| span.is_primary)
+        .map(|span| span.file_name.as_str())
+        .collect::<Vec<_>>();
+    files.sort_unstable();
+    files.dedup();
+    files.join(",")
+}
+
+fn stable_text_fingerprint(text: &str) -> String {
+    let mut hash = 14_695_981_039_346_656_037u64;
+    for byte in text.bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(1_099_511_628_211);
+    }
+    format!("{hash:016x}")
 }
 
 fn semantic_hazard_warning_count(
@@ -1838,6 +1871,62 @@ mod tests {
     }
 
     #[test]
+    fn baseline_matching_keeps_primary_span_files() {
+        let baseline = report(
+            false,
+            vec![diagnostic_with_span(
+                "E0425",
+                "cannot find value `x` in this scope",
+                "src/lib.rs",
+                12,
+                9,
+                10,
+            )],
+        );
+        let generated = report(
+            false,
+            vec![diagnostic_with_span(
+                "E0425",
+                "cannot find value `x` in this scope",
+                "src/main.rs",
+                12,
+                9,
+                10,
+            )],
+        );
+
+        assert!(!feedback_errors_are_baseline_known(
+            &generated,
+            Some(&baseline)
+        ));
+    }
+
+    #[test]
+    fn baseline_matching_distinguishes_stderr_only_failures() {
+        let baseline = report(
+            false,
+            vec![diagnostic_with_rendered(
+                "cargo-stderr",
+                "error: failed to select a version",
+                "error: failed to select a version\ncandidate A\n",
+            )],
+        );
+        let generated = report(
+            false,
+            vec![diagnostic_with_rendered(
+                "cargo-stderr",
+                "error: failed to select a version",
+                "error: failed to select a version\ncandidate B\n",
+            )],
+        );
+
+        assert!(!feedback_errors_are_baseline_known(
+            &generated,
+            Some(&baseline)
+        ));
+    }
+
+    #[test]
     fn diagnostic_signatures_are_order_insensitive() {
         let left = vec![
             diagnostic("E0432", "unresolved import `crate::missing`"),
@@ -2081,6 +2170,18 @@ mod tests {
                 is_primary: true,
                 text: Vec::new(),
             }],
+        }
+    }
+
+    fn diagnostic_with_rendered(code: &str, message: &str, rendered: &str) -> CheckDiagnostic {
+        CheckDiagnostic {
+            level: "error".to_string(),
+            message: message.to_string(),
+            code: Some(code.to_string()),
+            package_id: None,
+            target: None,
+            rendered: Some(rendered.to_string()),
+            spans: Vec::new(),
         }
     }
 
