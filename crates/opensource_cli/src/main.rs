@@ -1,6 +1,6 @@
 use std::{
     collections::BTreeSet,
-    ffi::OsStr,
+    ffi::{OsStr, OsString},
     path::{Path, PathBuf},
     process::Command,
     time::Duration,
@@ -190,6 +190,13 @@ struct CliOptions {
 }
 
 fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
+    parse_args_from(std::env::args_os().skip(1))
+}
+
+fn parse_args_from<I>(args: I) -> Result<CliOptions, Box<dyn std::error::Error>>
+where
+    I: IntoIterator<Item = OsString>,
+{
     let mut analyzer_mode = AnalyzerMode::Syn;
     let mut run_check = false;
     let mut feedback_iterations = 0;
@@ -208,11 +215,16 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     let mut run_preflight = false;
     let mut preflight_report = None;
     let mut positional = Vec::new();
-    let mut args = std::env::args_os().skip(1);
+    let mut args = args.into_iter();
 
     while let Some(arg) = args.next() {
         if arg == OsStr::new("--check") {
             run_check = true;
+        } else if arg == OsStr::new("--production") {
+            run_baseline_check = true;
+            run_preflight = true;
+            feedback_repair_iterations = feedback_repair_iterations.max(3);
+            deny_warnings = true;
         } else if arg == OsStr::new("--analyzer") {
             let value = args
                 .next()
@@ -882,7 +894,7 @@ fn format_duration_ms(duration_ms: u64) -> String {
 
 fn usage() -> String {
     concat!(
-        "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--preflight] [--feedback] ",
+        "usage: slicers [--analyzer <syn|ra-hir>] [--production] [--check] [--preflight] [--feedback] ",
         "[--feedback-loop <n>] [--feedback-repair-loop <n>] [--feedback-limit <n>] ",
         "[--feedback-timeout <seconds>] [--deny-warnings] [--feedback-report <path>] ",
         "[--feedback-target-dir <path>] [--repair-report <path>] ",
@@ -911,7 +923,7 @@ mod tests {
 
     use super::{
         baseline_limited_feedback_is_accepted, feedback_errors_are_baseline_known,
-        feedback_is_accepted, semantic_hazard_warning_count,
+        feedback_is_accepted, parse_args_from, semantic_hazard_warning_count,
     };
 
     #[test]
@@ -1024,6 +1036,34 @@ mod tests {
         ));
     }
 
+    #[test]
+    fn production_flag_enables_strict_validation_preset() {
+        let options = parse_options(["--production", "workspace", "out"]);
+
+        assert!(options.run_baseline_check);
+        assert!(options.run_preflight);
+        assert!(options.deny_warnings);
+        assert_eq!(options.feedback_repair_iterations, 3);
+        assert_eq!(options.feedback_iterations, 0);
+        assert_eq!(options.workspace_root, PathBuf::from("workspace"));
+        assert_eq!(options.output_root, PathBuf::from("out"));
+    }
+
+    #[test]
+    fn explicit_feedback_repair_loop_can_raise_production_preset() {
+        let options = parse_options([
+            "--production",
+            "--feedback-repair-loop",
+            "5",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(options.feedback_repair_iterations, 5);
+        assert!(options.run_baseline_check);
+        assert!(options.deny_warnings);
+    }
+
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {
         CheckReport {
             manifest_path: PathBuf::from("/tmp/Cargo.toml"),
@@ -1059,5 +1099,10 @@ mod tests {
             rendered: None,
             spans: Vec::new(),
         }
+    }
+
+    fn parse_options<const N: usize>(args: [&str; N]) -> super::CliOptions {
+        parse_args_from(args.into_iter().map(std::ffi::OsString::from))
+            .expect("arguments should parse")
     }
 }

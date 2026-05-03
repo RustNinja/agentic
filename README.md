@@ -86,6 +86,7 @@ cargo run -p opensource_cli --bin slicers -- --preflight . /tmp/slicers-prefligh
 cargo run -p opensource_cli --bin slicers -- --feedback . /tmp/slicers-feedback
 cargo run -p opensource_cli --bin slicers -- --feedback-repair-loop 3 . /tmp/slicers-repair
 cargo run -p opensource_cli --bin slicers -- --baseline-check --feedback . /tmp/slicers-feedback
+cargo run -p opensource_cli --bin slicers -- --production . /tmp/slicers-production
 cargo run -p opensource_cli --bin slicers -- --slice-report /tmp/slicers-report.json . /tmp/slicers-proof
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
@@ -128,6 +129,12 @@ generated errors still fail feedback. The baseline Cargo target directory
 defaults to a sibling of the output root so baseline compilation never makes the
 slice output look user-owned before rendering starts; use `--baseline-target-dir`
 to override it.
+
+`--production` is the strict validation preset for release-style runs. It
+enables baseline checking, preflight, `--feedback-repair-loop 3`, and
+`--deny-warnings`, while still allowing explicit flags such as
+`--feedback-repair-loop 5`, `--feedback-timeout`, and target/report paths to
+override the preset where needed.
 
 This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A
