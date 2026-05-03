@@ -1212,6 +1212,89 @@ fn token_stream_mentions_ident(tokens: &TokenStream, ident: &str) -> bool {
     })
 }
 
+fn token_stream_mentions_dependency_public_name(
+    project: &Project,
+    caller_package: &str,
+    dependency_package: &str,
+    visible_name: &str,
+    tokens: &TokenStream,
+) -> bool {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    if token_trees.iter().any(|token| {
+        matches!(token, TokenTree::Group(group)
+        if token_stream_mentions_dependency_public_name(
+            project,
+            caller_package,
+            dependency_package,
+            visible_name,
+            &group.stream(),
+        ))
+    }) {
+        return true;
+    }
+
+    let mut index = 0;
+    while index < token_trees.len() {
+        let TokenTree::Ident(ident) = &token_trees[index] else {
+            index += 1;
+            continue;
+        };
+
+        let mut segments = vec![ident.to_string()];
+        let mut cursor = index + 1;
+        while token_trees_have_path_separator(&token_trees, cursor) {
+            let Some(TokenTree::Ident(next)) = token_trees.get(cursor + 2) else {
+                break;
+            };
+            segments.push(next.to_string());
+            cursor += 3;
+        }
+
+        if segments.len() >= 2
+            && segments[1] == visible_name
+            && first_segment_targets_dependency(
+                project,
+                caller_package,
+                dependency_package,
+                &segments[0],
+            )
+        {
+            return true;
+        }
+
+        index = cursor.max(index + 1);
+    }
+
+    false
+}
+
+fn token_trees_have_path_separator(tokens: &[TokenTree], index: usize) -> bool {
+    matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+        && matches!(tokens.get(index + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+}
+
+fn first_segment_targets_dependency(
+    project: &Project,
+    caller_package: &str,
+    dependency_package: &str,
+    first: &str,
+) -> bool {
+    if first == dependency_package || first == dependency_code_name(dependency_package) {
+        return true;
+    }
+
+    project
+        .workspace
+        .packages
+        .get(caller_package)
+        .is_some_and(|package| {
+            package.dependencies.iter().any(|dependency| {
+                dependency.package == dependency_package
+                    && dependency_name_matches(dependency, first)
+            })
+        })
+}
+
 fn dependency_package_name(alias: &str, value: &Value) -> String {
     value
         .as_table()
@@ -1499,7 +1582,14 @@ fn transform_items(
                     module_path: module_path.to_vec(),
                     name: function.sig.ident.to_string(),
                 };
-                reduced.reachable.contains(&id).then(|| {
+                (reduced.reachable.contains(&id)
+                    || public_reexport_targets_item(
+                        project,
+                        package,
+                        module_path,
+                        &function.sig.ident.to_string(),
+                    ))
+                .then(|| {
                     let mut function = function.clone();
                     strip_opensourced_attrs(&mut function.attrs);
                     allow_dead_code_if_not_public(&function.vis, &mut function.attrs);
@@ -1537,7 +1627,9 @@ fn transform_items(
             | Item::Const(_)
             | Item::Static(_)
             | Item::Macro(_) => item_id(package, module_path, item).and_then(|id| {
-                reduced.reachable_items.contains(&id).then(|| {
+                (reduced.reachable_items.contains(&id)
+                    || public_reexport_targets_item(project, package, module_path, &id.name))
+                .then(|| {
                     let mut item = item.clone();
                     strip_opensourced_attrs_from_item(&mut item);
                     allow_dead_code_for_non_public_item(&mut item);
@@ -1761,6 +1853,7 @@ fn module_should_render(
         .reachable_items
         .iter()
         .any(|item| item.package == package && path_has_prefix(&item.module_path, module_path))
+        || public_reexport_targets_module(project, package, module_path)
 }
 
 fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
@@ -2526,37 +2619,104 @@ fn reachable_module_import_scope_mentions_ident_excluding(
     ident: &str,
     excluded_module_path: Option<&[String]>,
 ) -> bool {
-    reachable_module_mentions_ident(project, reduced, package, module_path, ident)
-        || project
-            .files
-            .values()
-            .filter(|source| source.package == package)
-            .filter(|source| source.module_path.len() == module_path.len() + 1)
-            .filter(|source| path_has_prefix(&source.module_path, module_path))
-            .filter(|source| {
-                excluded_module_path
-                    .map_or(true, |excluded| source.module_path.as_slice() != excluded)
-            })
-            .filter(|source| module_should_render(project, reduced, package, &source.module_path))
-            .filter(|source| file_has_super_glob_import(&source.syntax))
-            .any(|source| {
-                reachable_module_import_scope_mentions_ident_excluding(
-                    project,
-                    reduced,
-                    package,
-                    &source.module_path,
-                    ident,
-                    excluded_module_path,
-                )
-            })
+    if reachable_module_mentions_ident(project, reduced, package, module_path, ident) {
+        return true;
+    }
+
+    if project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+        .is_some_and(|source| {
+            inline_child_modules_import_scope_mentions_ident(
+                project,
+                reduced,
+                package,
+                module_path,
+                &source.syntax.items,
+                ident,
+                excluded_module_path,
+            )
+        })
+    {
+        return true;
+    }
+
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .filter(|source| source.module_path.len() == module_path.len() + 1)
+        .filter(|source| path_has_prefix(&source.module_path, module_path))
+        .filter(|source| {
+            excluded_module_path.map_or(true, |excluded| source.module_path.as_slice() != excluded)
+        })
+        .filter(|source| module_should_render(project, reduced, package, &source.module_path))
+        .filter(|source| file_has_super_glob_import(&source.syntax))
+        .any(|source| {
+            reachable_module_import_scope_mentions_ident_excluding(
+                project,
+                reduced,
+                package,
+                &source.module_path,
+                ident,
+                excluded_module_path,
+            )
+        })
 }
 
 fn file_has_super_glob_import(file: &syn::File) -> bool {
-    file.items.iter().any(|item| {
+    items_have_super_glob_import(&file.items)
+}
+
+fn items_have_super_glob_import(items: &[Item]) -> bool {
+    items.iter().any(|item| {
         let Item::Use(item_use) = item else {
             return false;
         };
         use_tree_has_super_glob_import(&item_use.tree)
+    })
+}
+
+fn inline_child_modules_import_scope_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+    ident: &str,
+    excluded_module_path: Option<&[String]>,
+) -> bool {
+    items.iter().any(|item| {
+        let Item::Mod(item_mod) = item else {
+            return false;
+        };
+        let Some((_, child_items)) = &item_mod.content else {
+            return false;
+        };
+        if !items_have_super_glob_import(child_items) {
+            return false;
+        }
+
+        let mut child_path = module_path.to_vec();
+        child_path.push(item_mod.ident.to_string());
+        if excluded_module_path.is_some_and(|excluded| child_path == excluded) {
+            return false;
+        }
+        if !module_should_render(project, reduced, package, &child_path) {
+            return false;
+        }
+
+        reachable_module_mentions_ident(project, reduced, package, &child_path, ident)
+            || inline_child_modules_import_scope_mentions_ident(
+                project,
+                reduced,
+                package,
+                &child_path,
+                child_items,
+                ident,
+                excluded_module_path,
+            )
     })
 }
 
@@ -2874,6 +3034,14 @@ fn prune_use_tree(
             Some(UseTree::Path(path))
         }
         UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
             prefix.push(name.ident.to_string());
             (!use_target_should_drop(
                 project,
@@ -2882,7 +3050,13 @@ fn prune_use_tree(
                 module_path,
                 &prefix,
                 is_public_use,
-            ))
+            ) || (is_public_use
+                && public_reexport_name_is_referenced_by_reduced_package(
+                    project,
+                    reduced,
+                    package,
+                    &visible_name,
+                )))
             .then(|| UseTree::Name(name.clone()))
         }
         UseTree::Rename(rename) => {
@@ -2895,9 +3069,18 @@ fn prune_use_tree(
                 module_path,
                 &prefix,
                 is_public_use,
-            ) || reachable_package_mentions_ident(project, reduced, package, &alias)
-                || (is_public_use
-                    && reachable_reduced_packages_mention_ident(project, reduced, &alias)))
+            ) || renamed_use_alias_is_reachable(
+                project,
+                reduced,
+                package,
+                module_path,
+                &alias,
+                is_public_use,
+            ) || (is_public_use
+                && (reachable_reduced_packages_mention_ident(project, reduced, &alias)
+                    || public_reexport_name_is_referenced_by_reduced_package(
+                        project, reduced, package, &alias,
+                    ))))
             .then(|| UseTree::Rename(rename.clone()))
         }
         UseTree::Group(group) => {
@@ -2928,6 +3111,184 @@ fn prune_use_tree(
             is_public_use,
         ))
         .then(|| UseTree::Glob(glob.clone())),
+    }
+}
+
+fn renamed_use_alias_is_reachable(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    alias: &str,
+    is_public_use: bool,
+) -> bool {
+    if reachable_module_import_scope_mentions_ident(project, reduced, package, module_path, alias) {
+        return true;
+    }
+
+    is_public_use && reachable_package_mentions_ident(project, reduced, package, alias)
+}
+
+fn public_reexport_name_is_referenced_by_reduced_package(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    visible_name: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() != package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_dependency_public_name(
+                    project,
+                    &record.package,
+                    package,
+                    visible_name,
+                    &record.item.to_token_stream(),
+                )
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_dependency_public_name(
+                    project,
+                    callable.package(),
+                    package,
+                    visible_name,
+                    &record.item.to_token_stream(),
+                )
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package() != package)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_dependency_public_name(
+                        project,
+                        &record.package,
+                        package,
+                        visible_name,
+                        &record.item.to_token_stream(),
+                    )
+                })
+            })
+}
+
+fn public_reexport_targets_module(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    if module_path.is_empty() {
+        return false;
+    }
+
+    public_reexport_target_paths(project, package)
+        .iter()
+        .any(|target_path| path_has_prefix(target_path, module_path))
+}
+
+fn public_reexport_targets_item(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    name: &str,
+) -> bool {
+    let mut expected = module_path.to_vec();
+    expected.push(name.to_string());
+    public_reexport_target_paths(project, package)
+        .iter()
+        .any(|target_path| target_path == &expected)
+}
+
+fn public_reexport_target_paths(project: &Project, package: &str) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for source in project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+    {
+        for item in &source.syntax.items {
+            let Item::Use(item_use) = item else {
+                continue;
+            };
+            if !matches!(item_use.vis, syn::Visibility::Public(_)) {
+                continue;
+            }
+            collect_public_reexport_target_paths(
+                project,
+                package,
+                &source.module_path,
+                &item_use.tree,
+                Vec::new(),
+                &mut paths,
+            );
+        }
+    }
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
+fn collect_public_reexport_target_paths(
+    project: &Project,
+    package: &str,
+    use_module_path: &[String],
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    paths: &mut Vec<Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_public_reexport_target_paths(
+                project,
+                package,
+                use_module_path,
+                &path.tree,
+                prefix,
+                paths,
+            );
+        }
+        UseTree::Name(name) => {
+            prefix.push(name.ident.to_string());
+            collect_public_reexport_target_path(project, package, use_module_path, &prefix, paths);
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            collect_public_reexport_target_path(project, package, use_module_path, &prefix, paths);
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_public_reexport_target_paths(
+                    project,
+                    package,
+                    use_module_path,
+                    item,
+                    prefix.clone(),
+                    paths,
+                );
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn collect_public_reexport_target_path(
+    project: &Project,
+    package: &str,
+    use_module_path: &[String],
+    use_path: &[String],
+    paths: &mut Vec<Vec<String>>,
+) {
+    let Some((target_package, target_path)) =
+        resolve_use_target_path(project, package, use_module_path, use_path)
+    else {
+        return;
+    };
+    if target_package == package {
+        paths.push(target_path);
     }
 }
 

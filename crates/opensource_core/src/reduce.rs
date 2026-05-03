@@ -118,6 +118,31 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
             }
         }
 
+        add_source_mentioned_dependency_packages(
+            project,
+            &mut candidate_packages,
+            &reachable,
+            &reachable_items,
+        );
+
+        let dependencies = externally_referenced_public_reexport_dependencies(
+            project,
+            &candidate_packages,
+            &reachable,
+            &reachable_items,
+        );
+        for dependency in dependencies.callables {
+            if candidate_packages.contains(dependency.package()) && !reachable.contains(&dependency)
+            {
+                callable_queue.push_back(dependency);
+            }
+        }
+        for item in dependencies.items {
+            if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
+                item_queue.push_back(item);
+            }
+        }
+
         let dependencies = retained_item_macro_dependencies(
             project,
             &candidate_packages,
@@ -343,7 +368,16 @@ fn retained_rendered_use_dependencies(
         .files
         .values()
         .filter(|source| candidate_packages.contains(&source.package))
-        .filter(|source| module_has_reachable_code(project, reachable, reachable_items, source))
+        .filter(|source| {
+            module_has_reachable_code(project, reachable, reachable_items, source)
+                || (source.module_path.is_empty()
+                    && package_public_api_is_referenced_by_reachable_packages(
+                        project,
+                        reachable,
+                        reachable_items,
+                        &source.package,
+                    ))
+        })
     {
         let aliases = project
             .module_aliases
@@ -364,8 +398,14 @@ fn retained_rendered_use_dependencies(
             &source.package,
             &source.module_path,
         );
-        let package_idents =
+        let mut package_idents =
             reachable_package_source_idents(project, reachable, reachable_items, &source.package);
+        package_idents.extend(public_reexport_idents_referenced_by_reachable_packages(
+            project,
+            reachable,
+            reachable_items,
+            &source.package,
+        ));
 
         for item in &source.syntax.items {
             let syn::Item::Use(item_use) = item else {
@@ -396,6 +436,67 @@ fn retained_rendered_use_dependencies(
                     &path,
                     &reachable_idents,
                 ));
+            }
+        }
+    }
+    dependencies
+}
+
+fn externally_referenced_public_reexport_dependencies(
+    project: &Project,
+    candidate_packages: &BTreeSet<String>,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    for source in project
+        .files
+        .values()
+        .filter(|source| candidate_packages.contains(&source.package))
+    {
+        let public_idents = public_reexport_idents_referenced_by_reachable_packages(
+            project,
+            reachable,
+            reachable_items,
+            &source.package,
+        );
+        if public_idents.is_empty() {
+            continue;
+        }
+
+        let aliases = project
+            .module_aliases
+            .get(&(source.package.clone(), source.module_path.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let resolver = Resolver {
+            project,
+            package: &source.package,
+            module_path: &source.module_path,
+            aliases: &aliases,
+            self_type: None,
+        };
+
+        for item in &source.syntax.items {
+            let syn::Item::Use(item_use) = item else {
+                continue;
+            };
+            if !matches!(item_use.vis, syn::Visibility::Public(_)) {
+                continue;
+            }
+
+            let mut named_paths = Vec::new();
+            let mut glob_paths = Vec::new();
+            collect_use_dependency_paths(
+                &item_use.tree,
+                Vec::new(),
+                &mut named_paths,
+                &mut glob_paths,
+            );
+            for path in named_paths {
+                if public_idents.contains(&path.visible_name) {
+                    dependencies.extend(resolve_use_named_dependency(&resolver, &path.segments));
+                }
             }
         }
     }
@@ -944,6 +1045,112 @@ fn reachable_package_idents(
         }
     }
     idents
+}
+
+fn public_reexport_idents_referenced_by_reachable_packages(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    dependency_package: &str,
+) -> BTreeSet<String> {
+    let mut idents = BTreeSet::new();
+    for callable in reachable
+        .iter()
+        .filter(|callable| callable.package() != dependency_package)
+    {
+        if let Some(record) = project.functions.get(callable) {
+            collect_dependency_public_path_idents(
+                project,
+                &record.package,
+                dependency_package,
+                &record.item.to_token_stream(),
+                &mut idents,
+            );
+        }
+        if let Some(record) = project.methods.get(callable) {
+            collect_dependency_public_path_idents(
+                project,
+                callable.package(),
+                dependency_package,
+                &record.item.to_token_stream(),
+                &mut idents,
+            );
+        }
+    }
+    for item in reachable_items
+        .iter()
+        .filter(|item| item.package() != dependency_package)
+    {
+        if let Some(record) = project.items.get(item) {
+            collect_dependency_public_path_idents(
+                project,
+                &record.package,
+                dependency_package,
+                &record.item.to_token_stream(),
+                &mut idents,
+            );
+        }
+    }
+    idents
+}
+
+fn package_public_api_is_referenced_by_reachable_packages(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    dependency_package: &str,
+) -> bool {
+    !public_reexport_idents_referenced_by_reachable_packages(
+        project,
+        reachable,
+        reachable_items,
+        dependency_package,
+    )
+    .is_empty()
+}
+
+fn collect_dependency_public_path_idents(
+    project: &Project,
+    caller_package: &str,
+    dependency_package: &str,
+    tokens: &TokenStream,
+    idents: &mut BTreeSet<String>,
+) {
+    for segments in token_path_candidates(tokens) {
+        if segments.len() < 2 {
+            continue;
+        }
+        if first_segment_targets_dependency(
+            project,
+            caller_package,
+            dependency_package,
+            &segments[0],
+        ) {
+            idents.insert(segments[1].clone());
+        }
+    }
+}
+
+fn first_segment_targets_dependency(
+    project: &Project,
+    caller_package: &str,
+    dependency_package: &str,
+    first: &str,
+) -> bool {
+    if first == dependency_package || first == crate_code_name(dependency_package) {
+        return true;
+    }
+
+    project
+        .workspace
+        .packages
+        .get(caller_package)
+        .is_some_and(|package| {
+            package.dependencies.iter().any(|dependency| {
+                dependency.package == dependency_package
+                    && dependency_name_matches(dependency, first)
+            })
+        })
 }
 
 fn reachable_package_mentions_ident(
@@ -4328,12 +4535,9 @@ fn literal_path_segments(literal: &Literal) -> Option<Vec<String>> {
     if value.is_empty() || value.contains('/') {
         return None;
     }
-    let segments = value.split("::").map(str::to_string).collect::<Vec<_>>();
-    (!segments.is_empty()
-        && segments
-            .iter()
-            .all(|segment| syn::parse_str::<syn::Ident>(segment).is_ok()))
-    .then_some(segments)
+    let path = syn::parse_str::<Path>(&value).ok()?;
+    let segments = path_segments(&path);
+    (!segments.is_empty()).then_some(segments)
 }
 
 fn format_literal_value(expression: &Expr) -> Option<String> {

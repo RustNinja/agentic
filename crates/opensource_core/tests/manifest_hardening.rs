@@ -486,6 +486,150 @@ fn prunes_unused_external_pub_reexport_names() {
 }
 
 #[test]
+fn retains_renamed_external_imports_used_only_by_retained_macro_invocations() {
+    let workspace = temp_path("macro-rename-workspace");
+    let output = temp_path("macro-rename-output");
+    let target_dir = temp_path("macro-rename-target");
+    write_macro_renamed_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("macro_rename_like/src/lib.rs"));
+    assert!(
+        lib.contains("use serde_json::Value as JsonValue"),
+        "macro-only renamed import should remain\n{lib}"
+    );
+    assert!(lib.contains("define_api"));
+    assert!(lib.contains("generated"));
+    assert!(!lib.contains("dead"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro rename slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_parent_imports_used_by_inline_child_super_glob() {
+    let workspace = temp_path("inline-super-workspace");
+    let output = temp_path("inline-super-output");
+    let target_dir = temp_path("inline-super-target");
+    write_inline_super_glob_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("inline_super_like/src/lib.rs"));
+    assert!(lib.contains("Path"));
+    assert!(lib.contains("use super::*"));
+    assert!(!lib.contains("PathBuf"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated inline super-glob slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_string_literal_callback_paths_with_keyword_segments() {
+    let workspace = temp_path("serde-callback-workspace");
+    let output = temp_path("serde-callback-output");
+    let target_dir = temp_path("serde-callback-target");
+    write_serde_callback_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("serde_callback_like/src/lib.rs"));
+    assert!(lib.contains("fn skip_if_default"));
+    assert!(lib.contains("crate::skip_if_default"));
+    assert!(!lib.contains("pub fn dead"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde callback slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_local_public_reexports_referenced_through_dependency_crate_paths() {
+    let workspace = temp_path("public-reexport-workspace");
+    let output = temp_path("public-reexport-output");
+    let target_dir = temp_path("public-reexport-target");
+    write_local_public_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider = read(output.join("provider/src/lib.rs"));
+    assert!(provider.contains("mod error"));
+    assert!(provider.contains("pub use crate::error::Error"));
+    assert!(output.join("provider/src/error.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated local public reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider,
+    );
+}
+
+#[test]
 fn slices_nested_modules_declared_from_file_modules() {
     let workspace = temp_path("nested-file-workspace");
     let output = temp_path("nested-file-output");
@@ -5761,6 +5905,213 @@ pub fn selected(input: &Value) -> bool {
 
 pub fn noisy(map: Map<String, Value>, number: Number) -> usize {
     map.len() + number.as_u64().unwrap_or_default() as usize
+}
+"#,
+    );
+}
+
+fn write_macro_renamed_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["macro_rename_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("macro_rename_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "macro_rename_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("macro_rename_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde_json::Value as JsonValue;
+
+macro_rules! define_api {
+    ($name:ident, $ty:ty) => {
+        pub fn $name(value: $ty) -> usize {
+            value.to_string().len()
+        }
+    };
+}
+
+define_api!(generated, JsonValue);
+
+#[opensourced]
+pub fn selected() -> usize {
+    generated(serde_json::json!({"live": true}))
+}
+
+pub fn dead() -> usize {
+    0
+}
+"#,
+    );
+}
+
+fn write_inline_super_glob_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["inline_super_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("inline_super_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "inline_super_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("inline_super_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use std::path::{Path, PathBuf};
+
+#[opensourced]
+pub mod child {
+    use super::*;
+
+    pub fn selected() -> bool {
+        Path::new("live").is_relative()
+    }
+}
+
+pub fn dead() -> PathBuf {
+    PathBuf::from("dead")
+}
+"#,
+    );
+}
+
+fn write_serde_callback_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["serde_callback_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("serde_callback_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_callback_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1", features = ["derive"] }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("serde_callback_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::Serialize;
+
+#[opensourced]
+#[derive(Serialize)]
+pub struct Api {
+    #[serde(skip_serializing_if = "crate::skip_if_default")]
+    value: u32,
+}
+
+fn skip_if_default<T: PartialEq + Default>(v: &T) -> bool {
+    *v == T::default()
+}
+
+pub fn dead() -> bool {
+    false
+}
+"#,
+    );
+}
+
+fn write_local_public_reexport_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "provider"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "../provider", optional = true }}
+
+[features]
+default = ["provider"]
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> Result<(), provider::Error> {
+    Err(provider::Error::Bad)
+}
+"#,
+    );
+    write(
+        root.join("provider/Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("provider/src/lib.rs"),
+        r#"mod error;
+pub use crate::error::Error;
+
+pub fn dead() -> usize {
+    0
+}
+"#,
+    );
+    write(
+        root.join("provider/src/error.rs"),
+        r#"#[derive(Debug)]
+pub enum Error {
+    Bad,
 }
 "#,
     );
