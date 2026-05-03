@@ -418,6 +418,7 @@ fn run_feedback_loop(
         .feedback_report
         .clone()
         .unwrap_or_else(|| options.output_root.join("slice-feedback.json"));
+    let mut seen_diagnostics = std::collections::BTreeSet::new();
 
     for attempt in 1..=options.feedback_iterations {
         println!(
@@ -449,6 +450,15 @@ fn run_feedback_loop(
                 "feedback: generated errors match the source baseline; treating as baseline-limited pass"
             );
             return Ok(());
+        }
+
+        let signature = diagnostics_signature(&report.diagnostics);
+        if !seen_diagnostics.insert(signature) {
+            return Err(format!(
+                "feedback made no diagnostic progress; report written to {}",
+                report_path.display()
+            )
+            .into());
         }
     }
 
@@ -934,8 +944,9 @@ mod tests {
     use opensource_core::{CheckDiagnostic, CheckReport, FeedbackWideningReport};
 
     use super::{
-        baseline_limited_feedback_is_accepted, feedback_errors_are_baseline_known,
-        feedback_is_accepted, parse_args_from, semantic_hazard_warning_count, slice_report_path,
+        baseline_limited_feedback_is_accepted, diagnostics_signature,
+        feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
+        semantic_hazard_warning_count, slice_report_path,
     };
 
     #[test]
@@ -1046,6 +1057,20 @@ mod tests {
             &generated,
             Some(&baseline)
         ));
+    }
+
+    #[test]
+    fn diagnostic_signatures_are_order_insensitive() {
+        let left = vec![
+            diagnostic("E0432", "unresolved import `crate::missing`"),
+            diagnostic("E0425", "cannot find value `x` in this scope"),
+        ];
+        let right = vec![
+            diagnostic("E0425", "cannot find value `x` in this scope"),
+            diagnostic("E0432", "unresolved import `crate::missing`"),
+        ];
+
+        assert_eq!(diagnostics_signature(&left), diagnostics_signature(&right));
     }
 
     #[test]

@@ -103,8 +103,9 @@ build-script paths. `--feedback` runs this preflight first and fails before
 workspace, prints prioritized compiler diagnostics, and writes
 `slice-feedback.json` under the slice output, including exit code, timeout
 state, and duration. `--feedback-loop <n>` repeats that compiler feedback pass
-up to `n` times and fails with the JSON report path when the slice still does
-not compile. Feedback checks have a 600-second timeout by default; use
+up to `n` times, stops early when diagnostics repeat without progress, and
+fails with the JSON report path when the slice still does not compile. Feedback
+checks have a 600-second timeout by default; use
 `--feedback-timeout 0` to disable it or pass another second count.
 Use `--feedback-target-dir <path>` to reuse a Cargo target directory across
 repeated generated slices when dependency build time dominates validation.
