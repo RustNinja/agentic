@@ -16,7 +16,7 @@ use std::{
 
 use model::{Project, ReducedProject};
 use serde::Serialize;
-use syn::{punctuated::Punctuated, visit::Visit, Attribute, Macro};
+use syn::{parse::Parser, punctuated::Punctuated, visit::Visit, Attribute, Macro, Meta};
 
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{
@@ -335,6 +335,15 @@ struct SyntacticHazardCounts {
     custom_derive_macros: usize,
 }
 
+impl SyntacticHazardCounts {
+    fn add(&mut self, other: Self) {
+        self.source_include_macros += other.source_include_macros;
+        self.nonliteral_file_include_macros += other.nonliteral_file_include_macros;
+        self.custom_attribute_macros += other.custom_attribute_macros;
+        self.custom_derive_macros += other.custom_derive_macros;
+    }
+}
+
 fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
     let mut visitor = SyntacticHazardVisitor::default();
 
@@ -366,6 +375,7 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
         if attribute_requires_macro_expansion(attribute) {
             self.counts.custom_attribute_macros += 1;
         }
+        self.counts.add(cfg_attr_nested_macro_counts(attribute));
 
         syn::visit::visit_attribute(self, attribute);
     }
@@ -395,6 +405,38 @@ fn macro_has_literal_path(mac: &Macro) -> bool {
     syn::parse2::<syn::LitStr>(mac.tokens.clone()).is_ok()
 }
 
+fn cfg_attr_nested_macro_counts(attribute: &Attribute) -> SyntacticHazardCounts {
+    if !attribute.path().is_ident("cfg_attr") {
+        return SyntacticHazardCounts::default();
+    }
+
+    let Ok(arguments) =
+        attribute.parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+    else {
+        return SyntacticHazardCounts::default();
+    };
+
+    let mut counts = SyntacticHazardCounts::default();
+    for nested_attr in arguments.iter().skip(1) {
+        add_meta_macro_counts(nested_attr, &mut counts);
+    }
+    counts
+}
+
+fn add_meta_macro_counts(meta: &Meta, counts: &mut SyntacticHazardCounts) {
+    if meta.path().is_ident("derive") {
+        counts.custom_derive_macros += custom_derive_meta_count(meta);
+        return;
+    }
+
+    let Some(first) = meta.path().segments.first() else {
+        return;
+    };
+    if !attribute_path_is_builtin_or_inert(&first.ident.to_string()) {
+        counts.custom_attribute_macros += 1;
+    }
+}
+
 fn custom_derive_macro_count(attribute: &Attribute) -> usize {
     if !attribute.path().is_ident("derive") {
         return 0;
@@ -402,6 +444,22 @@ fn custom_derive_macro_count(attribute: &Attribute) -> usize {
 
     attribute
         .parse_args_with(Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter(|path| !derive_path_is_builtin(path))
+                .count()
+        })
+        .unwrap_or_default()
+}
+
+fn custom_derive_meta_count(meta: &Meta) -> usize {
+    let Meta::List(list) = meta else {
+        return 0;
+    };
+
+    Punctuated::<syn::Path, syn::Token![,]>::parse_terminated
+        .parse2(list.tokens.clone())
         .map(|paths| {
             paths
                 .iter()
@@ -970,6 +1028,56 @@ pub struct Payload {
         let report = generate(GenerateOptions {
             workspace_root: root,
             output_root: temp_output("attribute-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "custom_attribute_macros"));
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "custom_derive_macros"));
+    }
+
+    #[test]
+    fn reports_reachable_cfg_attr_macro_production_hazards() {
+        let root = temp_output("cfg-attribute-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> Payload {
+    Payload { value: 1 }
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+#[cfg_attr(feature = "ffi", derive(Debug, uniffi::Record))]
+pub struct Payload {
+    value: i32,
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("cfg-attribute-hazard-output"),
         })
         .expect("reduction should succeed");
 

@@ -147,7 +147,7 @@ Generation reports fail closed on known syntactic trust hazards as well,
 including retained `include!` source macros and non-literal file include macros
 that cannot be fully validated by static path copying alone, plus retained
 custom attribute and derive macros that may generate code outside the static
-parse tree.
+parse tree, including macros hidden behind `cfg_attr`.
 
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
 mode/notes, production-readiness hazards, roots, packages, reachable
