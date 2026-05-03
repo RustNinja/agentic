@@ -1050,6 +1050,8 @@ def semantic_warning_is_hazard(diagnostic: dict[str, Any]) -> bool:
     }:
         return True
     message = str(diagnostic.get("message") or "")
+    if code == "non_snake_case" and "variable `" in message:
+        return True
     return "unreachable pattern" in message or "irrefutable" in message
 
 

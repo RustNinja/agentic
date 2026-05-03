@@ -679,7 +679,9 @@ fn semantic_warning_is_hazard(diagnostic: &CheckDiagnostic) -> bool {
     matches!(
         diagnostic.code.as_deref(),
         Some("unreachable_patterns" | "irrefutable_let_patterns" | "bindings_with_variant_name")
-    ) || diagnostic.message.contains("unreachable pattern")
+    ) || (diagnostic.code.as_deref() == Some("non_snake_case")
+        && diagnostic.message.contains("variable `"))
+        || diagnostic.message.contains("unreachable pattern")
         || diagnostic.message.contains("irrefutable")
 }
 
@@ -968,6 +970,20 @@ mod tests {
             vec![warning_with_code(
                 "unreachable_patterns",
                 "unreachable pattern",
+            )],
+        );
+
+        assert_eq!(semantic_hazard_warning_count(&report.diagnostics, None), 1);
+        assert!(!feedback_is_accepted(&report, None, false));
+    }
+
+    #[test]
+    fn rejects_const_pattern_binding_warning_as_semantic_hazard() {
+        let report = report(
+            true,
+            vec![warning_with_code(
+                "non_snake_case",
+                "variable `HTTP_OK` should have a snake case name",
             )],
         );
 

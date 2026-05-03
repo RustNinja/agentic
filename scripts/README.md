@@ -28,8 +28,8 @@ environment failures from slicer failures; add `--allow-baseline-failures` when
 known-broken sources should still run and generated baseline-matching errors
 should be classified separately from slicer regressions. Use `--continuous` for
 soak runs. New semantic hazard warnings, including unreachable or irrefutable
-patterns introduced by pruning, are classified as slicer failures even when
-general warnings are allowed.
+patterns and non-snake-case pattern bindings introduced by pruning, are
+classified as slicer failures even when general warnings are allowed.
 Use `--validation preflight` when build time is the bottleneck; it validates the
 predicted generated shape without compiling dependencies. Use
 `--validation feedback` for slower compiler-confirmed runs,
