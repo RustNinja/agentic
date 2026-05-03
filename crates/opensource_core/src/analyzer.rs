@@ -162,6 +162,65 @@ mod rust_analyzer {
     }
 }
 
+#[cfg(test)]
+mod tests {
+    use std::path::{Path, PathBuf};
+
+    use super::{load_report, AnalyzerMode};
+
+    #[test]
+    fn parses_analyzer_modes() {
+        assert_eq!("syn".parse::<AnalyzerMode>().unwrap(), AnalyzerMode::Syn);
+        assert_eq!(
+            "ra-hir".parse::<AnalyzerMode>().unwrap(),
+            AnalyzerMode::RustAnalyzerHir
+        );
+        assert_eq!(
+            "rust-analyzer".parse::<AnalyzerMode>().unwrap(),
+            AnalyzerMode::RustAnalyzerHir
+        );
+        assert!("bogus".parse::<AnalyzerMode>().is_err());
+    }
+
+    #[test]
+    fn syn_report_is_available_without_optional_analyzer() {
+        let report = load_report(&workspace_root(), AnalyzerMode::Syn).unwrap();
+        assert_eq!(report.mode, AnalyzerMode::Syn);
+        assert!(report.loaded);
+        assert_eq!(report.engine, "syn");
+    }
+
+    #[test]
+    #[cfg(not(feature = "ra-hir"))]
+    fn ra_hir_reports_clear_error_when_feature_is_disabled() {
+        let error = load_report(&workspace_root(), AnalyzerMode::RustAnalyzerHir)
+            .expect_err("ra-hir should require the ra-hir feature");
+        assert!(error.to_string().contains("without the ra-hir feature"));
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
+    fn ra_hir_loads_workspace_and_initializes_semantics() {
+        let report = load_report(&workspace_root(), AnalyzerMode::RustAnalyzerHir).unwrap();
+        assert_eq!(report.mode, AnalyzerMode::RustAnalyzerHir);
+        assert!(report.loaded);
+        assert_eq!(report.engine, "rust-analyzer HIR");
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("RootDatabase")));
+        assert!(report.notes.iter().any(|note| note.contains("Semantics")));
+    }
+
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(2)
+            .expect("core crate should live under crates/opensource_core")
+            .to_path_buf()
+    }
+}
+
 #[cfg(not(feature = "ra-hir"))]
 mod rust_analyzer {
     use std::path::Path;
