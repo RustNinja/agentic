@@ -16,7 +16,7 @@ use std::{
 
 use model::{Project, ReducedProject};
 use serde::Serialize;
-use syn::{visit::Visit, Macro};
+use syn::{punctuated::Punctuated, visit::Visit, Attribute, Macro};
 
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{
@@ -305,12 +305,34 @@ fn add_syntactic_production_hazards(
             ),
         ));
     }
+    if counts.custom_attribute_macros > 0 {
+        hazards.push(production_hazard(
+            "custom_attribute_macros",
+            "warning",
+            format!(
+                "{} retained custom attribute macro/helper attribute(s) require compiler expansion to fully trust the slice",
+                counts.custom_attribute_macros
+            ),
+        ));
+    }
+    if counts.custom_derive_macros > 0 {
+        hazards.push(production_hazard(
+            "custom_derive_macros",
+            "warning",
+            format!(
+                "{} retained custom derive macro(s) may generate impls or bounds outside the static parse tree",
+                counts.custom_derive_macros
+            ),
+        ));
+    }
 }
 
 #[derive(Default)]
 struct SyntacticHazardCounts {
     source_include_macros: usize,
     nonliteral_file_include_macros: usize,
+    custom_attribute_macros: usize,
+    custom_derive_macros: usize,
 }
 
 fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
@@ -339,6 +361,15 @@ struct SyntacticHazardVisitor {
 }
 
 impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
+    fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+        self.counts.custom_derive_macros += custom_derive_macro_count(attribute);
+        if attribute_requires_macro_expansion(attribute) {
+            self.counts.custom_attribute_macros += 1;
+        }
+
+        syn::visit::visit_attribute(self, attribute);
+    }
+
     fn visit_macro(&mut self, mac: &'ast Macro) {
         if macro_path_ends_with(mac, "include") {
             self.counts.source_include_macros += 1;
@@ -362,6 +393,93 @@ fn macro_path_ends_with(mac: &Macro, name: &str) -> bool {
 
 fn macro_has_literal_path(mac: &Macro) -> bool {
     syn::parse2::<syn::LitStr>(mac.tokens.clone()).is_ok()
+}
+
+fn custom_derive_macro_count(attribute: &Attribute) -> usize {
+    if !attribute.path().is_ident("derive") {
+        return 0;
+    }
+
+    attribute
+        .parse_args_with(Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+        .map(|paths| {
+            paths
+                .iter()
+                .filter(|path| !derive_path_is_builtin(path))
+                .count()
+        })
+        .unwrap_or_default()
+}
+
+fn derive_path_is_builtin(path: &syn::Path) -> bool {
+    if path.leading_colon.is_some() || path.segments.len() != 1 {
+        return false;
+    }
+    path.segments.last().is_some_and(|segment| {
+        matches!(
+            segment.ident.to_string().as_str(),
+            "Clone"
+                | "Copy"
+                | "Debug"
+                | "Default"
+                | "Eq"
+                | "Hash"
+                | "Ord"
+                | "PartialEq"
+                | "PartialOrd"
+        )
+    })
+}
+
+fn attribute_requires_macro_expansion(attribute: &Attribute) -> bool {
+    if attribute.path().is_ident("derive") {
+        return false;
+    }
+
+    let Some(first) = attribute.path().segments.first() else {
+        return false;
+    };
+    !attribute_path_is_builtin_or_inert(&first.ident.to_string())
+}
+
+fn attribute_path_is_builtin_or_inert(first_segment: &str) -> bool {
+    matches!(
+        first_segment,
+        "allow"
+            | "automatically_derived"
+            | "bench"
+            | "cfg"
+            | "cfg_attr"
+            | "cold"
+            | "deny"
+            | "deprecated"
+            | "doc"
+            | "export_name"
+            | "forbid"
+            | "global_allocator"
+            | "ignore"
+            | "inline"
+            | "link"
+            | "link_name"
+            | "link_section"
+            | "macro_export"
+            | "macro_use"
+            | "must_use"
+            | "no_mangle"
+            | "non_exhaustive"
+            | "opensourced"
+            | "panic_handler"
+            | "path"
+            | "proc_macro"
+            | "proc_macro_attribute"
+            | "proc_macro_derive"
+            | "repr"
+            | "should_panic"
+            | "test"
+            | "track_caller"
+            | "used"
+            | "warn"
+    )
 }
 
 fn production_hazard(
@@ -815,6 +933,56 @@ pub fn entry() -> &'static str {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "nonliteral_file_include_macros"));
+    }
+
+    #[test]
+    fn reports_reachable_attribute_macro_production_hazards() {
+        let root = temp_output("attribute-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> Payload {
+    Payload { value: 1 }
+}
+
+#[custom_attr::decorate]
+#[derive(Debug, serde::Serialize)]
+pub struct Payload {
+    value: i32,
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("attribute-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "custom_attribute_macros"));
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "custom_derive_macros"));
     }
 
     #[test]
