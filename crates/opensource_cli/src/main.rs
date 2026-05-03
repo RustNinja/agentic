@@ -398,7 +398,8 @@ fn run_feedback_loop(
         if report.success && options.deny_warnings {
             println!("feedback: warnings denied by --deny-warnings");
         }
-        if options.allow_baseline_failures && feedback_errors_are_baseline_known(&report, baseline)
+        if options.allow_baseline_failures
+            && baseline_limited_feedback_is_accepted(&report, baseline, options.deny_warnings)
         {
             println!(
                 "feedback: generated errors match the source baseline; treating as baseline-limited pass"
@@ -455,7 +456,8 @@ fn run_feedback_repair_loop(
             println!("feedback: warnings denied by --deny-warnings and no conservative repair is available");
             break;
         }
-        if options.allow_baseline_failures && feedback_errors_are_baseline_known(&report, baseline)
+        if options.allow_baseline_failures
+            && baseline_limited_feedback_is_accepted(&report, baseline, options.deny_warnings)
         {
             println!(
                 "feedback: generated errors match the source baseline; treating as baseline-limited pass"
@@ -532,6 +534,15 @@ fn sibling_output_path(output_root: &Path, suffix: &str) -> PathBuf {
 
 fn feedback_is_accepted(report: &CheckReport, deny_warnings: bool) -> bool {
     report.success && (!deny_warnings || report.warning_count() == 0)
+}
+
+fn baseline_limited_feedback_is_accepted(
+    report: &CheckReport,
+    baseline: Option<&CheckReport>,
+    deny_warnings: bool,
+) -> bool {
+    feedback_errors_are_baseline_known(report, baseline)
+        && (!deny_warnings || report.warning_count() == 0)
 }
 
 fn feedback_errors_are_baseline_known(
@@ -813,7 +824,10 @@ mod tests {
 
     use opensource_core::{CheckDiagnostic, CheckReport};
 
-    use super::{feedback_errors_are_baseline_known, feedback_is_accepted};
+    use super::{
+        baseline_limited_feedback_is_accepted, feedback_errors_are_baseline_known,
+        feedback_is_accepted,
+    };
 
     #[test]
     fn accepts_warning_bearing_feedback_only_when_warning_denial_is_disabled() {
@@ -841,6 +855,32 @@ mod tests {
         assert!(feedback_errors_are_baseline_known(
             &generated,
             Some(&baseline)
+        ));
+    }
+
+    #[test]
+    fn baseline_limited_feedback_still_honors_warning_denial() {
+        let baseline = report(
+            false,
+            vec![diagnostic("E0425", "cannot find value `x` in this scope")],
+        );
+        let generated = report(
+            false,
+            vec![
+                diagnostic("E0425", "cannot find value `x` in this scope"),
+                warning("unused variable: `value`"),
+            ],
+        );
+
+        assert!(baseline_limited_feedback_is_accepted(
+            &generated,
+            Some(&baseline),
+            false
+        ));
+        assert!(!baseline_limited_feedback_is_accepted(
+            &generated,
+            Some(&baseline),
+            true
         ));
     }
 
