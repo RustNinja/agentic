@@ -818,11 +818,21 @@ fn build_script_is_uniffi_only(path: &Path) -> bool {
 }
 
 fn is_binary_entry_source(source: &SourceFile) -> bool {
-    source.module_path.is_empty()
-        && source
-            .path
-            .file_name()
-            .is_some_and(|file_name| file_name == "main.rs")
+    if !source.module_path.is_empty() {
+        return false;
+    }
+    if source
+        .path
+        .file_name()
+        .is_some_and(|file_name| file_name == "main.rs")
+    {
+        return true;
+    }
+    source
+        .path
+        .parent()
+        .and_then(Path::file_name)
+        .is_some_and(|file_name| file_name == "bin")
 }
 
 fn ensure_main_function(file: &mut syn::File) {

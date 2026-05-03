@@ -109,6 +109,10 @@ fn load_cargo_metadata(manifest_path: &Path) -> Result<CargoMetadata, Box<dyn st
 }
 
 fn entry_source_path(package_root: &Path, manifest: &Value, targets: &[MetadataTarget]) -> PathBuf {
+    if let Some(path) = metadata_marker_source_path(targets) {
+        return path;
+    }
+
     if let Some(path) = metadata_entry_source_path(package_root, targets) {
         return path;
     }
@@ -127,6 +131,34 @@ fn entry_source_path(package_root: &Path, manifest: &Value, targets: &[MetadataT
     }
 
     package_root.join("src/main.rs")
+}
+
+fn metadata_marker_source_path(targets: &[MetadataTarget]) -> Option<PathBuf> {
+    let mut paths = targets
+        .iter()
+        .filter(|target| target_is_parse_candidate(target))
+        .map(|target| target.src_path.clone())
+        .collect::<Vec<_>>();
+    paths.sort();
+    paths.dedup();
+    paths
+        .into_iter()
+        .find(|path| source_contains_opensourced_marker(path))
+}
+
+fn target_is_parse_candidate(target: &MetadataTarget) -> bool {
+    target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "lib" | "proc-macro" | "bin" | "example"))
+}
+
+fn source_contains_opensourced_marker(path: &Path) -> bool {
+    fs::read_to_string(path).is_ok_and(|text| {
+        text.contains("#[opensourced")
+            || text.contains("#[ opensourced")
+            || text.contains("opensourced::opensourced")
+    })
 }
 
 fn metadata_entry_source_path(package_root: &Path, targets: &[MetadataTarget]) -> Option<PathBuf> {

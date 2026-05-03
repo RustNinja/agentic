@@ -83,6 +83,44 @@ fn slices_single_package_binary_crate_with_stub_main() {
 }
 
 #[test]
+fn slices_marked_bin_target_when_package_also_has_lib_target() {
+    let workspace = temp_path("bin-with-lib-workspace");
+    let output = temp_path("bin-with-lib-output");
+    let target_dir = temp_path("bin-with-lib-target");
+    write_bin_with_lib_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app"]);
+    let source = read(output.join("app/src/bin/tool.rs"));
+    assert!(source.contains("pub fn selected"));
+    assert!(source.contains("fn helper"));
+    assert!(source.contains("fn main()"));
+    assert!(!source.contains("dead_lib"));
+    assert!(!source.contains("dead_bin"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated bin-with-lib slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/bin/tool.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn slices_multiple_marked_function_roots() {
     let workspace = temp_path("multi-root-workspace");
     let output = temp_path("multi-root-output");
@@ -2424,6 +2462,59 @@ fn noisy_entrypoint() {
 }
 
 fn dead() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_bin_with_lib_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"pub fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("app/src/bin/tool.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    helper(value)
+}
+
+fn helper(value: &str) -> String {
+    format!("bin:{value}")
+}
+
+fn dead_bin() -> String {
     "dead".to_string()
 }
 "#,
