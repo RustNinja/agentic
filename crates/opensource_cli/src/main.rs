@@ -946,6 +946,8 @@ fn run_feedback_repair_loop(
         .clone()
         .unwrap_or_else(|| options.output_root.join("slice-repair.json"));
     let mut seen_diagnostics = std::collections::BTreeSet::new();
+    let mut seen_diagnostic_shapes = std::collections::BTreeSet::new();
+    let mut repaired_previous_attempt = false;
 
     for attempt in 1..=options.feedback_repair_iterations {
         println!(
@@ -1138,6 +1140,38 @@ fn run_feedback_repair_loop(
             )
             .into());
         }
+        let shape_signature = diagnostics_shape_signature(&report.diagnostics);
+        let shape_repeated = !seen_diagnostic_shapes.insert(shape_signature);
+        if repaired_previous_attempt && report.error_count() > 0 && shape_repeated {
+            record_feedback_attempt(
+                validation,
+                "feedback-repair",
+                attempt,
+                "low_progress",
+                "feedback repair repeated the same diagnostic shape after changing files",
+                &report,
+                feedback_report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback-repair",
+                "failed",
+                "feedback repair repeated the same diagnostic shape after changing files",
+                &report,
+                feedback_report_path.clone(),
+                semantic_warnings,
+            );
+            return Err(format!(
+                "feedback repair repeated the same diagnostic shape after changing files; report written to {}",
+                feedback_report_path.display()
+            )
+            .into());
+        }
 
         let repair_report = repair_workspace(RepairOptions {
             output_root: options.output_root.clone(),
@@ -1184,6 +1218,7 @@ fn run_feedback_repair_loop(
         if repair_total_changes == 0 {
             break;
         }
+        repaired_previous_attempt = true;
 
         let preflight = run_preflight(options)?;
         if !preflight.success {
@@ -1397,6 +1432,38 @@ fn diagnostics_signature(diagnostics: &[CheckDiagnostic]) -> String {
     parts.join("\n")
 }
 
+fn diagnostics_shape_signature(diagnostics: &[CheckDiagnostic]) -> String {
+    let mut parts = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let mut files = diagnostic
+                .spans
+                .iter()
+                .filter(|span| span.is_primary)
+                .map(|span| span.file_name.as_str())
+                .collect::<Vec<_>>();
+            files.sort_unstable();
+            files.dedup();
+            let target = diagnostic
+                .target
+                .as_ref()
+                .map(|target| format!("{}:{}", target.kind.join("+"), target.name))
+                .unwrap_or_default();
+            format!(
+                "{}|{}|{}|{}|{}|{}",
+                diagnostic.level,
+                diagnostic.code.as_deref().unwrap_or(""),
+                diagnostic.package_id.as_deref().unwrap_or(""),
+                target,
+                diagnostic.message,
+                files.join(",")
+            )
+        })
+        .collect::<Vec<_>>();
+    parts.sort();
+    parts.join("\n")
+}
+
 fn print_preflight(report: &PreflightReport, limit: usize, report_path: &Path) {
     if report.success {
         println!(
@@ -1600,7 +1667,7 @@ mod tests {
     };
 
     use super::{
-        baseline_limited_feedback_is_accepted, diagnostics_signature,
+        baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
         semantic_hazard_warning_count, slice_report_path, uncovered_validation_targets,
         validation_report_path,
@@ -1774,6 +1841,47 @@ mod tests {
     }
 
     #[test]
+    fn diagnostic_shape_signatures_ignore_line_churn_but_keep_files() {
+        let original = vec![diagnostic_with_span(
+            "E0425",
+            "cannot find value `x` in this scope",
+            "src/lib.rs",
+            12,
+            9,
+            10,
+        )];
+        let shifted = vec![diagnostic_with_span(
+            "E0425",
+            "cannot find value `x` in this scope",
+            "src/lib.rs",
+            20,
+            5,
+            6,
+        )];
+        let other_file = vec![diagnostic_with_span(
+            "E0425",
+            "cannot find value `x` in this scope",
+            "src/main.rs",
+            20,
+            5,
+            6,
+        )];
+
+        assert_ne!(
+            diagnostics_signature(&original),
+            diagnostics_signature(&shifted)
+        );
+        assert_eq!(
+            diagnostics_shape_signature(&original),
+            diagnostics_shape_signature(&shifted)
+        );
+        assert_ne!(
+            diagnostics_shape_signature(&original),
+            diagnostics_shape_signature(&other_file)
+        );
+    }
+
+    #[test]
     fn production_flag_enables_strict_validation_preset() {
         let options = parse_options(["--production", "workspace", "out"]);
 
@@ -1926,6 +2034,33 @@ mod tests {
             target: None,
             rendered: None,
             spans: Vec::new(),
+        }
+    }
+
+    fn diagnostic_with_span(
+        code: &str,
+        message: &str,
+        file_name: &str,
+        line_start: u64,
+        column_start: u64,
+        column_end: u64,
+    ) -> CheckDiagnostic {
+        CheckDiagnostic {
+            level: "error".to_string(),
+            message: message.to_string(),
+            code: Some(code.to_string()),
+            package_id: None,
+            target: None,
+            rendered: None,
+            spans: vec![opensource_core::CheckSpan {
+                file_name: file_name.to_string(),
+                line_start,
+                line_end: line_start,
+                column_start,
+                column_end,
+                is_primary: true,
+                text: Vec::new(),
+            }],
         }
     }
 
