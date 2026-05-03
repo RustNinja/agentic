@@ -6,8 +6,8 @@ use std::{
 };
 
 use opensource_core::{
-    check_workspace, generate_with_analyzer, write_report, AnalyzerMode, CheckDiagnostic,
-    CheckOptions, CheckReport, GenerateOptions,
+    check_workspace, generate_with_analyzer, write_generate_report, write_report, AnalyzerMode,
+    CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions,
 };
 
 fn main() {
@@ -89,6 +89,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for item in &report.reachable_items {
         println!("  {item}");
     }
+    if let Some(report_path) = &options.slice_report {
+        write_generate_report(&report, report_path)?;
+        println!("slice report: {}", report_path.display());
+    }
 
     if options.feedback_iterations > 0 {
         run_feedback_loop(&options)?;
@@ -106,6 +110,7 @@ struct CliOptions {
     feedback_limit: usize,
     feedback_report: Option<PathBuf>,
     feedback_timeout: Option<Duration>,
+    slice_report: Option<PathBuf>,
     workspace_root: PathBuf,
     output_root: PathBuf,
 }
@@ -117,6 +122,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     let mut feedback_limit = 12;
     let mut feedback_report = None;
     let mut feedback_timeout = Some(Duration::from_secs(600));
+    let mut slice_report = None;
     let mut positional = Vec::new();
     let mut args = std::env::args_os().skip(1);
 
@@ -144,6 +150,11 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
                 args.next()
                     .ok_or("--feedback-report requires a following path")?,
             ));
+        } else if arg == OsStr::new("--slice-report") {
+            slice_report = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--slice-report requires a following path")?,
+            ));
         } else if arg == OsStr::new("--help") || arg == OsStr::new("-h") {
             println!("{}", usage());
             std::process::exit(0);
@@ -163,6 +174,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
         feedback_limit,
         feedback_report,
         feedback_timeout,
+        slice_report,
         workspace_root: workspace_root.clone(),
         output_root: output_root.clone(),
     })
@@ -300,7 +312,7 @@ fn usage() -> String {
     concat!(
         "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--feedback] [--feedback-loop <n>] ",
         "[--feedback-limit <n>] [--feedback-timeout <seconds>] [--feedback-report <path>] ",
-        "<workspace-root> <output-root>"
+        "[--slice-report <path>] <workspace-root> <output-root>"
     )
     .to_string()
 }

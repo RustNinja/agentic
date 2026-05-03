@@ -81,6 +81,7 @@ inside retained impl blocks so the reduced source keeps compiling.
 cargo test --workspace
 cargo run -p opensource_cli --bin slicers -- --check . /tmp/slicers-proof
 cargo run -p opensource_cli --bin slicers -- --feedback . /tmp/slicers-feedback
+cargo run -p opensource_cli --bin slicers -- --slice-report /tmp/slicers-report.json . /tmp/slicers-proof
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
 
@@ -94,6 +95,28 @@ This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A
 rust-analyzer HIR or rustc-driver backend remains the next precision step for
 resolving hard name-resolution cases before rendering.
+
+`--slice-report <path>` writes machine-readable generation metrics: analyzer
+mode/notes, roots, packages, reachable callables/items, and files written. The
+generic corpus runner uses this with compiler feedback to track real-project
+slice size, diagnostics, runtime, and timeout outcomes over repeated random root
+selection:
+
+```sh
+scripts/corpus_feedback_loop.py \
+  --source /path/to/rust/workspace \
+  --output-prefix /tmp/slicers-corpus \
+  --max-batches 20 \
+  --roots-per-batch 5 \
+  --feedback-loop 1 \
+  --feedback-timeout 600 \
+  --report reports/corpus_feedback.jsonl
+```
+
+The corpus runner discovers package targets through `cargo metadata --no-deps`,
+injects the local marker dependency only into packages selected for that batch,
+restores git-backed sources before and after mutation by default, preserves
+failed outputs for debugging, and appends one JSONL metrics row per batch.
 
 Workspace/package discovery is backed by `cargo metadata --no-deps`, so Cargo is
 the source of truth for workspace members, excludes, target entry paths,

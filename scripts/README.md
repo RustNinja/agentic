@@ -1,5 +1,29 @@
 # Scripts
 
+## Generic Corpus Feedback Loop
+
+`corpus_feedback_loop.py` is the project-agnostic production verification
+harness. It discovers local Rust package targets with `cargo metadata`, selects
+random candidate roots, injects `#[opensourced::opensourced]`, runs `slicers`
+with `--slice-report` and compiler feedback, then appends one JSONL metrics row
+per batch.
+
+```sh
+scripts/corpus_feedback_loop.py \
+  --source /path/to/rust/workspace \
+  --output-prefix /tmp/slicers-corpus \
+  --max-batches 20 \
+  --roots-per-batch 5 \
+  --feedback-loop 1 \
+  --feedback-timeout 600 \
+  --report reports/corpus_feedback.jsonl
+```
+
+By default it restores and cleans git-backed sources before and after each
+batch, keeps failed outputs for debugging, removes generated `target-feedback`,
+and prunes older successful outputs. Use `--baseline-check` to separate source
+environment failures from slicer failures, and `--continuous` for soak runs.
+
 ## Litter Feedback Loop
 
 `litter_feedback_loop.py` continuously restores a Litter checkout, marks five

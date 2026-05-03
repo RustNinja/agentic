@@ -6,11 +6,15 @@ mod parse;
 mod reduce;
 mod render;
 
-use std::path::PathBuf;
+use std::{
+    fs,
+    path::{Path, PathBuf},
+};
 
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport};
 pub use model::{CallableId, ItemId, RootId};
+use serde::Serialize;
 
 #[derive(Debug, Clone)]
 pub struct GenerateOptions {
@@ -63,6 +67,120 @@ pub fn generate_with_analyzer(
     })
 }
 
+pub fn write_generate_report(
+    report: &GenerateReport,
+    path: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(&GenerateReportJson::from_report(report))?;
+    fs::write(path, json)?;
+    Ok(())
+}
+
+#[derive(Serialize)]
+struct GenerateReportJson {
+    analyzer: AnalyzerReportJson,
+    root: String,
+    roots: Vec<String>,
+    packages: Vec<String>,
+    reachable: Vec<String>,
+    reachable_items: Vec<String>,
+    files_written: usize,
+}
+
+impl GenerateReportJson {
+    fn from_report(report: &GenerateReport) -> Self {
+        Self {
+            analyzer: AnalyzerReportJson::from_report(&report.analyzer),
+            root: report.root.to_string(),
+            roots: report.roots.iter().map(ToString::to_string).collect(),
+            packages: report.packages.clone(),
+            reachable: report.reachable.iter().map(ToString::to_string).collect(),
+            reachable_items: report
+                .reachable_items
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            files_written: report.files_written,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct AnalyzerReportJson {
+    mode: String,
+    loaded: bool,
+    engine: String,
+    notes: Vec<String>,
+    semantic: Option<SemanticReportJson>,
+}
+
+impl AnalyzerReportJson {
+    fn from_report(report: &AnalyzerReport) -> Self {
+        Self {
+            mode: report.mode.as_str().to_string(),
+            loaded: report.loaded,
+            engine: report.engine.clone(),
+            notes: report.notes.clone(),
+            semantic: report
+                .semantic
+                .as_ref()
+                .map(SemanticReportJson::from_report),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SemanticReportJson {
+    source_files: usize,
+    analyzed_files: usize,
+    failed_files: usize,
+    skipped_files: usize,
+    file_budget: usize,
+    method_call_budget: usize,
+    path_budget: usize,
+    method_calls: usize,
+    queried_method_calls: usize,
+    resolved_method_calls: usize,
+    callable_method_calls: usize,
+    fallback_method_calls: usize,
+    unresolved_method_calls: usize,
+    unqueried_method_calls: usize,
+    paths: usize,
+    queried_paths: usize,
+    resolved_paths: usize,
+    unresolved_paths: usize,
+    unqueried_paths: usize,
+}
+
+impl SemanticReportJson {
+    fn from_report(report: &SemanticReport) -> Self {
+        Self {
+            source_files: report.source_files,
+            analyzed_files: report.analyzed_files,
+            failed_files: report.failed_files,
+            skipped_files: report.skipped_files,
+            file_budget: report.file_budget,
+            method_call_budget: report.method_call_budget,
+            path_budget: report.path_budget,
+            method_calls: report.method_calls,
+            queried_method_calls: report.queried_method_calls,
+            resolved_method_calls: report.resolved_method_calls,
+            callable_method_calls: report.callable_method_calls,
+            fallback_method_calls: report.fallback_method_calls,
+            unresolved_method_calls: report.unresolved_method_calls,
+            unqueried_method_calls: report.unqueried_method_calls,
+            paths: report.paths,
+            queried_paths: report.queried_paths,
+            resolved_paths: report.resolved_paths,
+            unresolved_paths: report.unresolved_paths,
+            unqueried_paths: report.unqueried_paths,
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -72,7 +190,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{generate, GenerateOptions};
+    use super::{generate, write_generate_report, GenerateOptions};
 
     #[test]
     fn reduces_fixture_to_reachable_callables() {
@@ -195,6 +313,29 @@ mod tests {
             .expect("cargo check should start");
 
         assert!(status.success(), "generated workspace did not compile");
+    }
+
+    #[test]
+    fn writes_generation_report_json() {
+        let output = temp_output("generation-report-output");
+        let report = generate(GenerateOptions {
+            workspace_root: workspace_root(),
+            output_root: output,
+        })
+        .expect("reduction should succeed");
+        let report_path = temp_output("generation-report-json").join("slice-report.json");
+
+        write_generate_report(&report, &report_path).expect("generation report should be written");
+
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(report_path).unwrap()).unwrap();
+        assert_eq!(value["analyzer"]["mode"], "syn");
+        assert_eq!(value["root"], report.root.to_string());
+        assert_eq!(value["files_written"], report.files_written);
+        assert_eq!(
+            value["packages"].as_array().unwrap().len(),
+            report.packages.len()
+        );
     }
 
     #[test]
