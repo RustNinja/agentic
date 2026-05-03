@@ -8,7 +8,8 @@ use proc_macro2::{Span, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::{
-    GenericArgument, ImplItem, Item, ItemImpl, ItemMod, ItemUse, PathArguments, Type, UseTree,
+    Expr, GenericArgument, ImplItem, Item, ItemImpl, ItemMod, ItemUse, Lit, Meta, PathArguments,
+    Type, UseTree,
 };
 
 use crate::{
@@ -297,9 +298,25 @@ impl Parser {
 
         let name = item_mod.ident.to_string();
         let source_name = module_source_name(&name);
+        let path_attr = path_attr(item_mod);
         let file_path = module_dir.join(format!("{source_name}.rs"));
         let mod_path = module_dir.join(source_name).join("mod.rs");
-        let (next_file, next_dir) = if file_path.exists() {
+        let (next_file, next_dir) = if let Some(path_attr) = path_attr {
+            let path = if path_attr.is_absolute() {
+                path_attr
+            } else {
+                module_dir.join(path_attr)
+            };
+            if !path.exists() {
+                return Err(format!(
+                    "module {name} path attribute points to missing source file in package {package}: {}",
+                    path.display()
+                )
+                .into());
+            }
+            let next_dir = path.parent().unwrap_or(module_dir).to_path_buf();
+            (path, next_dir)
+        } else if file_path.exists() {
             (file_path, module_dir.join(source_name))
         } else if mod_path.exists() {
             (mod_path, module_dir.join(source_name))
@@ -750,4 +767,22 @@ fn collect_type_paths(
 
 fn module_source_name(name: &str) -> &str {
     name.strip_prefix("r#").unwrap_or(name)
+}
+
+fn path_attr(item_mod: &syn::ItemMod) -> Option<PathBuf> {
+    item_mod.attrs.iter().find_map(|attribute| {
+        if !attribute.path().is_ident("path") {
+            return None;
+        }
+        let Meta::NameValue(name_value) = &attribute.meta else {
+            return None;
+        };
+        let Expr::Lit(expr_lit) = &name_value.value else {
+            return None;
+        };
+        let Lit::Str(lit) = &expr_lit.lit else {
+            return None;
+        };
+        Some(PathBuf::from(lit.value()))
+    })
 }

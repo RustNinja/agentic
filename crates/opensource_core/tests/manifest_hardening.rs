@@ -125,6 +125,47 @@ fn slices_marked_bin_target_when_package_also_has_lib_target() {
 }
 
 #[test]
+fn slices_path_attributed_external_modules() {
+    let workspace = temp_path("path-attr-workspace");
+    let output = temp_path("path-attr-output");
+    let target_dir = temp_path("path-attr-target");
+    write_path_attr_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["path_attr_like"]);
+    let lib = read(output.join("path_attr_like/src/lib.rs"));
+    let custom = read(output.join("path_attr_like/src/generated/custom.rs"));
+    assert!(lib.contains("mod custom"));
+    assert!(lib.contains("path = \"generated/custom.rs\""));
+    assert!(custom.contains("pub fn selected"));
+    assert!(custom.contains("fn helper"));
+    assert!(!lib.contains("dead_lib"));
+    assert!(!custom.contains("dead_custom"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated path-attr slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}\nsrc/generated/custom.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+        custom,
+    );
+}
+
+#[test]
 fn slices_multiple_marked_function_roots() {
     let workspace = temp_path("multi-root-workspace");
     let output = temp_path("multi-root-output");
@@ -2532,6 +2573,55 @@ fn helper(value: &str) -> String {
 }
 
 fn dead_command() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_path_attr_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "path_attr_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"#[path = "generated/custom.rs"]
+mod custom;
+
+fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("src/generated/custom.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    helper(value)
+}
+
+fn helper(value: &str) -> String {
+    format!("custom:{value}")
+}
+
+fn dead_custom() -> String {
     "dead".to_string()
 }
 "#,
