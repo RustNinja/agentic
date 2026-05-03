@@ -208,7 +208,7 @@ fn prune_dead_items_from_diagnostics(
     output_root: &Path,
     diagnostics: &[Value],
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    let mut by_file: BTreeMap<PathBuf, Vec<DeadItemCandidate>> = BTreeMap::new();
+    let mut prune_ops_by_file: BTreeMap<PathBuf, Vec<PruneOp>> = BTreeMap::new();
     let mut import_spans_by_file: BTreeMap<PathBuf, Vec<ImportSpanCandidate>> = BTreeMap::new();
     for diagnostic in diagnostics {
         let code = diagnostic
@@ -254,18 +254,50 @@ fn prune_dead_items_from_diagnostics(
                     });
                 continue;
             }
+            let path = diagnostic_path(output_root, file_name);
+            if code == Some("dead_code") && dead_code_message_is_field(message) {
+                prune_ops_by_file
+                    .entry(path)
+                    .or_default()
+                    .push(PruneOp::AllowDeadCode(AllowDeadCodeCandidate {
+                        line_start: line_start as usize,
+                    }));
+                continue;
+            }
             let Some(name) = dead_candidate_name(code, message, span) else {
                 continue;
             };
-            let path = diagnostic_path(output_root, file_name);
-            by_file.entry(path).or_default().push(DeadItemCandidate {
-                name,
-                line_start: line_start as usize,
-            });
+            prune_ops_by_file
+                .entry(path)
+                .or_default()
+                .push(PruneOp::RemoveItem(DeadItemCandidate {
+                    name,
+                    line_start: line_start as usize,
+                }));
         }
     }
 
     let mut removed = 0;
+    for (path, mut candidates) in prune_ops_by_file {
+        if !path.exists() {
+            continue;
+        }
+        candidates.sort_by(|left, right| right.line_start().cmp(&left.line_start()));
+        candidates.dedup();
+        let mut source = fs::read_to_string(&path)?;
+        for candidate in candidates {
+            let changed = match candidate {
+                PruneOp::RemoveItem(candidate) => remove_item_at_line(&mut source, &candidate),
+                PruneOp::AllowDeadCode(candidate) => {
+                    allow_dead_code_on_enclosing_item(&mut source, &candidate)
+                }
+            };
+            if changed {
+                removed += 1;
+            }
+        }
+        fs::write(path, source)?;
+    }
     for (path, mut candidates) in import_spans_by_file {
         if !path.exists() {
             continue;
@@ -278,22 +310,9 @@ fn prune_dead_items_from_diagnostics(
         });
         candidates.dedup();
         let mut source = fs::read_to_string(&path)?;
+        candidates = filter_import_candidates_covered_by_whole_use_removals(&source, candidates);
         for candidate in candidates {
             if remove_import_span(&mut source, &candidate) {
-                removed += 1;
-            }
-        }
-        fs::write(path, source)?;
-    }
-    for (path, mut candidates) in by_file {
-        if !path.exists() {
-            continue;
-        }
-        candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
-        candidates.dedup();
-        let mut source = fs::read_to_string(&path)?;
-        for candidate in candidates {
-            if remove_item_at_line(&mut source, &candidate) {
                 removed += 1;
             }
         }
@@ -314,6 +333,26 @@ struct ImportSpanCandidate {
     column_start: usize,
     column_end: usize,
     remove_line: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AllowDeadCodeCandidate {
+    line_start: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum PruneOp {
+    RemoveItem(DeadItemCandidate),
+    AllowDeadCode(AllowDeadCodeCandidate),
+}
+
+impl PruneOp {
+    fn line_start(&self) -> usize {
+        match self {
+            PruneOp::RemoveItem(candidate) => candidate.line_start,
+            PruneOp::AllowDeadCode(candidate) => candidate.line_start,
+        }
+    }
 }
 
 fn diagnostic_path(output_root: &Path, file_name: &str) -> PathBuf {
@@ -361,14 +400,16 @@ fn dead_code_message_is_item(message: &str) -> bool {
         || message.contains("associated constant `")
         || message.contains("constant `")
         || message.contains("enum `")
-        || message.contains("field `")
-        || message.contains("fields `")
         || message.contains("module `")
         || message.contains("static `")
         || message.contains("struct `")
         || message.contains("type alias `")
         || message.contains("union `")
         || message.contains("trait `")
+}
+
+fn dead_code_message_is_field(message: &str) -> bool {
+    message.contains("field `") || message.contains("fields `")
 }
 
 fn name_from_span_text(span: &Value) -> Option<String> {
@@ -484,6 +525,61 @@ fn remove_item_at_line(source: &mut String, candidate: &DeadItemCandidate) -> bo
     true
 }
 
+fn allow_dead_code_on_enclosing_item(
+    source: &mut String,
+    candidate: &AllowDeadCodeCandidate,
+) -> bool {
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(mut index) = candidate.line_start.checked_sub(1) else {
+        return false;
+    };
+    if index >= lines.len() {
+        return false;
+    }
+
+    loop {
+        let trimmed = lines[index].trim_start();
+        if item_header_can_own_field_dead_code(trimmed) {
+            let mut insert_at = index;
+            while insert_at > 0 {
+                let previous = lines[insert_at - 1].trim_start();
+                if previous.starts_with("#[") || previous.starts_with("///") {
+                    insert_at -= 1;
+                } else {
+                    break;
+                }
+            }
+            if lines[insert_at..=index]
+                .iter()
+                .any(|line| line.contains("allow(dead_code)"))
+            {
+                return false;
+            }
+            let indentation = &lines[index][..lines[index].len() - trimmed.len()];
+            lines.insert(insert_at, format!("{indentation}#[allow(dead_code)]"));
+            *source = lines.join("\n");
+            source.push('\n');
+            return true;
+        }
+        if index == 0 {
+            return false;
+        }
+        index -= 1;
+    }
+}
+
+fn item_header_can_own_field_dead_code(trimmed: &str) -> bool {
+    let without_visibility = trimmed
+        .strip_prefix("pub ")
+        .or_else(|| trimmed.strip_prefix("pub(crate) "))
+        .or_else(|| trimmed.strip_prefix("pub(super) "))
+        .or_else(|| trimmed.strip_prefix("pub(in "))
+        .unwrap_or(trimmed);
+    without_visibility.starts_with("struct ")
+        || without_visibility.starts_with("enum ")
+        || without_visibility.starts_with("union ")
+}
+
 fn remove_import_span(source: &mut String, candidate: &ImportSpanCandidate) -> bool {
     let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
     let Some(line_index) = candidate.line_start.checked_sub(1) else {
@@ -494,7 +590,9 @@ fn remove_import_span(source: &mut String, candidate: &ImportSpanCandidate) -> b
     };
 
     if candidate.remove_line {
-        lines.remove(line_index);
+        if !remove_use_statement_at_line(&mut lines, line_index) {
+            lines.remove(line_index);
+        }
         *source = lines.join("\n");
         source.push('\n');
         return true;
@@ -537,7 +635,12 @@ fn column_to_byte_index(line: &str, one_based_column: usize) -> usize {
 }
 
 fn cleanup_import_line(line: &str) -> String {
-    let mut cleaned = line.to_string();
+    let indentation_len = line.len() - line.trim_start().len();
+    let indentation = &line[..indentation_len];
+    let mut cleaned = line[indentation_len..].to_string();
+    while cleaned.trim_start().starts_with(',') {
+        cleaned = cleaned.trim_start()[1..].trim_start().to_string();
+    }
     for _ in 0..4 {
         cleaned = cleaned
             .replace("{, ", "{")
@@ -547,7 +650,69 @@ fn cleanup_import_line(line: &str) -> String {
             .replace(", ,", ",")
             .replace("{ }", "{}");
     }
-    cleaned
+    format!("{indentation}{cleaned}")
+}
+
+fn remove_use_statement_at_line(lines: &mut Vec<String>, line_index: usize) -> bool {
+    let Some(line) = lines.get(line_index) else {
+        return false;
+    };
+    if !line.trim_start().starts_with("use ") {
+        return false;
+    }
+
+    let Some(end) = use_statement_end(lines, line_index) else {
+        return false;
+    };
+    lines.drain(line_index..=end);
+    true
+}
+
+fn use_statement_end(lines: &[String], line_index: usize) -> Option<usize> {
+    let mut depth = 0isize;
+    for (index, line) in lines.iter().enumerate().skip(line_index) {
+        for character in line.chars() {
+            match character {
+                '{' => depth += 1,
+                '}' => depth -= 1,
+                ';' if depth <= 0 => return Some(index),
+                _ => {}
+            }
+        }
+    }
+    None
+}
+
+fn filter_import_candidates_covered_by_whole_use_removals(
+    source: &str,
+    candidates: Vec<ImportSpanCandidate>,
+) -> Vec<ImportSpanCandidate> {
+    let lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let whole_use_ranges = candidates
+        .iter()
+        .filter(|candidate| candidate.remove_line)
+        .filter_map(|candidate| {
+            let start = candidate.line_start.checked_sub(1)?;
+            let line = lines.get(start)?;
+            line.trim_start()
+                .starts_with("use ")
+                .then(|| use_statement_end(&lines, start).map(|end| (start + 1, end + 1)))?
+        })
+        .collect::<Vec<_>>();
+
+    if whole_use_ranges.is_empty() {
+        return candidates;
+    }
+
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.remove_line
+                || !whole_use_ranges.iter().any(|(start, end)| {
+                    *start <= candidate.line_start && candidate.line_start <= *end
+                })
+        })
+        .collect()
 }
 
 #[derive(Clone, Debug, Default)]
@@ -802,4 +967,158 @@ fn same_path(left: &PathBuf, right: &PathBuf) -> bool {
         return false;
     };
     left == right
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cleanup_import_line_removes_leading_group_comma() {
+        assert_eq!(cleanup_import_line("    , Envelope,"), "    Envelope,");
+        assert_eq!(cleanup_import_line("    ,"), "    ");
+    }
+
+    #[test]
+    fn remove_import_span_removes_whole_multiline_use_statement() {
+        let mut source = r#"use crate::protocol::params::{
+    InitializeParams,
+    TypedBroadcast,
+};
+
+pub struct Kept;
+"#
+        .to_string();
+
+        let removed = remove_import_span(
+            &mut source,
+            &ImportSpanCandidate {
+                line_start: 1,
+                column_start: 1,
+                column_end: 29,
+                remove_line: true,
+            },
+        );
+
+        assert!(removed);
+        assert_eq!(source, "\npub struct Kept;\n");
+    }
+
+    #[test]
+    fn prune_imports_ignores_nested_spans_inside_removed_multiline_use() {
+        let root = std::env::temp_dir().join(format!(
+            "slicers-cli-import-overlap-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            r#"use crate::protocol::params::{
+    InitializeParams,
+    TypedBroadcast,
+};
+
+pub struct Kept {
+    pub request_timeout: Duration,
+}
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = vec![
+            json!({
+                "code": { "code": "unused_imports" },
+                "message": "unused import",
+                "spans": [{
+                    "file_name": "src/lib.rs",
+                    "line_start": 1,
+                    "column_start": 1,
+                    "column_end": 31,
+                    "text": [{ "text": "use crate::protocol::params::{" }]
+                }]
+            }),
+            json!({
+                "code": { "code": "unused_imports" },
+                "message": "unused import",
+                "spans": [{
+                    "file_name": "src/lib.rs",
+                    "line_start": 2,
+                    "column_start": 5,
+                    "column_end": 21,
+                    "text": [{ "text": "    InitializeParams," }]
+                }]
+            }),
+        ];
+
+        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let source = std::fs::read_to_string(source_path).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!source.contains("use crate::protocol::params"));
+        assert!(source.contains("pub struct Kept {"));
+        assert!(source.contains("pub request_timeout: Duration"));
+    }
+
+    #[test]
+    fn prune_dead_items_keeps_item_lines_stable_when_imports_are_removed() {
+        let root = std::env::temp_dir().join(format!(
+            "slicers-cli-prune-order-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            r#"use crate::foo::{
+    A,
+};
+
+pub struct Config {
+    socket_path: PathBuf,
+    request_timeout: Duration,
+}
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = vec![
+            json!({
+                "code": { "code": "unused_imports" },
+                "message": "unused import",
+                "spans": [{
+                    "file_name": "src/lib.rs",
+                    "line_start": 1,
+                    "column_start": 1,
+                    "column_end": 18,
+                    "text": [{ "text": "use crate::foo::{" }]
+                }]
+            }),
+            json!({
+                "code": { "code": "dead_code" },
+                "message": "field `socket_path` is never read",
+                "spans": [{
+                    "file_name": "src/lib.rs",
+                    "line_start": 6,
+                    "text": [{ "text": "    socket_path: PathBuf," }]
+                }]
+            }),
+        ];
+
+        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let source = std::fs::read_to_string(source_path).unwrap();
+
+        assert_eq!(removed, 2);
+        assert!(source.contains("#[allow(dead_code)]"));
+        assert!(source.contains("pub struct Config {"));
+        assert!(source.contains("socket_path: PathBuf"));
+        assert!(source.contains("request_timeout: Duration"));
+        assert!(!source.contains("use crate::foo"));
+    }
 }
