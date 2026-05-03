@@ -505,6 +505,25 @@ fn cfg_attr_nested_macro_counts(attribute: &Attribute) -> SyntacticHazardCounts 
         return SyntacticHazardCounts::default();
     };
 
+    cfg_attr_argument_macro_counts(&arguments)
+}
+
+fn cfg_attr_meta_nested_macro_counts(meta: &Meta) -> SyntacticHazardCounts {
+    let Meta::List(list) = meta else {
+        return SyntacticHazardCounts::default();
+    };
+    let Ok(arguments) =
+        Punctuated::<Meta, syn::Token![,]>::parse_terminated.parse2(list.tokens.clone())
+    else {
+        return SyntacticHazardCounts::default();
+    };
+
+    cfg_attr_argument_macro_counts(&arguments)
+}
+
+fn cfg_attr_argument_macro_counts(
+    arguments: &Punctuated<Meta, syn::Token![,]>,
+) -> SyntacticHazardCounts {
     let mut counts = SyntacticHazardCounts::default();
     for nested_attr in arguments.iter().skip(1) {
         add_meta_macro_counts(nested_attr, &mut counts);
@@ -513,6 +532,10 @@ fn cfg_attr_nested_macro_counts(attribute: &Attribute) -> SyntacticHazardCounts 
 }
 
 fn add_meta_macro_counts(meta: &Meta, counts: &mut SyntacticHazardCounts) {
+    if meta.path().is_ident("cfg_attr") {
+        counts.add(cfg_attr_meta_nested_macro_counts(meta));
+        return;
+    }
     if meta.path().is_ident("derive") {
         counts.custom_derive_macros += custom_derive_meta_count(meta);
         return;
@@ -1218,8 +1241,8 @@ pub fn entry() -> Payload {
     Payload { value: 1 }
 }
 
-#[cfg_attr(feature = "ffi", uniffi::export)]
-#[cfg_attr(feature = "ffi", derive(Debug, uniffi::Record))]
+#[cfg_attr(feature = "ffi", cfg_attr(feature = "bindings", uniffi::export))]
+#[cfg_attr(feature = "ffi", cfg_attr(feature = "bindings", derive(Debug, uniffi::Record)))]
 pub struct Payload {
     value: i32,
 }
