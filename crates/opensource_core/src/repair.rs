@@ -18,6 +18,8 @@ pub struct RepairOptions {
 pub struct RepairReport {
     pub removed_items: usize,
     pub removed_imports: usize,
+    #[serde(default)]
+    pub normalized_paths: usize,
     pub added_dead_code_allows: usize,
     pub deferred_dead_code_allows: usize,
     pub skipped_diagnostics: usize,
@@ -30,12 +32,17 @@ pub struct RepairFileChange {
     pub path: PathBuf,
     pub removed_items: usize,
     pub removed_imports: usize,
+    #[serde(default)]
+    pub normalized_paths: usize,
     pub added_dead_code_allows: usize,
 }
 
 impl RepairReport {
     pub fn total_changes(&self) -> usize {
-        self.removed_items + self.removed_imports + self.added_dead_code_allows
+        self.removed_items
+            + self.removed_imports
+            + self.normalized_paths
+            + self.added_dead_code_allows
     }
 }
 
@@ -44,10 +51,31 @@ pub fn repair_workspace(
 ) -> Result<RepairReport, Box<dyn std::error::Error>> {
     let mut item_candidates_by_file = BTreeMap::<PathBuf, Vec<DeadItemCandidate>>::new();
     let mut import_candidates_by_file = BTreeMap::<PathBuf, Vec<ImportSpanCandidate>>::new();
+    let mut syntax_candidates_by_file = BTreeMap::<PathBuf, Vec<PathSyntaxCandidate>>::new();
     let mut allow_candidates_by_file = BTreeMap::<PathBuf, Vec<AllowDeadCodeCandidate>>::new();
     let mut skipped_diagnostics = 0;
 
     for diagnostic in &options.diagnostics {
+        if diagnostic.level == "error" {
+            let mut repaired = false;
+            for span in diagnostic.spans.iter().filter(|span| span.is_primary) {
+                let Some(path) = diagnostic_path(&options.output_root, &span.file_name) else {
+                    continue;
+                };
+                if let Some(candidate) = path_syntax_candidate(diagnostic, span) {
+                    syntax_candidates_by_file
+                        .entry(path)
+                        .or_default()
+                        .push(candidate);
+                    repaired = true;
+                }
+            }
+            if !repaired {
+                skipped_diagnostics += 1;
+            }
+            continue;
+        }
+
         if diagnostic.level != "warning" {
             skipped_diagnostics += 1;
             continue;
@@ -114,8 +142,35 @@ pub fn repair_workspace(
         skipped_diagnostics,
         ..RepairReport::default()
     };
-    let has_structural_repairs =
-        !item_candidates_by_file.is_empty() || !import_candidates_by_file.is_empty();
+    let has_structural_repairs = !syntax_candidates_by_file.is_empty()
+        || !item_candidates_by_file.is_empty()
+        || !import_candidates_by_file.is_empty();
+    for (path, mut candidates) in syntax_candidates_by_file {
+        if !path.exists() {
+            continue;
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .line_start
+                .cmp(&left.line_start)
+                .then_with(|| right.column_start.cmp(&left.column_start))
+                .then_with(|| right.kind.cmp(&left.kind))
+        });
+        candidates.dedup();
+        drop_candidates_covered_by_malformed_use_removals(&mut candidates);
+        let mut source = fs::read_to_string(&path)?;
+        let mut normalized_paths = 0;
+        for candidate in candidates {
+            if repair_path_syntax(&mut source, &candidate) {
+                report.normalized_paths += 1;
+                normalized_paths += 1;
+            }
+        }
+        if normalized_paths > 0 {
+            record_file_change(&mut report, &path, 0, 0, normalized_paths, 0);
+        }
+        fs::write(path, source)?;
+    }
     for (path, mut candidates) in item_candidates_by_file {
         if !path.exists() {
             continue;
@@ -131,7 +186,7 @@ pub fn repair_workspace(
             }
         }
         if removed_items > 0 {
-            record_file_change(&mut report, &path, removed_items, 0, 0);
+            record_file_change(&mut report, &path, removed_items, 0, 0, 0);
         }
         fs::write(path, source)?;
     }
@@ -165,7 +220,7 @@ pub fn repair_workspace(
             }
         }
         if removed_imports > 0 {
-            record_file_change(&mut report, &path, 0, removed_imports, 0);
+            record_file_change(&mut report, &path, 0, removed_imports, 0, 0);
         }
         fs::write(path, source)?;
     }
@@ -191,7 +246,7 @@ pub fn repair_workspace(
                 }
             }
             if added_allows > 0 {
-                record_file_change(&mut report, &path, 0, 0, added_allows);
+                record_file_change(&mut report, &path, 0, 0, 0, added_allows);
             }
             fs::write(path, source)?;
         }
@@ -205,6 +260,7 @@ fn record_file_change(
     path: &Path,
     removed_items: usize,
     removed_imports: usize,
+    normalized_paths: usize,
     added_dead_code_allows: usize,
 ) {
     if let Some(change) = report
@@ -214,6 +270,7 @@ fn record_file_change(
     {
         change.removed_items += removed_items;
         change.removed_imports += removed_imports;
+        change.normalized_paths += normalized_paths;
         change.added_dead_code_allows += added_dead_code_allows;
         return;
     }
@@ -221,6 +278,7 @@ fn record_file_change(
         path: path.to_path_buf(),
         removed_items,
         removed_imports,
+        normalized_paths,
         added_dead_code_allows,
     });
 }
@@ -254,6 +312,21 @@ struct ImportSpanCandidate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AllowDeadCodeCandidate {
     line_start: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct PathSyntaxCandidate {
+    kind: PathSyntaxRepairKind,
+    line_start: usize,
+    column_start: usize,
+    column_end: usize,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+enum PathSyntaxRepairKind {
+    MalformedUseRoot,
+    RepeatedSeparator,
+    AbsoluteTypeRoot,
 }
 
 fn diagnostic_path(output_root: &Path, file_name: &str) -> Option<PathBuf> {
@@ -347,6 +420,190 @@ fn clean_ident_token(token: &str) -> Option<String> {
 
 fn span_text(span: &CheckSpan) -> Option<&str> {
     span.text.first().map(String::as_str)
+}
+
+fn path_syntax_candidate(
+    diagnostic: &CheckDiagnostic,
+    span: &CheckSpan,
+) -> Option<PathSyntaxCandidate> {
+    let text = span_text(span).unwrap_or_default();
+    let line_start = span.line_start as usize;
+    if line_has_malformed_use_root(text) {
+        return Some(PathSyntaxCandidate {
+            kind: PathSyntaxRepairKind::MalformedUseRoot,
+            line_start,
+            column_start: 1,
+            column_end: text.chars().count() + 1,
+        });
+    }
+
+    let column_start = span.column_start as usize;
+    let column_end = span.column_end as usize;
+    if repeated_path_separator_is_repairable(&diagnostic.message)
+        && repeated_path_separator_span(text, column_start).is_some()
+    {
+        return Some(PathSyntaxCandidate {
+            kind: PathSyntaxRepairKind::RepeatedSeparator,
+            line_start,
+            column_start,
+            column_end,
+        });
+    }
+
+    if absolute_type_root_is_repairable(diagnostic)
+        && line_has_absolute_type_root_at_span(text, span)
+    {
+        return Some(PathSyntaxCandidate {
+            kind: PathSyntaxRepairKind::AbsoluteTypeRoot,
+            line_start,
+            column_start,
+            column_end,
+        });
+    }
+
+    None
+}
+
+fn repeated_path_separator_is_repairable(message: &str) -> bool {
+    message.contains("path separator must be a double colon")
+        || message.contains("expected identifier, found `::`")
+}
+
+fn absolute_type_root_is_repairable(diagnostic: &CheckDiagnostic) -> bool {
+    matches!(diagnostic.code.as_deref(), Some("E0425" | "E0433"))
+        && diagnostic
+            .message
+            .contains("in the list of imported crates")
+}
+
+fn line_has_malformed_use_root(line: &str) -> bool {
+    let Some(rest) = use_path_after_prefix(line) else {
+        return false;
+    };
+    let rest = rest.trim_start();
+    rest.starts_with(":::")
+}
+
+fn use_path_after_prefix(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    if let Some(rest) = trimmed.strip_prefix("use ") {
+        return Some(rest);
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("pub ")
+        .and_then(|rest| rest.strip_prefix("use "))
+    {
+        return Some(rest);
+    }
+    if let Some(rest) = trimmed
+        .strip_prefix("pub(crate) ")
+        .or_else(|| trimmed.strip_prefix("pub(super) "))
+        .and_then(|rest| rest.strip_prefix("use "))
+    {
+        return Some(rest);
+    }
+    trimmed
+        .strip_prefix("pub(in ")
+        .and_then(|rest| rest.split_once(") "))
+        .and_then(|(_, rest)| rest.strip_prefix("use "))
+}
+
+fn line_has_absolute_type_root_at_span(line: &str, span: &CheckSpan) -> bool {
+    let start = column_to_byte_index(line, span.column_start as usize);
+    let end = column_to_byte_index(line, span.column_end as usize);
+    let Some(identifier) = line.get(start..end).and_then(first_ident_prefix) else {
+        return false;
+    };
+    let identifier = identifier.strip_prefix("r#").unwrap_or(identifier);
+    if !identifier
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_uppercase())
+    {
+        return false;
+    }
+    if matches!(identifier, "Self" | "Super" | "Crate") {
+        return false;
+    }
+    if start < 2 || line.get(start - 2..start) != Some("::") {
+        return false;
+    }
+    if count_preceding_colons(line, start) != 2 {
+        return false;
+    }
+    let Some(prefix) = line.get(..start - 2) else {
+        return false;
+    };
+    match prefix.chars().next_back() {
+        Some(character) => character_can_precede_absolute_root(character),
+        None => true,
+    }
+}
+
+fn first_ident_prefix(text: &str) -> Option<&str> {
+    let end = text
+        .char_indices()
+        .find(|(_, character)| {
+            !(character.is_ascii_alphanumeric() || *character == '_' || *character == '#')
+        })
+        .map(|(index, _)| index)
+        .unwrap_or(text.len());
+    (end > 0).then_some(&text[..end])
+}
+
+fn count_preceding_colons(line: &str, byte_index: usize) -> usize {
+    line.as_bytes()[..byte_index]
+        .iter()
+        .rev()
+        .take_while(|byte| **byte == b':')
+        .count()
+}
+
+fn character_can_precede_absolute_root(character: char) -> bool {
+    character.is_whitespace()
+        || matches!(
+            character,
+            '(' | '[' | '{' | '<' | ',' | '=' | ':' | ';' | '&' | '|' | '!' | '?'
+        )
+}
+
+fn repeated_path_separator_span(line: &str, one_based_column: usize) -> Option<(usize, usize)> {
+    let bytes = line.as_bytes();
+    if bytes.is_empty() {
+        return None;
+    }
+    let mut cursor = column_to_byte_index(line, one_based_column).min(bytes.len());
+    if cursor == bytes.len() || bytes[cursor] != b':' {
+        if cursor == 0 || bytes[cursor - 1] != b':' {
+            return None;
+        }
+        cursor -= 1;
+    }
+
+    let mut start = cursor;
+    while start > 0 && bytes[start - 1] == b':' {
+        start -= 1;
+    }
+    let mut end = cursor;
+    while end < bytes.len() && bytes[end] == b':' {
+        end += 1;
+    }
+    (end - start > 2).then_some((start, end))
+}
+
+fn drop_candidates_covered_by_malformed_use_removals(candidates: &mut Vec<PathSyntaxCandidate>) {
+    let malformed_use_lines = candidates
+        .iter()
+        .filter(|candidate| candidate.kind == PathSyntaxRepairKind::MalformedUseRoot)
+        .map(|candidate| candidate.line_start)
+        .collect::<BTreeSet<_>>();
+    if malformed_use_lines.is_empty() {
+        return;
+    }
+    candidates.retain(|candidate| {
+        candidate.kind == PathSyntaxRepairKind::MalformedUseRoot
+            || !malformed_use_lines.contains(&candidate.line_start)
+    });
 }
 
 fn is_use_statement_start(text: &str) -> bool {
@@ -498,6 +755,82 @@ fn remove_import_span(source: &mut String, candidate: &ImportSpanCandidate) -> b
     true
 }
 
+fn repair_path_syntax(source: &mut String, candidate: &PathSyntaxCandidate) -> bool {
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(line_index) = candidate.line_start.checked_sub(1) else {
+        return false;
+    };
+
+    match candidate.kind {
+        PathSyntaxRepairKind::MalformedUseRoot => {
+            if !remove_malformed_use_statement_at_line(&mut lines, line_index) {
+                return false;
+            }
+        }
+        PathSyntaxRepairKind::RepeatedSeparator => {
+            let Some(line) = lines.get_mut(line_index) else {
+                return false;
+            };
+            if !collapse_repeated_path_separator_at_span(line, candidate.column_start) {
+                return false;
+            }
+        }
+        PathSyntaxRepairKind::AbsoluteTypeRoot => {
+            let Some(line) = lines.get_mut(line_index) else {
+                return false;
+            };
+            if !remove_absolute_type_root_at_span(line, candidate) {
+                return false;
+            }
+        }
+    }
+
+    *source = join_lines(lines);
+    true
+}
+
+fn collapse_repeated_path_separator_at_span(line: &mut String, one_based_column: usize) -> bool {
+    let Some((start, end)) = repeated_path_separator_span(line, one_based_column) else {
+        return false;
+    };
+    line.replace_range(start..end, "::");
+    true
+}
+
+fn remove_absolute_type_root_at_span(line: &mut String, candidate: &PathSyntaxCandidate) -> bool {
+    let start = column_to_byte_index(line, candidate.column_start);
+    let end = column_to_byte_index(line, candidate.column_end);
+    let Some(identifier) = line.get(start..end).and_then(first_ident_prefix) else {
+        return false;
+    };
+    let identifier = identifier.strip_prefix("r#").unwrap_or(identifier);
+    if !identifier
+        .chars()
+        .next()
+        .is_some_and(|character| character.is_ascii_uppercase())
+    {
+        return false;
+    }
+    if start < 2 || line.get(start - 2..start) != Some("::") {
+        return false;
+    }
+    if count_preceding_colons(line, start) != 2 {
+        return false;
+    }
+    let Some(prefix) = line.get(..start - 2) else {
+        return false;
+    };
+    let can_remove = match prefix.chars().next_back() {
+        Some(character) => character_can_precede_absolute_root(character),
+        None => true,
+    };
+    if !can_remove {
+        return false;
+    }
+    line.replace_range(start - 2..start, "");
+    true
+}
+
 fn add_dead_code_allow_for_enclosing_type(
     source: &mut String,
     candidate: &AllowDeadCodeCandidate,
@@ -623,6 +956,28 @@ fn remove_use_statement_at_line(lines: &mut Vec<String>, line_index: usize) -> b
         return false;
     };
     lines.drain(line_index..=end);
+    true
+}
+
+fn remove_malformed_use_statement_at_line(lines: &mut Vec<String>, line_index: usize) -> bool {
+    let Some(start) = (0..=line_index).rev().find(|index| {
+        lines
+            .get(*index)
+            .is_some_and(|line| is_use_statement_start(line))
+    }) else {
+        return false;
+    };
+    let Some(end) = use_statement_end(lines, start) else {
+        return false;
+    };
+    if line_index > end {
+        return false;
+    }
+    let statement = lines[start..=end].join(" ");
+    if !line_has_malformed_use_root(&statement) {
+        return false;
+    }
+    lines.drain(start..=end);
     true
 }
 
@@ -1094,6 +1449,123 @@ mod tests {
         assert!(source.contains("socket_path: String"));
     }
 
+    #[test]
+    fn removes_malformed_use_root_from_compiler_error() {
+        let root = temp_output("repair-malformed-use-root");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "use ::::{Removed};\n\npub fn keep() -> usize {\n    1\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![error(
+                None,
+                "expected identifier, found `::`",
+                "src/lib.rs",
+                1,
+                7,
+                9,
+                "use ::::{Removed};",
+            )],
+        })
+        .unwrap();
+
+        assert_eq!(report.normalized_paths, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.skipped_diagnostics, 0);
+        assert_eq!(report.changed_files.len(), 1);
+        assert_eq!(report.changed_files[0].normalized_paths, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(!source.contains("Removed"));
+        assert!(source.contains("pub fn keep"));
+    }
+
+    #[test]
+    fn collapses_repeated_path_separator_at_compiler_span() {
+        let root = temp_output("repair-repeated-path-separator");
+        let file = root.join("src/lib.rs");
+        write(&file, "pub fn run() {\n    module:::value();\n}\n");
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![error(
+                None,
+                "path separator must be a double colon",
+                "src/lib.rs",
+                2,
+                13,
+                14,
+                "    module:::value();",
+            )],
+        })
+        .unwrap();
+
+        assert_eq!(report.normalized_paths, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(source.contains("module::value();"));
+        assert!(!source.contains("module:::value();"));
+    }
+
+    #[test]
+    fn removes_uppercase_absolute_type_root_remnant() {
+        let root = temp_output("repair-absolute-type-root");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "pub struct Local;\npub fn build() {\n    let _ = ::Local;\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![error(
+                Some("E0425"),
+                "cannot find crate `Local` in the list of imported crates",
+                "src/lib.rs",
+                3,
+                15,
+                20,
+                "    let _ = ::Local;",
+            )],
+        })
+        .unwrap();
+
+        assert_eq!(report.normalized_paths, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(source.contains("let _ = Local;"));
+        assert!(!source.contains("::Local"));
+    }
+
+    #[test]
+    fn keeps_lowercase_absolute_crate_roots_for_widening() {
+        let root = temp_output("repair-lowercase-crate-root");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "pub fn build() {\n    let _ = ::std::fmt::Error;\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![error(
+                Some("E0433"),
+                "failed to resolve: could not find `std` in the list of imported crates",
+                "src/lib.rs",
+                2,
+                15,
+                18,
+                "    let _ = ::std::fmt::Error;",
+            )],
+        })
+        .unwrap();
+
+        assert_eq!(report.normalized_paths, 0);
+        assert_eq!(report.skipped_diagnostics, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(source.contains("::std::fmt::Error"));
+    }
+
     fn warning(
         code: &str,
         message: &str,
@@ -1107,6 +1579,34 @@ mod tests {
             level: "warning".to_string(),
             message: message.to_string(),
             code: Some(code.to_string()),
+            package_id: None,
+            target: None,
+            rendered: None,
+            spans: vec![CheckSpan {
+                file_name: file_name.to_string(),
+                line_start,
+                line_end: line_start,
+                column_start,
+                column_end,
+                is_primary: true,
+                text: vec![text.to_string()],
+            }],
+        }
+    }
+
+    fn error(
+        code: Option<&str>,
+        message: &str,
+        file_name: &str,
+        line_start: u64,
+        column_start: u64,
+        column_end: u64,
+        text: &str,
+    ) -> CheckDiagnostic {
+        CheckDiagnostic {
+            level: "error".to_string(),
+            message: message.to_string(),
+            code: code.map(str::to_string),
             package_id: None,
             target: None,
             rendered: None,
