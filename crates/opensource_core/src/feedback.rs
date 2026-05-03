@@ -270,6 +270,15 @@ fn classify_widening_candidate(diagnostic: &CheckDiagnostic) -> Option<FeedbackW
 }
 
 fn classify_feedback_hazard(diagnostic: &CheckDiagnostic) -> Option<FeedbackHazard> {
+    if semantic_warning_is_hazard(diagnostic) {
+        return Some(FeedbackHazard {
+            kind: "semantic-warning".to_string(),
+            severity: "high".to_string(),
+            code: diagnostic.code.clone(),
+            message: diagnostic.message.clone(),
+        });
+    }
+
     let code = diagnostic.code.as_deref()?;
     let (kind, severity) = match code {
         "cargo-timeout" => ("feedback-timeout", "blocker"),
@@ -289,6 +298,19 @@ fn classify_feedback_hazard(diagnostic: &CheckDiagnostic) -> Option<FeedbackHaza
         code: diagnostic.code.clone(),
         message: diagnostic.message.clone(),
     })
+}
+
+fn semantic_warning_is_hazard(diagnostic: &CheckDiagnostic) -> bool {
+    if diagnostic.level != "warning" {
+        return false;
+    }
+    matches!(
+        diagnostic.code.as_deref(),
+        Some("unreachable_patterns" | "irrefutable_let_patterns" | "bindings_with_variant_name")
+    ) || (diagnostic.code.as_deref() == Some("non_snake_case")
+        && diagnostic.message.contains("variable `"))
+        || diagnostic.message.contains("unreachable pattern")
+        || diagnostic.message.contains("irrefutable")
 }
 
 fn hazard_severity_rank(severity: &str) -> usize {
@@ -561,6 +583,33 @@ mod tests {
     }
 
     #[test]
+    fn classifies_semantic_warning_feedback_hazards() {
+        let diagnostics = vec![
+            warning(
+                "unreachable_patterns",
+                "unreachable pattern",
+                "src/lib.rs",
+                9,
+            ),
+            warning(
+                "non_snake_case",
+                "variable `HTTP_OK` should have a snake case name",
+                "src/lib.rs",
+                12,
+            ),
+        ];
+
+        let widening = classify_feedback(&diagnostics);
+
+        assert!(widening.candidates.is_empty());
+        assert_eq!(widening.hazards.len(), 2);
+        assert!(widening
+            .hazards
+            .iter()
+            .all(|hazard| { hazard.kind == "semantic-warning" && hazard.severity == "high" }));
+    }
+
+    #[test]
     fn turns_stderr_only_cargo_failure_into_error_diagnostic() {
         let diagnostic = stderr_failure_diagnostic(
             "\nerror: failed to load manifest for workspace member `/tmp/out/member`\n\nCaused by:\n  missing dependency\n",
@@ -722,8 +771,22 @@ mod tests {
     }
 
     fn diagnostic(code: &str, message: &str, file_name: &str, line_start: u64) -> CheckDiagnostic {
+        check_diagnostic("error", code, message, file_name, line_start)
+    }
+
+    fn warning(code: &str, message: &str, file_name: &str, line_start: u64) -> CheckDiagnostic {
+        check_diagnostic("warning", code, message, file_name, line_start)
+    }
+
+    fn check_diagnostic(
+        level: &str,
+        code: &str,
+        message: &str,
+        file_name: &str,
+        line_start: u64,
+    ) -> CheckDiagnostic {
         CheckDiagnostic {
-            level: "error".to_string(),
+            level: level.to_string(),
             message: message.to_string(),
             code: Some(code.to_string()),
             rendered: None,

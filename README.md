@@ -117,7 +117,9 @@ arguments through to baseline and generated `cargo check` runs, for example
 Feedback reports also classify unresolved compiler diagnostics into widening
 candidates and production hazards, so missing paths, items, methods, crates,
 module files, timeouts, and manifest-shape failures can be triaged without
-reading raw `cargo check` output.
+reading raw `cargo check` output. Semantic drift warnings that can mean pruning
+changed behavior, such as unreachable patterns or missing-constant pattern
+bindings, are classified as feedback hazards too.
 Use `--deny-warnings` when a production validation run should reject generated
 workspaces that compile with warnings.
 `--feedback-repair-loop <n>` runs bounded compiler feedback with conservative
