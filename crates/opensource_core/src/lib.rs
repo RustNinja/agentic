@@ -205,6 +205,7 @@ fn production_readiness_report(
             "configured analyzer did not load; generated reachability used fallback evidence",
         ));
     }
+    add_semantic_inventory_hazard(analyzer, &mut hazards);
 
     let Some(semantic) = &analyzer.semantic else {
         hazards.push(production_hazard(
@@ -277,6 +278,19 @@ fn production_readiness_report(
     }
 
     production_readiness_status(hazards)
+}
+
+fn add_semantic_inventory_hazard(
+    analyzer: &AnalyzerReport,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    if analyzer.semantic.is_some() {
+        hazards.push(production_hazard(
+            "semantic_inventory_not_applied",
+            "warning",
+            "semantic analyzer inventory is report-only in this build; compiler feedback is still required before trusting the slice",
+        ));
+    }
 }
 
 fn add_syntactic_production_hazards(
@@ -775,7 +789,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::{generate, write_generate_report, GenerateOptions};
+    use super::{
+        add_semantic_inventory_hazard, generate, write_generate_report, AnalyzerMode,
+        AnalyzerReport, GenerateOptions, SemanticReport,
+    };
 
     #[test]
     fn reduces_fixture_to_reachable_callables() {
@@ -946,6 +963,24 @@ mod tests {
             .find(|location| location["id"] == "a::internal_entry")
             .expect("unreachable callable should still have a source-map entry");
         assert_eq!(internal_location["reachable"], false);
+    }
+
+    #[test]
+    fn reports_semantic_inventory_as_report_only_production_hazard() {
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerHir,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+        };
+        let mut hazards = Vec::new();
+
+        add_semantic_inventory_hazard(&analyzer, &mut hazards);
+
+        assert!(hazards
+            .iter()
+            .any(|hazard| hazard.code == "semantic_inventory_not_applied"));
     }
 
     #[test]

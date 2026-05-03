@@ -141,8 +141,10 @@ needed.
 
 This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A
-rust-analyzer HIR or rustc-driver backend remains the next precision step for
-resolving hard name-resolution cases before rendering.
+rust-analyzer HIR run currently contributes report-only semantic inventory; the
+production report marks that boundary explicitly until those edges are consumed
+by reduction. A rust-analyzer HIR or rustc-driver backend remains the next
+precision step for resolving hard name-resolution cases before rendering.
 Generation reports fail closed on known syntactic trust hazards as well,
 including retained `include!` source macros and non-literal file include macros
 that cannot be fully validated by static path copying alone, plus retained
