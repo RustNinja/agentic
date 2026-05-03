@@ -942,6 +942,44 @@ fn rewrites_features_and_keeps_target_dependencies_and_build_script() {
 }
 
 #[test]
+fn retains_local_build_dependencies_for_retained_build_scripts() {
+    let workspace = temp_path("build-dependency-workspace");
+    let output = temp_path("build-dependency-output");
+    let target_dir = temp_path("build-dependency-target");
+    write_build_dependency_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "build_helper"]);
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    assert!(
+        app_manifest.contains("build_helper"),
+        "app manifest should retain local build-dependency\n{app_manifest}"
+    );
+    assert!(output.join("build_helper/src/lib.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated build-dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+    );
+}
+
+#[test]
 fn keeps_optional_dependency_requested_by_retained_local_package_feature() {
     let workspace = temp_path("implicit-feature-workspace");
     let output = temp_path("implicit-feature-output");
@@ -3368,6 +3406,66 @@ pub fn platform() -> String {
         r#"
 pub fn dead() -> String {
     "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_build_dependency_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "build_helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+opensourced.workspace = true
+
+[build-dependencies]
+build_helper = { path = "../build_helper" }
+"#,
+    );
+    write(
+        root.join("app/build.rs"),
+        r#"fn main() {
+    build_helper::emit();
+}
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    "selected"
+}
+"#,
+    );
+    write_package(
+        root,
+        "build_helper",
+        r#"pub fn emit() {
+    println!("cargo:rerun-if-changed=build.rs");
 }
 "#,
     );

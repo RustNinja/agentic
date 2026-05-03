@@ -37,16 +37,33 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(semantic) = &report.analyzer.semantic {
         println!(
-            "  analyzer semantic files: {}/{} analyzed ({} failed)",
-            semantic.analyzed_files, semantic.source_files, semantic.failed_files
+            "  analyzer semantic files: {}/{} analyzed ({} failed, {} skipped by budget)",
+            semantic.analyzed_files,
+            semantic.source_files,
+            semantic.failed_files,
+            semantic.skipped_files
         );
         println!(
-            "  analyzer method calls: {}/{} resolved ({} unresolved)",
-            semantic.resolved_method_calls, semantic.method_calls, semantic.unresolved_method_calls
+            "  analyzer budgets: files={}, method_calls={}, paths={}",
+            semantic.file_budget, semantic.method_call_budget, semantic.path_budget
         );
         println!(
-            "  analyzer paths: {}/{} resolved ({} unresolved)",
-            semantic.resolved_paths, semantic.paths, semantic.unresolved_paths
+            "  analyzer method calls: {}/{} queried function-resolved, {}/{} callable, {}/{} fallback ({} unresolved, {} unqueried)",
+            semantic.resolved_method_calls,
+            semantic.queried_method_calls,
+            semantic.callable_method_calls,
+            semantic.queried_method_calls,
+            semantic.fallback_method_calls,
+            semantic.queried_method_calls,
+            semantic.unresolved_method_calls,
+            semantic.unqueried_method_calls
+        );
+        println!(
+            "  analyzer paths: {}/{} queried resolved ({} unresolved, {} unqueried)",
+            semantic.resolved_paths,
+            semantic.queried_paths,
+            semantic.unresolved_paths,
+            semantic.unqueried_paths
         );
     }
     if report.roots.len() == 1 {

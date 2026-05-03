@@ -9,6 +9,7 @@ use syn::{
     GenericArgument, ImplItem, Item, ItemMacro, Local, Macro, Member, Meta, Pat, PatTupleStruct,
     Path, PathArguments, ReturnType, Stmt, Type, TypePath, UseTree,
 };
+use toml::Value;
 
 use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId};
 
@@ -156,6 +157,13 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
 
     let mut packages = reachable_packages(&roots, &reachable, &reachable_items);
     add_source_mentioned_dependency_packages(project, &mut packages, &reachable, &reachable_items);
+    let build_dependency_packages = add_local_build_dependency_packages(project, &mut packages);
+    retain_entire_packages(
+        project,
+        &build_dependency_packages,
+        &mut reachable,
+        &mut reachable_items,
+    );
 
     Ok(ReducedProject {
         root,
@@ -774,6 +782,107 @@ fn add_source_mentioned_dependency_packages(
                 }
             }
         }
+    }
+}
+
+fn add_local_build_dependency_packages(
+    project: &Project,
+    packages: &mut BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut retained_build_dependencies = BTreeSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for package_name in packages.clone() {
+            let Some(package) = project.workspace.packages.get(&package_name) else {
+                continue;
+            };
+
+            for dependency_package in local_build_dependency_packages(project, &package.manifest) {
+                for package in package_closure(project, &dependency_package) {
+                    retained_build_dependencies.insert(package.clone());
+                    changed |= packages.insert(package);
+                }
+            }
+        }
+    }
+    retained_build_dependencies
+}
+
+fn retain_entire_packages(
+    project: &Project,
+    packages: &BTreeSet<String>,
+    reachable: &mut BTreeSet<CallableId>,
+    reachable_items: &mut BTreeSet<ItemId>,
+) {
+    if packages.is_empty() {
+        return;
+    }
+
+    reachable.extend(
+        project
+            .functions
+            .keys()
+            .filter(|callable| packages.contains(callable.package()))
+            .cloned(),
+    );
+    reachable.extend(
+        project
+            .methods
+            .keys()
+            .filter(|callable| packages.contains(callable.package()))
+            .cloned(),
+    );
+    reachable_items.extend(
+        project
+            .items
+            .keys()
+            .filter(|item| packages.contains(item.package()))
+            .cloned(),
+    );
+}
+
+fn local_build_dependency_packages(project: &Project, manifest: &Value) -> BTreeSet<String> {
+    let mut packages = BTreeSet::new();
+    if let Some(table) = manifest.get("build-dependencies").and_then(Value::as_table) {
+        collect_local_dependency_packages(project, table, &mut packages);
+    }
+
+    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            if let Some(table) = target.get("build-dependencies").and_then(Value::as_table) {
+                collect_local_dependency_packages(project, table, &mut packages);
+            }
+        }
+    }
+
+    packages
+}
+
+fn collect_local_dependency_packages(
+    project: &Project,
+    table: &toml::value::Table,
+    packages: &mut BTreeSet<String>,
+) {
+    for (alias, value) in table {
+        let package = dependency_package_name(alias, value);
+        if package != "opensourced" && project.workspace.packages.contains_key(&package) {
+            packages.insert(package);
+        }
+    }
+}
+
+fn dependency_package_name(alias: &str, value: &Value) -> String {
+    match value {
+        Value::Table(table) => table
+            .get("package")
+            .and_then(Value::as_str)
+            .unwrap_or(alias)
+            .to_string(),
+        _ => alias.to_string(),
     }
 }
 
