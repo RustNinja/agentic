@@ -152,7 +152,9 @@ custom attribute and derive macros that may generate code outside the static
 parse tree, including macros hidden behind nested `cfg_attr`, and retained
 non-builtin macro invocations. Retained build scripts are also reported because
 they can generate source, link metadata, or asset requirements outside the
-static parse tree.
+static parse tree. Retained `cfg`/`cfg_attr` attributes are reported when a
+slice needs feature or target matrix validation beyond the current host/default
+configuration.
 
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
 mode/notes, production-readiness hazards, roots, packages, reachable

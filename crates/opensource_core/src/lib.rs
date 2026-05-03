@@ -391,6 +391,16 @@ fn add_syntactic_production_hazards(
             ),
         ));
     }
+    if counts.conditional_compilation_attrs > 0 {
+        hazards.push(production_hazard(
+            "conditional_compilation_attrs",
+            "warning",
+            format!(
+                "{} retained cfg/cfg_attr attribute(s) require feature or target matrix validation for full production confidence",
+                counts.conditional_compilation_attrs
+            ),
+        ));
+    }
 }
 
 #[derive(Default)]
@@ -400,6 +410,7 @@ struct SyntacticHazardCounts {
     custom_attribute_macros: usize,
     custom_derive_macros: usize,
     custom_macro_invocations: usize,
+    conditional_compilation_attrs: usize,
 }
 
 impl SyntacticHazardCounts {
@@ -409,6 +420,7 @@ impl SyntacticHazardCounts {
         self.custom_attribute_macros += other.custom_attribute_macros;
         self.custom_derive_macros += other.custom_derive_macros;
         self.custom_macro_invocations += other.custom_macro_invocations;
+        self.conditional_compilation_attrs += other.conditional_compilation_attrs;
     }
 }
 
@@ -439,6 +451,9 @@ struct SyntacticHazardVisitor {
 
 impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
+        if attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr") {
+            self.counts.conditional_compilation_attrs += 1;
+        }
         self.counts.custom_derive_macros += custom_derive_macro_count(attribute);
         if attribute_requires_macro_expansion(attribute) {
             self.counts.custom_attribute_macros += 1;
@@ -1353,6 +1368,11 @@ pub struct Payload {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "custom_derive_macros"));
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "conditional_compilation_attrs"));
     }
 
     #[test]
