@@ -198,6 +198,7 @@ fn production_readiness_report(
     let mut hazards = Vec::new();
     add_workspace_production_hazards(project, reduced, &mut hazards);
     add_syntactic_production_hazards(project, reduced, &mut hazards);
+    add_reduction_evidence_production_hazards(reduced, &mut hazards);
 
     if !analyzer.loaded {
         hazards.push(production_hazard(
@@ -398,6 +399,33 @@ fn add_syntactic_production_hazards(
             format!(
                 "{} retained cfg/cfg_attr attribute(s) require feature or target matrix validation for full production confidence",
                 counts.conditional_compilation_attrs
+            ),
+        ));
+    }
+}
+
+fn add_reduction_evidence_production_hazards(
+    reduced: &ReducedProject,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    let evidence = &reduced.evidence;
+    if evidence.unresolved_method_fallbacks > 0 {
+        hazards.push(production_hazard(
+            "syntactic_method_fallbacks",
+            "warning",
+            format!(
+                "{} unresolved method call(s) used syntactic fallback analysis; {} candidate method(s) were retained by name and require compiler feedback validation",
+                evidence.unresolved_method_fallbacks, evidence.unresolved_method_candidate_matches
+            ),
+        ));
+    }
+    if evidence.capped_unresolved_method_fallbacks > 0 {
+        hazards.push(production_hazard(
+            "syntactic_method_fallback_cap",
+            "warning",
+            format!(
+                "{} unresolved method fallback(s) exceeded the name-only candidate cap; compiler feedback is required to detect any omitted method dependencies",
+                evidence.capped_unresolved_method_fallbacks
             ),
         ));
     }
@@ -1222,6 +1250,59 @@ pub fn entry() -> Vec<i32> {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "custom_macro_invocations"));
+    }
+
+    #[test]
+    fn reports_syntactic_method_fallback_production_hazards() {
+        let root = temp_output("method-fallback-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+macro_rules! make_worker {
+    () => {
+        Worker
+    };
+}
+
+#[opensourced]
+pub fn entry() -> i32 {
+    make_worker!().run()
+}
+
+pub struct Worker;
+
+impl Worker {
+    pub fn run(&self) -> i32 {
+        1
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("method-fallback-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "syntactic_method_fallbacks"));
     }
 
     #[test]

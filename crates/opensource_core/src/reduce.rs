@@ -11,7 +11,9 @@ use syn::{
 };
 use toml::Value;
 
-use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId};
+use crate::model::{
+    CallableId, ItemId, ItemKind, Project, ReducedProject, ReductionEvidence, RootId,
+};
 
 const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 24;
 
@@ -76,6 +78,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
     }
     let mut reachable = BTreeSet::new();
     let mut reachable_items = BTreeSet::new();
+    let mut evidence = ReductionEvidence::default();
     let mut callable_queue = VecDeque::from(callable_roots);
     let mut item_queue = VecDeque::from(item_roots);
 
@@ -88,6 +91,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
             }
 
             let dependencies = callable_dependencies(project, &callable);
+            evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
                     && !reachable.contains(&dependency)
@@ -109,6 +113,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
             }
 
             let dependencies = item_dependencies(project, &item);
+            evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
                     && !reachable.contains(&dependency)
@@ -136,6 +141,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
             &reachable,
             &reachable_items,
         );
+        evidence.add(&dependencies.evidence);
         for dependency in dependencies.callables {
             if candidate_packages.contains(dependency.package()) && !reachable.contains(&dependency)
             {
@@ -154,6 +160,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
             &reachable,
             &reachable_items,
         );
+        evidence.add(&dependencies.evidence);
         for dependency in dependencies.callables {
             if candidate_packages.contains(dependency.package()) && !reachable.contains(&dependency)
             {
@@ -172,6 +179,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
             &reachable,
             &reachable_items,
         );
+        evidence.add(&dependencies.evidence);
         for dependency in dependencies.callables {
             if candidate_packages.contains(dependency.package()) && !reachable.contains(&dependency)
             {
@@ -192,6 +200,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
         &mut packages,
         &mut reachable,
         &mut reachable_items,
+        &mut evidence,
     );
     let build_dependency_packages = add_local_build_dependency_packages(project, &mut packages);
     retain_entire_packages(
@@ -205,6 +214,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
         &mut packages,
         &mut reachable,
         &mut reachable_items,
+        &mut evidence,
     );
 
     Ok(ReducedProject {
@@ -213,6 +223,7 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
         packages,
         reachable,
         reachable_items,
+        evidence,
     })
 }
 
@@ -605,6 +616,7 @@ fn retain_referenced_public_reexport_dependencies(
     packages: &mut BTreeSet<String>,
     reachable: &mut BTreeSet<CallableId>,
     reachable_items: &mut BTreeSet<ItemId>,
+    evidence: &mut ReductionEvidence,
 ) {
     loop {
         let package_count = packages.len();
@@ -616,8 +628,14 @@ fn retain_referenced_public_reexport_dependencies(
             reachable,
             reachable_items,
         );
-        let changed =
-            retain_dependency_set(project, packages, reachable, reachable_items, dependencies);
+        let changed = retain_dependency_set(
+            project,
+            packages,
+            reachable,
+            reachable_items,
+            dependencies,
+            evidence,
+        );
         if !changed && !packages_changed {
             break;
         }
@@ -630,8 +648,10 @@ fn retain_dependency_set(
     reachable: &mut BTreeSet<CallableId>,
     reachable_items: &mut BTreeSet<ItemId>,
     dependencies: DependencySet,
+    evidence: &mut ReductionEvidence,
 ) -> bool {
     let mut changed = false;
+    evidence.add(&dependencies.evidence);
     let mut callable_queue = dependencies
         .callables
         .into_iter()
@@ -656,6 +676,7 @@ fn retain_dependency_set(
             }
             changed = true;
             let dependencies = callable_dependencies(project, &callable);
+            evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
                     && !reachable.contains(&dependency)
@@ -677,6 +698,7 @@ fn retain_dependency_set(
             }
             changed = true;
             let dependencies = item_dependencies(project, &item);
+            evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
                     && !reachable.contains(&dependency)
@@ -1525,6 +1547,7 @@ fn item_has_test_attr(item: &Item) -> bool {
 struct DependencySet {
     callables: BTreeSet<CallableId>,
     items: BTreeSet<ItemId>,
+    evidence: ReductionEvidence,
 }
 
 impl DependencySet {
@@ -1535,6 +1558,7 @@ impl DependencySet {
     fn extend(&mut self, other: Self) {
         self.callables.extend(other.callables);
         self.items.extend(other.items);
+        self.evidence.add(&other.evidence);
     }
 }
 
@@ -2252,9 +2276,17 @@ impl<'a> DependencyVisitor<'a> {
         }
 
         if receiver_candidates.is_empty() && matches.len() > MAX_UNRESOLVED_METHOD_NAME_CANDIDATES {
+            self.dependencies.evidence.unresolved_method_fallbacks += 1;
+            self.dependencies
+                .evidence
+                .capped_unresolved_method_fallbacks += 1;
             return;
         }
 
+        self.dependencies.evidence.unresolved_method_fallbacks += 1;
+        self.dependencies
+            .evidence
+            .unresolved_method_candidate_matches += matches.len();
         for callable in matches {
             self.add_method_dependency(&callable);
         }
