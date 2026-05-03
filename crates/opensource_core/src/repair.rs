@@ -21,6 +21,16 @@ pub struct RepairReport {
     pub added_dead_code_allows: usize,
     pub deferred_dead_code_allows: usize,
     pub skipped_diagnostics: usize,
+    #[serde(default)]
+    pub changed_files: Vec<RepairFileChange>,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Eq, PartialEq, Serialize)]
+pub struct RepairFileChange {
+    pub path: PathBuf,
+    pub removed_items: usize,
+    pub removed_imports: usize,
+    pub added_dead_code_allows: usize,
 }
 
 impl RepairReport {
@@ -113,10 +123,15 @@ pub fn repair_workspace(
         candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
         candidates.dedup();
         let mut source = fs::read_to_string(&path)?;
+        let mut removed_items = 0;
         for candidate in candidates {
             if remove_item_at_line(&mut source, &candidate) {
                 report.removed_items += 1;
+                removed_items += 1;
             }
+        }
+        if removed_items > 0 {
+            record_file_change(&mut report, &path, removed_items, 0, 0);
         }
         fs::write(path, source)?;
     }
@@ -142,10 +157,15 @@ pub fn repair_workspace(
                 .then_with(|| right.column_start.cmp(&left.column_start))
         });
         candidates.dedup();
+        let mut removed_imports = 0;
         for candidate in candidates {
             if remove_import_span(&mut source, &candidate) {
                 report.removed_imports += 1;
+                removed_imports += 1;
             }
+        }
+        if removed_imports > 0 {
+            record_file_change(&mut report, &path, 0, removed_imports, 0);
         }
         fs::write(path, source)?;
     }
@@ -163,16 +183,46 @@ pub fn repair_workspace(
             candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
             candidates.dedup();
             let mut source = fs::read_to_string(&path)?;
+            let mut added_allows = 0;
             for candidate in candidates {
                 if add_dead_code_allow_for_enclosing_type(&mut source, &candidate) {
                     report.added_dead_code_allows += 1;
+                    added_allows += 1;
                 }
+            }
+            if added_allows > 0 {
+                record_file_change(&mut report, &path, 0, 0, added_allows);
             }
             fs::write(path, source)?;
         }
     }
 
     Ok(report)
+}
+
+fn record_file_change(
+    report: &mut RepairReport,
+    path: &Path,
+    removed_items: usize,
+    removed_imports: usize,
+    added_dead_code_allows: usize,
+) {
+    if let Some(change) = report
+        .changed_files
+        .iter_mut()
+        .find(|change| change.path == path)
+    {
+        change.removed_items += removed_items;
+        change.removed_imports += removed_imports;
+        change.added_dead_code_allows += added_dead_code_allows;
+        return;
+    }
+    report.changed_files.push(RepairFileChange {
+        path: path.to_path_buf(),
+        removed_items,
+        removed_imports,
+        added_dead_code_allows,
+    });
 }
 
 pub fn write_repair_report(
@@ -859,6 +909,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.removed_imports, 1);
+        assert_eq!(report.changed_files.len(), 1);
+        assert_eq!(report.changed_files[0].removed_imports, 1);
         let source = fs::read_to_string(file).unwrap();
         assert!(!source.contains("std::fmt"));
         assert!(source.contains("pub fn keep"));
@@ -888,6 +940,8 @@ mod tests {
         .unwrap();
 
         assert_eq!(report.removed_items, 1);
+        assert_eq!(report.changed_files.len(), 1);
+        assert_eq!(report.changed_files[0].removed_items, 1);
         let source = fs::read_to_string(file).unwrap();
         assert!(!source.contains("dead"));
         assert!(source.contains("pub fn keep"));
@@ -958,6 +1012,8 @@ mod tests {
 
         assert_eq!(report.added_dead_code_allows, 1);
         assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.changed_files.len(), 1);
+        assert_eq!(report.changed_files[0].added_dead_code_allows, 1);
         let source = fs::read_to_string(file).unwrap();
         assert!(source.contains("#[allow(dead_code)]\n#[derive(Debug)]\npub struct Config"));
         assert!(source.contains("socket_path: String"));

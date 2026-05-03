@@ -977,6 +977,7 @@ def build_row(
             "added_dead_code_allows": (repair or {}).get("added_dead_code_allows"),
             "deferred_dead_code_allows": (repair or {}).get("deferred_dead_code_allows"),
             "skipped_diagnostics": (repair or {}).get("skipped_diagnostics"),
+            "changed_files": len((repair or {}).get("changed_files") or []),
             "total_changes": repair_total_changes(repair),
         },
         "classification": classification,

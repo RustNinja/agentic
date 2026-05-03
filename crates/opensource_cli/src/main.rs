@@ -1124,12 +1124,13 @@ fn run_feedback_repair_loop(
         })?;
         write_repair_report(&repair_report, &repair_report_path)?;
         println!(
-            "repair: removed_items={}, removed_imports={}, added_dead_code_allows={}, deferred_dead_code_allows={}, skipped_diagnostics={}, total_changes={}; report: {}",
+            "repair: removed_items={}, removed_imports={}, added_dead_code_allows={}, deferred_dead_code_allows={}, skipped_diagnostics={}, changed_files={}, total_changes={}; report: {}",
             repair_report.removed_items,
             repair_report.removed_imports,
             repair_report.added_dead_code_allows,
             repair_report.deferred_dead_code_allows,
             repair_report.skipped_diagnostics,
+            repair_report.changed_files.len(),
             repair_report.total_changes(),
             repair_report_path.display()
         );
