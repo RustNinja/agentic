@@ -68,6 +68,8 @@ The fixture and tests cover:
 - pruning unused local dependency imports from retained source files;
 - skipping external module files with no reachable descendants;
 - preserving external and workspace dependencies such as `serde`;
+- pruning unused UniFFI scaffolding, UniFFI-only derive entries, and mobile
+  `cdylib` crate types when the selected root is plain Rust;
 - dropping `#[cfg(test)]` modules and `#[test]` functions from generated output;
 - stripping the marker macro and its dependency from the generated workspace;
 - compiling the generated workspace with `cargo check`.

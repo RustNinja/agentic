@@ -6,8 +6,12 @@ use std::{
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
+use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
-use syn::{parse_quote, GenericArgument, ImplItem, Item, PathArguments, TraitItem, Type, UseTree};
+use syn::{
+    parse_quote, Field, GenericArgument, ImplItem, Item, PathArguments, TraitItem, Type, UseTree,
+    Variant,
+};
 use toml::{value::Table, Value};
 
 use crate::{
@@ -702,7 +706,10 @@ fn write_package_manifest(
     }
 
     if let Some(value) = package.manifest.get("lib") {
-        manifest.insert("lib".to_string(), value.clone());
+        manifest.insert(
+            "lib".to_string(),
+            transformed_lib_table(project, reduced, package, value),
+        );
     }
 
     if let Some(value) = transformed_bin_targets(package)? {
@@ -784,6 +791,43 @@ fn transformed_bin_targets(package: &Package) -> Result<Option<Value>, Box<dyn s
         .collect::<Vec<_>>();
 
     Ok((!retained.is_empty()).then_some(Value::Array(retained)))
+}
+
+fn transformed_lib_table(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &Package,
+    value: &Value,
+) -> Value {
+    let mut value = value.clone();
+    if !package_depends_on(package, "uniffi")
+        || package_preserves_uniffi_surface(project, reduced, &package.name)
+    {
+        return value;
+    }
+
+    let Some(table) = value.as_table_mut() else {
+        return value;
+    };
+    let Some(crate_types) = table.get_mut("crate-type").and_then(Value::as_array_mut) else {
+        return value;
+    };
+    crate_types.retain(|crate_type| {
+        crate_type
+            .as_str()
+            .is_none_or(|crate_type| !matches!(crate_type, "cdylib" | "staticlib"))
+    });
+    if crate_types.is_empty() {
+        crate_types.push(Value::String("lib".to_string()));
+    }
+    value
+}
+
+fn package_depends_on(package: &Package, dependency_name: &str) -> bool {
+    package
+        .dependencies
+        .iter()
+        .any(|dependency| dependency_name_matches(dependency, dependency_name))
 }
 
 fn bin_target_matches_entry_source(package: &Package, bin: &Value, entry_source: &Path) -> bool {
@@ -1253,13 +1297,7 @@ fn known_macro_dependency_usage(usage: &PackageSourceUsage, alias: &str, code_na
             .any(|ident| usage.mentions_ident(ident)),
         "error_support_macros" => usage.mentions_ident("handle_error"),
         "lazy_static" => usage.mentions_ident("lazy_static"),
-        "uniffi" => {
-            usage.mentions_ident("Record")
-                || usage.mentions_ident("Object")
-                || usage.mentions_ident("Enum")
-                || usage.mentions_ident("Error")
-                || usage.mentions_ident("export")
-        }
+        "uniffi" => usage.mentions_ident("uniffi"),
         "clap" => {
             usage.mentions_ident("Parser")
                 || usage.mentions_ident("Subcommand")
@@ -1296,13 +1334,7 @@ fn known_macro_dependency_package_mentions(
             reachable_package_mentions_ident(project, reduced, package, "handle_error")
         }
         "lazy_static" => reachable_package_mentions_ident(project, reduced, package, "lazy_static"),
-        "uniffi" => {
-            reachable_package_mentions_ident(project, reduced, package, "Record")
-                || reachable_package_mentions_ident(project, reduced, package, "Object")
-                || reachable_package_mentions_ident(project, reduced, package, "Enum")
-                || reachable_package_mentions_ident(project, reduced, package, "Error")
-                || reachable_package_mentions_ident(project, reduced, package, "export")
-        }
+        "uniffi" => package_preserves_uniffi_surface(project, reduced, package),
         "clap" => {
             reachable_package_mentions_ident(project, reduced, package, "Parser")
                 || reachable_package_mentions_ident(project, reduced, package, "Subcommand")
@@ -1716,6 +1748,7 @@ fn transform_items(
     module_path: &[String],
     items: &[Item],
 ) -> Vec<Item> {
+    let preserve_uniffi_surface = package_preserves_uniffi_surface(project, reduced, package);
     let retained_macro_definitions =
         retained_macro_definitions_for_generated_items(project, reduced, package, items);
 
@@ -1751,6 +1784,9 @@ fn transform_items(
                 reduced.reachable.contains(&id).then(|| {
                     let mut function = function.clone();
                     strip_opensourced_attrs(&mut function.attrs);
+                    if !preserve_uniffi_surface {
+                        strip_uniffi_attrs(&mut function.attrs);
+                    }
                     allow_dead_code_if_not_public(&function.vis, &mut function.attrs);
                     Item::Fn(function)
                 })
@@ -1773,6 +1809,10 @@ fn transform_items(
                 reduced.reachable_items.contains(&id).then(|| {
                     let mut item_struct = item_struct.clone();
                     strip_opensourced_attrs(&mut item_struct.attrs);
+                    if !preserve_uniffi_surface {
+                        strip_uniffi_attrs_from_fields(&mut item_struct.fields);
+                        strip_uniffi_attrs(&mut item_struct.attrs);
+                    }
                     prune_private_struct_fields(project, reduced, package, &mut item_struct);
                     allow_dead_code_for_private_struct_fields(&mut item_struct);
                     allow_dead_code_if_not_public(&item_struct.vis, &mut item_struct.attrs);
@@ -1789,6 +1829,9 @@ fn transform_items(
                 reduced.reachable_items.contains(&id).then(|| {
                     let mut item = item.clone();
                     strip_opensourced_attrs_from_item(&mut item);
+                    if !preserve_uniffi_surface {
+                        strip_uniffi_attrs_from_item(&mut item);
+                    }
                     allow_dead_code_for_non_public_item(&mut item);
                     item
                 })
@@ -1849,6 +1892,9 @@ fn transform_items(
                         if reduced.reachable.contains(&id) {
                             let mut method = method.clone();
                             strip_opensourced_attrs(&mut method.attrs);
+                            if !preserve_uniffi_surface {
+                                strip_uniffi_attrs(&mut method.attrs);
+                            }
                             allow_dead_code_if_not_public(&method.vis, &mut method.attrs);
                             kept_impl_items.push(ImplItem::Fn(method));
                             kept_method = true;
@@ -1863,6 +1909,9 @@ fn transform_items(
                             if !impl_item_is_test(impl_item) {
                                 let mut impl_item = impl_item.clone();
                                 strip_opensourced_attrs_from_impl_item(&mut impl_item);
+                                if !preserve_uniffi_surface {
+                                    strip_uniffi_attrs_from_impl_item(&mut impl_item);
+                                }
                                 allow_dead_code_for_non_public_impl_item(&mut impl_item);
                                 kept_impl_items.push(impl_item);
                             }
@@ -1878,6 +1927,12 @@ fn transform_items(
                     }
 
                     let mut item_impl = item_impl.clone();
+                    if !preserve_uniffi_surface {
+                        strip_uniffi_attrs(&mut item_impl.attrs);
+                        for impl_item in &mut kept_impl_items {
+                            strip_uniffi_attrs_from_impl_item(impl_item);
+                        }
+                    }
                     item_impl.items = kept_impl_items;
                     downgrade_uniffi_async_runtime_if_no_async_methods(&mut item_impl);
                     Some(Item::Impl(item_impl))
@@ -1888,6 +1943,9 @@ fn transform_items(
             Item::Mod(item_mod) => {
                 let mut item_mod = item_mod.clone();
                 strip_opensourced_attrs(&mut item_mod.attrs);
+                if !preserve_uniffi_surface {
+                    strip_uniffi_attrs(&mut item_mod.attrs);
+                }
                 let mut child_path = module_path.to_vec();
                 child_path.push(item_mod.ident.to_string());
                 let module_item_is_reachable = reduced.reachable_items.contains(&ItemId {
@@ -2084,9 +2142,9 @@ fn should_retain_macro_invocation(
     let is_uniffi_scaffolding = macro_path_ends_with(&item_macro.mac.path, "setup_scaffolding")
         || macro_path_ends_with(&item_macro.mac.path, "include_scaffolding");
     if is_uniffi_scaffolding {
-        return reachable_package_mentions_ident(project, reduced, package, "uniffi");
+        return package_preserves_uniffi_surface(project, reduced, package);
     }
-    if is_uniffi && !reachable_package_mentions_ident(project, reduced, package, "uniffi") {
+    if is_uniffi && !package_preserves_uniffi_surface(project, reduced, package) {
         return false;
     }
 
@@ -2240,6 +2298,75 @@ fn macro_path_starts_with(path: &syn::Path, name: &str) -> bool {
     path.segments
         .first()
         .is_some_and(|segment| segment.ident == name)
+}
+
+fn attr_path_starts_with(path: &syn::Path, name: &str) -> bool {
+    path_starts_with(path, name)
+}
+
+fn path_starts_with(path: &syn::Path, name: &str) -> bool {
+    path.segments
+        .first()
+        .is_some_and(|segment| segment.ident == name)
+}
+
+fn package_preserves_uniffi_surface(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project
+                .functions
+                .get(callable)
+                .is_some_and(|record| attrs_include_uniffi_export(&record.item.attrs))
+                || project
+                    .methods
+                    .get(callable)
+                    .is_some_and(|record| attrs_include_uniffi_export(&record.item.attrs))
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package() == package)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    item_attrs(&record.item).is_some_and(attrs_include_uniffi_export)
+                })
+            })
+}
+
+fn item_attrs(item: &Item) -> Option<&[syn::Attribute]> {
+    match item {
+        Item::Const(item) => Some(&item.attrs),
+        Item::Enum(item) => Some(&item.attrs),
+        Item::Fn(item) => Some(&item.attrs),
+        Item::Impl(item) => Some(&item.attrs),
+        Item::Macro(item) => Some(&item.attrs),
+        Item::Mod(item) => Some(&item.attrs),
+        Item::Static(item) => Some(&item.attrs),
+        Item::Struct(item) => Some(&item.attrs),
+        Item::Trait(item) => Some(&item.attrs),
+        Item::Type(item) => Some(&item.attrs),
+        Item::Union(item) => Some(&item.attrs),
+        _ => None,
+    }
+}
+
+fn attrs_include_uniffi_export(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let path = attr.path();
+        (path.segments.len() == 2
+            && path.segments[0].ident == "uniffi"
+            && path.segments[1].ident == "export")
+            || (path.is_ident("cfg_attr")
+                && token_stream_mentions_ident(&attr.to_token_stream(), "uniffi")
+                && token_stream_mentions_ident(&attr.to_token_stream(), "export"))
+    })
 }
 
 fn reachable_package_mentions_ident(
@@ -2959,9 +3086,50 @@ fn strip_opensourced_attrs(attrs: &mut Vec<syn::Attribute>) {
     attrs.retain(|attribute| !is_opensourced_attr(attribute.path()));
 }
 
+fn strip_uniffi_attrs(attrs: &mut Vec<syn::Attribute>) {
+    let mut retained = Vec::new();
+    for mut attr in std::mem::take(attrs) {
+        if attr_path_starts_with(attr.path(), "uniffi") {
+            continue;
+        }
+        if attr.path().is_ident("cfg_attr")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "uniffi")
+        {
+            continue;
+        }
+        if attr.path().is_ident("derive") {
+            if let Ok(paths) =
+                attr.parse_args_with(Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+            {
+                let paths = paths
+                    .into_iter()
+                    .filter(|path| !path_starts_with(path, "uniffi"))
+                    .collect::<Vec<_>>();
+                if paths.is_empty() {
+                    continue;
+                }
+                attr = parse_quote!(#[derive(#(#paths),*)]);
+            }
+        }
+        retained.push(attr);
+    }
+    *attrs = retained;
+}
+
 fn strip_opensourced_attrs_from_impl_item(item: &mut ImplItem) {
     if let ImplItem::Fn(method) = item {
         strip_opensourced_attrs(&mut method.attrs);
+    }
+}
+
+fn strip_uniffi_attrs_from_impl_item(item: &mut ImplItem) {
+    match item {
+        ImplItem::Const(item) => strip_uniffi_attrs(&mut item.attrs),
+        ImplItem::Fn(item) => strip_uniffi_attrs(&mut item.attrs),
+        ImplItem::Macro(item) => strip_uniffi_attrs(&mut item.attrs),
+        ImplItem::Type(item) => strip_uniffi_attrs(&mut item.attrs),
+        ImplItem::Verbatim(_) => {}
+        _ => {}
     }
 }
 
@@ -2985,12 +3153,88 @@ fn strip_opensourced_attrs_from_item(item: &mut Item) {
     }
 }
 
+fn strip_uniffi_attrs_from_item(item: &mut Item) {
+    match item {
+        Item::Const(item) => strip_uniffi_attrs(&mut item.attrs),
+        Item::Enum(item) => {
+            strip_uniffi_attrs(&mut item.attrs);
+            for variant in &mut item.variants {
+                strip_uniffi_attrs_from_variant(variant);
+            }
+        }
+        Item::Fn(item) => strip_uniffi_attrs(&mut item.attrs),
+        Item::Impl(item) => {
+            strip_uniffi_attrs(&mut item.attrs);
+            for impl_item in &mut item.items {
+                strip_uniffi_attrs_from_impl_item(impl_item);
+            }
+        }
+        Item::Macro(item) => strip_uniffi_attrs(&mut item.attrs),
+        Item::Mod(item) => strip_uniffi_attrs(&mut item.attrs),
+        Item::Static(item) => strip_uniffi_attrs(&mut item.attrs),
+        Item::Struct(item) => {
+            strip_uniffi_attrs(&mut item.attrs);
+            strip_uniffi_attrs_from_fields(&mut item.fields);
+        }
+        Item::Trait(item) => {
+            strip_uniffi_attrs(&mut item.attrs);
+            for trait_item in &mut item.items {
+                strip_uniffi_attrs_from_trait_item(trait_item);
+            }
+        }
+        Item::Type(item) => strip_uniffi_attrs(&mut item.attrs),
+        Item::Union(item) => {
+            strip_uniffi_attrs(&mut item.attrs);
+            for field in &mut item.fields.named {
+                strip_uniffi_attrs_from_field(field);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn strip_uniffi_attrs_from_fields(fields: &mut syn::Fields) {
+    match fields {
+        syn::Fields::Named(fields) => {
+            for field in &mut fields.named {
+                strip_uniffi_attrs_from_field(field);
+            }
+        }
+        syn::Fields::Unnamed(fields) => {
+            for field in &mut fields.unnamed {
+                strip_uniffi_attrs_from_field(field);
+            }
+        }
+        syn::Fields::Unit => {}
+    }
+}
+
+fn strip_uniffi_attrs_from_field(field: &mut Field) {
+    strip_uniffi_attrs(&mut field.attrs);
+}
+
+fn strip_uniffi_attrs_from_variant(variant: &mut Variant) {
+    strip_uniffi_attrs(&mut variant.attrs);
+    strip_uniffi_attrs_from_fields(&mut variant.fields);
+}
+
 fn strip_opensourced_attrs_from_trait_item(item: &mut TraitItem) {
     match item {
         TraitItem::Const(item) => strip_opensourced_attrs(&mut item.attrs),
         TraitItem::Fn(item) => strip_opensourced_attrs(&mut item.attrs),
         TraitItem::Macro(item) => strip_opensourced_attrs(&mut item.attrs),
         TraitItem::Type(item) => strip_opensourced_attrs(&mut item.attrs),
+        TraitItem::Verbatim(_) => {}
+        _ => {}
+    }
+}
+
+fn strip_uniffi_attrs_from_trait_item(item: &mut TraitItem) {
+    match item {
+        TraitItem::Const(item) => strip_uniffi_attrs(&mut item.attrs),
+        TraitItem::Fn(item) => strip_uniffi_attrs(&mut item.attrs),
+        TraitItem::Macro(item) => strip_uniffi_attrs(&mut item.attrs),
+        TraitItem::Type(item) => strip_uniffi_attrs(&mut item.attrs),
         TraitItem::Verbatim(_) => {}
         _ => {}
     }

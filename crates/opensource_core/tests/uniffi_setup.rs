@@ -75,6 +75,43 @@ fn drops_uniffi_scaffolding_for_plain_rust_custom_type_slice() {
 }
 
 #[test]
+fn drops_uniffi_derives_and_cdylib_for_plain_rust_record_slice() {
+    let workspace = temp_path("plain-record-workspace");
+    let output = temp_path("plain-record-output");
+    write_plain_record_fixture_workspace(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(
+        source.contains("#[derive(Debug)]\npub struct ApiRecord"),
+        "plain Rust slice should keep non-UniFFI derives:\n{source}",
+    );
+    assert!(
+        !source.contains("uniffi::Record"),
+        "plain Rust slice should strip UniFFI derive entries:\n{source}",
+    );
+    assert!(
+        !source.contains("uniffi::setup_scaffolding!"),
+        "plain Rust slice should drop UniFFI scaffolding:\n{source}",
+    );
+
+    let manifest = read(output.join("app/Cargo.toml"));
+    assert!(
+        !manifest.contains("uniffi"),
+        "plain Rust slice should prune UniFFI dependency:\n{manifest}",
+    );
+    assert!(
+        !manifest.contains("cdylib"),
+        "plain Rust slice should not keep UniFFI cdylib crate type:\n{manifest}",
+    );
+}
+
+#[test]
 fn prunes_unrelated_uniffi_sibling_modules() {
     let workspace = temp_path("sibling-workspace");
     let output = temp_path("sibling-output");
@@ -268,6 +305,61 @@ uniffi::custom_type!(DeadTimestamp, i64, {
     lower: |obj| obj.0 as i64,
     try_lift: |value| Ok(Self(value as u64)),
 });
+"#,
+    );
+}
+
+fn write_plain_record_fixture_workspace(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+crate-type = ["lib", "cdylib"]
+
+[dependencies]
+opensourced.workspace = true
+uniffi = "0.31.0"
+"#,
+    );
+
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[derive(Debug, uniffi::Record)]
+pub struct ApiRecord {
+    pub value: String,
+}
+
+#[opensourced]
+pub fn selected_value(value: String) -> ApiRecord {
+    ApiRecord { value }
+}
+
+uniffi::setup_scaffolding!();
 "#,
     );
 }
