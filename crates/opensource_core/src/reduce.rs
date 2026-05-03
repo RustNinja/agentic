@@ -3050,6 +3050,7 @@ impl DependencyVisitor<'_> {
     fn add_macro_token_dependencies(&mut self, tokens: &TokenStream) {
         let mut referenced_types = BTreeSet::new();
         let mut candidate_method_names = BTreeSet::new();
+        let self_method_names = macro_self_method_names(tokens);
         for segments in token_path_candidates(tokens) {
             if segments.len() == 1 {
                 candidate_method_names.insert(segments[0].clone());
@@ -3076,12 +3077,44 @@ impl DependencyVisitor<'_> {
             }
         }
 
+        if let Some(self_type) = &self.resolver.self_type {
+            for method in &self_method_names {
+                for callable in self.resolver.resolve_methods(self_type, method) {
+                    self.dependencies.callables.insert(callable);
+                }
+            }
+        }
+
         for type_ref in referenced_types {
             for method in &candidate_method_names {
                 for callable in self.resolver.resolve_methods(&type_ref, method) {
                     self.dependencies.callables.insert(callable);
                 }
             }
+        }
+    }
+}
+
+fn macro_self_method_names(tokens: &TokenStream) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_macro_self_method_names(tokens, &mut names);
+    names
+}
+
+fn collect_macro_self_method_names(tokens: &TokenStream, names: &mut BTreeSet<String>) {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &tokens {
+        if let TokenTree::Group(group) = token {
+            collect_macro_self_method_names(&group.stream(), names);
+        }
+    }
+    for window in tokens.windows(3) {
+        let [TokenTree::Ident(receiver), TokenTree::Punct(dot), TokenTree::Ident(method)] = window
+        else {
+            continue;
+        };
+        if receiver == "self" && dot.as_char() == '.' {
+            names.insert(method.to_string());
         }
     }
 }

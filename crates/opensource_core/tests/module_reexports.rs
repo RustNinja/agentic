@@ -353,6 +353,43 @@ fn prunes_unused_private_fields_from_public_struct_surface() {
     );
 }
 
+#[test]
+fn retains_self_methods_referenced_inside_macro_invocations() {
+    let workspace = temp_path("macro-self-method-workspace");
+    let output = temp_path("macro-self-method-output");
+    write_macro_self_method_fixture_workspace(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read_output(&output, "app/src/lib.rs");
+    assert!(lib.contains("tokio::join!"));
+    assert!(lib.contains("scan_a"));
+    assert!(lib.contains("scan_b"));
+    assert_not_present(&lib, ["unused_scan", "scan_dead"]);
+
+    let target_dir = temp_path("macro-self-method-build");
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .output()
+        .expect("cargo check should start");
+
+    assert!(
+        output.status.success(),
+        "generated workspace did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        lib,
+    );
+}
+
 fn write_fixture_workspace(root: &Path) {
     let opensourced_path = repo_root().join("crates/opensourced");
     let opensourced_path = toml_path(&opensourced_path);
@@ -740,6 +777,71 @@ edition = "2021"
         r#"compile_error!("unused private field dependency was built");
 
 pub struct Envelope;
+"#,
+    );
+}
+
+fn write_macro_self_method_fixture_workspace(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    let opensourced_path = toml_path(&opensourced_path);
+
+    write_file(
+        &root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = { path = "OPEN_SOURCED_PATH" }
+"#
+        .replace("OPEN_SOURCED_PATH", &opensourced_path)
+        .as_str(),
+    );
+
+    write_file(
+        &root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+tokio = { version = "1", features = ["macros"] }
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/lib.rs"),
+        r#"pub struct Scanner;
+
+impl Scanner {
+    #[opensourced::opensourced]
+    pub async fn selected(&self) -> u32 {
+        self.scan_all().await
+    }
+
+    async fn scan_all(&self) -> u32 {
+        let (a, b) = tokio::join!(self.scan_a(), self.scan_b());
+        a + b
+    }
+
+    async fn scan_a(&self) -> u32 {
+        1
+    }
+
+    async fn scan_b(&self) -> u32 {
+        2
+    }
+
+    pub async fn unused_scan(&self) -> u32 {
+        self.scan_dead().await
+    }
+
+    async fn scan_dead(&self) -> u32 {
+        3
+    }
+}
 "#,
     );
 }
