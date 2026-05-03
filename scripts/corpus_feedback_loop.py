@@ -1144,6 +1144,10 @@ def build_row(
             "files_written": (generation or {}).get("files_written"),
             "packages": (generation or {}).get("packages", []),
             "roots": (generation or {}).get("roots", []),
+            "feedback_widened_roots": (generation or {}).get("feedback_widened_roots", []),
+            "feedback_widened_root_count": len(
+                (generation or {}).get("feedback_widened_roots", [])
+            ),
             "reachable_callables": len((generation or {}).get("reachable", [])),
             "reachable_items": len((generation or {}).get("reachable_items", [])),
             "production_status": production.get("status"),
