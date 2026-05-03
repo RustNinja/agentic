@@ -354,9 +354,11 @@ fn run_feedback_repair_loop(options: &CliOptions) -> Result<(), Box<dyn std::err
         })?;
         write_repair_report(&repair_report, &repair_report_path)?;
         println!(
-            "repair: removed_items={}, removed_imports={}, skipped_diagnostics={}, total_changes={}; report: {}",
+            "repair: removed_items={}, removed_imports={}, added_dead_code_allows={}, deferred_dead_code_allows={}, skipped_diagnostics={}, total_changes={}; report: {}",
             repair_report.removed_items,
             repair_report.removed_imports,
+            repair_report.added_dead_code_allows,
+            repair_report.deferred_dead_code_allows,
             repair_report.skipped_diagnostics,
             repair_report.total_changes(),
             repair_report_path.display()
@@ -385,12 +387,31 @@ fn repairable_warning_count(diagnostics: &[CheckDiagnostic]) -> usize {
         .iter()
         .filter(|diagnostic| {
             diagnostic.level == "warning"
-                && matches!(
-                    diagnostic.code.as_deref(),
-                    Some("dead_code" | "unused_imports")
-                )
+                && (diagnostic.code.as_deref() == Some("unused_imports")
+                    || (diagnostic.code.as_deref() == Some("dead_code")
+                        && dead_code_warning_is_repairable(&diagnostic.message)))
         })
         .count()
+}
+
+fn dead_code_warning_is_repairable(message: &str) -> bool {
+    message.contains("function `")
+        || message.contains("method `")
+        || message.contains("associated function `")
+        || message.contains("associated items `")
+        || message.contains("associated constant `")
+        || message.contains("constant `")
+        || message.contains("enum `")
+        || message.contains("module `")
+        || message.contains("static `")
+        || message.contains("struct `")
+        || message.contains("type alias `")
+        || message.contains("union `")
+        || message.contains("trait `")
+        || message.contains("field `")
+        || message.contains("fields `")
+        || message.contains("variant `")
+        || message.contains("variants `")
 }
 
 fn diagnostics_signature(diagnostics: &[CheckDiagnostic]) -> String {

@@ -101,8 +101,9 @@ the slice still does not compile. Feedback checks have a 600-second timeout by
 default; use `--feedback-timeout 0` to disable it or pass another second count.
 `--feedback-repair-loop <n>` runs bounded compiler feedback with conservative
 source repairs between attempts. The first repair tier only handles diagnostics
-that are safe to edit mechanically, such as `unused_imports` and item-level
-`dead_code`, and stops on repeated diagnostics or no-progress rounds.
+that are safe to edit mechanically, such as `unused_imports`, item-level
+`dead_code`, and deferred dead-code allows for retained fields or enum variants.
+It stops on repeated diagnostics or no-progress rounds.
 This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A
 rust-analyzer HIR or rustc-driver backend remains the next precision step for

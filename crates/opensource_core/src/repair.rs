@@ -18,12 +18,14 @@ pub struct RepairOptions {
 pub struct RepairReport {
     pub removed_items: usize,
     pub removed_imports: usize,
+    pub added_dead_code_allows: usize,
+    pub deferred_dead_code_allows: usize,
     pub skipped_diagnostics: usize,
 }
 
 impl RepairReport {
     pub fn total_changes(&self) -> usize {
-        self.removed_items + self.removed_imports
+        self.removed_items + self.removed_imports + self.added_dead_code_allows
     }
 }
 
@@ -32,6 +34,7 @@ pub fn repair_workspace(
 ) -> Result<RepairReport, Box<dyn std::error::Error>> {
     let mut item_candidates_by_file = BTreeMap::<PathBuf, Vec<DeadItemCandidate>>::new();
     let mut import_candidates_by_file = BTreeMap::<PathBuf, Vec<ImportSpanCandidate>>::new();
+    let mut allow_candidates_by_file = BTreeMap::<PathBuf, Vec<AllowDeadCodeCandidate>>::new();
     let mut skipped_diagnostics = 0;
 
     for diagnostic in &options.diagnostics {
@@ -70,17 +73,23 @@ pub fn repair_workspace(
                     repaired = true;
                 }
                 Some("dead_code") => {
-                    let Some(name) = dead_candidate_name(&diagnostic.message, span) else {
-                        continue;
-                    };
-                    item_candidates_by_file
-                        .entry(path)
-                        .or_default()
-                        .push(DeadItemCandidate {
-                            name,
-                            line_start: span.line_start as usize,
-                        });
-                    repaired = true;
+                    if let Some(name) = dead_candidate_name(&diagnostic.message, span) {
+                        item_candidates_by_file
+                            .entry(path)
+                            .or_default()
+                            .push(DeadItemCandidate {
+                                name,
+                                line_start: span.line_start as usize,
+                            });
+                        repaired = true;
+                    } else if dead_code_message_is_type_member(&diagnostic.message) {
+                        allow_candidates_by_file.entry(path).or_default().push(
+                            AllowDeadCodeCandidate {
+                                line_start: span.line_start as usize,
+                            },
+                        );
+                        repaired = true;
+                    }
                 }
                 _ => {}
             }
@@ -95,6 +104,8 @@ pub fn repair_workspace(
         skipped_diagnostics,
         ..RepairReport::default()
     };
+    let has_structural_repairs =
+        !item_candidates_by_file.is_empty() || !import_candidates_by_file.is_empty();
     for (path, mut candidates) in item_candidates_by_file {
         if !path.exists() {
             continue;
@@ -139,6 +150,28 @@ pub fn repair_workspace(
         fs::write(path, source)?;
     }
 
+    if has_structural_repairs {
+        report.deferred_dead_code_allows = allow_candidates_by_file
+            .values()
+            .map(std::vec::Vec::len)
+            .sum();
+    } else {
+        for (path, mut candidates) in allow_candidates_by_file {
+            if !path.exists() {
+                continue;
+            }
+            candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
+            candidates.dedup();
+            let mut source = fs::read_to_string(&path)?;
+            for candidate in candidates {
+                if add_dead_code_allow_for_enclosing_type(&mut source, &candidate) {
+                    report.added_dead_code_allows += 1;
+                }
+            }
+            fs::write(path, source)?;
+        }
+    }
+
     Ok(report)
 }
 
@@ -166,6 +199,11 @@ struct ImportSpanCandidate {
     column_end: usize,
     remove_line: bool,
     message: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AllowDeadCodeCandidate {
+    line_start: usize,
 }
 
 fn diagnostic_path(output_root: &Path, file_name: &str) -> Option<PathBuf> {
@@ -218,6 +256,13 @@ fn dead_code_message_is_item(message: &str) -> bool {
         || message.contains("type alias `")
         || message.contains("union `")
         || message.contains("trait `")
+}
+
+fn dead_code_message_is_type_member(message: &str) -> bool {
+    message.contains("field `")
+        || message.contains("fields `")
+        || message.contains("variant `")
+        || message.contains("variants `")
 }
 
 fn name_from_backticks(message: &str) -> Option<&str> {
@@ -401,6 +446,76 @@ fn remove_import_span(source: &mut String, candidate: &ImportSpanCandidate) -> b
 
     *source = join_lines(lines);
     true
+}
+
+fn add_dead_code_allow_for_enclosing_type(
+    source: &mut String,
+    candidate: &AllowDeadCodeCandidate,
+) -> bool {
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(mut cursor) = candidate.line_start.checked_sub(1) else {
+        return false;
+    };
+    if lines.is_empty() {
+        return false;
+    }
+    if cursor >= lines.len() {
+        cursor = lines.len() - 1;
+    }
+
+    let Some(item_line) = (0..=cursor)
+        .rev()
+        .find(|index| line_starts_type_item(&lines[*index]))
+    else {
+        return false;
+    };
+
+    let mut insert_at = item_line;
+    while insert_at > 0 && line_is_outer_attr_or_doc(&lines[insert_at - 1]) {
+        insert_at -= 1;
+    }
+    if lines[insert_at..item_line]
+        .iter()
+        .any(|line| line.contains("allow(dead_code)"))
+    {
+        return false;
+    }
+
+    lines.insert(insert_at, "#[allow(dead_code)]".to_string());
+    *source = join_lines(lines);
+    true
+}
+
+fn line_starts_type_item(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    let rest = strip_visibility_prefix(trimmed);
+    rest.starts_with("struct ")
+        || rest.starts_with("enum ")
+        || rest.starts_with("union ")
+        || rest.starts_with("type ")
+}
+
+fn strip_visibility_prefix(text: &str) -> &str {
+    if let Some(rest) = text.strip_prefix("pub ") {
+        return rest;
+    }
+    if let Some(rest) = text.strip_prefix("pub(crate) ") {
+        return rest;
+    }
+    if let Some(rest) = text.strip_prefix("pub(super) ") {
+        return rest;
+    }
+    if let Some(rest) = text.strip_prefix("pub(in ") {
+        if let Some((_, rest)) = rest.split_once(") ") {
+            return rest;
+        }
+    }
+    text
+}
+
+fn line_is_outer_attr_or_doc(line: &str) -> bool {
+    let trimmed = line.trim_start();
+    trimmed.starts_with("#[") || trimmed.starts_with("///")
 }
 
 fn remove_column_range(line: &mut String, column_start: usize, column_end: usize) -> bool {
@@ -816,6 +931,111 @@ mod tests {
         let source = fs::read_to_string(file).unwrap();
         assert!(!source.contains("use crate"));
         assert!(source.contains("pub fn keep"));
+    }
+
+    #[test]
+    fn allows_dead_struct_fields_after_structural_repairs_are_exhausted() {
+        let root = temp_output("repair-dead-field");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "#[derive(Debug)]\npub struct Config {\n    socket_path: String,\n    request_timeout: u64,\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![warning(
+                "dead_code",
+                "field `socket_path` is never read",
+                "src/lib.rs",
+                3,
+                5,
+                16,
+                "    socket_path: String,",
+            )],
+        })
+        .unwrap();
+
+        assert_eq!(report.added_dead_code_allows, 1);
+        assert_eq!(report.total_changes(), 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(source.contains("#[allow(dead_code)]\n#[derive(Debug)]\npub struct Config"));
+        assert!(source.contains("socket_path: String"));
+        assert!(source.contains("request_timeout: u64"));
+    }
+
+    #[test]
+    fn allows_dead_enum_variants_without_removing_variants() {
+        let root = temp_output("repair-dead-enum-variant");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "pub enum Mode {\n    Fast,\n    Slow,\n}\n\npub fn keep() -> Mode {\n    Mode::Fast\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![warning(
+                "dead_code",
+                "variant `Slow` is never constructed",
+                "src/lib.rs",
+                3,
+                5,
+                9,
+                "    Slow,",
+            )],
+        })
+        .unwrap();
+
+        assert_eq!(report.added_dead_code_allows, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(source.contains("#[allow(dead_code)]\npub enum Mode"));
+        assert!(source.contains("Fast"));
+        assert!(source.contains("Slow"));
+        assert!(source.contains("Mode::Fast"));
+    }
+
+    #[test]
+    fn defers_dead_code_allows_when_structural_repairs_exist() {
+        let root = temp_output("repair-defer-field-allow");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "use std::fmt;\n\npub struct Config {\n    socket_path: String,\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![
+                warning(
+                    "unused_imports",
+                    "unused import: `std::fmt`",
+                    "src/lib.rs",
+                    1,
+                    1,
+                    14,
+                    "use std::fmt;",
+                ),
+                warning(
+                    "dead_code",
+                    "field `socket_path` is never read",
+                    "src/lib.rs",
+                    4,
+                    5,
+                    16,
+                    "    socket_path: String,",
+                ),
+            ],
+        })
+        .unwrap();
+
+        assert_eq!(report.removed_imports, 1);
+        assert_eq!(report.added_dead_code_allows, 0);
+        assert_eq!(report.deferred_dead_code_allows, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(!source.contains("std::fmt"));
+        assert!(!source.contains("#[allow(dead_code)]"));
+        assert!(source.contains("socket_path: String"));
     }
 
     fn warning(

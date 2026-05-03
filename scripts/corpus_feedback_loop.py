@@ -849,6 +849,8 @@ def build_row(
         "repair": {
             "removed_items": (repair or {}).get("removed_items"),
             "removed_imports": (repair or {}).get("removed_imports"),
+            "added_dead_code_allows": (repair or {}).get("added_dead_code_allows"),
+            "deferred_dead_code_allows": (repair or {}).get("deferred_dead_code_allows"),
             "skipped_diagnostics": (repair or {}).get("skipped_diagnostics"),
             "total_changes": repair_total_changes(repair),
         },
@@ -897,7 +899,11 @@ def diagnostic_codes(diagnostics: list[dict[str, Any]]) -> list[str]:
 def repair_total_changes(repair: dict[str, Any] | None) -> int | None:
     if repair is None:
         return None
-    return int(repair.get("removed_items") or 0) + int(repair.get("removed_imports") or 0)
+    return (
+        int(repair.get("removed_items") or 0)
+        + int(repair.get("removed_imports") or 0)
+        + int(repair.get("added_dead_code_allows") or 0)
+    )
 
 
 def summarize_diagnostics(
