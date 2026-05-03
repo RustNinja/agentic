@@ -1173,6 +1173,9 @@ mod tests {
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {
         CheckReport {
             manifest_path: PathBuf::from("/tmp/Cargo.toml"),
+            target_dir: None,
+            timeout_ms: None,
+            cargo_args: Vec::new(),
             success,
             timed_out: false,
             exit_code: if success { 0 } else { 101 },

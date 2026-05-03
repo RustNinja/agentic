@@ -24,6 +24,10 @@ pub struct CheckOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckReport {
     pub manifest_path: PathBuf,
+    pub target_dir: Option<PathBuf>,
+    pub timeout_ms: Option<u64>,
+    #[serde(default)]
+    pub cargo_args: Vec<String>,
     pub success: bool,
     pub timed_out: bool,
     pub exit_code: i32,
@@ -134,6 +138,11 @@ fn check_workspace_with_program(
 
     Ok(CheckReport {
         manifest_path: options.manifest_path,
+        target_dir: options.target_dir,
+        timeout_ms: options
+            .timeout
+            .map(|timeout| timeout.as_millis().try_into().unwrap_or(u64::MAX)),
+        cargo_args: options.cargo_args,
         success: output.status.success(),
         timed_out: outcome.timed_out,
         exit_code: output.status.code().unwrap_or(-1),
@@ -470,13 +479,14 @@ fn span_from_value(span: &Value) -> Option<CheckSpan> {
 mod tests {
     use std::{
         fs,
+        path::PathBuf,
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
     use super::{
         check_workspace_with_program, classify_feedback, parse_cargo_messages,
         stderr_failure_diagnostic, timeout_failure_diagnostic, CheckDiagnostic, CheckOptions,
-        CheckSpan,
+        CheckReport, CheckSpan, FeedbackWideningReport,
     };
 
     #[test]
@@ -675,10 +685,40 @@ mod tests {
 
         let args = fs::read_to_string(&args_path).unwrap();
         assert!(report.success);
+        assert_eq!(
+            report.cargo_args,
+            ["--all-features", "--target", "wasm32-unknown-unknown"]
+        );
+        assert_eq!(report.timeout_ms, Some(1_000));
         assert!(args.contains("--all-features"));
         assert!(args.contains("--target\nwasm32-unknown-unknown"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn serializes_feedback_invocation_context() {
+        let report = CheckReport {
+            manifest_path: PathBuf::from("/tmp/slice/Cargo.toml"),
+            target_dir: Some(PathBuf::from("/tmp/slice-target")),
+            timeout_ms: Some(600_000),
+            cargo_args: vec!["--all-targets".to_string()],
+            success: true,
+            timed_out: false,
+            exit_code: 0,
+            duration_ms: 12,
+            diagnostics: Vec::new(),
+            widening: FeedbackWideningReport::default(),
+            stderr: String::new(),
+        };
+
+        let value: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&report).unwrap())
+                .expect("report should serialize");
+
+        assert_eq!(value["target_dir"], "/tmp/slice-target");
+        assert_eq!(value["timeout_ms"], 600_000);
+        assert_eq!(value["cargo_args"][0], "--all-targets");
     }
 
     fn diagnostic(code: &str, message: &str, file_name: &str, line_start: u64) -> CheckDiagnostic {
