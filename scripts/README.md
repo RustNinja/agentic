@@ -28,7 +28,8 @@ Use `--validation preflight` when build time is the bottleneck; it validates the
 predicted generated shape without compiling dependencies. Use
 `--validation feedback` for slower compiler-confirmed runs, or
 `--validation repair` to run the bounded compiler repair loop and capture repair
-metrics for each generated slice.
+metrics for each generated slice. Use `--feedback-target-dir` on feedback or
+repair corpus runs to reuse dependency builds across generated outputs.
 
 ## Litter Feedback Loop
 

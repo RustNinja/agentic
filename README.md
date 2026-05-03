@@ -99,6 +99,8 @@ workspace, prints prioritized compiler diagnostics, and writes
 compiler feedback pass up to `n` times and fails with the JSON report path when
 the slice still does not compile. Feedback checks have a 600-second timeout by
 default; use `--feedback-timeout 0` to disable it or pass another second count.
+Use `--feedback-target-dir <path>` to reuse a Cargo target directory across
+repeated generated slices when dependency build time dominates validation.
 `--feedback-repair-loop <n>` runs bounded compiler feedback with conservative
 source repairs between attempts. The first repair tier only handles diagnostics
 that are safe to edit mechanically, such as `unused_imports`, item-level
@@ -135,7 +137,9 @@ failed outputs for debugging, and appends one JSONL metrics row per batch.
 Use `--validation preflight` for fast no-build corpus exploration, rerun
 interesting or suspicious cases with `--validation feedback`, and use
 `--validation repair` when a corpus batch should exercise the conservative
-compiler repair loop and record `slice-repair.json` metrics.
+compiler repair loop and record `slice-repair.json` metrics. Pass
+`--feedback-target-dir` for feedback or repair batches when running a corpus
+against dependency-heavy projects.
 
 Workspace/package discovery is backed by `cargo metadata --no-deps`, so Cargo is
 the source of truth for workspace members, excludes, target entry paths,

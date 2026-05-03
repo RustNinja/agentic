@@ -169,6 +169,14 @@ def parse_args() -> argparse.Namespace:
         help="slicers --feedback-timeout seconds; use 0 to disable",
     )
     parser.add_argument(
+        "--feedback-target-dir",
+        type=Path,
+        help=(
+            "shared CARGO_TARGET_DIR for feedback/repair validation; "
+            "use this to keep dependency builds warm across corpus cases"
+        ),
+    )
+    parser.add_argument(
         "--validation",
         choices=("preflight", "feedback", "repair"),
         default="feedback",
@@ -693,6 +701,13 @@ def slicers_command(
                 str(feedback_report_path),
             ]
         )
+    if args.validation != "preflight" and args.feedback_target_dir:
+        command.extend(
+            [
+                "--feedback-target-dir",
+                str(args.feedback_target_dir.resolve()),
+            ]
+        )
     command.extend(
         [
             str(source),
@@ -841,6 +856,7 @@ def build_row(
         "feedback": {
             "success": (feedback or {}).get("success"),
             "timed_out": (feedback or {}).get("timed_out"),
+            "target_dir": feedback_target_dir(args, output_root),
             "errors": errors,
             "warnings": warnings,
             "diagnostic_codes": diagnostic_codes(diagnostics),
@@ -904,6 +920,12 @@ def repair_total_changes(repair: dict[str, Any] | None) -> int | None:
         + int(repair.get("removed_imports") or 0)
         + int(repair.get("added_dead_code_allows") or 0)
     )
+
+
+def feedback_target_dir(args: argparse.Namespace, output_root: Path) -> str:
+    if args.feedback_target_dir:
+        return str(args.feedback_target_dir.resolve())
+    return str(output_root / "target-feedback")
 
 
 def summarize_diagnostics(

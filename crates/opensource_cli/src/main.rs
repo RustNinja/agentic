@@ -124,6 +124,7 @@ struct CliOptions {
     feedback_repair_iterations: usize,
     feedback_limit: usize,
     feedback_report: Option<PathBuf>,
+    feedback_target_dir: Option<PathBuf>,
     feedback_timeout: Option<Duration>,
     repair_report: Option<PathBuf>,
     slice_report: Option<PathBuf>,
@@ -140,6 +141,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     let mut feedback_repair_iterations = 0;
     let mut feedback_limit = 12;
     let mut feedback_report = None;
+    let mut feedback_target_dir = None;
     let mut feedback_timeout = Some(Duration::from_secs(600));
     let mut repair_report = None;
     let mut slice_report = None;
@@ -176,6 +178,11 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
                 args.next()
                     .ok_or("--feedback-report requires a following path")?,
             ));
+        } else if arg == OsStr::new("--feedback-target-dir") {
+            feedback_target_dir = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--feedback-target-dir requires a following path")?,
+            ));
         } else if arg == OsStr::new("--repair-report") {
             repair_report = Some(PathBuf::from(
                 args.next()
@@ -210,6 +217,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
         feedback_repair_iterations,
         feedback_limit,
         feedback_report,
+        feedback_target_dir,
         feedback_timeout,
         repair_report,
         slice_report,
@@ -284,7 +292,7 @@ fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Err
         );
         let report = check_workspace(CheckOptions {
             manifest_path: options.output_root.join("Cargo.toml"),
-            target_dir: Some(options.output_root.join("target-feedback")),
+            target_dir: Some(feedback_target_dir(options)),
             timeout: options.feedback_timeout,
         })?;
         write_report(&report, &report_path)?;
@@ -320,7 +328,7 @@ fn run_feedback_repair_loop(options: &CliOptions) -> Result<(), Box<dyn std::err
         );
         let report = check_workspace(CheckOptions {
             manifest_path: options.output_root.join("Cargo.toml"),
-            target_dir: Some(options.output_root.join("target-feedback")),
+            target_dir: Some(feedback_target_dir(options)),
             timeout: options.feedback_timeout,
         })?;
         write_report(&report, &feedback_report_path)?;
@@ -380,6 +388,13 @@ fn run_feedback_repair_loop(options: &CliOptions) -> Result<(), Box<dyn std::err
         repair_report_path.display()
     )
     .into())
+}
+
+fn feedback_target_dir(options: &CliOptions) -> PathBuf {
+    options
+        .feedback_target_dir
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("target-feedback"))
 }
 
 fn repairable_warning_count(diagnostics: &[CheckDiagnostic]) -> usize {
@@ -557,7 +572,8 @@ fn usage() -> String {
     concat!(
         "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--preflight] [--feedback] ",
         "[--feedback-loop <n>] [--feedback-repair-loop <n>] [--feedback-limit <n>] ",
-        "[--feedback-timeout <seconds>] [--feedback-report <path>] [--repair-report <path>] ",
+        "[--feedback-timeout <seconds>] [--feedback-report <path>] ",
+        "[--feedback-target-dir <path>] [--repair-report <path>] ",
         "[--slice-report <path>] [--preflight-report <path>] ",
         "<workspace-root> <output-root>"
     )
