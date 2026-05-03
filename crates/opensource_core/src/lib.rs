@@ -196,6 +196,7 @@ fn production_readiness_report(
     reduced: &ReducedProject,
 ) -> ProductionReadinessReport {
     let mut hazards = Vec::new();
+    add_workspace_production_hazards(project, reduced, &mut hazards);
     add_syntactic_production_hazards(project, reduced, &mut hazards);
 
     if !analyzer.loaded {
@@ -290,6 +291,47 @@ fn add_semantic_inventory_hazard(
             "warning",
             "semantic analyzer inventory is report-only in this build; compiler feedback is still required before trusting the slice",
         ));
+    }
+}
+
+fn add_workspace_production_hazards(
+    project: &Project,
+    reduced: &ReducedProject,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    let retained_build_scripts = reduced
+        .packages
+        .iter()
+        .filter_map(|package| project.workspace.packages.get(package))
+        .filter(|package| package_build_script_path(package).is_some())
+        .count();
+    if retained_build_scripts > 0 {
+        hazards.push(production_hazard(
+            "retained_build_scripts",
+            "warning",
+            format!(
+                "{} retained package build script(s) may generate source, link metadata, or asset dependencies outside the static parse tree",
+                retained_build_scripts
+            ),
+        ));
+    }
+}
+
+fn package_build_script_path(package: &crate::manifest::Package) -> Option<PathBuf> {
+    let package_table = package
+        .manifest
+        .get("package")
+        .and_then(toml::Value::as_table);
+    match package_table.and_then(|table| table.get("build")) {
+        Some(toml::Value::Boolean(false)) => None,
+        Some(toml::Value::String(path)) => {
+            let path = package.root.join(path);
+            path.exists().then_some(path)
+        }
+        _ => {
+            let path = package.root.join("build.rs");
+            path.exists().then_some(path)
+        }
     }
 }
 
@@ -1165,6 +1207,52 @@ pub fn entry() -> Vec<i32> {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "custom_macro_invocations"));
+    }
+
+    #[test]
+    fn reports_retained_build_script_production_hazards() {
+        let root = temp_output("build-script-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/build.rs"),
+            r#"fn main() {
+    println!("cargo:rerun-if-changed=build.rs");
+}
+"#,
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("build-script-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "retained_build_scripts"));
     }
 
     #[test]
