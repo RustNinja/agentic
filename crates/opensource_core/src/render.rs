@@ -25,6 +25,7 @@ const OUTPUT_MARKER: &str = ".slicers-output";
 
 struct RenderPlan {
     reachable_items: BTreeSet<ItemId>,
+    callable_idents_by_package: BTreeMap<String, BTreeSet<String>>,
     mentions: ReachableMentionIndex,
     import_scope_mentions: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
 }
@@ -33,20 +34,17 @@ impl RenderPlan {
     fn build(project: &Project, reduced: &ReducedProject) -> Self {
         let mut reachable_items = BTreeSet::new();
         let mut rendered_item_idents = BTreeSet::new();
-        let callable_idents = reachable_reduced_callable_idents(project, reduced);
+        let callable_idents = reachable_reduced_callable_ident_index(project, reduced);
+        let retained_surface_idents = retained_surface_idents_by_package(project, reduced);
 
         for item in &reduced.reachable_items {
             if root_item_should_render(reduced, item)
                 || !package_has_reachable_callables(reduced, &item.package)
                 || matches!(item.kind, ItemKind::Const | ItemKind::Static)
-                || callable_idents.contains(&item.name)
-                || retained_impl_surfaces_mention_ident(project, reduced, &item.package, &item.name)
-                || retained_macro_surfaces_mention_ident(
-                    project,
-                    reduced,
-                    &item.package,
-                    &item.name,
-                )
+                || callable_idents.all.contains(&item.name)
+                || retained_surface_idents
+                    .get(&item.package)
+                    .is_some_and(|idents| idents.contains(&item.name))
             {
                 insert_render_plan_item(
                     project,
@@ -82,6 +80,7 @@ impl RenderPlan {
 
         Self {
             reachable_items,
+            callable_idents_by_package: callable_idents.by_package,
             mentions: ReachableMentionIndex::build(project, reduced),
             import_scope_mentions: RefCell::new(BTreeMap::new()),
         }
@@ -99,6 +98,18 @@ impl RenderPlan {
         self.mentions
             .module_mentions_ident(package, module_path, ident)
     }
+
+    fn package_callable_mentions_ident(&self, package: &str, ident: &str) -> bool {
+        self.callable_idents_by_package
+            .get(package)
+            .is_some_and(|idents| idents.contains(ident))
+    }
+}
+
+#[derive(Default)]
+struct CallableMentionIndex {
+    all: BTreeSet<String>,
+    by_package: BTreeMap<String, BTreeSet<String>>,
 }
 
 #[derive(Clone, Eq, Ord, PartialEq, PartialOrd)]
@@ -541,7 +552,8 @@ fn collect_struct_surface_idents(
         return;
     };
     for field in &fields.named {
-        if struct_field_should_remain(project, reduced, &item_id.package, item_struct, field) {
+        if struct_field_should_remain(project, reduced, None, &item_id.package, item_struct, field)
+        {
             collect_token_idents(&field.to_token_stream(), idents);
         }
     }
@@ -586,12 +598,14 @@ fn collect_trait_surface_idents(
     }
 }
 
-fn reachable_reduced_callable_idents(
+fn reachable_reduced_callable_ident_index(
     project: &Project,
     reduced: &ReducedProject,
-) -> BTreeSet<String> {
-    let mut idents = BTreeSet::new();
+) -> CallableMentionIndex {
+    let mut index = CallableMentionIndex::default();
     for callable in &reduced.reachable {
+        let package = callable.package().to_string();
+        let mut idents = BTreeSet::new();
         collect_callable_idents(callable, &mut idents);
         if let Some(record) = project.functions.get(callable) {
             collect_token_idents(&record.item.to_token_stream(), &mut idents);
@@ -599,8 +613,10 @@ fn reachable_reduced_callable_idents(
         if let Some(record) = project.methods.get(callable) {
             collect_token_idents(&record.item.to_token_stream(), &mut idents);
         }
+        index.all.extend(idents.iter().cloned());
+        index.by_package.entry(package).or_default().extend(idents);
     }
-    idents
+    index
 }
 
 fn collect_callable_idents(callable: &CallableId, idents: &mut BTreeSet<String>) {
@@ -684,25 +700,24 @@ fn retained_impl_surfaces_mention_ident(
         })
 }
 
-fn retained_macro_surfaces_mention_ident(
+fn retained_surface_idents_by_package(
     project: &Project,
     reduced: &ReducedProject,
-    package: &str,
-    ident: &str,
-) -> bool {
-    project
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut packages = BTreeMap::<String, BTreeSet<String>>::new();
+    for source in project
         .files
         .values()
-        .filter(|source| source.package == package)
-        .any(|source| {
-            retained_macro_invocations_mention_ident(
-                project,
-                reduced,
-                package,
-                &source.module_path,
-                ident,
-            )
-        })
+        .filter(|source| reduced.packages.contains(&source.package))
+    {
+        let mut idents = BTreeSet::new();
+        collect_retained_module_surface_idents(project, reduced, source, &mut idents);
+        packages
+            .entry(source.package.clone())
+            .or_default()
+            .extend(idents);
+    }
+    packages
 }
 
 fn source_tree_rs_files(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
@@ -2514,6 +2529,7 @@ fn transform_items(
                     prune_private_struct_fields(
                         project,
                         reduced,
+                        render_plan,
                         package,
                         &mut item_struct,
                         preserve_private_fields,
@@ -3355,22 +3371,39 @@ fn collect_retained_module_surface_idents(
 
     for item in &source.syntax.items {
         match item {
-            Item::Impl(item_impl)
-                if impl_has_reachable_method(
+            Item::Impl(item_impl) => {
+                let has_reachable_method = impl_has_reachable_method(
                     project,
                     reduced,
                     &source.package,
                     &source.module_path,
                     item_impl,
                     &aliases,
-                ) =>
-            {
-                for attr in &item_impl.attrs {
-                    collect_token_idents(&attr.to_token_stream(), idents);
+                );
+                if has_reachable_method {
+                    for attr in &item_impl.attrs {
+                        collect_token_idents(&attr.to_token_stream(), idents);
+                    }
+                    for impl_item in &item_impl.items {
+                        if !matches!(impl_item, ImplItem::Fn(_)) && !impl_item_is_test(impl_item) {
+                            collect_token_idents(&impl_item.to_token_stream(), idents);
+                        }
+                    }
                 }
-                for impl_item in &item_impl.items {
-                    if !matches!(impl_item, ImplItem::Fn(_)) && !impl_item_is_test(impl_item) {
-                        collect_token_idents(&impl_item.to_token_stream(), idents);
+                if item_impl.trait_.is_some()
+                    && impl_should_render(
+                        project,
+                        reduced,
+                        &source.package,
+                        &source.module_path,
+                        item_impl,
+                        &aliases,
+                    )
+                {
+                    for impl_item in &item_impl.items {
+                        if !impl_item_is_test(impl_item) {
+                            collect_token_idents(&impl_item.to_token_stream(), idents);
+                        }
                     }
                 }
             }
@@ -3772,7 +3805,7 @@ fn reachable_item_mentions_ident(
         return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
     };
     fields.named.iter().any(|field| {
-        struct_field_should_remain(project, reduced, package, item_struct, field)
+        struct_field_should_remain(project, reduced, None, package, item_struct, field)
             && token_stream_mentions_ident(&field.to_token_stream(), ident)
     })
 }
@@ -4400,6 +4433,7 @@ fn allow_dead_code_for_non_public_impl_item(item: &mut ImplItem) {
 fn prune_private_struct_fields(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     item_struct: &mut syn::ItemStruct,
     preserve_private_fields: bool,
@@ -4416,7 +4450,14 @@ fn prune_private_struct_fields(
         .named
         .iter()
         .filter(|field| {
-            struct_field_should_remain(project, reduced, package, &original_struct, field)
+            struct_field_should_remain(
+                project,
+                reduced,
+                Some(render_plan),
+                package,
+                &original_struct,
+                field,
+            )
         })
         .cloned()
         .collect();
@@ -4425,6 +4466,7 @@ fn prune_private_struct_fields(
 fn struct_field_should_remain(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     item_struct: &syn::ItemStruct,
     field: &Field,
@@ -4443,7 +4485,12 @@ fn struct_field_should_remain(
     let Some(name) = field.ident.as_ref() else {
         return true;
     };
-    reachable_callables_mention_ident(project, reduced, package, &name.to_string())
+    let name = name.to_string();
+    if let Some(render_plan) = render_plan {
+        render_plan.package_callable_mentions_ident(package, &name)
+    } else {
+        reachable_callables_mention_ident(project, reduced, package, &name)
+    }
 }
 
 fn field_attrs_require_field(field: &Field) -> bool {
