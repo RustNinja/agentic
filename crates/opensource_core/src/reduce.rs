@@ -497,6 +497,17 @@ fn visible_glob_use_paths(items: &[syn::Item]) -> Vec<Vec<String>> {
     paths
 }
 
+fn all_glob_use_paths(items: &[syn::Item]) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for item in items {
+        let syn::Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_glob_use_paths(&item_use.tree, Vec::new(), &mut paths);
+    }
+    paths
+}
+
 fn collect_glob_use_paths(tree: &UseTree, mut prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
     match tree {
         UseTree::Path(path) => {
@@ -1747,13 +1758,18 @@ impl Resolver<'_> {
             return Some(id);
         }
 
-        let alias = self.resolve_alias_target(&package, &module_path, &name)?;
-        let id = CallableId::Free {
-            package: alias.package,
-            module_path: alias.module_path,
-            name: alias.name,
-        };
-        self.project.functions.contains_key(&id).then_some(id)
+        if let Some(alias) = self.resolve_alias_target(&package, &module_path, &name) {
+            let id = CallableId::Free {
+                package: alias.package,
+                module_path: alias.module_path,
+                name: alias.name,
+            };
+            if self.project.functions.contains_key(&id) {
+                return Some(id);
+            }
+        }
+
+        self.find_glob_import_function(&package, &module_path, &name, &mut BTreeSet::new())
     }
 
     fn resolve_associated_method(&self, path: &Path) -> Option<CallableId> {
@@ -2216,8 +2232,40 @@ impl Resolver<'_> {
             if let Some(reexport_target) = self.crate_root_reexport_method_candidate(&candidate) {
                 queue.push_back(reexport_target);
             }
+            for imported_impl_target in self.same_leaf_method_candidates(&candidate) {
+                queue.push_back(imported_impl_target);
+            }
             candidates.push(candidate);
         }
+        candidates
+    }
+
+    fn same_leaf_method_candidates(&self, type_ref: &TypeRef) -> Vec<TypeRef> {
+        let Some(leaf) = type_ref.type_path.last() else {
+            return Vec::new();
+        };
+        let mut candidates = self
+            .project
+            .methods
+            .keys()
+            .filter_map(|id| {
+                let CallableId::Method {
+                    package, type_path, ..
+                } = id
+                else {
+                    return None;
+                };
+                (package == &type_ref.package
+                    && type_path != &type_ref.type_path
+                    && type_path.last() == Some(leaf))
+                .then(|| TypeRef {
+                    package: package.clone(),
+                    type_path: type_path.clone(),
+                })
+            })
+            .collect::<Vec<_>>();
+        candidates.sort();
+        candidates.dedup();
         candidates
     }
 
@@ -2445,7 +2493,141 @@ impl Resolver<'_> {
             }
         }
 
-        self.find_glob_reexport_item(package, &module_path, &name, kinds, &mut BTreeSet::new())
+        if let Some(item) =
+            self.find_glob_reexport_item(package, &module_path, &name, kinds, &mut BTreeSet::new())
+        {
+            return Some(item);
+        }
+
+        self.find_glob_import_item(package, &module_path, &name, kinds, &mut BTreeSet::new())
+    }
+
+    fn find_glob_import_function(
+        &self,
+        package: &str,
+        module_path: &[String],
+        name: &str,
+        visited: &mut BTreeSet<(String, Vec<String>, String)>,
+    ) -> Option<CallableId> {
+        if !visited.insert((package.to_string(), module_path.to_vec(), name.to_string())) {
+            return None;
+        }
+
+        let source = self
+            .project
+            .files
+            .values()
+            .find(|source| source.package == package && source.module_path == module_path)?;
+        for glob_path in all_glob_use_paths(&source.syntax.items) {
+            let aliases = self
+                .project
+                .module_aliases
+                .get(&(package.to_string(), module_path.to_vec()))
+                .cloned()
+                .unwrap_or_default();
+            let resolver = Resolver {
+                project: self.project,
+                package,
+                module_path,
+                aliases: &aliases,
+                self_type: None,
+            };
+            let glob_path = resolver.apply_alias(glob_path);
+            let Some((target_package, target_module_path)) = resolver.resolve_prefix(&glob_path)
+            else {
+                continue;
+            };
+            let id = CallableId::Free {
+                package: target_package.clone(),
+                module_path: target_module_path.clone(),
+                name: name.to_string(),
+            };
+            if self.project.functions.contains_key(&id) {
+                return Some(id);
+            }
+            if let Some(callable) =
+                self.find_glob_import_function(&target_package, &target_module_path, name, visited)
+            {
+                return Some(callable);
+            }
+        }
+
+        None
+    }
+
+    fn find_glob_import_item(
+        &self,
+        package: &str,
+        module_path: &[String],
+        name: &str,
+        kinds: &[ItemKind],
+        visited: &mut BTreeSet<(String, Vec<String>, String)>,
+    ) -> Option<ItemId> {
+        if !visited.insert((package.to_string(), module_path.to_vec(), name.to_string())) {
+            return None;
+        }
+
+        let source = self
+            .project
+            .files
+            .values()
+            .find(|source| source.package == package && source.module_path == module_path)?;
+        for glob_path in all_glob_use_paths(&source.syntax.items) {
+            let aliases = self
+                .project
+                .module_aliases
+                .get(&(package.to_string(), module_path.to_vec()))
+                .cloned()
+                .unwrap_or_default();
+            let resolver = Resolver {
+                project: self.project,
+                package,
+                module_path,
+                aliases: &aliases,
+                self_type: None,
+            };
+            let glob_path = resolver.apply_alias(glob_path);
+            let Some((target_package, target_module_path)) = resolver.resolve_prefix(&glob_path)
+            else {
+                continue;
+            };
+
+            let mut target_path = target_module_path.clone();
+            target_path.push(name.to_string());
+            if let Some(item) = self.find_item_in_module(&target_package, &target_path, kinds) {
+                return Some(item);
+            }
+            if let Some(alias) =
+                self.resolve_alias_target(&target_package, &target_module_path, name)
+            {
+                let alias_path = alias.full_path();
+                if let Some(item) = self.find_item_in_module(&alias.package, &alias_path, kinds) {
+                    return Some(item);
+                }
+                if let Some((alias_name, alias_module_path)) = alias_path.split_last() {
+                    if let Some(item) = self.find_glob_import_item(
+                        &alias.package,
+                        alias_module_path,
+                        alias_name,
+                        kinds,
+                        visited,
+                    ) {
+                        return Some(item);
+                    }
+                }
+            }
+            if let Some(item) = self.find_glob_import_item(
+                &target_package,
+                &target_module_path,
+                name,
+                kinds,
+                visited,
+            ) {
+                return Some(item);
+            }
+        }
+
+        None
     }
 
     fn find_item_in_module(

@@ -987,6 +987,64 @@ fn resolves_methods_after_if_let_option_unwrap() {
 }
 
 #[test]
+fn resolves_private_glob_imports_and_sibling_impl_methods() {
+    let workspace = temp_path("private-glob-impl-workspace");
+    let output = temp_path("private-glob-impl-output");
+    let target_dir = temp_path("private-glob-impl-target");
+    write_private_glob_impl_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let reachable = report
+        .reachable
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert!(
+        reachable
+            .iter()
+            .any(|callable| callable.contains("MobileClient::spawn_detached")),
+        "sibling impl method was not retained: {reachable:?}",
+    );
+    assert!(
+        reachable
+            .iter()
+            .any(|callable| callable.contains("AppStoreReducer::snapshot")),
+        "method on parent named import was not retained: {reachable:?}",
+    );
+
+    let store_listener =
+        read(output.join("private_glob_impl_like/src/mobile_client/store_listener.rs"));
+    let event_loop = read(output.join("private_glob_impl_like/src/mobile_client/event_loop.rs"));
+    let reducer = read(output.join("private_glob_impl_like/src/reducer.rs"));
+    assert!(store_listener.contains("client.spawn_detached()"));
+    assert!(event_loop.contains("fn spawn_detached"));
+    assert!(reducer.contains("fn snapshot"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated private-glob impl slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nstore_listener.rs:\n{}\nevent_loop.rs:\n{}\nreducer.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        store_listener,
+        event_loop,
+        reducer,
+    );
+}
+
+#[test]
 fn resolves_type_paths_through_visible_glob_reexports() {
     let workspace = temp_path("glob-type-reexport-workspace");
     let output = temp_path("glob-type-reexport-output");
@@ -3168,6 +3226,96 @@ pub fn selected(input: &Value) -> bool {
 
 pub fn noisy(map: Map<String, Value>, number: Number) -> usize {
     map.len() + number.as_u64().unwrap_or_default() as usize
+}
+"#,
+    );
+}
+
+fn write_private_glob_impl_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["private_glob_impl_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("private_glob_impl_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "private_glob_impl_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("private_glob_impl_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+mod mobile_client;
+mod reducer;
+
+#[opensourced]
+pub fn selected() -> usize {
+    mobile_client::run()
+}
+"#,
+    );
+    write(
+        root.join("private_glob_impl_like/src/reducer.rs"),
+        r#"pub struct AppStoreReducer;
+
+impl AppStoreReducer {
+    pub fn snapshot(&self) -> usize {
+        7
+    }
+}
+"#,
+    );
+    write(
+        root.join("private_glob_impl_like/src/mobile_client/mod.rs"),
+        r#"use crate::reducer::AppStoreReducer;
+
+mod event_loop;
+mod store_listener;
+
+use self::store_listener::*;
+
+pub struct MobileClient {
+    app_store: AppStoreReducer,
+}
+
+pub fn run() -> usize {
+    let client = MobileClient {
+        app_store: AppStoreReducer,
+    };
+    spawn_store_listener(&client)
+}
+"#,
+    );
+    write(
+        root.join("private_glob_impl_like/src/mobile_client/event_loop.rs"),
+        r#"use super::*;
+
+impl MobileClient {
+    pub(crate) fn spawn_detached(&self) -> usize {
+        self.app_store.snapshot()
+    }
+}
+"#,
+    );
+    write(
+        root.join("private_glob_impl_like/src/mobile_client/store_listener.rs"),
+        r#"use super::*;
+
+pub(super) fn spawn_store_listener(client: &MobileClient) -> usize {
+    client.spawn_detached()
 }
 "#,
     );

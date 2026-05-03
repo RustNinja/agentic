@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, BTreeSet},
     ffi::OsStr,
     fs,
     path::{Path, PathBuf},
@@ -151,6 +151,7 @@ fn run_compiler_prune(
             "round": round,
             "cargo_status": final_output.status.code(),
             "diagnostic_count": diagnostics.len(),
+            "diagnostics": diagnostics,
             "removed_dead_items": removed,
             "redemoted_visibilities": redemoted,
         }));
@@ -232,8 +233,9 @@ fn prune_dead_items_from_diagnostics(
                 continue;
             };
             if code == Some("unused_imports") {
-                let remove_line =
-                    span_text(span).is_some_and(|text| text.trim_start().starts_with("use "));
+                let span_text = span_text(span);
+                let remove_line = span_text
+                    .is_some_and(|text| unused_import_span_removes_whole_use(text, message));
                 let column_start = span
                     .get("column_start")
                     .and_then(Value::as_u64)
@@ -251,6 +253,7 @@ fn prune_dead_items_from_diagnostics(
                         column_start: column_start as usize,
                         column_end: column_end as usize,
                         remove_line,
+                        message: message.to_string(),
                     });
                 continue;
             }
@@ -310,7 +313,16 @@ fn prune_dead_items_from_diagnostics(
         });
         candidates.dedup();
         let mut source = fs::read_to_string(&path)?;
+        candidates = promote_fully_pruned_multiline_use_groups(&source, candidates);
         candidates = filter_import_candidates_covered_by_whole_use_removals(&source, candidates);
+        candidates = dedup_whole_use_removal_candidates(&source, candidates);
+        candidates.sort_by(|left, right| {
+            right
+                .line_start
+                .cmp(&left.line_start)
+                .then_with(|| right.column_start.cmp(&left.column_start))
+        });
+        candidates.dedup();
         for candidate in candidates {
             if remove_import_span(&mut source, &candidate) {
                 removed += 1;
@@ -333,6 +345,7 @@ struct ImportSpanCandidate {
     column_start: usize,
     column_end: usize,
     remove_line: bool,
+    message: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -384,7 +397,7 @@ fn dead_candidate_name(code: Option<&str>, message: &str, span: &Value) -> Optio
     }
 
     if matches!(code, Some("unused_imports" | "E0432" | "E0603"))
-        && span_text(span)?.trim_start().starts_with("use ")
+        && is_use_statement_start(span_text(span)?)
     {
         return Some("use".to_string());
     }
@@ -442,6 +455,44 @@ fn span_text(span: &Value) -> Option<&str> {
         .first()?
         .get("text")
         .and_then(Value::as_str)
+}
+
+fn is_use_statement_start(text: &str) -> bool {
+    let trimmed = text.trim_start();
+    if trimmed.starts_with("use ") {
+        return true;
+    }
+    if trimmed
+        .strip_prefix("pub ")
+        .is_some_and(|rest| rest.starts_with("use "))
+    {
+        return true;
+    }
+    if trimmed
+        .strip_prefix("pub(crate) ")
+        .or_else(|| trimmed.strip_prefix("pub(super) "))
+        .is_some_and(|rest| rest.starts_with("use "))
+    {
+        return true;
+    }
+    trimmed
+        .strip_prefix("pub(in ")
+        .and_then(|rest| rest.split_once(") "))
+        .is_some_and(|(_, rest)| rest.starts_with("use "))
+}
+
+fn unused_import_span_removes_whole_use(span_text: &str, message: &str) -> bool {
+    if !is_use_statement_start(span_text) {
+        return false;
+    }
+
+    let import_names = use_statement_leaf_names_from_text(span_text);
+    if import_names.len() <= 1 {
+        return true;
+    }
+
+    let unused_names = unused_import_names_from_message(message);
+    !unused_names.is_empty() && import_names.is_subset(&unused_names)
 }
 
 fn remove_item_at_line(source: &mut String, candidate: &DeadItemCandidate) -> bool {
@@ -657,7 +708,7 @@ fn remove_use_statement_at_line(lines: &mut Vec<String>, line_index: usize) -> b
     let Some(line) = lines.get(line_index) else {
         return false;
     };
-    if !line.trim_start().starts_with("use ") {
+    if !is_use_statement_start(line) {
         return false;
     }
 
@@ -694,8 +745,7 @@ fn filter_import_candidates_covered_by_whole_use_removals(
         .filter_map(|candidate| {
             let start = candidate.line_start.checked_sub(1)?;
             let line = lines.get(start)?;
-            line.trim_start()
-                .starts_with("use ")
+            is_use_statement_start(line)
                 .then(|| use_statement_end(&lines, start).map(|end| (start + 1, end + 1)))?
         })
         .collect::<Vec<_>>();
@@ -713,6 +763,200 @@ fn filter_import_candidates_covered_by_whole_use_removals(
                 })
         })
         .collect()
+}
+
+fn dedup_whole_use_removal_candidates(
+    source: &str,
+    candidates: Vec<ImportSpanCandidate>,
+) -> Vec<ImportSpanCandidate> {
+    let lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let mut seen_whole_use_ranges = BTreeSet::<(usize, usize)>::new();
+    candidates
+        .into_iter()
+        .filter(|candidate| {
+            if !candidate.remove_line {
+                return true;
+            }
+            let Some(start) = candidate.line_start.checked_sub(1) else {
+                return true;
+            };
+            let range = lines
+                .get(start)
+                .filter(|line| is_use_statement_start(line))
+                .and_then(|_| use_statement_end(&lines, start))
+                .map(|end| (start, end))
+                .unwrap_or((start, start));
+            seen_whole_use_ranges.insert(range)
+        })
+        .collect()
+}
+
+fn promote_fully_pruned_multiline_use_groups(
+    source: &str,
+    mut candidates: Vec<ImportSpanCandidate>,
+) -> Vec<ImportSpanCandidate> {
+    let lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let mut groups = BTreeMap::<(usize, usize), Vec<ImportSpanCandidate>>::new();
+    for candidate in &candidates {
+        if candidate.remove_line {
+            continue;
+        }
+        let Some(line_index) = candidate.line_start.checked_sub(1) else {
+            continue;
+        };
+        let Some((start, end)) = enclosing_multiline_use_statement(&lines, line_index) else {
+            continue;
+        };
+        if line_index == start || line_index >= end {
+            continue;
+        }
+        groups
+            .entry((start, end))
+            .or_default()
+            .push(candidate.clone());
+    }
+
+    for ((start, end), group_candidates) in groups {
+        if multiline_use_group_all_imports_are_reported_unused(
+            &lines,
+            start,
+            end,
+            &group_candidates,
+        ) || multiline_use_group_inner_lines_fully_pruned(&lines, start, end, &group_candidates)
+        {
+            candidates.push(ImportSpanCandidate {
+                line_start: start + 1,
+                column_start: 1,
+                column_end: lines[start].len() + 1,
+                remove_line: true,
+                message: String::new(),
+            });
+        }
+    }
+
+    candidates
+}
+
+fn enclosing_multiline_use_statement(
+    lines: &[String],
+    line_index: usize,
+) -> Option<(usize, usize)> {
+    let mut start = line_index;
+    loop {
+        if is_use_statement_start(lines.get(start)?) {
+            let end = use_statement_end(lines, start)?;
+            return (end > start).then_some((start, end));
+        }
+        if start == 0 {
+            return None;
+        }
+        start -= 1;
+    }
+}
+
+fn multiline_use_group_inner_lines_fully_pruned(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    candidates: &[ImportSpanCandidate],
+) -> bool {
+    if end <= start + 1 {
+        return false;
+    }
+    for line_index in (start + 1)..end {
+        let Some(line) = lines.get(line_index) else {
+            return false;
+        };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let mut cleaned = line.clone();
+        let mut line_candidates = candidates
+            .iter()
+            .filter(|candidate| candidate.line_start == line_index + 1)
+            .collect::<Vec<_>>();
+        line_candidates.sort_by(|left, right| right.column_start.cmp(&left.column_start));
+        if line_candidates.is_empty() {
+            return false;
+        }
+        for candidate in line_candidates {
+            let _ = remove_column_range(&mut cleaned, candidate.column_start, candidate.column_end);
+        }
+        cleaned = cleanup_import_line(&cleaned);
+        if !cleaned.trim().is_empty() {
+            return false;
+        }
+    }
+    true
+}
+
+fn multiline_use_group_all_imports_are_reported_unused(
+    lines: &[String],
+    start: usize,
+    end: usize,
+    candidates: &[ImportSpanCandidate],
+) -> bool {
+    let import_names = multiline_use_group_leaf_names(lines, start, end);
+    if import_names.is_empty() {
+        return false;
+    }
+
+    let unused_names = candidates
+        .iter()
+        .flat_map(|candidate| unused_import_names_from_message(&candidate.message))
+        .collect::<BTreeSet<_>>();
+    !unused_names.is_empty() && import_names.is_subset(&unused_names)
+}
+
+fn multiline_use_group_leaf_names(lines: &[String], start: usize, end: usize) -> BTreeSet<String> {
+    use_statement_leaf_names_from_text(&lines[start..=end].join(" "))
+}
+
+fn use_statement_leaf_names_from_text(text: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let mut segment = String::new();
+    for character in text.chars() {
+        match character {
+            '{' => segment.clear(),
+            ',' | '}' | ';' => {
+                if let Some(name) = last_ident_in_use_segment(&segment) {
+                    names.insert(name);
+                }
+                segment.clear();
+            }
+            _ => segment.push(character),
+        }
+    }
+    names
+}
+
+fn unused_import_names_from_message(message: &str) -> BTreeSet<String> {
+    if !message.starts_with("unused import") {
+        return BTreeSet::new();
+    }
+
+    let mut names = BTreeSet::new();
+    let mut remaining = message;
+    while let Some((_, after_open)) = remaining.split_once('`') {
+        let Some((raw_name, after_close)) = after_open.split_once('`') else {
+            break;
+        };
+        if let Some(name) = last_ident_in_use_segment(raw_name) {
+            names.insert(name);
+        }
+        remaining = after_close;
+    }
+    names
+}
+
+fn last_ident_in_use_segment(segment: &str) -> Option<String> {
+    segment
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || character == '_' || character == '#')
+        })
+        .rev()
+        .filter_map(clean_ident_token)
+        .find(|token| !matches!(token.as_str(), "use" | "crate" | "as"))
 }
 
 #[derive(Clone, Debug, Default)]
@@ -997,6 +1241,7 @@ pub struct Kept;
                 column_start: 1,
                 column_end: 29,
                 remove_line: true,
+                message: String::new(),
             },
         );
 
@@ -1061,6 +1306,256 @@ pub struct Kept {
         assert!(!source.contains("use crate::protocol::params"));
         assert!(source.contains("pub struct Kept {"));
         assert!(source.contains("pub request_timeout: Duration"));
+    }
+
+    #[test]
+    fn prune_imports_promotes_fully_unused_multiline_group_from_inner_spans() {
+        let root = std::env::temp_dir().join(format!(
+            "slicers-cli-import-inner-only-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            r#"use crate::protocol::params::{
+    InitializeParams,
+    TypedBroadcast,
+};
+
+pub struct Kept {
+    pub request_timeout: Duration,
+}
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = vec![
+            json!({
+                "code": { "code": "unused_imports" },
+                "message": "unused import",
+                "spans": [{
+                    "file_name": "src/lib.rs",
+                    "line_start": 2,
+                    "column_start": 5,
+                    "column_end": 21,
+                    "text": [{ "text": "    InitializeParams," }]
+                }]
+            }),
+            json!({
+                "code": { "code": "unused_imports" },
+                "message": "unused import",
+                "spans": [{
+                    "file_name": "src/lib.rs",
+                    "line_start": 3,
+                    "column_start": 5,
+                    "column_end": 19,
+                    "text": [{ "text": "    TypedBroadcast," }]
+                }]
+            }),
+        ];
+
+        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let source = std::fs::read_to_string(source_path).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!source.contains("use crate::protocol::params"));
+        assert!(!source.contains("InitializeParams"));
+        assert!(!source.contains("TypedBroadcast"));
+        assert!(source.contains("pub struct Kept {"));
+        assert!(source.contains("pub request_timeout: Duration"));
+    }
+
+    #[test]
+    fn prune_imports_promotes_multiline_group_from_message_names() {
+        let root = std::env::temp_dir().join(format!(
+            "slicers-cli-import-message-names-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            r#"use crate::protocol::params::{
+    ThreadFollowerCommandApprovalDecisionParams, ThreadFollowerEditLastUserTurnParams,
+    ThreadFollowerFileApprovalDecisionParams,
+    TypedBroadcast,
+};
+
+pub struct Kept {
+    inner: Arc<Inner>,
+}
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = vec![json!({
+            "code": { "code": "unused_imports" },
+            "message": "unused imports: `ThreadFollowerCommandApprovalDecisionParams`, `ThreadFollowerEditLastUserTurnParams`, `ThreadFollowerFileApprovalDecisionParams`, and `TypedBroadcast`",
+            "spans": [{
+                "file_name": "src/lib.rs",
+                "line_start": 2,
+                "column_start": 5,
+                "column_end": 48,
+                "text": [{
+                    "text": "    ThreadFollowerCommandApprovalDecisionParams, ThreadFollowerEditLastUserTurnParams,"
+                }]
+            }]
+        })];
+
+        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let source = std::fs::read_to_string(source_path).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!source.contains("use crate::protocol::params"));
+        assert!(!source.contains("ThreadFollower"));
+        assert!(!source.contains("TypedBroadcast"));
+        assert!(source.contains("pub struct Kept {"));
+        assert!(source.contains("inner: Arc<Inner>"));
+    }
+
+    #[test]
+    fn prune_imports_removes_duplicate_whole_use_spans_once() {
+        let root = std::env::temp_dir().join(format!(
+            "slicers-cli-import-duplicate-whole-use-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            r#"use tokio::io::{AsyncRead, AsyncWrite};
+use crate::client::connection::IpcConnection;
+
+pub struct Kept {
+    connection: IpcConnection,
+}
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = vec![json!({
+            "code": { "code": "unused_imports" },
+            "message": "unused imports: `AsyncRead` and `AsyncWrite`",
+            "spans": [
+                {
+                    "file_name": "src/lib.rs",
+                    "line_start": 1,
+                    "column_start": 17,
+                    "column_end": 26,
+                    "text": [{ "text": "use tokio::io::{AsyncRead, AsyncWrite};" }]
+                },
+                {
+                    "file_name": "src/lib.rs",
+                    "line_start": 1,
+                    "column_start": 28,
+                    "column_end": 38,
+                    "text": [{ "text": "use tokio::io::{AsyncRead, AsyncWrite};" }]
+                }
+            ]
+        })];
+
+        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let source = std::fs::read_to_string(source_path).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!source.contains("tokio::io"));
+        assert!(source.contains("use crate::client::connection::IpcConnection;"));
+        assert!(source.contains("connection: IpcConnection"));
+    }
+
+    #[test]
+    fn prune_imports_keeps_used_member_in_single_line_group() {
+        let root = std::env::temp_dir().join(format!(
+            "slicers-cli-import-partial-single-line-group-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            r#"use crate::protocol::params::{TypedBroadcast, TypedRequest};
+
+pub struct Kept {
+    broadcast_tx: TypedBroadcast,
+}
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = vec![json!({
+            "code": { "code": "unused_imports" },
+            "message": "unused import: `TypedRequest`",
+            "spans": [{
+                "file_name": "src/lib.rs",
+                "line_start": 1,
+                "column_start": 47,
+                "column_end": 59,
+                "text": [{
+                    "text": "use crate::protocol::params::{TypedBroadcast, TypedRequest};"
+                }]
+            }]
+        })];
+
+        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let source = std::fs::read_to_string(source_path).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(source.contains("use crate::protocol::params::{TypedBroadcast};"));
+        assert!(!source.contains("TypedRequest"));
+        assert!(source.contains("broadcast_tx: TypedBroadcast"));
+    }
+
+    #[test]
+    fn prune_imports_removes_visibility_prefixed_single_use() {
+        let root = std::env::temp_dir().join(format!(
+            "slicers-cli-import-pub-crate-use-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            r#"pub(crate) use snapshot::QueuedFollowUpDraft;
+pub use snapshot::AppSnapshot;
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = vec![json!({
+            "code": { "code": "unused_imports" },
+            "message": "unused import: `snapshot::QueuedFollowUpDraft`",
+            "spans": [{
+                "file_name": "src/lib.rs",
+                "line_start": 1,
+                "column_start": 16,
+                "column_end": 47,
+                "text": [{ "text": "pub(crate) use snapshot::QueuedFollowUpDraft;" }]
+            }]
+        })];
+
+        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let source = std::fs::read_to_string(source_path).unwrap();
+
+        assert_eq!(removed, 1);
+        assert!(!source.contains("QueuedFollowUpDraft"));
+        assert!(!source.contains("pub(crate) use ;"));
+        assert!(source.contains("pub use snapshot::AppSnapshot;"));
     }
 
     #[test]
