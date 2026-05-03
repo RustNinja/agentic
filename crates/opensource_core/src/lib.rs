@@ -334,6 +334,10 @@ mod tests {
         assert!(!a_source.contains("internal_entry"));
 
         let b_source = fs::read_to_string(output.join("b/src/lib.rs")).unwrap();
+        assert!(
+            !b_source.contains("#[allow(dead_code)]"),
+            "compiler-prune must not pre-allow reachable dependency items:\n{b_source}"
+        );
         assert!(!b_source.contains("cfg(test)"));
         assert!(!b_source.contains("unit_test_that_must_not_be_exported"));
     }

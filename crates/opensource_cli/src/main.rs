@@ -143,23 +143,27 @@ fn run_compiler_prune(
 
     let mut rounds = Vec::new();
     let mut final_output = run_cargo_check_json(&output_root)?;
-    let mut diagnostics = lint_audit_diagnostics(&final_output.stdout);
+    let mut diagnostics = compiler_prune_diagnostics(&final_output.stdout, &output_root);
     for round in 0..12 {
-        let removed = prune_dead_items_from_diagnostics(&output_root, &diagnostics)?;
+        let prune_report = prune_dead_items_from_diagnostics(&output_root, &diagnostics)?;
         let redemoted = 0;
         rounds.push(json!({
             "round": round,
             "cargo_status": final_output.status.code(),
             "diagnostic_count": diagnostics.len(),
             "diagnostics": diagnostics,
-            "removed_dead_items": removed,
+            "removed_dead_items": prune_report.removed_items,
+            "removed_imports": prune_report.removed_imports,
+            "field_dead_code_allows": prune_report.field_dead_code_allows,
+            "deferred_field_dead_code_allows": prune_report.deferred_field_dead_code_allows,
+            "total_changes": prune_report.total_changes(),
             "redemoted_visibilities": redemoted,
         }));
-        if removed == 0 && redemoted == 0 {
+        if prune_report.total_changes() == 0 && redemoted == 0 {
             break;
         }
         final_output = run_cargo_check_json(&output_root)?;
-        diagnostics = lint_audit_diagnostics(&final_output.stdout);
+        diagnostics = compiler_prune_diagnostics(&final_output.stdout, &output_root);
     }
 
     let report_path = output_root.join("slicers-compiler-prune-report.json");
@@ -189,6 +193,16 @@ fn run_compiler_prune(
         run_rust_analyzer_audit(&output_root, &rust_analyzer)?;
     }
 
+    if !final_output.status.success() || !diagnostics.is_empty() {
+        return Err(format!(
+            "compiler-prune did not converge: cargo status {:?}, {} local diagnostics remain; see {}",
+            final_output.status.code(),
+            diagnostics.len(),
+            report_path.display()
+        )
+        .into());
+    }
+
     Ok(())
 }
 
@@ -208,8 +222,9 @@ fn run_cargo_check_json(output_root: &Path) -> Result<Output, Box<dyn std::error
 fn prune_dead_items_from_diagnostics(
     output_root: &Path,
     diagnostics: &[Value],
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let mut prune_ops_by_file: BTreeMap<PathBuf, Vec<PruneOp>> = BTreeMap::new();
+) -> Result<PruneReport, Box<dyn std::error::Error>> {
+    let mut prune_ops_by_file: BTreeMap<PathBuf, Vec<DeadItemCandidate>> = BTreeMap::new();
+    let mut field_allows_by_file: BTreeMap<PathBuf, Vec<AllowDeadCodeCandidate>> = BTreeMap::new();
     let mut import_spans_by_file: BTreeMap<PathBuf, Vec<ImportSpanCandidate>> = BTreeMap::new();
     for diagnostic in diagnostics {
         let code = diagnostic
@@ -244,7 +259,9 @@ fn prune_dead_items_from_diagnostics(
                     .get("column_end")
                     .and_then(Value::as_u64)
                     .unwrap_or(column_start);
-                let path = diagnostic_path(output_root, file_name);
+                let Some(path) = diagnostic_path(output_root, file_name) else {
+                    continue;
+                };
                 import_spans_by_file
                     .entry(path)
                     .or_default()
@@ -257,14 +274,16 @@ fn prune_dead_items_from_diagnostics(
                     });
                 continue;
             }
-            let path = diagnostic_path(output_root, file_name);
+            let Some(path) = diagnostic_path(output_root, file_name) else {
+                continue;
+            };
             if code == Some("dead_code") && dead_code_message_is_field(message) {
-                prune_ops_by_file
+                field_allows_by_file
                     .entry(path)
                     .or_default()
-                    .push(PruneOp::AllowDeadCode(AllowDeadCodeCandidate {
+                    .push(AllowDeadCodeCandidate {
                         line_start: line_start as usize,
-                    }));
+                    });
                 continue;
             }
             let Some(name) = dead_candidate_name(code, message, span) else {
@@ -273,30 +292,24 @@ fn prune_dead_items_from_diagnostics(
             prune_ops_by_file
                 .entry(path)
                 .or_default()
-                .push(PruneOp::RemoveItem(DeadItemCandidate {
+                .push(DeadItemCandidate {
                     name,
                     line_start: line_start as usize,
-                }));
+                });
         }
     }
 
-    let mut removed = 0;
+    let mut report = PruneReport::default();
     for (path, mut candidates) in prune_ops_by_file {
         if !path.exists() {
             continue;
         }
-        candidates.sort_by(|left, right| right.line_start().cmp(&left.line_start()));
+        candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
         candidates.dedup();
         let mut source = fs::read_to_string(&path)?;
         for candidate in candidates {
-            let changed = match candidate {
-                PruneOp::RemoveItem(candidate) => remove_item_at_line(&mut source, &candidate),
-                PruneOp::AllowDeadCode(candidate) => {
-                    allow_dead_code_on_enclosing_item(&mut source, &candidate)
-                }
-            };
-            if changed {
-                removed += 1;
+            if remove_item_at_line(&mut source, &candidate) {
+                report.removed_items += 1;
             }
         }
         fs::write(path, source)?;
@@ -325,12 +338,32 @@ fn prune_dead_items_from_diagnostics(
         candidates.dedup();
         for candidate in candidates {
             if remove_import_span(&mut source, &candidate) {
-                removed += 1;
+                report.removed_imports += 1;
             }
         }
         fs::write(path, source)?;
     }
-    Ok(removed)
+
+    if report.removed_items == 0 && report.removed_imports == 0 {
+        for (path, mut candidates) in field_allows_by_file {
+            if !path.exists() {
+                continue;
+            }
+            candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
+            candidates.dedup();
+            let mut source = fs::read_to_string(&path)?;
+            for candidate in candidates {
+                if allow_dead_code_on_enclosing_item(&mut source, &candidate) {
+                    report.field_dead_code_allows += 1;
+                }
+            }
+            fs::write(path, source)?;
+        }
+    } else {
+        report.deferred_field_dead_code_allows = field_allows_by_file.values().map(Vec::len).sum();
+    }
+
+    Ok(report)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -353,27 +386,26 @@ struct AllowDeadCodeCandidate {
     line_start: usize,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
-enum PruneOp {
-    RemoveItem(DeadItemCandidate),
-    AllowDeadCode(AllowDeadCodeCandidate),
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+struct PruneReport {
+    removed_items: usize,
+    removed_imports: usize,
+    field_dead_code_allows: usize,
+    deferred_field_dead_code_allows: usize,
 }
 
-impl PruneOp {
-    fn line_start(&self) -> usize {
-        match self {
-            PruneOp::RemoveItem(candidate) => candidate.line_start,
-            PruneOp::AllowDeadCode(candidate) => candidate.line_start,
-        }
+impl PruneReport {
+    fn total_changes(&self) -> usize {
+        self.removed_items + self.removed_imports + self.field_dead_code_allows
     }
 }
 
-fn diagnostic_path(output_root: &Path, file_name: &str) -> PathBuf {
+fn diagnostic_path(output_root: &Path, file_name: &str) -> Option<PathBuf> {
     let path = PathBuf::from(file_name);
     if path.is_absolute() {
-        path
+        path_is_inside_output_root(&path, output_root).then_some(path)
     } else {
-        output_root.join(path)
+        Some(output_root.join(path))
     }
 }
 
@@ -1145,6 +1177,13 @@ fn path_to_json_string(path: &OsStr) -> String {
     path.to_string_lossy().into_owned()
 }
 
+fn compiler_prune_diagnostics(stdout: &[u8], output_root: &Path) -> Vec<Value> {
+    lint_audit_diagnostics(stdout)
+        .into_iter()
+        .filter(|diagnostic| diagnostic_is_inside_output_root(diagnostic, output_root))
+        .collect()
+}
+
 fn lint_audit_diagnostics(stdout: &[u8]) -> Vec<Value> {
     let interesting_codes = [
         "dead_code",
@@ -1156,8 +1195,11 @@ fn lint_audit_diagnostics(stdout: &[u8]) -> Vec<Value> {
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|value| value.get("reason").and_then(Value::as_str) == Some("compiler-message"))
-        .filter_map(|value| value.get("message").cloned())
-        .filter(|message| {
+        .filter_map(|value| {
+            let message = value.get("message")?.clone();
+            Some((value, message))
+        })
+        .filter(|(_, message)| {
             let level = message.get("level").and_then(Value::as_str);
             let code = message
                 .get("code")
@@ -1167,7 +1209,7 @@ fn lint_audit_diagnostics(stdout: &[u8]) -> Vec<Value> {
                 || (level == Some("warning")
                     && code.is_some_and(|code| interesting_codes.contains(&code)))
         })
-        .map(|message| {
+        .map(|(value, message)| {
             let primary_spans = message
                 .get("spans")
                 .and_then(Value::as_array)
@@ -1184,11 +1226,55 @@ fn lint_audit_diagnostics(stdout: &[u8]) -> Vec<Value> {
             json!({
                 "code": message.get("code").cloned().unwrap_or(Value::Null),
                 "level": message.get("level").cloned().unwrap_or(Value::Null),
+                "manifest_path": value.get("manifest_path").cloned().unwrap_or(Value::Null),
+                "package_id": value.get("package_id").cloned().unwrap_or(Value::Null),
                 "message": message.get("message").cloned().unwrap_or(Value::Null),
                 "spans": primary_spans,
             })
         })
         .collect()
+}
+
+fn diagnostic_is_inside_output_root(diagnostic: &Value, output_root: &Path) -> bool {
+    if let Some(manifest_path) = diagnostic.get("manifest_path").and_then(Value::as_str) {
+        return path_is_inside_output_root(Path::new(manifest_path), output_root);
+    }
+
+    let Some(spans) = diagnostic.get("spans").and_then(Value::as_array) else {
+        return true;
+    };
+    if spans.is_empty() {
+        return true;
+    }
+
+    spans.iter().any(|span| {
+        span.get("file_name")
+            .and_then(Value::as_str)
+            .is_some_and(|file_name| diagnostic_path(output_root, file_name).is_some())
+    })
+}
+
+fn path_is_inside_output_root(path: &Path, output_root: &Path) -> bool {
+    let root = canonicalize_existing_prefix(output_root);
+    let candidate = canonicalize_existing_prefix(path);
+    candidate.starts_with(root)
+}
+
+fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
+    if let Ok(canonical) = path.canonicalize() {
+        return canonical;
+    }
+
+    let Some(parent) = path.parent() else {
+        return path.to_path_buf();
+    };
+    let Ok(canonical_parent) = parent.canonicalize() else {
+        return path.to_path_buf();
+    };
+    match path.file_name() {
+        Some(file_name) => canonical_parent.join(file_name),
+        None => canonical_parent,
+    }
 }
 
 fn usage() -> String {
@@ -1299,10 +1385,11 @@ pub struct Kept {
             }),
         ];
 
-        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let report = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
         let source = std::fs::read_to_string(source_path).unwrap();
 
-        assert_eq!(removed, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.removed_imports, 1);
         assert!(!source.contains("use crate::protocol::params"));
         assert!(source.contains("pub struct Kept {"));
         assert!(source.contains("pub request_timeout: Duration"));
@@ -1358,10 +1445,11 @@ pub struct Kept {
             }),
         ];
 
-        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let report = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
         let source = std::fs::read_to_string(source_path).unwrap();
 
-        assert_eq!(removed, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.removed_imports, 1);
         assert!(!source.contains("use crate::protocol::params"));
         assert!(!source.contains("InitializeParams"));
         assert!(!source.contains("TypedBroadcast"));
@@ -1409,10 +1497,11 @@ pub struct Kept {
             }]
         })];
 
-        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let report = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
         let source = std::fs::read_to_string(source_path).unwrap();
 
-        assert_eq!(removed, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.removed_imports, 1);
         assert!(!source.contains("use crate::protocol::params"));
         assert!(!source.contains("ThreadFollower"));
         assert!(!source.contains("TypedBroadcast"));
@@ -1464,10 +1553,11 @@ pub struct Kept {
             ]
         })];
 
-        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let report = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
         let source = std::fs::read_to_string(source_path).unwrap();
 
-        assert_eq!(removed, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.removed_imports, 1);
         assert!(!source.contains("tokio::io"));
         assert!(source.contains("use crate::client::connection::IpcConnection;"));
         assert!(source.contains("connection: IpcConnection"));
@@ -1509,10 +1599,11 @@ pub struct Kept {
             }]
         })];
 
-        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let report = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
         let source = std::fs::read_to_string(source_path).unwrap();
 
-        assert_eq!(removed, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.removed_imports, 1);
         assert!(source.contains("use crate::protocol::params::{TypedBroadcast};"));
         assert!(!source.contains("TypedRequest"));
         assert!(source.contains("broadcast_tx: TypedBroadcast"));
@@ -1549,10 +1640,11 @@ pub use snapshot::AppSnapshot;
             }]
         })];
 
-        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let report = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
         let source = std::fs::read_to_string(source_path).unwrap();
 
-        assert_eq!(removed, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.removed_imports, 1);
         assert!(!source.contains("QueuedFollowUpDraft"));
         assert!(!source.contains("pub(crate) use ;"));
         assert!(source.contains("pub use snapshot::AppSnapshot;"));
@@ -1606,14 +1698,209 @@ pub struct Config {
             }),
         ];
 
-        let removed = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let report = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
         let source = std::fs::read_to_string(source_path).unwrap();
 
-        assert_eq!(removed, 2);
-        assert!(source.contains("#[allow(dead_code)]"));
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.removed_imports, 1);
+        assert_eq!(report.deferred_field_dead_code_allows, 1);
+        assert!(!source.contains("#[allow(dead_code)]"));
         assert!(source.contains("pub struct Config {"));
         assert!(source.contains("socket_path: PathBuf"));
         assert!(source.contains("request_timeout: Duration"));
         assert!(!source.contains("use crate::foo"));
+    }
+
+    #[test]
+    fn prune_field_dead_code_only_after_structural_pruning_is_exhausted() {
+        let root = std::env::temp_dir().join(format!(
+            "slicers-cli-field-allow-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let source_path = root.join("src/lib.rs");
+        std::fs::create_dir_all(source_path.parent().unwrap()).unwrap();
+        std::fs::write(
+            &source_path,
+            r#"pub struct Config {
+    socket_path: PathBuf,
+    request_timeout: Duration,
+}
+"#,
+        )
+        .unwrap();
+
+        let diagnostics = vec![json!({
+            "code": { "code": "dead_code" },
+            "message": "field `socket_path` is never read",
+            "spans": [{
+                "file_name": "src/lib.rs",
+                "line_start": 2,
+                "text": [{ "text": "    socket_path: PathBuf," }]
+            }]
+        })];
+
+        let report = prune_dead_items_from_diagnostics(&root, &diagnostics).unwrap();
+        let source = std::fs::read_to_string(source_path).unwrap();
+
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.field_dead_code_allows, 1);
+        assert!(source.contains("#[allow(dead_code)]\npub struct Config {"));
+        assert!(source.contains("socket_path: PathBuf"));
+        assert!(source.contains("request_timeout: Duration"));
+    }
+
+    #[test]
+    fn compiler_prune_does_not_preallow_reachable_dependency_items() {
+        let workspace = std::env::temp_dir().join(format!(
+            "slicers-cli-compiler-prune-fixture-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let output = std::env::temp_dir().join(format!(
+            "slicers-cli-compiler-prune-output-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let target = std::env::temp_dir().join(format!(
+            "slicers-cli-compiler-prune-target-{}",
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        let _target_guard = EnvVarGuard::set_path("SLICERS_CARGO_TARGET_DIR", &target);
+        let opensourced_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .join("opensourced");
+        let opensourced_path = opensourced_path.to_string_lossy();
+
+        std::fs::create_dir_all(workspace.join("app/src")).unwrap();
+        std::fs::create_dir_all(workspace.join("helper/src")).unwrap();
+        std::fs::write(
+            workspace.join("Cargo.toml"),
+            format!(
+                r#"[workspace]
+members = ["app", "helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+                opensourced_path
+            ),
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("app/Cargo.toml"),
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helper = { path = "../helper" }
+opensourced.workspace = true
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn exported() -> helper::Kept {
+    helper::make()
+}
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("helper/Cargo.toml"),
+            r#"[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+        )
+        .unwrap();
+        std::fs::write(
+            workspace.join("helper/src/lib.rs"),
+            r#"use std::{fmt::Debug, marker::PhantomData};
+
+pub struct Kept {
+    value: i32,
+    marker: PhantomData<()>,
+}
+
+pub fn make() -> Kept {
+    Kept {
+        value: 7,
+        marker: PhantomData,
+    }
+}
+"#,
+        )
+        .unwrap();
+
+        run_compiler_prune(workspace, output.clone(), RustAnalyzerOptions::default())
+            .expect("compiler-prune should converge");
+
+        let helper_source = std::fs::read_to_string(output.join("helper/src/lib.rs")).unwrap();
+        assert!(
+            helper_source.contains("#[allow(dead_code)]\npub struct Kept"),
+            "field-level dead_code should be allowed only on the remaining necessary type:\n{helper_source}"
+        );
+        assert!(
+            !helper_source.contains("#[allow(dead_code)]\npub fn make"),
+            "reachable functions must not be pre-allowed:\n{helper_source}"
+        );
+
+        let report: Value = serde_json::from_str(
+            &std::fs::read_to_string(output.join("slicers-compiler-prune-report.json")).unwrap(),
+        )
+        .unwrap();
+        let rounds = report
+            .get("rounds")
+            .and_then(Value::as_array)
+            .expect("report should contain rounds");
+        assert!(
+            rounds.iter().any(|round| round
+                .get("field_dead_code_allows")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                > 0),
+            "later pass should restore only necessary field dead_code allows:\n{report:#}"
+        );
+    }
+
+    struct EnvVarGuard {
+        key: &'static str,
+        previous: Option<std::ffi::OsString>,
+    }
+
+    impl EnvVarGuard {
+        fn set_path(key: &'static str, value: &Path) -> Self {
+            let previous = std::env::var_os(key);
+            std::env::set_var(key, value);
+            Self { key, previous }
+        }
+    }
+
+    impl Drop for EnvVarGuard {
+        fn drop(&mut self) {
+            if let Some(previous) = &self.previous {
+                std::env::set_var(self.key, previous);
+            } else {
+                std::env::remove_var(self.key);
+            }
+        }
     }
 }

@@ -532,9 +532,6 @@ fn demote_items_for_prune(
                     module_path: module_path.to_vec(),
                     name: function.sig.ident.to_string(),
                 };
-                if reduced.reachable.contains(&id) {
-                    protect_dead_code(&mut function.attrs);
-                }
                 if !reduced.reachable.contains(&id)
                     && !external_references
                         .contains(&(package.to_string(), function.sig.ident.to_string()))
@@ -544,15 +541,6 @@ fn demote_items_for_prune(
             }
             Item::Struct(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
-                if reachable_item_exists(
-                    reduced,
-                    package,
-                    module_path,
-                    &item.ident.to_string(),
-                    ItemKind::Struct,
-                ) {
-                    protect_dead_code(&mut item.attrs);
-                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -566,15 +554,6 @@ fn demote_items_for_prune(
             }
             Item::Enum(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
-                if reachable_item_exists(
-                    reduced,
-                    package,
-                    module_path,
-                    &item.ident.to_string(),
-                    ItemKind::Enum,
-                ) {
-                    protect_dead_code(&mut item.attrs);
-                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -588,15 +567,6 @@ fn demote_items_for_prune(
             }
             Item::Union(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
-                if reachable_item_exists(
-                    reduced,
-                    package,
-                    module_path,
-                    &item.ident.to_string(),
-                    ItemKind::Union,
-                ) {
-                    protect_dead_code(&mut item.attrs);
-                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -610,15 +580,6 @@ fn demote_items_for_prune(
             }
             Item::Type(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
-                if reachable_item_exists(
-                    reduced,
-                    package,
-                    module_path,
-                    &item.ident.to_string(),
-                    ItemKind::Type,
-                ) {
-                    protect_dead_code(&mut item.attrs);
-                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -632,15 +593,6 @@ fn demote_items_for_prune(
             }
             Item::Trait(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
-                if reachable_item_exists(
-                    reduced,
-                    package,
-                    module_path,
-                    &item.ident.to_string(),
-                    ItemKind::Trait,
-                ) {
-                    protect_dead_code(&mut item.attrs);
-                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -654,15 +606,6 @@ fn demote_items_for_prune(
             }
             Item::Const(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
-                if reachable_item_exists(
-                    reduced,
-                    package,
-                    module_path,
-                    &item.ident.to_string(),
-                    ItemKind::Const,
-                ) {
-                    protect_dead_code(&mut item.attrs);
-                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -676,15 +619,6 @@ fn demote_items_for_prune(
             }
             Item::Static(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
-                if reachable_item_exists(
-                    reduced,
-                    package,
-                    module_path,
-                    &item.ident.to_string(),
-                    ItemKind::Static,
-                ) {
-                    protect_dead_code(&mut item.attrs);
-                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -738,9 +672,6 @@ fn demote_items_for_prune(
                                     && callable_method == &method.sig.ident.to_string()
                             )
                         });
-                        if is_boundary {
-                            protect_dead_code(&mut method.attrs);
-                        }
                         if !is_boundary
                             && !external_references
                                 .contains(&(package.to_string(), method.sig.ident.to_string()))
@@ -785,21 +716,6 @@ fn protect_dead_code(attrs: &mut Vec<syn::Attribute>) {
         return;
     }
     attrs.push(parse_quote!(#[allow(dead_code)]));
-}
-
-fn reachable_item_exists(
-    reduced: &ReducedProject,
-    package: &str,
-    module_path: &[String],
-    name: &str,
-    kind: ItemKind,
-) -> bool {
-    reduced.reachable_items.contains(&ItemId {
-        package: package.to_string(),
-        module_path: module_path.to_vec(),
-        name: name.to_string(),
-        kind,
-    })
 }
 
 fn empty_nonboundary_module(
