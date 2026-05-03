@@ -70,17 +70,10 @@ pub fn write_compiler_prune_workspace(
     reduced: &ReducedProject,
     output_root: &Path,
 ) -> Result<CompilerPruneWorkspaceReport, Box<dyn std::error::Error>> {
-    if output_root.exists() {
-        fs::remove_dir_all(output_root)?;
-    }
-    fs::create_dir_all(output_root)?;
-
     let workspace = &project.workspace;
-    let copied_packages = compiler_prune_package_closure(project, reduced.root.package());
+    let copied_packages = reduced.packages.clone();
     let external_references = external_reference_names(project, &copied_packages);
-    let mut files_written = copy_compiler_prune_tree(project, &copied_packages, output_root)?;
-    rewrite_lint_audit_manifests(&workspace.root, output_root, output_root)?;
-    restrict_workspace_members(project, &copied_packages, output_root)?;
+    let mut files_written = write_reduced_workspace(project, reduced, output_root)?;
 
     let mut demoted_visibilities = 0;
     for source in project.files.values() {
@@ -90,8 +83,9 @@ pub fn write_compiler_prune_workspace(
         {
             continue;
         }
-        let relative_path = source.path.strip_prefix(&workspace.root)?;
-        let output_path = output_root.join(relative_path);
+        let Some(output_path) = reduced_source_output_path(project, output_root, source) else {
+            continue;
+        };
         demoted_visibilities += demote_dependency_visibility(
             &output_path,
             reduced,
@@ -110,8 +104,10 @@ pub fn write_compiler_prune_workspace(
         if !package.lib_path.starts_with(&workspace.root) {
             continue;
         }
-        let relative_path = package.lib_path.strip_prefix(&workspace.root)?;
-        let output_path = output_root.join(relative_path);
+        let Some(output_path) = reduced_package_entry_output_path(project, output_root, package)
+        else {
+            continue;
+        };
         if inject_compiler_prune_attrs(&output_path)? {
             linted_roots.push(output_path);
         }
@@ -159,45 +155,24 @@ pub fn refresh_compiler_prune_visibility(
     })
 }
 
-fn copy_compiler_prune_tree(
+fn reduced_source_output_path(
     project: &Project,
-    copied_packages: &BTreeSet<String>,
     output_root: &Path,
-) -> Result<usize, Box<dyn std::error::Error>> {
-    let workspace_root = &project.workspace.root;
-    let mut copied = 0;
-    for root_file in [
-        "Cargo.toml",
-        "Cargo.lock",
-        "rust-toolchain",
-        "rust-toolchain.toml",
-    ] {
-        let source = workspace_root.join(root_file);
-        if source.exists() {
-            copied += copy_lint_audit_tree(workspace_root, &source, output_root)?;
-        }
-    }
+    source: &SourceFile,
+) -> Option<PathBuf> {
+    let package = project.workspace.packages.get(&source.package)?;
+    let relative_path = source.path.strip_prefix(&package.root).ok()?;
+    Some(output_root.join(&package.name).join(relative_path))
+}
 
-    for package in copied_packages
-        .iter()
-        .filter_map(|package| project.workspace.packages.get(package))
-        .filter(|package| package.root.starts_with(workspace_root))
-    {
-        if package.root == *workspace_root {
-            let source_dir = package.root.join("src");
-            if source_dir.exists() {
-                copied += copy_lint_audit_tree(workspace_root, &source_dir, output_root)?;
-            }
-            let build_script = package.root.join("build.rs");
-            if build_script.exists() {
-                copied += copy_lint_audit_tree(workspace_root, &build_script, output_root)?;
-            }
-        } else {
-            copied += copy_lint_audit_tree(workspace_root, &package.root, output_root)?;
-        }
-    }
-
-    Ok(copied)
+fn reduced_package_entry_output_path(
+    project: &Project,
+    output_root: &Path,
+    package: &Package,
+) -> Option<PathBuf> {
+    let relative_path = package.lib_path.strip_prefix(&package.root).ok()?;
+    let package = project.workspace.packages.get(&package.name)?;
+    Some(output_root.join(&package.name).join(relative_path))
 }
 
 fn compiler_prune_package_closure(project: &Project, root_package: &str) -> BTreeSet<String> {
@@ -329,49 +304,6 @@ fn compiler_prune_item_name(item: &Item) -> Option<(String, ItemKind)> {
         Item::Mod(item) => Some((item.ident.to_string(), ItemKind::Module)),
         _ => None,
     }
-}
-
-fn restrict_workspace_members(
-    project: &Project,
-    copied_packages: &BTreeSet<String>,
-    output_root: &Path,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let root_manifest = output_root.join("Cargo.toml");
-    if !root_manifest.exists() {
-        return Ok(());
-    }
-
-    let mut manifest = fs::read_to_string(&root_manifest)?.parse::<Value>()?;
-    let Some(workspace) = manifest.get_mut("workspace").and_then(Value::as_table_mut) else {
-        return Ok(());
-    };
-
-    let mut members = copied_packages
-        .iter()
-        .filter_map(|package| project.workspace.packages.get(package))
-        .filter(|package| package.root.starts_with(&project.workspace.root))
-        .map(|package| {
-            package
-                .root
-                .strip_prefix(&project.workspace.root)
-                .map(|relative| {
-                    if relative.as_os_str().is_empty() {
-                        ".".to_string()
-                    } else {
-                        relative.to_string_lossy().replace('\\', "/")
-                    }
-                })
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-    members.sort();
-    members.dedup();
-    workspace.insert(
-        "members".to_string(),
-        Value::Array(members.into_iter().map(Value::String).collect()),
-    );
-
-    fs::write(root_manifest, toml::to_string_pretty(&manifest)?)?;
-    Ok(())
 }
 
 fn copy_lint_audit_tree(
@@ -522,7 +454,7 @@ fn inject_compiler_prune_attrs(path: &Path) -> Result<bool, Box<dyn std::error::
     let attrs = [
         "#![deny(dead_code, unused_imports, unused_macros, unreachable_pub)]",
         "#![allow(unused_crate_dependencies)]",
-        "// slicers compiler-prune: broad copy with dependency visibility lowered",
+        "// slicers compiler-prune: reduced slice with compiler-enforced pruning",
     ];
     let mut lines = text.lines().collect::<Vec<_>>();
     let mut insert_at = 0;
@@ -600,6 +532,9 @@ fn demote_items_for_prune(
                     module_path: module_path.to_vec(),
                     name: function.sig.ident.to_string(),
                 };
+                if reduced.reachable.contains(&id) {
+                    protect_dead_code(&mut function.attrs);
+                }
                 if !reduced.reachable.contains(&id)
                     && !external_references
                         .contains(&(package.to_string(), function.sig.ident.to_string()))
@@ -609,6 +544,15 @@ fn demote_items_for_prune(
             }
             Item::Struct(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
+                if reachable_item_exists(
+                    reduced,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Struct,
+                ) {
+                    protect_dead_code(&mut item.attrs);
+                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -622,6 +566,15 @@ fn demote_items_for_prune(
             }
             Item::Enum(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
+                if reachable_item_exists(
+                    reduced,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Enum,
+                ) {
+                    protect_dead_code(&mut item.attrs);
+                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -635,6 +588,15 @@ fn demote_items_for_prune(
             }
             Item::Union(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
+                if reachable_item_exists(
+                    reduced,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Union,
+                ) {
+                    protect_dead_code(&mut item.attrs);
+                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -648,6 +610,15 @@ fn demote_items_for_prune(
             }
             Item::Type(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
+                if reachable_item_exists(
+                    reduced,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Type,
+                ) {
+                    protect_dead_code(&mut item.attrs);
+                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -661,6 +632,15 @@ fn demote_items_for_prune(
             }
             Item::Trait(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
+                if reachable_item_exists(
+                    reduced,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Trait,
+                ) {
+                    protect_dead_code(&mut item.attrs);
+                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -674,6 +654,15 @@ fn demote_items_for_prune(
             }
             Item::Const(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
+                if reachable_item_exists(
+                    reduced,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Const,
+                ) {
+                    protect_dead_code(&mut item.attrs);
+                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -687,6 +676,15 @@ fn demote_items_for_prune(
             }
             Item::Static(item) => {
                 protect_opensourced_dead_code(&mut item.attrs);
+                if reachable_item_exists(
+                    reduced,
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    ItemKind::Static,
+                ) {
+                    protect_dead_code(&mut item.attrs);
+                }
                 if !boundary_or_external_item_exists(
                     reduced,
                     external_references,
@@ -740,6 +738,9 @@ fn demote_items_for_prune(
                                     && callable_method == &method.sig.ident.to_string()
                             )
                         });
+                        if is_boundary {
+                            protect_dead_code(&mut method.attrs);
+                        }
                         if !is_boundary
                             && !external_references
                                 .contains(&(package.to_string(), method.sig.ident.to_string()))
@@ -770,6 +771,10 @@ fn protect_opensourced_dead_code(attrs: &mut Vec<syn::Attribute>) {
     {
         return;
     }
+    protect_dead_code(attrs);
+}
+
+fn protect_dead_code(attrs: &mut Vec<syn::Attribute>) {
     if attrs.iter().any(|attribute| {
         attribute.path().is_ident("allow")
             && attribute
@@ -780,6 +785,21 @@ fn protect_opensourced_dead_code(attrs: &mut Vec<syn::Attribute>) {
         return;
     }
     attrs.push(parse_quote!(#[allow(dead_code)]));
+}
+
+fn reachable_item_exists(
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    name: &str,
+    kind: ItemKind,
+) -> bool {
+    reduced.reachable_items.contains(&ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name: name.to_string(),
+        kind,
+    })
 }
 
 fn empty_nonboundary_module(
@@ -3012,7 +3032,10 @@ fn external_trait_import_should_remain(
         return false;
     }
     if !is_public_use {
-        return true;
+        return target
+            .iter()
+            .take(target.len().saturating_sub(1))
+            .any(|segment| reachable_package_mentions_ident(project, reduced, package, segment));
     }
     target
         .iter()

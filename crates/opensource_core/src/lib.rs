@@ -152,8 +152,7 @@ mod tests {
 
     use super::{
         generate, generate_compiler_prune_workspace, generate_lint_audit_workspace,
-        refresh_compiler_prune_visibility, CompilerPruneOptions, CompilerPruneRefreshOptions,
-        GenerateOptions, LintAuditOptions,
+        CompilerPruneOptions, GenerateOptions, LintAuditOptions,
     };
 
     #[test]
@@ -303,7 +302,7 @@ mod tests {
     }
 
     #[test]
-    fn compiler_prune_copies_dependency_closure_and_lowers_visibility() {
+    fn compiler_prune_starts_from_reduced_slice_and_lints_it() {
         let output = temp_output("compiler-prune");
         let report = generate_compiler_prune_workspace(CompilerPruneOptions {
             workspace_root: workspace_root(),
@@ -313,58 +312,50 @@ mod tests {
 
         assert_eq!(
             report.packages,
-            ["a", "b", "c", "d", "e", "opensourced"],
-            "compiler-prune should copy the recursive Cargo dependency closure, not the full workspace"
+            ["a", "b", "c", "d", "e"],
+            "compiler-prune should start from the reduced source package set"
         );
-        assert!(report.demoted_visibilities > 0);
         assert!(!output.join("crates/opensource_core").exists());
         assert!(!output.join("crates/opensource_cli").exists());
         assert!(!output.join("docs").exists());
 
         let root_manifest = fs::read_to_string(output.join("Cargo.toml")).unwrap();
-        assert!(root_manifest.contains("\"fixtures/a\""));
-        assert!(root_manifest.contains("\"fixtures/b\""));
-        assert!(root_manifest.contains("\"fixtures/c\""));
-        assert!(root_manifest.contains("\"fixtures/d\""));
-        assert!(root_manifest.contains("\"fixtures/e\""));
-        assert!(root_manifest.contains("\"crates/opensourced\""));
+        assert!(root_manifest.contains("\"a\""));
+        assert!(root_manifest.contains("\"b\""));
+        assert!(root_manifest.contains("\"c\""));
+        assert!(root_manifest.contains("\"d\""));
+        assert!(root_manifest.contains("\"e\""));
+        assert!(!root_manifest.contains("opensourced"));
         assert!(!root_manifest.contains("opensource_core"));
 
-        let a_source = fs::read_to_string(output.join("fixtures/a/src/lib.rs")).unwrap();
+        let a_source = fs::read_to_string(output.join("a/src/lib.rs")).unwrap();
         assert!(a_source.contains("slicers compiler-prune"));
-        assert!(a_source.contains("pub(crate) fn internal_entry"));
+        assert!(a_source.contains("pub fn open_source_entry"));
+        assert!(!a_source.contains("internal_entry"));
 
-        let b_source = fs::read_to_string(output.join("fixtures/b/src/lib.rs")).unwrap();
+        let b_source = fs::read_to_string(output.join("b/src/lib.rs")).unwrap();
         assert!(!b_source.contains("cfg(test)"));
         assert!(!b_source.contains("unit_test_that_must_not_be_exported"));
     }
 
     #[test]
-    fn compiler_prune_refresh_relowers_after_dead_callers_are_removed() {
-        let output = temp_output("compiler-prune-refresh");
+    fn compiler_prune_generated_workspace_compiles() {
+        let output = temp_output("compiler-prune-compile");
         generate_compiler_prune_workspace(CompilerPruneOptions {
             workspace_root: workspace_root(),
             output_root: output.clone(),
         })
         .expect("compiler prune workspace should generate");
 
-        let a_path = output.join("fixtures/a/src/lib.rs");
-        let mut a_source = fs::read_to_string(&a_path).unwrap();
-        let start = a_source.find("pub(crate) fn internal_entry").unwrap();
-        a_source.truncate(start);
-        fs::write(&a_path, a_source).unwrap();
+        let target_dir = temp_output("compiler-prune-target");
+        let status = Command::new("cargo")
+            .arg("check")
+            .current_dir(&output)
+            .env("CARGO_TARGET_DIR", target_dir)
+            .status()
+            .expect("cargo check should start");
 
-        let before = fs::read_to_string(output.join("fixtures/b/src/lib.rs")).unwrap();
-        assert!(before.contains("pub fn unused_public"));
-
-        let report = refresh_compiler_prune_visibility(CompilerPruneRefreshOptions {
-            workspace_root: output.clone(),
-        })
-        .expect("refresh should succeed");
-
-        assert!(report.demoted_visibilities > 0);
-        let after = fs::read_to_string(output.join("fixtures/b/src/lib.rs")).unwrap();
-        assert!(after.contains("pub(crate) fn unused_public"));
+        assert!(status.success(), "compiler-prune workspace did not compile");
     }
 
     fn workspace_root() -> PathBuf {

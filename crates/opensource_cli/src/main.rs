@@ -8,8 +8,7 @@ use std::{
 
 use opensource_core::{
     generate, generate_compiler_prune_workspace, generate_lint_audit_workspace,
-    refresh_compiler_prune_visibility, CompilerPruneOptions, CompilerPruneRefreshOptions,
-    GenerateOptions, LintAuditOptions,
+    CompilerPruneOptions, GenerateOptions, LintAuditOptions,
 };
 use serde_json::{json, Value};
 
@@ -147,14 +146,7 @@ fn run_compiler_prune(
     let mut diagnostics = lint_audit_diagnostics(&final_output.stdout);
     for round in 0..12 {
         let removed = prune_dead_items_from_diagnostics(&output_root, &diagnostics)?;
-        let redemoted = if removed == 0 {
-            0
-        } else {
-            refresh_compiler_prune_visibility(CompilerPruneRefreshOptions {
-                workspace_root: output_root.clone(),
-            })?
-            .demoted_visibilities
-        };
+        let redemoted = 0;
         rounds.push(json!({
             "round": round,
             "cargo_status": final_output.status.code(),
@@ -217,6 +209,7 @@ fn prune_dead_items_from_diagnostics(
     diagnostics: &[Value],
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let mut by_file: BTreeMap<PathBuf, Vec<DeadItemCandidate>> = BTreeMap::new();
+    let mut import_spans_by_file: BTreeMap<PathBuf, Vec<ImportSpanCandidate>> = BTreeMap::new();
     for diagnostic in diagnostics {
         let code = diagnostic
             .get("code")
@@ -238,6 +231,29 @@ fn prune_dead_items_from_diagnostics(
             let Some(line_start) = span.get("line_start").and_then(Value::as_u64) else {
                 continue;
             };
+            if code == Some("unused_imports") {
+                let remove_line =
+                    span_text(span).is_some_and(|text| text.trim_start().starts_with("use "));
+                let column_start = span
+                    .get("column_start")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(1);
+                let column_end = span
+                    .get("column_end")
+                    .and_then(Value::as_u64)
+                    .unwrap_or(column_start);
+                let path = diagnostic_path(output_root, file_name);
+                import_spans_by_file
+                    .entry(path)
+                    .or_default()
+                    .push(ImportSpanCandidate {
+                        line_start: line_start as usize,
+                        column_start: column_start as usize,
+                        column_end: column_end as usize,
+                        remove_line,
+                    });
+                continue;
+            }
             let Some(name) = dead_candidate_name(code, message, span) else {
                 continue;
             };
@@ -250,6 +266,25 @@ fn prune_dead_items_from_diagnostics(
     }
 
     let mut removed = 0;
+    for (path, mut candidates) in import_spans_by_file {
+        if !path.exists() {
+            continue;
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .line_start
+                .cmp(&left.line_start)
+                .then_with(|| right.column_start.cmp(&left.column_start))
+        });
+        candidates.dedup();
+        let mut source = fs::read_to_string(&path)?;
+        for candidate in candidates {
+            if remove_import_span(&mut source, &candidate) {
+                removed += 1;
+            }
+        }
+        fs::write(path, source)?;
+    }
     for (path, mut candidates) in by_file {
         if !path.exists() {
             continue;
@@ -271,6 +306,14 @@ fn prune_dead_items_from_diagnostics(
 struct DeadItemCandidate {
     name: String,
     line_start: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ImportSpanCandidate {
+    line_start: usize,
+    column_start: usize,
+    column_end: usize,
+    remove_line: bool,
 }
 
 fn diagnostic_path(output_root: &Path, file_name: &str) -> PathBuf {
@@ -439,6 +482,72 @@ fn remove_item_at_line(source: &mut String, candidate: &DeadItemCandidate) -> bo
     *source = lines.join("\n");
     source.push('\n');
     true
+}
+
+fn remove_import_span(source: &mut String, candidate: &ImportSpanCandidate) -> bool {
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(line_index) = candidate.line_start.checked_sub(1) else {
+        return false;
+    };
+    let Some(line) = lines.get_mut(line_index) else {
+        return false;
+    };
+
+    if candidate.remove_line {
+        lines.remove(line_index);
+        *source = lines.join("\n");
+        source.push('\n');
+        return true;
+    }
+
+    if !remove_column_range(line, candidate.column_start, candidate.column_end) {
+        return false;
+    }
+    *line = cleanup_import_line(line);
+    if line.trim().is_empty() || line.contains("::{}") {
+        lines.remove(line_index);
+    }
+
+    *source = lines.join("\n");
+    source.push('\n');
+    true
+}
+
+fn remove_column_range(line: &mut String, column_start: usize, column_end: usize) -> bool {
+    if column_start == 0 || column_end < column_start {
+        return false;
+    }
+    let start = column_to_byte_index(line, column_start);
+    let end = column_to_byte_index(line, column_end);
+    if start >= end || end > line.len() {
+        return false;
+    }
+    line.replace_range(start..end, "");
+    true
+}
+
+fn column_to_byte_index(line: &str, one_based_column: usize) -> usize {
+    if one_based_column <= 1 {
+        return 0;
+    }
+    line.char_indices()
+        .nth(one_based_column - 1)
+        .map(|(index, _)| index)
+        .unwrap_or(line.len())
+}
+
+fn cleanup_import_line(line: &str) -> String {
+    let mut cleaned = line.to_string();
+    for _ in 0..4 {
+        cleaned = cleaned
+            .replace("{, ", "{")
+            .replace("{,", "{")
+            .replace(", }", "}")
+            .replace(",}", "}")
+            .replace(", ,", ",")
+            .replace("{ }", "{}");
+    }
+    cleaned
 }
 
 #[derive(Clone, Debug, Default)]

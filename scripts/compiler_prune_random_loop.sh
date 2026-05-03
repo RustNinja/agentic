@@ -1,5 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
+export LC_ALL=C
+export LANG=C
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 limit="${SLICERS_LOOP_LIMIT:-0}"
@@ -16,6 +18,38 @@ cases=(
 )
 
 cargo build -p opensource_cli
+
+copy_current_tree() {
+  local destination="$1"
+  mkdir -p "$destination"
+  (
+    cd "$repo_root"
+    git ls-files -z | tar --null -T - -cf -
+  ) | tar -xf - -C "$destination"
+}
+
+item_inventory() {
+  local root="$1"
+  find "$root" -name '*.rs' -print |
+    sort |
+    while IFS= read -r file; do
+      local relative="${file#"$root"/}"
+      sed -E \
+        -e '/^#!\[/d' \
+        -e '/^#\[allow\(dead_code\)\]$/d' \
+        -e '/slicers compiler-prune/d' \
+        "$file" |
+        rg --no-line-number '^[[:space:]]*(pub(\([^)]*\))?[[:space:]]+)?(async[[:space:]]+)?(fn|struct|enum|trait|union|type|const|static|mod)[[:space:]]+[A-Za-z_][A-Za-z0-9_]*|^[[:space:]]*impl([[:space:]]|<)' |
+        sed "s#^#$relative:#"
+    done
+}
+
+package_inventory() {
+  local root="$1"
+  find "$root" -mindepth 2 -maxdepth 2 -name Cargo.toml -print |
+    sed "s#$root/##; s#/Cargo.toml##" |
+    sort
+}
 
 while true; do
   cycle=$((cycle + 1))
@@ -41,12 +75,13 @@ while true; do
     IFS='|' read -r label package file pattern <<<"$case"
 
     workspace="/tmp/slicers-loop-${cycle}-${index}-${label}-src"
+    expected="/tmp/slicers-loop-${cycle}-${index}-${label}-expected"
     slice="/tmp/slicers-loop-${cycle}-${index}-${label}-slice"
     original_target="/tmp/slicers-loop-${cycle}-${index}-${label}-original-target"
+    expected_target="/tmp/slicers-loop-${cycle}-${index}-${label}-expected-target"
     slice_target="/tmp/slicers-loop-${cycle}-${index}-${label}-slice-target"
 
-    mkdir -p "$workspace"
-    git -C "$repo_root" archive --format=tar HEAD | tar -x -C "$workspace"
+    copy_current_tree "$workspace"
 
     perl -0pi -e 's/\n#\[opensourced\]\n/\n/g' "$workspace"/fixtures/*/src/lib.rs
     manifest="$workspace/fixtures/$package/Cargo.toml"
@@ -67,11 +102,24 @@ while true; do
 
     echo "  [$cycle.$index] root=$label package=$package"
     CARGO_TARGET_DIR="$original_target" cargo check --manifest-path "$workspace/Cargo.toml" -p "$package" --lib
+    "$repo_root/target/debug/slicers" "$workspace" "$expected"
     SLICERS_CARGO_TARGET_DIR="$slice_target" "$repo_root/target/debug/slicers" --compiler-prune "$workspace" "$slice"
     CARGO_TARGET_DIR="$slice_target" cargo check --manifest-path "$slice/Cargo.toml" -p "$package" --lib
     rg -q '"cargo_status": 0' "$slice/slicers-compiler-prune-report.json"
 
+    expected_packages="/tmp/slicers-loop-${cycle}-${index}-${label}-expected-packages.txt"
+    slice_packages="/tmp/slicers-loop-${cycle}-${index}-${label}-slice-packages.txt"
+    expected_items="/tmp/slicers-loop-${cycle}-${index}-${label}-expected-items.txt"
+    slice_items="/tmp/slicers-loop-${cycle}-${index}-${label}-slice-items.txt"
+    package_inventory "$expected" >"$expected_packages"
+    package_inventory "$slice" >"$slice_packages"
+    item_inventory "$expected" >"$expected_items"
+    item_inventory "$slice" >"$slice_items"
+    diff -u "$expected_packages" "$slice_packages"
+    diff -u "$expected_items" "$slice_items"
+
     CARGO_TARGET_DIR="$original_target" cargo clean --manifest-path "$workspace/Cargo.toml"
+    CARGO_TARGET_DIR="$expected_target" cargo clean --manifest-path "$expected/Cargo.toml"
     CARGO_TARGET_DIR="$slice_target" cargo clean --manifest-path "$slice/Cargo.toml"
   done <<<"$selected"
 done
