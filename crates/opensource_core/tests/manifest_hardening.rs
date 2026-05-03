@@ -1376,6 +1376,7 @@ fn retains_marker_trait_impls_external_trait_imports_and_method_arg_impls() {
     let lib = read(output.join("app/src/lib.rs"));
     assert!(lib.contains("Engine"));
     assert!(lib.contains("impl Eq for Guid"));
+    assert!(lib.contains("unsafe impl Sync for Guid"));
     assert!(lib.contains("impl Visitor"));
 
     let cargo_check = Command::new("cargo")
@@ -1411,6 +1412,9 @@ fn retains_associated_conversion_impls_for_external_targets() {
     let lib = read(output.join("app/src/lib.rs"));
     assert!(lib.contains("impl From<Timestamp> for SystemTime"));
     assert!(lib.contains("impl From<SystemTime> for Timestamp"));
+    if cfg!(unix) {
+        assert!(lib.contains("ExitStatusExt"));
+    }
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -4907,6 +4911,8 @@ impl PartialEq for Guid {
 
 impl Eq for Guid {}
 
+unsafe impl Sync for Guid {}
+
 struct GuidVisitor;
 
 impl Visitor<'_> for GuidVisitor {
@@ -4970,7 +4976,10 @@ opensourced.workspace = true
     );
     write(
         root.join("app/src/lib.rs"),
-        r#"use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        r#"#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use opensourced::opensourced;
 
@@ -4980,8 +4989,14 @@ pub struct Timestamp(pub u64);
 impl Timestamp {
     #[opensourced]
     pub fn checked_sub(self, d: Duration) -> Option<Timestamp> {
-        SystemTime::from(self).checked_sub(d).map(Timestamp::from)
+        SystemTime::from(self).checked_sub(d).map(Into::into)
     }
+}
+
+#[cfg(unix)]
+#[opensourced]
+pub fn status_from_code(code: i32) -> ExitStatus {
+    ExitStatus::from_raw(code << 8)
 }
 
 impl From<SystemTime> for Timestamp {

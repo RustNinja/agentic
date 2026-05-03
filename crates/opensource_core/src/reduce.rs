@@ -2117,6 +2117,7 @@ impl<'a> DependencyVisitor<'a> {
                 package,
                 type_path,
                 trait_path: Some(trait_path),
+                trait_input_type_paths,
                 method,
                 ..
             } = callable
@@ -2129,7 +2130,10 @@ impl<'a> DependencyVisitor<'a> {
                 && trait_path
                     .last()
                     .is_some_and(|candidate| candidate == trait_name)
-                && self.resolver.resolve_local_type_item(type_path).is_some()
+                && (self.resolver.resolve_local_type_item(type_path).is_some()
+                    || trait_input_type_paths.iter().any(|type_path| {
+                        self.resolver.resolve_local_type_item(type_path).is_some()
+                    }))
             {
                 self.dependencies.callables.insert(callable.clone());
             }
