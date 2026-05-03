@@ -51,6 +51,27 @@ package_inventory() {
     sort
 }
 
+workspace_file_inventory() {
+  local root="$1"
+  find "$root" \
+    \( -path "$root/target" -o -path "$root/.git" \) -prune -o \
+    -type f \
+    ! -name slicers-compiler-prune-report.json \
+    -print |
+    sed "s#$root/##" |
+    sort
+}
+
+raw_workspace_file_count() {
+  local root="$1"
+  find "$root" \
+    \( -path "$root/target" -o -path "$root/.git" \) -prune -o \
+    -type f \
+    -print |
+    wc -l |
+    tr -d ' '
+}
+
 while true; do
   cycle=$((cycle + 1))
   if [[ "$limit" != "0" && "$cycle" -gt "$limit" ]]; then
@@ -111,10 +132,19 @@ while true; do
     slice_packages="/tmp/slicers-loop-${cycle}-${index}-${label}-slice-packages.txt"
     expected_items="/tmp/slicers-loop-${cycle}-${index}-${label}-expected-items.txt"
     slice_items="/tmp/slicers-loop-${cycle}-${index}-${label}-slice-items.txt"
+    expected_files="/tmp/slicers-loop-${cycle}-${index}-${label}-expected-files.txt"
+    slice_files="/tmp/slicers-loop-${cycle}-${index}-${label}-slice-files.txt"
     package_inventory "$expected" >"$expected_packages"
     package_inventory "$slice" >"$slice_packages"
     item_inventory "$expected" >"$expected_items"
     item_inventory "$slice" >"$slice_items"
+    workspace_file_inventory "$expected" >"$expected_files"
+    workspace_file_inventory "$slice" >"$slice_files"
+    expected_file_count="$(wc -l <"$expected_files" | tr -d ' ')"
+    slice_file_count="$(wc -l <"$slice_files" | tr -d ' ')"
+    slice_raw_file_count="$(raw_workspace_file_count "$slice")"
+    echo "workspace files: expected=$expected_file_count compiler-prune=$slice_file_count raw=$slice_raw_file_count"
+    diff -u "$expected_files" "$slice_files"
     diff -u "$expected_packages" "$slice_packages"
     diff -u "$expected_items" "$slice_items"
 
