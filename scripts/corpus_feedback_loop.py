@@ -76,6 +76,14 @@ class Candidate:
         return f"{relative}:{self.line}:{self.kind}:{self.name} ({module})"
 
 
+@dataclass(frozen=True)
+class CargoSource:
+    user_source: Path
+    manifest_path: Path
+    cargo_root: Path
+    metadata: dict[str, Any]
+
+
 @dataclass
 class CommandResult:
     command: list[str]
@@ -256,8 +264,7 @@ def main() -> int:
 
     if not (repo / "Cargo.toml").exists():
         raise SystemExit(f"missing Cargo.toml under repo {repo}")
-    if not (source / "Cargo.toml").exists():
-        raise SystemExit(f"missing Cargo.toml under source {source}")
+    cargo_source = resolve_cargo_source(source)
     if not opensourced_path.exists():
         raise SystemExit(f"missing opensourced crate at {opensourced_path}")
 
@@ -265,7 +272,7 @@ def main() -> int:
     successes = 0
     batch = args.start
     while max_batches is None or successes + failures < max_batches:
-        row = run_batch(args, repo, source, opensourced_path, rng, batch)
+        row = run_batch(args, repo, cargo_source, opensourced_path, rng, batch)
         append_jsonl(args.report.resolve(), row)
         print_batch_summary(row)
 
@@ -301,10 +308,126 @@ def validate_args(args: argparse.Namespace) -> None:
         args.deny_warnings = True
 
 
+def resolve_cargo_source(source: Path) -> CargoSource:
+    source = source.resolve()
+    manifest = direct_manifest_candidate(source)
+    if manifest is not None:
+        metadata = load_metadata_for_manifest(manifest)
+        return cargo_source_from_metadata(source, manifest, metadata)
+
+    if not source.is_dir():
+        raise SystemExit(f"--source must be a Cargo.toml or directory: {source}")
+
+    resolved = []
+    failures: list[str] = []
+    for candidate in discover_manifest_candidates(source):
+        result = cargo_metadata(candidate, timeout_seconds=45)
+        if not result.success:
+            reason = first_nonempty_line(result.stderr) or str(result.exit_code)
+            failures.append(f"{candidate}: {reason}")
+            continue
+        metadata = json.loads(result.stdout)
+        resolved.append(cargo_source_from_metadata(source, candidate, metadata))
+
+    by_root: dict[Path, CargoSource] = {}
+    for candidate in resolved:
+        by_root.setdefault(candidate.cargo_root, candidate)
+
+    if len(by_root) == 1:
+        return next(iter(by_root.values()))
+    if not by_root:
+        searched = "\n  ".join(str(path) for path in discover_manifest_candidates(source)[:12])
+        failure_text = "\n  ".join(failures[:12])
+        detail = failure_text or searched or "no Cargo.toml candidates found"
+        raise SystemExit(
+            f"could not resolve a Cargo workspace under {source}; pass --source path/to/Cargo.toml\n  {detail}"
+        )
+
+    choices = "\n  ".join(str(candidate.manifest_path) for candidate in by_root.values())
+    raise SystemExit(
+        f"multiple Cargo workspaces found under {source}; pass --source path/to/Cargo.toml\n  {choices}"
+    )
+
+
+def direct_manifest_candidate(source: Path) -> Path | None:
+    if source.is_file() and source.name == "Cargo.toml":
+        return source
+    manifest = source / "Cargo.toml"
+    if manifest.exists():
+        return manifest
+    return None
+
+
+def discover_manifest_candidates(source: Path) -> list[Path]:
+    ignored_dirs = {
+        ".git",
+        ".hg",
+        ".svn",
+        "target",
+        "node_modules",
+        "__pycache__",
+    }
+    candidates: list[Path] = []
+    for root, dirs, files in os.walk(source):
+        dirs[:] = [
+            directory
+            for directory in dirs
+            if directory not in ignored_dirs
+            and not directory.startswith(".")
+            and not directory.startswith("slicers-corpus-")
+        ]
+        if "Cargo.toml" in files:
+            candidates.append(Path(root) / "Cargo.toml")
+    candidates.sort()
+    return candidates
+
+
+def load_metadata_for_manifest(manifest_path: Path) -> dict[str, Any]:
+    result = cargo_metadata(manifest_path, timeout_seconds=120)
+    if not result.success:
+        reason = first_nonempty_line(result.stderr) or str(result.exit_code)
+        raise SystemExit(f"cargo metadata failed for {manifest_path}: {reason}")
+    return json.loads(result.stdout)
+
+
+def cargo_metadata(manifest_path: Path, timeout_seconds: int) -> CommandResult:
+    return run_command(
+        [
+            "cargo",
+            "metadata",
+            "--no-deps",
+            "--format-version",
+            "1",
+            "--manifest-path",
+            str(manifest_path),
+        ],
+        manifest_path.parent,
+        timeout_seconds=timeout_seconds,
+    )
+
+
+def cargo_source_from_metadata(
+    user_source: Path,
+    manifest_path: Path,
+    metadata: dict[str, Any],
+) -> CargoSource:
+    workspace_root = Path(metadata.get("workspace_root") or manifest_path.parent).resolve()
+    workspace_manifest = workspace_root / "Cargo.toml"
+    if workspace_manifest.exists() and workspace_manifest != manifest_path:
+        metadata = load_metadata_for_manifest(workspace_manifest)
+        manifest_path = workspace_manifest
+    return CargoSource(
+        user_source=user_source,
+        manifest_path=manifest_path.resolve(),
+        cargo_root=workspace_root,
+        metadata=metadata,
+    )
+
+
 def run_batch(
     args: argparse.Namespace,
     repo: Path,
-    source: Path,
+    cargo_source: CargoSource,
     opensourced_path: Path,
     rng: random.Random,
     batch: int,
@@ -324,13 +447,13 @@ def run_batch(
 
     try:
         if not args.no_git_restore:
-            restore_source(source)
+            restore_source(cargo_source.cargo_root)
         if args.baseline_check:
-            baseline = run_baseline_check(source, args.case_timeout)
+            baseline = run_baseline_check(cargo_source.manifest_path, args.case_timeout)
             if not baseline["success"] and not args.allow_baseline_failures:
                 return build_row(
                     args,
-                    source,
+                    cargo_source,
                     output_root,
                     batch,
                     started,
@@ -346,18 +469,23 @@ def run_batch(
                     "baseline_failed",
                 )
 
-        packages = load_packages(source)
+        packages = load_packages(cargo_source)
         candidates = discover_candidates(packages, args.public_only)
         candidate_counts = count_candidates(candidates)
         roots = select_roots(candidates, args.kinds, args.roots_per_batch, rng)
 
-        uses_workspace_dependency = source_uses_workspace_dependencies(source)
-        inject_opensourced_dependency(source, opensourced_path, roots, uses_workspace_dependency)
+        uses_workspace_dependency = source_uses_workspace_dependencies(cargo_source.cargo_root)
+        inject_opensourced_dependency(
+            cargo_source.cargo_root,
+            opensourced_path,
+            roots,
+            uses_workspace_dependency,
+        )
         annotate(roots)
 
         command = slicers_command(
             args,
-            source,
+            cargo_source.manifest_path,
             output_root,
             slice_report_path,
             preflight_report_path,
@@ -375,7 +503,7 @@ def run_batch(
         classification = classify(command_result, preflight, feedback, baseline, args)
         return build_row(
             args,
-            source,
+            cargo_source,
             output_root,
             batch,
             started,
@@ -393,7 +521,7 @@ def run_batch(
     except Exception as error:
         return build_row(
             args,
-            source,
+            cargo_source,
             output_root,
             batch,
             started,
@@ -412,25 +540,13 @@ def run_batch(
     finally:
         shutil.rmtree(output_root / "target-feedback", ignore_errors=True)
         if not args.no_git_restore:
-            restore_source(source)
+            restore_source(cargo_source.cargo_root)
 
 
-def load_packages(workspace: Path) -> list[Package]:
-    metadata = run_command(
-        ["cargo", "metadata", "--no-deps", "--format-version", "1"],
-        workspace,
-        timeout_seconds=120,
-    )
-    if not metadata.success:
-        raise RuntimeError(
-            "cargo metadata failed for "
-            f"{workspace}: {first_nonempty_line(metadata.stderr) or metadata.exit_code}"
-        )
-
-    data = json.loads(metadata.stdout)
-    workspace_members = set(data.get("workspace_members", []))
+def load_packages(cargo_source: CargoSource) -> list[Package]:
+    workspace_members = set(cargo_source.metadata.get("workspace_members", []))
     packages = []
-    for package in data.get("packages", []):
+    for package in cargo_source.metadata.get("packages", []):
         if package.get("id") not in workspace_members:
             continue
         manifest_path = Path(package["manifest_path"]).resolve()
@@ -445,7 +561,9 @@ def load_packages(workspace: Path) -> list[Package]:
 
     packages.sort(key=lambda package: (package.name, str(package.entry)))
     if not packages:
-        raise RuntimeError(f"no local lib/bin package targets found under {workspace}")
+        raise RuntimeError(
+            f"no local lib/bin package targets found under {cargo_source.manifest_path}"
+        )
     return packages
 
 
@@ -685,7 +803,7 @@ def annotate(selected: list[Candidate]) -> None:
 
 def slicers_command(
     args: argparse.Namespace,
-    source: Path,
+    manifest_path: Path,
     output_root: Path,
     slice_report_path: Path,
     preflight_report_path: Path,
@@ -767,17 +885,23 @@ def slicers_command(
         command.append("--deny-warnings")
     command.extend(
         [
-            str(source),
+            str(manifest_path),
             str(output_root),
         ]
     )
     return command
 
 
-def run_baseline_check(source: Path, timeout_seconds: int) -> dict[str, Any]:
+def run_baseline_check(manifest_path: Path, timeout_seconds: int) -> dict[str, Any]:
     result = run_command(
-        ["cargo", "check", "--message-format=json"],
-        source,
+        [
+            "cargo",
+            "check",
+            "--manifest-path",
+            str(manifest_path),
+            "--message-format=json",
+        ],
+        manifest_path.parent,
         timeout_seconds=timeout_seconds,
     )
     diagnostics = parse_cargo_diagnostics(result.stdout)
@@ -869,7 +993,7 @@ def classify(
 
 def build_row(
     args: argparse.Namespace,
-    source: Path,
+    cargo_source: CargoSource,
     output_root: Path,
     batch: int,
     started: float,
@@ -909,8 +1033,10 @@ def build_row(
     row: dict[str, Any] = {
         "iteration": batch,
         "timestamp_utc": datetime.now(timezone.utc).isoformat(),
-        "source": str(source),
-        "source_git_head": git_head(source),
+        "source": str(cargo_source.user_source),
+        "cargo_root": str(cargo_source.cargo_root),
+        "cargo_manifest": str(cargo_source.manifest_path),
+        "source_git_head": git_head(cargo_source.cargo_root),
         "seed": args.seed,
         "validation": {
             "tier": args.validation,
@@ -925,7 +1051,7 @@ def build_row(
             "report_gates": validation_gate_statuses(validation_report),
             "report_attempts": len((validation_report or {}).get("attempts") or []),
         },
-        "roots": [candidate.display(source) for candidate in roots],
+        "roots": [candidate.display(cargo_source.cargo_root) for candidate in roots],
         "candidate_counts": candidate_counts,
         "baseline": baseline,
         "slice": {
@@ -974,6 +1100,7 @@ def build_row(
         "repair": {
             "removed_items": (repair or {}).get("removed_items"),
             "removed_imports": (repair or {}).get("removed_imports"),
+            "normalized_paths": (repair or {}).get("normalized_paths"),
             "added_dead_code_allows": (repair or {}).get("added_dead_code_allows"),
             "deferred_dead_code_allows": (repair or {}).get("deferred_dead_code_allows"),
             "skipped_diagnostics": (repair or {}).get("skipped_diagnostics"),
@@ -1151,6 +1278,7 @@ def repair_total_changes(repair: dict[str, Any] | None) -> int | None:
     return (
         int(repair.get("removed_items") or 0)
         + int(repair.get("removed_imports") or 0)
+        + int(repair.get("normalized_paths") or 0)
         + int(repair.get("added_dead_code_allows") or 0)
     )
 
@@ -1234,8 +1362,9 @@ def print_batch_summary(row: dict[str, Any]) -> None:
 
 
 def restore_source(source: Path) -> None:
+    git_context = source.parent if source.is_file() else source
     git_root = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "--show-toplevel"],
+        ["git", "-C", str(git_context), "rev-parse", "--show-toplevel"],
         check=False,
         capture_output=True,
         text=True,
@@ -1248,8 +1377,9 @@ def restore_source(source: Path) -> None:
 
 
 def git_head(source: Path) -> str | None:
+    git_context = source.parent if source.is_file() else source
     result = subprocess.run(
-        ["git", "-C", str(source), "rev-parse", "--short", "HEAD"],
+        ["git", "-C", str(git_context), "rev-parse", "--short", "HEAD"],
         check=False,
         capture_output=True,
         text=True,

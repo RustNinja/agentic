@@ -520,6 +520,7 @@ where
     let [workspace_root, output_root] = positional.as_slice() else {
         return Err(usage().into());
     };
+    let workspace_root = normalize_workspace_root_arg(workspace_root);
 
     Ok(CliOptions {
         analyzer_mode,
@@ -542,9 +543,19 @@ where
         run_preflight,
         preflight_report,
         production_preset,
-        workspace_root: workspace_root.clone(),
+        workspace_root,
         output_root: output_root.clone(),
     })
+}
+
+fn normalize_workspace_root_arg(path: &Path) -> PathBuf {
+    if path.file_name() != Some(OsStr::new("Cargo.toml")) {
+        return path.to_path_buf();
+    }
+    path.parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 fn parse_usize_arg(
@@ -1643,7 +1654,7 @@ fn usage() -> String {
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
         "[--baseline-target-dir <path>] [--slice-report <path>] [--validation-report <path>] ",
         "[--preflight-report <path>] ",
-        "<workspace-root> <output-root>"
+        "<workspace-root-or-Cargo.toml> <output-root>"
     )
     .to_string()
 }
@@ -1901,6 +1912,15 @@ mod tests {
         );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
+    }
+
+    #[test]
+    fn positional_cargo_manifest_uses_parent_as_workspace_root() {
+        let nested = parse_options(["repo/rust/Cargo.toml", "out"]);
+        let current_dir = parse_options(["Cargo.toml", "out"]);
+
+        assert_eq!(nested.workspace_root, PathBuf::from("repo/rust"));
+        assert_eq!(current_dir.workspace_root, PathBuf::from("."));
     }
 
     #[test]
