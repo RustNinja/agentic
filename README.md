@@ -104,6 +104,8 @@ the slice still does not compile. Feedback checks have a 600-second timeout by
 default; use `--feedback-timeout 0` to disable it or pass another second count.
 Use `--feedback-target-dir <path>` to reuse a Cargo target directory across
 repeated generated slices when dependency build time dominates validation.
+Use `--deny-warnings` when a production validation run should reject generated
+workspaces that compile with warnings.
 `--feedback-repair-loop <n>` runs bounded compiler feedback with conservative
 source repairs between attempts. The first repair tier only handles diagnostics
 that are safe to edit mechanically, such as `unused_imports`, item-level

@@ -151,6 +151,7 @@ struct CliOptions {
     feedback_report: Option<PathBuf>,
     feedback_target_dir: Option<PathBuf>,
     feedback_timeout: Option<Duration>,
+    deny_warnings: bool,
     repair_report: Option<PathBuf>,
     run_baseline_check: bool,
     allow_baseline_failures: bool,
@@ -172,6 +173,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     let mut feedback_report = None;
     let mut feedback_target_dir = None;
     let mut feedback_timeout = Some(Duration::from_secs(600));
+    let mut deny_warnings = false;
     let mut repair_report = None;
     let mut run_baseline_check = false;
     let mut allow_baseline_failures = false;
@@ -211,6 +213,8 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
             feedback_limit = parse_usize_arg("--feedback-limit", args.next())?;
         } else if arg == OsStr::new("--feedback-timeout") {
             feedback_timeout = parse_feedback_timeout(args.next())?;
+        } else if arg == OsStr::new("--deny-warnings") {
+            deny_warnings = true;
         } else if arg == OsStr::new("--feedback-report") {
             feedback_report = Some(PathBuf::from(
                 args.next()
@@ -269,6 +273,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
         feedback_report,
         feedback_target_dir,
         feedback_timeout,
+        deny_warnings,
         repair_report,
         run_baseline_check,
         allow_baseline_failures,
@@ -378,8 +383,11 @@ fn run_feedback_loop(
         write_report(&report, &report_path)?;
         print_feedback(&report, options.feedback_limit, &report_path);
 
-        if report.success {
+        if feedback_is_accepted(&report, options.deny_warnings) {
             return Ok(());
+        }
+        if report.success && options.deny_warnings {
+            println!("feedback: warnings denied by --deny-warnings");
         }
         if options.allow_baseline_failures && feedback_errors_are_baseline_known(&report, baseline)
         {
@@ -424,14 +432,19 @@ fn run_feedback_repair_loop(
         write_report(&report, &feedback_report_path)?;
         print_feedback(&report, options.feedback_limit, &feedback_report_path);
 
+        let warnings = report.warning_count();
         let repairable_warnings = repairable_warning_count(&report.diagnostics);
-        if report.success && repairable_warnings == 0 {
+        if feedback_is_accepted(&report, options.deny_warnings) {
             return Ok(());
         }
-        if report.success {
+        if report.success && repairable_warnings > 0 {
             println!(
                 "feedback: cargo check passed but {repairable_warnings} repairable warning(s) remain; attempting conservative repair"
             );
+        }
+        if report.success && options.deny_warnings && repairable_warnings == 0 && warnings > 0 {
+            println!("feedback: warnings denied by --deny-warnings and no conservative repair is available");
+            break;
         }
         if options.allow_baseline_failures && feedback_errors_are_baseline_known(&report, baseline)
         {
@@ -506,6 +519,10 @@ fn sibling_output_path(output_root: &Path, suffix: &str) -> PathBuf {
         return output_root.join(format!(".{suffix}"));
     };
     output_root.with_file_name(format!("{}-{suffix}", name.to_string_lossy()))
+}
+
+fn feedback_is_accepted(report: &CheckReport, deny_warnings: bool) -> bool {
+    report.success && (!deny_warnings || report.warning_count() == 0)
 }
 
 fn feedback_errors_are_baseline_known(
@@ -750,7 +767,7 @@ fn usage() -> String {
     concat!(
         "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--preflight] [--feedback] ",
         "[--feedback-loop <n>] [--feedback-repair-loop <n>] [--feedback-limit <n>] ",
-        "[--feedback-timeout <seconds>] [--feedback-report <path>] ",
+        "[--feedback-timeout <seconds>] [--deny-warnings] [--feedback-report <path>] ",
         "[--feedback-target-dir <path>] [--repair-report <path>] ",
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
         "[--baseline-target-dir <path>] [--slice-report <path>] [--preflight-report <path>] ",
@@ -775,7 +792,19 @@ mod tests {
 
     use opensource_core::{CheckDiagnostic, CheckReport};
 
-    use super::feedback_errors_are_baseline_known;
+    use super::{feedback_errors_are_baseline_known, feedback_is_accepted};
+
+    #[test]
+    fn accepts_warning_bearing_feedback_only_when_warning_denial_is_disabled() {
+        let clean = report(true, Vec::new());
+        let warning_report = report(false, vec![warning("unused variable: `value`")]);
+        let mut successful_with_warning = warning_report.clone();
+        successful_with_warning.success = true;
+
+        assert!(feedback_is_accepted(&clean, true));
+        assert!(feedback_is_accepted(&successful_with_warning, false));
+        assert!(!feedback_is_accepted(&successful_with_warning, true));
+    }
 
     #[test]
     fn recognizes_generated_errors_present_in_failed_source_baseline() {
@@ -826,6 +855,16 @@ mod tests {
             level: "error".to_string(),
             message: message.to_string(),
             code: Some(code.to_string()),
+            rendered: None,
+            spans: Vec::new(),
+        }
+    }
+
+    fn warning(message: &str) -> CheckDiagnostic {
+        CheckDiagnostic {
+            level: "warning".to_string(),
+            message: message.to_string(),
+            code: Some("unused_variables".to_string()),
             rendered: None,
             spans: Vec::new(),
         }
