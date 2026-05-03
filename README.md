@@ -164,7 +164,10 @@ against dependency-heavy projects, and `--deny-warnings` when corpus success
 must mean warning-free compiler feedback. Use `--baseline-check` to separate
 source failures from slicer failures; add `--allow-baseline-failures` for
 known-broken sources where generated baseline-matching errors should be tracked
-as baseline-limited passes instead of slicer regressions.
+as baseline-limited passes instead of slicer regressions. Feedback validation
+also treats new semantic hazard warnings, such as unreachable patterns caused by
+missing constants or variants, as slicer failures even when general warnings are
+allowed.
 
 Workspace/package discovery is backed by `cargo metadata --no-deps`, so Cargo is
 the source of truth for workspace members, excludes, target entry paths,

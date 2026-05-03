@@ -748,7 +748,9 @@ def run_baseline_check(source: Path, timeout_seconds: int) -> dict[str, Any]:
         "duration_ms": result.duration_ms,
         "errors": count_diagnostics(diagnostics, "error"),
         "warnings": count_diagnostics(diagnostics, "warning"),
+        "semantic_warnings": semantic_hazard_warning_count(diagnostics, None),
         "diagnostic_error_keys": diagnostic_error_keys(diagnostics),
+        "diagnostic_semantic_warning_keys": semantic_hazard_warning_keys(diagnostics),
         "first_diagnostics": summarize_diagnostics(diagnostics),
     }
 
@@ -807,12 +809,19 @@ def classify(
         return "slice_generation_failed"
     errors = count_diagnostics(feedback.get("diagnostics", []), "error")
     warnings = count_diagnostics(feedback.get("diagnostics", []), "warning")
+    semantic_warnings = semantic_hazard_warning_count(
+        feedback.get("diagnostics", []), baseline
+    )
     if command_result.exit_code != 0 or not feedback.get("success") or errors:
         if feedback_errors_are_baseline_known(feedback, baseline):
+            if semantic_warnings:
+                return "slice_semantic_warning_failed"
             if warnings and (args.deny_warnings or args.stop_on_warning):
                 return "slice_feedback_failed"
             return "slice_baseline_limited_passed"
         return "slice_feedback_failed"
+    if semantic_warnings:
+        return "slice_semantic_warning_failed"
     if args.stop_on_warning and warnings:
         return "slice_feedback_failed"
     return "slice_check_passed"
@@ -838,13 +847,14 @@ def build_row(
     diagnostics = (feedback or {}).get("diagnostics", [])
     warnings = count_diagnostics(diagnostics, "warning")
     errors = count_diagnostics(diagnostics, "error")
+    semantic_warnings = semantic_hazard_warning_count(diagnostics, baseline)
     preflight_diagnostics = (preflight or {}).get("diagnostics", [])
     passed = classification in {
         "slice_check_passed",
         "slice_preflight_passed",
         "slice_baseline_limited_passed",
     }
-    if (args.stop_on_warning or args.deny_warnings) and warnings:
+    if semantic_warnings or ((args.stop_on_warning or args.deny_warnings) and warnings):
         passed = False
 
     row: dict[str, Any] = {
@@ -896,6 +906,7 @@ def build_row(
             "target_dir": feedback_target_dir(args, output_root),
             "errors": errors,
             "warnings": warnings,
+            "semantic_warnings": semantic_warnings,
             "diagnostic_codes": diagnostic_codes(diagnostics),
             "first_diagnostics": summarize_diagnostics(diagnostics),
         },
@@ -971,6 +982,45 @@ def diagnostic_key(diagnostic: dict[str, Any]) -> str:
             str(diagnostic.get("message") or ""),
         ]
     )
+
+
+def semantic_hazard_warning_count(
+    diagnostics: list[dict[str, Any]],
+    baseline: dict[str, Any] | None,
+) -> int:
+    baseline_keys = set((baseline or {}).get("diagnostic_semantic_warning_keys") or [])
+    return sum(
+        1
+        for key in semantic_hazard_warning_keys(diagnostics)
+        if key not in baseline_keys
+    )
+
+
+def semantic_hazard_warning_keys(diagnostics: list[dict[str, Any]]) -> list[str]:
+    keys: list[str] = []
+    for diagnostic in diagnostics:
+        if not semantic_warning_is_hazard(diagnostic):
+            continue
+        key = diagnostic_key(diagnostic)
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def semantic_warning_is_hazard(diagnostic: dict[str, Any]) -> bool:
+    if diagnostic.get("level") != "warning":
+        return False
+    code = diagnostic.get("code")
+    if isinstance(code, dict):
+        code = code.get("code")
+    if code in {
+        "unreachable_patterns",
+        "irrefutable_let_patterns",
+        "bindings_with_variant_name",
+    }:
+        return True
+    message = str(diagnostic.get("message") or "")
+    return "unreachable pattern" in message or "irrefutable" in message
 
 
 def feedback_errors_are_baseline_known(

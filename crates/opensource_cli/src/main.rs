@@ -392,8 +392,12 @@ fn run_feedback_loop(
         write_report(&report, &report_path)?;
         print_feedback(&report, options.feedback_limit, &report_path);
 
-        if feedback_is_accepted(&report, options.deny_warnings) {
+        let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, baseline);
+        if feedback_is_accepted(&report, baseline, options.deny_warnings) {
             return Ok(());
+        }
+        if report.success && semantic_warnings > 0 {
+            println!("feedback: semantic warning gate rejected {semantic_warnings} new warning(s)");
         }
         if report.success && options.deny_warnings {
             println!("feedback: warnings denied by --deny-warnings");
@@ -443,9 +447,14 @@ fn run_feedback_repair_loop(
         print_feedback(&report, options.feedback_limit, &feedback_report_path);
 
         let warnings = report.warning_count();
+        let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, baseline);
         let repairable_warnings = repairable_warning_count(&report.diagnostics);
-        if feedback_is_accepted(&report, options.deny_warnings) {
+        if feedback_is_accepted(&report, baseline, options.deny_warnings) {
             return Ok(());
+        }
+        if report.success && semantic_warnings > 0 {
+            println!("feedback: semantic warning gate rejected {semantic_warnings} new warning(s)");
+            break;
         }
         if report.success && repairable_warnings > 0 {
             println!(
@@ -532,8 +541,14 @@ fn sibling_output_path(output_root: &Path, suffix: &str) -> PathBuf {
     output_root.with_file_name(format!("{}-{suffix}", name.to_string_lossy()))
 }
 
-fn feedback_is_accepted(report: &CheckReport, deny_warnings: bool) -> bool {
-    report.success && (!deny_warnings || report.warning_count() == 0)
+fn feedback_is_accepted(
+    report: &CheckReport,
+    baseline: Option<&CheckReport>,
+    deny_warnings: bool,
+) -> bool {
+    report.success
+        && semantic_hazard_warning_count(&report.diagnostics, baseline) == 0
+        && (!deny_warnings || report.warning_count() == 0)
 }
 
 fn baseline_limited_feedback_is_accepted(
@@ -542,6 +557,7 @@ fn baseline_limited_feedback_is_accepted(
     deny_warnings: bool,
 ) -> bool {
     feedback_errors_are_baseline_known(report, baseline)
+        && semantic_hazard_warning_count(&report.diagnostics, baseline) == 0
         && (!deny_warnings || report.warning_count() == 0)
 }
 
@@ -582,6 +598,39 @@ fn diagnostic_baseline_key(diagnostic: &CheckDiagnostic) -> String {
         diagnostic.code.as_deref().unwrap_or(""),
         diagnostic.message
     )
+}
+
+fn semantic_hazard_warning_count(
+    diagnostics: &[CheckDiagnostic],
+    baseline: Option<&CheckReport>,
+) -> usize {
+    let baseline_warnings = baseline
+        .map(|report| diagnostic_semantic_warning_keys(&report.diagnostics))
+        .unwrap_or_default();
+    diagnostics
+        .iter()
+        .filter(|diagnostic| semantic_warning_is_hazard(diagnostic))
+        .filter(|diagnostic| !baseline_warnings.contains(&diagnostic_baseline_key(diagnostic)))
+        .count()
+}
+
+fn diagnostic_semantic_warning_keys(diagnostics: &[CheckDiagnostic]) -> BTreeSet<String> {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| semantic_warning_is_hazard(diagnostic))
+        .map(diagnostic_baseline_key)
+        .collect()
+}
+
+fn semantic_warning_is_hazard(diagnostic: &CheckDiagnostic) -> bool {
+    if diagnostic.level != "warning" {
+        return false;
+    }
+    matches!(
+        diagnostic.code.as_deref(),
+        Some("unreachable_patterns" | "irrefutable_let_patterns" | "bindings_with_variant_name")
+    ) || diagnostic.message.contains("unreachable pattern")
+        || diagnostic.message.contains("irrefutable")
 }
 
 fn repairable_warning_count(diagnostics: &[CheckDiagnostic]) -> usize {
@@ -826,7 +875,7 @@ mod tests {
 
     use super::{
         baseline_limited_feedback_is_accepted, feedback_errors_are_baseline_known,
-        feedback_is_accepted,
+        feedback_is_accepted, semantic_hazard_warning_count,
     };
 
     #[test]
@@ -836,9 +885,47 @@ mod tests {
         let mut successful_with_warning = warning_report.clone();
         successful_with_warning.success = true;
 
-        assert!(feedback_is_accepted(&clean, true));
-        assert!(feedback_is_accepted(&successful_with_warning, false));
-        assert!(!feedback_is_accepted(&successful_with_warning, true));
+        assert!(feedback_is_accepted(&clean, None, true));
+        assert!(feedback_is_accepted(&successful_with_warning, None, false));
+        assert!(!feedback_is_accepted(&successful_with_warning, None, true));
+    }
+
+    #[test]
+    fn rejects_new_semantic_warning_even_when_warning_denial_is_disabled() {
+        let report = report(
+            true,
+            vec![warning_with_code(
+                "unreachable_patterns",
+                "unreachable pattern",
+            )],
+        );
+
+        assert_eq!(semantic_hazard_warning_count(&report.diagnostics, None), 1);
+        assert!(!feedback_is_accepted(&report, None, false));
+    }
+
+    #[test]
+    fn accepts_semantic_warning_already_present_in_source_baseline() {
+        let baseline = report(
+            true,
+            vec![warning_with_code(
+                "unreachable_patterns",
+                "unreachable pattern",
+            )],
+        );
+        let generated = report(
+            true,
+            vec![warning_with_code(
+                "unreachable_patterns",
+                "unreachable pattern",
+            )],
+        );
+
+        assert_eq!(
+            semantic_hazard_warning_count(&generated.diagnostics, Some(&baseline)),
+            0
+        );
+        assert!(feedback_is_accepted(&generated, Some(&baseline), false));
     }
 
     #[test]
@@ -924,10 +1011,14 @@ mod tests {
     }
 
     fn warning(message: &str) -> CheckDiagnostic {
+        warning_with_code("unused_variables", message)
+    }
+
+    fn warning_with_code(code: &str, message: &str) -> CheckDiagnostic {
         CheckDiagnostic {
             level: "warning".to_string(),
             message: message.to_string(),
-            code: Some("unused_variables".to_string()),
+            code: Some(code.to_string()),
             rendered: None,
             spans: Vec::new(),
         }
