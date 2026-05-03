@@ -152,8 +152,9 @@ file spans and reachability flags. It also records phase timings for analyzer
 loading, manifest loading, parsing, reduction, rendering, and total generation
 time. That source map is the join point for semantic analyzer edges. The generic
 corpus runner carries the same production hazard fields into each JSONL row and
-uses them with compiler feedback to track real-project slice size, diagnostics,
-runtime, and timeout outcomes over repeated random root selection:
+uses them with compiler feedback widening categories to track real-project slice
+size, diagnostics, runtime, and timeout outcomes over repeated random root
+selection:
 
 ```sh
 scripts/corpus_feedback_loop.py \
@@ -175,14 +176,15 @@ failed outputs for debugging, and appends one JSONL metrics row per batch.
 Use `--validation preflight` for fast no-build corpus exploration, rerun
 interesting or suspicious cases with `--validation feedback`, and use
 `--validation repair` when a corpus batch should exercise the conservative
-compiler repair loop and record `slice-repair.json` metrics. Pass
-`--feedback-target-dir` for feedback or repair batches when running a corpus
-against dependency-heavy projects, and `--deny-warnings` when corpus success
-must mean warning-free compiler feedback. Use `--baseline-check` to separate
-source failures from slicer failures; add `--allow-baseline-failures` for
-known-broken sources where generated baseline-matching errors should be tracked
-as baseline-limited passes instead of slicer regressions. Feedback validation
-also treats new semantic hazard warnings, such as unreachable patterns caused by
+compiler repair loop and record `slice-repair.json` metrics. Use
+`--validation production` for the strict preset. Pass `--feedback-target-dir`
+for feedback, repair, or production batches when running a corpus against
+dependency-heavy projects, and `--deny-warnings` when corpus success must mean
+warning-free compiler feedback. Use `--baseline-check` to separate source
+failures from slicer failures; add `--allow-baseline-failures` for known-broken
+sources where generated baseline-matching errors should be tracked as
+baseline-limited passes instead of slicer regressions. Feedback validation also
+treats new semantic hazard warnings, such as unreachable patterns caused by
 missing constants or variants, as slicer failures even when general warnings are
 allowed.
 

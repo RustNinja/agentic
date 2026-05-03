@@ -32,13 +32,14 @@ patterns introduced by pruning, are classified as slicer failures even when
 general warnings are allowed.
 Use `--validation preflight` when build time is the bottleneck; it validates the
 predicted generated shape without compiling dependencies. Use
-`--validation feedback` for slower compiler-confirmed runs, or
-`--validation repair` to run the bounded compiler repair loop and capture repair
-metrics for each generated slice. Use `--feedback-target-dir` on feedback or
-repair corpus runs to reuse dependency builds across generated outputs. Use
-`--deny-warnings` for production gates that require warning-free generated
-feedback. Each corpus row includes production-readiness status and hazard codes
-from the generated `slice-report.json`.
+`--validation feedback` for slower compiler-confirmed runs,
+`--validation repair` to run the bounded compiler repair loop, or
+`--validation production` to run the strict slicers production preset. Use
+`--feedback-target-dir` on feedback, repair, or production corpus runs to reuse
+dependency builds across generated outputs. Use `--deny-warnings` for
+production gates that require warning-free generated feedback. Each corpus row
+includes production-readiness status, production hazard codes, and compiler
+feedback widening candidate/hazard kinds.
 
 ## Litter Feedback Loop
 

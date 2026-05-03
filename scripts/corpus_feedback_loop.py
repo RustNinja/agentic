@@ -178,11 +178,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--validation",
-        choices=("preflight", "feedback", "repair"),
+        choices=("preflight", "feedback", "repair", "production"),
         default="feedback",
         help=(
             "validation tier: preflight is fast and does not build dependencies; "
-            "repair runs the conservative compiler repair loop"
+            "repair runs the conservative compiler repair loop; production uses "
+            "the strict slicers production preset"
         ),
     )
     parser.add_argument(
@@ -212,7 +213,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--deny-warnings",
         action="store_true",
-        help="pass slicers --deny-warnings during feedback or repair validation",
+        help="pass slicers --deny-warnings during feedback, repair, or production validation",
     )
     parser.add_argument(
         "--keep-going",
@@ -285,6 +286,9 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--case-timeout must be greater than zero")
     if args.allow_baseline_failures:
         args.baseline_check = True
+    if args.validation == "production":
+        args.baseline_check = True
+        args.deny_warnings = True
 
 
 def run_batch(
@@ -692,6 +696,20 @@ def slicers_command(
     )
     if args.validation == "preflight":
         command.append("--preflight")
+    elif args.validation == "production":
+        command.extend(
+            [
+                "--production",
+                "--feedback-repair-loop",
+                str(args.feedback_loop),
+                "--feedback-timeout",
+                str(args.feedback_timeout),
+                "--feedback-report",
+                str(feedback_report_path),
+                "--repair-report",
+                str(repair_report_path),
+            ]
+        )
     elif args.validation == "repair":
         command.extend(
             [
@@ -845,6 +863,9 @@ def build_row(
     error: str | None = None,
 ) -> dict[str, Any]:
     diagnostics = (feedback or {}).get("diagnostics", [])
+    widening = (feedback or {}).get("widening") or {}
+    widening_candidates = widening.get("candidates") or []
+    feedback_hazards = widening.get("hazards") or []
     warnings = count_diagnostics(diagnostics, "warning")
     errors = count_diagnostics(diagnostics, "error")
     semantic_warnings = semantic_hazard_warning_count(diagnostics, baseline)
@@ -913,6 +934,10 @@ def build_row(
             "warnings": warnings,
             "semantic_warnings": semantic_warnings,
             "diagnostic_codes": diagnostic_codes(diagnostics),
+            "widening_candidates": len(widening_candidates),
+            "widening_candidate_kinds": keyed_values(widening_candidates, "kind"),
+            "widening_hazards": len(feedback_hazards),
+            "widening_hazard_kinds": keyed_values(feedback_hazards, "kind"),
             "first_diagnostics": summarize_diagnostics(diagnostics),
         },
         "repair": {
@@ -1035,6 +1060,15 @@ def production_hazard_codes(hazards: list[dict[str, Any]]) -> list[str]:
         if isinstance(code, str) and code not in codes:
             codes.append(code)
     return codes
+
+
+def keyed_values(items: list[dict[str, Any]], key: str) -> list[str]:
+    values: list[str] = []
+    for item in items:
+        value = item.get(key)
+        if isinstance(value, str) and value not in values:
+            values.append(value)
+    return values
 
 
 def feedback_errors_are_baseline_known(
