@@ -9,6 +9,7 @@ mod render;
 mod repair;
 
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -43,6 +44,7 @@ pub struct GenerateReport {
     pub production: ProductionReadinessReport,
     pub root: RootId,
     pub roots: Vec<RootId>,
+    pub feedback_widened_roots: Vec<RootId>,
     pub packages: Vec<String>,
     pub targets: Vec<GeneratedTargetReport>,
     pub reachable: Vec<CallableId>,
@@ -111,6 +113,14 @@ pub fn generate_with_analyzer(
     options: GenerateOptions,
     analyzer_mode: AnalyzerMode,
 ) -> Result<GenerateReport, Box<dyn std::error::Error>> {
+    generate_with_analyzer_feedback(options, analyzer_mode, &[])
+}
+
+pub fn generate_with_analyzer_feedback(
+    options: GenerateOptions,
+    analyzer_mode: AnalyzerMode,
+    feedback_diagnostics: &[feedback::CheckDiagnostic],
+) -> Result<GenerateReport, Box<dyn std::error::Error>> {
     let total_started = Instant::now();
     let phase_started = Instant::now();
     let analyzer = analyzer::load_report(&options.workspace_root, analyzer_mode)?;
@@ -124,8 +134,10 @@ pub fn generate_with_analyzer(
     let project = parse::parse_workspace(workspace)?;
     let parse_ms = elapsed_ms(phase_started);
 
+    let feedback_widened_roots = feedback_extra_roots(&project, feedback_diagnostics);
+
     let phase_started = Instant::now();
-    let reduced = reduce::reduce(&project)?;
+    let reduced = reduce::reduce_with_extra_roots(&project, &feedback_widened_roots)?;
     let reduce_ms = elapsed_ms(phase_started);
 
     let phase_started = Instant::now();
@@ -157,6 +169,7 @@ pub fn generate_with_analyzer(
         production,
         root: reduced.root,
         roots: reduced.roots,
+        feedback_widened_roots,
         packages,
         targets,
         reachable,
@@ -180,6 +193,232 @@ fn target_report(project: &Project, packages: &[String]) -> Vec<GeneratedTargetR
             })
         })
         .collect()
+}
+
+const FEEDBACK_WIDENING_ROOT_MATCH_LIMIT: usize = 24;
+
+fn feedback_extra_roots(
+    project: &Project,
+    diagnostics: &[feedback::CheckDiagnostic],
+) -> Vec<RootId> {
+    let mut roots = Vec::new();
+    let mut seen = BTreeSet::new();
+    for diagnostic in diagnostics {
+        if diagnostic.level != "error" {
+            continue;
+        }
+        let Some(code) = diagnostic.code.as_deref() else {
+            continue;
+        };
+        let symbols = diagnostic_symbols(diagnostic);
+        if symbols.is_empty() {
+            continue;
+        }
+        let package_hint = diagnostic_package_hint(diagnostic);
+        for symbol in symbols {
+            let Some(name) = symbol_leaf_name(&symbol) else {
+                continue;
+            };
+            let candidates = feedback_root_candidates(project, code, package_hint.as_deref(), name);
+            if candidates.is_empty() || candidates.len() > FEEDBACK_WIDENING_ROOT_MATCH_LIMIT {
+                continue;
+            }
+            for root in candidates {
+                if !root_is_marked(project, &root) && seen.insert(root.clone()) {
+                    roots.push(root);
+                }
+            }
+        }
+    }
+    roots.sort();
+    roots
+}
+
+fn feedback_root_candidates(
+    project: &Project,
+    code: &str,
+    package_hint: Option<&str>,
+    name: &str,
+) -> Vec<RootId> {
+    let mut roots = Vec::new();
+    match code {
+        "E0405" => {
+            roots.extend(item_name_candidates(project, package_hint, name, |item| {
+                item.kind == model::ItemKind::Trait
+            }));
+        }
+        "E0412" | "E0422" => {
+            roots.extend(item_name_candidates(project, package_hint, name, |item| {
+                matches!(
+                    item.kind,
+                    model::ItemKind::Struct
+                        | model::ItemKind::Enum
+                        | model::ItemKind::Union
+                        | model::ItemKind::Type
+                        | model::ItemKind::Trait
+                        | model::ItemKind::Mod
+                )
+            }));
+        }
+        "E0425" => {
+            roots.extend(free_function_name_candidates(project, package_hint, name));
+            roots.extend(item_name_candidates(project, package_hint, name, |item| {
+                matches!(item.kind, model::ItemKind::Const | model::ItemKind::Static)
+            }));
+        }
+        "E0432" | "E0433" => {
+            roots.extend(free_function_name_candidates(project, package_hint, name));
+            roots.extend(item_name_candidates(project, package_hint, name, |_| true));
+        }
+        "E0599" => {
+            roots.extend(method_name_candidates(project, package_hint, name));
+        }
+        _ => {}
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn free_function_name_candidates(
+    project: &Project,
+    package_hint: Option<&str>,
+    name: &str,
+) -> Vec<RootId> {
+    project
+        .functions
+        .keys()
+        .filter(|callable| callable.package_matches(package_hint))
+        .filter(|callable| match callable {
+            CallableId::Free {
+                name: candidate, ..
+            } => candidate == name,
+            CallableId::Method { .. } => false,
+        })
+        .cloned()
+        .map(RootId::Callable)
+        .collect()
+}
+
+fn method_name_candidates(
+    project: &Project,
+    package_hint: Option<&str>,
+    name: &str,
+) -> Vec<RootId> {
+    project
+        .methods
+        .keys()
+        .filter(|callable| callable.package_matches(package_hint))
+        .filter(|callable| match callable {
+            CallableId::Method { method, .. } => method == name,
+            CallableId::Free { .. } => false,
+        })
+        .cloned()
+        .map(RootId::Callable)
+        .collect()
+}
+
+fn item_name_candidates(
+    project: &Project,
+    package_hint: Option<&str>,
+    name: &str,
+    kind_matches: impl Fn(&ItemId) -> bool,
+) -> Vec<RootId> {
+    project
+        .items
+        .keys()
+        .filter(|item| item.package_matches(package_hint))
+        .filter(|item| item.name == name && kind_matches(item))
+        .cloned()
+        .map(RootId::Item)
+        .collect()
+}
+
+trait PackageMatch {
+    fn package_matches(&self, package_hint: Option<&str>) -> bool;
+}
+
+impl PackageMatch for CallableId {
+    fn package_matches(&self, package_hint: Option<&str>) -> bool {
+        package_hint.is_none_or(|package| self.package() == package)
+    }
+}
+
+impl PackageMatch for ItemId {
+    fn package_matches(&self, package_hint: Option<&str>) -> bool {
+        package_hint.is_none_or(|package| self.package() == package)
+    }
+}
+
+fn diagnostic_symbols(diagnostic: &feedback::CheckDiagnostic) -> Vec<String> {
+    let mut symbols = backticked_symbols(&diagnostic.message);
+    if let Some(rendered) = &diagnostic.rendered {
+        symbols.extend(backticked_symbols(rendered));
+    }
+    symbols.sort();
+    symbols.dedup();
+    symbols
+}
+
+fn backticked_symbols(text: &str) -> Vec<String> {
+    let mut symbols = Vec::new();
+    let mut remaining = text;
+    while let Some((_, tail)) = remaining.split_once('`') {
+        let Some((symbol, after)) = tail.split_once('`') else {
+            break;
+        };
+        if !symbol.is_empty() {
+            symbols.push(symbol.to_string());
+        }
+        remaining = after;
+    }
+    symbols
+}
+
+fn symbol_leaf_name(symbol: &str) -> Option<&str> {
+    symbol
+        .split('<')
+        .next()
+        .unwrap_or(symbol)
+        .rsplit("::")
+        .find(|segment| !matches!(*segment, "" | "crate" | "self" | "super"))
+        .filter(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+        })
+}
+
+fn diagnostic_package_hint(diagnostic: &feedback::CheckDiagnostic) -> Option<String> {
+    diagnostic
+        .package_id
+        .as_deref()
+        .and_then(package_name_from_diagnostic_package_id)
+        .or_else(|| diagnostic.target.as_ref().map(|target| target.name.clone()))
+}
+
+fn package_name_from_diagnostic_package_id(package_id: &str) -> Option<String> {
+    if let Some(fragment) = package_id.split('#').next_back() {
+        if let Some((name, _)) = fragment.split_once('@') {
+            if !name.is_empty() {
+                return Some(name.to_string());
+            }
+        }
+    }
+    package_id
+        .split_whitespace()
+        .next()
+        .map(str::to_string)
+        .filter(|name| !name.is_empty())
+}
+
+fn root_is_marked(project: &Project, root: &RootId) -> bool {
+    root_direct_attrs(project, root).is_some_and(|attrs| {
+        attrs
+            .iter()
+            .any(|attribute| reduce::is_opensourced_attr(attribute.path()))
+    })
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -929,6 +1168,7 @@ struct GenerateReportJson {
     timings: GenerateTimingReportJson,
     root: String,
     roots: Vec<String>,
+    feedback_widened_roots: Vec<String>,
     packages: Vec<String>,
     targets: Vec<GeneratedTargetReportJson>,
     reachable: Vec<String>,
@@ -945,6 +1185,11 @@ impl GenerateReportJson {
             timings: GenerateTimingReportJson::from_report(&report.timings),
             root: report.root.to_string(),
             roots: report.roots.iter().map(ToString::to_string).collect(),
+            feedback_widened_roots: report
+                .feedback_widened_roots
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
             packages: report.packages.clone(),
             targets: report
                 .targets
@@ -1145,8 +1390,9 @@ mod tests {
     };
 
     use super::{
-        add_semantic_inventory_hazard, generate, write_generate_report, AnalyzerMode,
-        AnalyzerReport, GenerateOptions, SemanticReport,
+        add_semantic_inventory_hazard, generate, generate_with_analyzer_feedback,
+        write_generate_report, AnalyzerMode, AnalyzerReport, CheckDiagnostic, GenerateOptions,
+        SemanticReport,
     };
 
     #[test]
@@ -1713,6 +1959,65 @@ pub fn entry() -> usize {
             .hazards
             .iter()
             .any(|hazard| { hazard.code == "cfg_gated_roots" && hazard.severity == "error" }));
+    }
+
+    #[test]
+    fn feedback_diagnostics_widen_matching_unmarked_roots() {
+        let root = temp_output("feedback-widen-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+
+pub fn helper() -> usize {
+    2
+}
+"#,
+        );
+
+        let report = generate_with_analyzer_feedback(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: temp_output("feedback-widen-output"),
+            },
+            AnalyzerMode::Syn,
+            &[CheckDiagnostic {
+                level: "error".to_string(),
+                message: "cannot find value `helper` in this scope".to_string(),
+                code: Some("E0425".to_string()),
+                package_id: Some("app 0.1.0 (path+file:///tmp/app)".to_string()),
+                target: None,
+                rendered: None,
+                spans: Vec::new(),
+                suggestions: Vec::new(),
+            }],
+        )
+        .expect("feedback widening should generate");
+
+        assert!(report
+            .feedback_widened_roots
+            .iter()
+            .any(|root| root.to_string() == "app::helper"));
+        assert!(report
+            .reachable
+            .iter()
+            .any(|callable| callable.to_string() == "app::helper"));
     }
 
     #[test]

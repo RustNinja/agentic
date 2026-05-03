@@ -10,10 +10,10 @@ use std::{
 use serde::Serialize;
 
 use opensource_core::{
-    check_workspace, generate_with_analyzer, preflight_workspace, repair_workspace,
-    write_generate_report, write_preflight_report, write_repair_report, write_report, AnalyzerMode,
-    CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions, GeneratedTargetReport,
-    PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
+    check_workspace, generate_with_analyzer, generate_with_analyzer_feedback, preflight_workspace,
+    repair_workspace, write_generate_report, write_preflight_report, write_repair_report,
+    write_report, AnalyzerMode, CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions,
+    GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
 };
 
 fn main() {
@@ -965,6 +965,8 @@ fn run_feedback_repair_loop(
         .unwrap_or_else(|| options.output_root.join("slice-repair.json"));
     let mut seen_diagnostics = std::collections::BTreeSet::new();
     let mut seen_diagnostic_shapes = std::collections::BTreeSet::new();
+    let mut seen_widened_roots = std::collections::BTreeSet::new();
+    let mut feedback_widening_diagnostics = Vec::new();
     let mut repaired_previous_attempt = false;
 
     for attempt in 1..=options.feedback_repair_iterations {
@@ -1125,6 +1127,57 @@ fn run_feedback_repair_loop(
                 semantic_warnings,
             );
             break;
+        }
+
+        if report.error_count() > 0 {
+            feedback_widening_diagnostics.extend(report.diagnostics.clone());
+            let widened_report = generate_with_analyzer_feedback(
+                GenerateOptions {
+                    workspace_root: options.workspace_root.clone(),
+                    output_root: options.output_root.clone(),
+                },
+                options.analyzer_mode,
+                &feedback_widening_diagnostics,
+            )?;
+            let widened_signature = widened_report
+                .feedback_widened_roots
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join("\n");
+            if !widened_signature.is_empty() && seen_widened_roots.insert(widened_signature) {
+                if let Some(report_path) = slice_report_path(options) {
+                    write_generate_report(&widened_report, &report_path)?;
+                }
+                println!(
+                    "feedback: widened {} root(s) from compiler diagnostics and re-rendered generated workspace",
+                    widened_report.feedback_widened_roots.len()
+                );
+                record_feedback_attempt(
+                    validation,
+                    "feedback-repair",
+                    attempt,
+                    "widened",
+                    "compiler feedback widened the generated workspace",
+                    &report,
+                    feedback_report_path.clone(),
+                    false,
+                    semantic_warnings,
+                    repairable_warnings,
+                    None,
+                    None,
+                );
+
+                let preflight = run_preflight(options)?;
+                if !preflight.success {
+                    return Err(
+                        "feedback widening produced a structurally invalid generated workspace"
+                            .into(),
+                    );
+                }
+                repaired_previous_attempt = false;
+                continue;
+            }
         }
 
         let signature = diagnostics_signature(&report.diagnostics);

@@ -20,7 +20,10 @@ use crate::model::{
 
 const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 24;
 
-pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::Error>> {
+pub fn reduce_with_extra_roots(
+    project: &Project,
+    extra_roots: &[RootId],
+) -> Result<ReducedProject, Box<dyn std::error::Error>> {
     let mut callable_roots = project
         .functions
         .values()
@@ -55,6 +58,27 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
         .filter(|(_, record)| item_has_opensourced_attr(&record.item))
         .map(|(id, _)| id.clone())
         .collect::<Vec<_>>();
+    item_roots.sort();
+    item_roots.dedup();
+
+    for root in extra_roots {
+        match root {
+            RootId::Callable(callable) => {
+                if project.functions.contains_key(callable)
+                    || project.methods.contains_key(callable)
+                {
+                    callable_roots.push(callable.clone());
+                }
+            }
+            RootId::Item(item) => {
+                if project.items.contains_key(item) {
+                    item_roots.push(item.clone());
+                }
+            }
+        }
+    }
+    callable_roots.sort();
+    callable_roots.dedup();
     item_roots.sort();
     item_roots.dedup();
 
