@@ -132,10 +132,16 @@ fn diagnostic_from_value(message: &Value) -> Option<CheckDiagnostic> {
 }
 
 fn stderr_failure_diagnostic(stderr: &str) -> Option<CheckDiagnostic> {
-    let message = stderr
+    let first_nonempty = stderr
         .lines()
         .map(str::trim)
         .find(|line| !line.is_empty())?
+        .to_string();
+    let message = stderr
+        .lines()
+        .map(str::trim)
+        .find(|line| line.starts_with("error:"))
+        .unwrap_or(&first_nonempty)
         .to_string();
 
     Some(CheckDiagnostic {
@@ -207,5 +213,18 @@ mod tests {
         );
         assert!(diagnostic.rendered.unwrap().contains("missing dependency"));
         assert!(diagnostic.spans.is_empty());
+    }
+
+    #[test]
+    fn prefers_stderr_error_line_over_leading_warnings() {
+        let diagnostic = stderr_failure_diagnostic(
+            "warning: /tmp/out/Cargo.toml: unused manifest key: patch.crates-io.ohttp.revision\nerror: failed to select a version for `rc_crypto`\n",
+        )
+        .expect("stderr should produce a diagnostic");
+
+        assert_eq!(
+            diagnostic.message,
+            "error: failed to select a version for `rc_crypto`"
+        );
     }
 }

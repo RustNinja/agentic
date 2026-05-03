@@ -609,6 +609,9 @@ fn write_package_manifest(
     }
 
     let package_usage = package_source_usage(project, reduced, package_name);
+    let requested_features = requested_local_features(project, reduced, package_name);
+    let feature_required_aliases =
+        dependency_aliases_required_by_features(package, &requested_features);
     let mut retained_dependency_aliases = BTreeSet::new();
     let dependencies = transformed_dependencies(
         project,
@@ -617,6 +620,7 @@ fn write_package_manifest(
         "dependencies",
         DependencyRetention::SourceMentioned,
         &package_usage,
+        &feature_required_aliases,
         &mut retained_dependency_aliases,
     )?;
     if !dependencies.is_empty() {
@@ -631,6 +635,7 @@ fn write_package_manifest(
             "build-dependencies",
             DependencyRetention::BuildScript,
             &package_usage,
+            &feature_required_aliases,
             &mut retained_dependency_aliases,
         )?;
         if !build_dependencies.is_empty() {
@@ -646,6 +651,7 @@ fn write_package_manifest(
         reduced,
         package_name,
         &package_usage,
+        &feature_required_aliases,
         &mut retained_dependency_aliases,
     )? {
         manifest.insert("target".to_string(), Value::Table(target_dependencies));
@@ -797,6 +803,7 @@ fn transformed_dependencies(
     table_name: &str,
     retention: DependencyRetention,
     package_usage: &PackageSourceUsage,
+    feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
 ) -> Result<Table, Box<dyn std::error::Error>> {
     let package = project
@@ -812,6 +819,7 @@ fn transformed_dependencies(
     let mut dependencies = Table::new();
     for (alias, value) in source_dependencies {
         let dependency_package = dependency_package_name(alias, value);
+        let is_feature_required = feature_required_aliases.contains(alias);
         if is_marker_dependency(alias, &dependency_package) {
             continue;
         }
@@ -834,7 +842,8 @@ fn transformed_dependencies(
             alias,
             retention,
             package_usage,
-        ) {
+        ) || is_feature_required
+        {
             retained_aliases.insert(alias.clone());
             dependencies.insert(
                 alias.clone(),
@@ -851,6 +860,7 @@ fn transformed_target_dependencies(
     reduced: &ReducedProject,
     package_name: &str,
     package_usage: &PackageSourceUsage,
+    feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
 ) -> Result<Option<Table>, Box<dyn std::error::Error>> {
     let package = project
@@ -879,6 +889,7 @@ fn transformed_target_dependencies(
             source_dependencies,
             DependencyRetention::SourceMentioned,
             package_usage,
+            feature_required_aliases,
             retained_aliases,
         );
         if dependencies.is_empty() {
@@ -900,11 +911,13 @@ fn transformed_dependency_table(
     source_dependencies: &Table,
     retention: DependencyRetention,
     package_usage: &PackageSourceUsage,
+    feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
 ) -> Table {
     let mut dependencies = Table::new();
     for (alias, value) in source_dependencies {
         let dependency_package = dependency_package_name(alias, value);
+        let is_feature_required = feature_required_aliases.contains(alias);
         if is_marker_dependency(alias, &dependency_package) {
             continue;
         }
@@ -927,7 +940,8 @@ fn transformed_dependency_table(
             alias,
             retention,
             package_usage,
-        ) {
+        ) || is_feature_required
+        {
             retained_aliases.insert(alias.clone());
             let value = project
                 .workspace
@@ -1232,6 +1246,88 @@ fn transformed_features(package: &Package, retained_aliases: &BTreeSet<String>) 
     Some(Value::Table(transformed))
 }
 
+fn requested_local_features(
+    project: &Project,
+    reduced: &ReducedProject,
+    package_name: &str,
+) -> BTreeSet<String> {
+    let mut features = BTreeSet::new();
+    for dependent_name in &reduced.packages {
+        let Some(dependent) = project.workspace.packages.get(dependent_name) else {
+            continue;
+        };
+        for (_table_name, table) in package_dependency_tables(dependent) {
+            for (alias, value) in table {
+                if dependency_package_name(alias, value) == package_name {
+                    collect_dependency_requested_features(value, &mut features);
+                }
+            }
+        }
+    }
+    features
+}
+
+fn collect_dependency_requested_features(value: &Value, features: &mut BTreeSet<String>) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    let default_features_enabled = table
+        .get("default-features")
+        .and_then(Value::as_bool)
+        .unwrap_or(true);
+    if default_features_enabled {
+        features.insert("default".to_string());
+    }
+    if let Some(requested) = table.get("features").and_then(Value::as_array) {
+        features.extend(
+            requested
+                .iter()
+                .filter_map(Value::as_str)
+                .map(str::to_string),
+        );
+    }
+}
+
+fn dependency_aliases_required_by_features(
+    package: &Package,
+    requested_features: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let source_aliases = package_dependency_aliases(package);
+    let Some(features) = package.manifest.get("features").and_then(Value::as_table) else {
+        return requested_features
+            .intersection(&source_aliases)
+            .cloned()
+            .collect();
+    };
+
+    let mut required = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut pending = requested_features.iter().cloned().collect::<Vec<_>>();
+    while let Some(feature) = pending.pop() {
+        if !visited.insert(feature.clone()) {
+            continue;
+        }
+        if source_aliases.contains(&feature) {
+            required.insert(feature.clone());
+        }
+        let Some(values) = features.get(&feature).and_then(Value::as_array) else {
+            continue;
+        };
+        for value in values {
+            let Some(item) = value.as_str() else {
+                continue;
+            };
+            if let Some(alias) = feature_dependency_alias(item, &source_aliases) {
+                required.insert(alias);
+            } else {
+                pending.push(item.to_string());
+            }
+        }
+    }
+
+    required
+}
+
 fn package_dependency_aliases(package: &Package) -> BTreeSet<String> {
     let mut aliases = BTreeSet::new();
     for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
@@ -1252,6 +1348,18 @@ fn package_dependency_aliases(package: &Package) -> BTreeSet<String> {
         }
     }
     aliases
+}
+
+fn feature_dependency_alias(item: &str, source_aliases: &BTreeSet<String>) -> Option<String> {
+    let dependency = item
+        .strip_prefix("dep:")
+        .or_else(|| item.split_once('/').map(|(dependency, _)| dependency))
+        .or_else(|| item.split_once("?/").map(|(dependency, _)| dependency))
+        .unwrap_or(item);
+    let dependency = dependency.strip_suffix('?').unwrap_or(dependency);
+    source_aliases
+        .contains(dependency)
+        .then(|| dependency.to_string())
 }
 
 fn feature_reference_should_remain(

@@ -942,6 +942,49 @@ fn rewrites_features_and_keeps_target_dependencies_and_build_script() {
 }
 
 #[test]
+fn keeps_optional_dependency_requested_by_retained_local_package_feature() {
+    let workspace = temp_path("implicit-feature-workspace");
+    let output = temp_path("implicit-feature-output");
+    let target_dir = temp_path("implicit-feature-target");
+    write_implicit_feature_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    let helper_manifest = read(output.join("helper/Cargo.toml"));
+    assert!(app_manifest.contains("features = [\"feature_dep\"]"));
+    assert!(
+        helper_manifest.contains("feature_dep"),
+        "helper manifest should retain optional dependency requested through app feature\n{helper_manifest}"
+    );
+    assert!(
+        helper_manifest.contains("optional = true"),
+        "helper manifest should preserve optional dependency metadata\n{helper_manifest}"
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated implicit feature slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\nhelper/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+        helper_manifest,
+    );
+}
+
+#[test]
 fn resolves_external_workspace_path_dependencies_from_original_root() {
     let workspace = temp_path("external-workspace-dep-workspace");
     let output = temp_path("external-workspace-dep-output");
@@ -3877,6 +3920,74 @@ pub enum AppAskForApproval {
 
 pub enum DeadPolicy {
     Noise,
+}
+"#,
+    );
+}
+
+fn write_implicit_feature_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helper = { path = "../helper", features = ["feature_dep"] }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> String {
+    helper::value()
+}
+"#,
+    );
+    write(
+        root.join("helper/Cargo.toml"),
+        r#"[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+feature_dep = { path = "../feature_dep", optional = true }
+"#,
+    );
+    write(
+        root.join("helper/src/lib.rs"),
+        r#"pub fn value() -> String {
+    "helper".to_string()
+}
+"#,
+    );
+    write_package(
+        root,
+        "feature_dep",
+        r#"pub fn value() -> &'static str {
+    "feature"
 }
 "#,
     );
