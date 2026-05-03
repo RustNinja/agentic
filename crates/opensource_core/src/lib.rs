@@ -11,6 +11,7 @@ mod repair;
 use std::{
     fs,
     path::{Path, PathBuf},
+    time::Instant,
 };
 
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
@@ -41,6 +42,17 @@ pub struct GenerateReport {
     pub reachable_items: Vec<ItemId>,
     pub source_map: SourceMapReport,
     pub files_written: usize,
+    pub timings: GenerateTimingReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateTimingReport {
+    pub total_ms: u64,
+    pub analyzer_ms: u64,
+    pub manifest_ms: u64,
+    pub parse_ms: u64,
+    pub reduce_ms: u64,
+    pub render_ms: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -71,11 +83,34 @@ pub fn generate_with_analyzer(
     options: GenerateOptions,
     analyzer_mode: AnalyzerMode,
 ) -> Result<GenerateReport, Box<dyn std::error::Error>> {
+    let total_started = Instant::now();
+    let phase_started = Instant::now();
     let analyzer = analyzer::load_report(&options.workspace_root, analyzer_mode)?;
+    let analyzer_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
     let workspace = manifest::load_workspace(&options.workspace_root)?;
+    let manifest_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
     let project = parse::parse_workspace(workspace)?;
+    let parse_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
     let reduced = reduce::reduce(&project)?;
+    let reduce_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
     let files_written = render::write_reduced_workspace(&project, &reduced, &options.output_root)?;
+    let render_ms = elapsed_ms(phase_started);
+    let timings = GenerateTimingReport {
+        total_ms: elapsed_ms(total_started),
+        analyzer_ms,
+        manifest_ms,
+        parse_ms,
+        reduce_ms,
+        render_ms,
+    };
 
     let mut packages = reduced.packages.iter().cloned().collect::<Vec<_>>();
     packages.sort();
@@ -96,7 +131,12 @@ pub fn generate_with_analyzer(
         reachable_items,
         source_map,
         files_written,
+        timings,
     })
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 fn source_map_report(project: &model::Project, reduced: &model::ReducedProject) -> SourceMapReport {
@@ -145,6 +185,7 @@ pub fn write_generate_report(
 #[derive(Serialize)]
 struct GenerateReportJson {
     analyzer: AnalyzerReportJson,
+    timings: GenerateTimingReportJson,
     root: String,
     roots: Vec<String>,
     packages: Vec<String>,
@@ -158,6 +199,7 @@ impl GenerateReportJson {
     fn from_report(report: &GenerateReport) -> Self {
         Self {
             analyzer: AnalyzerReportJson::from_report(&report.analyzer),
+            timings: GenerateTimingReportJson::from_report(&report.timings),
             root: report.root.to_string(),
             roots: report.roots.iter().map(ToString::to_string).collect(),
             packages: report.packages.clone(),
@@ -169,6 +211,29 @@ impl GenerateReportJson {
                 .collect(),
             source_map: SourceMapReportJson::from_report(&report.source_map),
             files_written: report.files_written,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct GenerateTimingReportJson {
+    total_ms: u64,
+    analyzer_ms: u64,
+    manifest_ms: u64,
+    parse_ms: u64,
+    reduce_ms: u64,
+    render_ms: u64,
+}
+
+impl GenerateTimingReportJson {
+    fn from_report(report: &GenerateTimingReport) -> Self {
+        Self {
+            total_ms: report.total_ms,
+            analyzer_ms: report.analyzer_ms,
+            manifest_ms: report.manifest_ms,
+            parse_ms: report.parse_ms,
+            reduce_ms: report.reduce_ms,
+            render_ms: report.render_ms,
         }
     }
 }
@@ -454,6 +519,8 @@ mod tests {
         assert_eq!(value["analyzer"]["mode"], "syn");
         assert_eq!(value["root"], report.root.to_string());
         assert_eq!(value["files_written"], report.files_written);
+        assert_eq!(value["timings"]["total_ms"], report.timings.total_ms);
+        assert!(value["timings"]["render_ms"].as_u64().is_some());
         assert_eq!(
             value["packages"].as_array().unwrap().len(),
             report.packages.len()

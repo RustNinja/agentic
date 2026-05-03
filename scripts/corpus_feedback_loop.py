@@ -856,6 +856,8 @@ def build_row(
         "feedback": {
             "success": (feedback or {}).get("success"),
             "timed_out": (feedback or {}).get("timed_out"),
+            "exit_code": (feedback or {}).get("exit_code"),
+            "duration_ms": (feedback or {}).get("duration_ms"),
             "target_dir": feedback_target_dir(args, output_root),
             "errors": errors,
             "warnings": warnings,

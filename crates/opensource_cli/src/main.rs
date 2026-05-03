@@ -100,6 +100,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     println!("files written: {}", report.files_written);
+    println!(
+        "generation timing: total={}ms analyzer={}ms manifest={}ms parse={}ms reduce={}ms render={}ms",
+        report.timings.total_ms,
+        report.timings.analyzer_ms,
+        report.timings.manifest_ms,
+        report.timings.parse_ms,
+        report.timings.reduce_ms,
+        report.timings.render_ms
+    );
     println!("packages: {}", report.packages.join(", "));
     println!("reachable callables:");
     for callable in &report.reachable {
@@ -682,17 +691,19 @@ fn print_baseline(report: &CheckReport, limit: usize, report_path: Option<&Path>
         .unwrap_or_default();
     if report.success {
         println!(
-            "baseline: source cargo check passed with {} warning(s){}",
+            "baseline: source cargo check passed with {} warning(s) in {}{}",
             report.warning_count(),
+            format_duration_ms(report.duration_ms),
             report_text
         );
         return;
     }
 
     println!(
-        "baseline: source cargo check failed with {} error(s), {} warning(s){}",
+        "baseline: source cargo check failed with {} error(s), {} warning(s) in {}{}",
         report.error_count(),
         report.warning_count(),
+        format_duration_ms(report.duration_ms),
         report_text
     );
 
@@ -707,17 +718,19 @@ fn print_baseline(report: &CheckReport, limit: usize, report_path: Option<&Path>
 fn print_feedback(report: &CheckReport, limit: usize, report_path: &Path) {
     if report.success {
         println!(
-            "feedback: cargo check passed with {} warning(s); report: {}",
+            "feedback: cargo check passed with {} warning(s) in {}; report: {}",
             report.warning_count(),
+            format_duration_ms(report.duration_ms),
             report_path.display()
         );
         return;
     }
 
     println!(
-        "feedback: cargo check failed with {} error(s), {} warning(s); report: {}",
+        "feedback: cargo check failed with {} error(s), {} warning(s) in {}; report: {}",
         report.error_count(),
         report.warning_count(),
+        format_duration_ms(report.duration_ms),
         report_path.display()
     );
 
@@ -760,6 +773,14 @@ fn print_diagnostic(diagnostic: &CheckDiagnostic) {
         if let Some(line) = span.text.first() {
             println!("    | {line}");
         }
+    }
+}
+
+fn format_duration_ms(duration_ms: u64) -> String {
+    if duration_ms < 1_000 {
+        format!("{duration_ms}ms")
+    } else {
+        format!("{:.2}s", duration_ms as f64 / 1_000.0)
     }
 }
 
@@ -845,6 +866,8 @@ mod tests {
             manifest_path: PathBuf::from("/tmp/Cargo.toml"),
             success,
             timed_out: false,
+            exit_code: if success { 0 } else { 101 },
+            duration_ms: 25,
             diagnostics,
             stderr: String::new(),
         }

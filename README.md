@@ -98,10 +98,11 @@ before `cargo check` when the generated shape is already structurally invalid.
 
 `--feedback` runs `cargo check --message-format=json` against the generated
 workspace, prints prioritized compiler diagnostics, and writes
-`slice-feedback.json` under the slice output. `--feedback-loop <n>` repeats that
-compiler feedback pass up to `n` times and fails with the JSON report path when
-the slice still does not compile. Feedback checks have a 600-second timeout by
-default; use `--feedback-timeout 0` to disable it or pass another second count.
+`slice-feedback.json` under the slice output, including exit code, timeout
+state, and duration. `--feedback-loop <n>` repeats that compiler feedback pass
+up to `n` times and fails with the JSON report path when the slice still does
+not compile. Feedback checks have a 600-second timeout by default; use
+`--feedback-timeout 0` to disable it or pass another second count.
 Use `--feedback-target-dir <path>` to reuse a Cargo target directory across
 repeated generated slices when dependency build time dominates validation.
 Use `--deny-warnings` when a production validation run should reject generated
@@ -131,8 +132,10 @@ resolving hard name-resolution cases before rendering.
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
 mode/notes, roots, packages, reachable callables/items, files written, and a
 source map for parsed callables/items with file spans and reachability flags.
-That source map is the join point for semantic analyzer edges. The generic
-corpus runner uses this with compiler feedback to track real-project slice size,
+It also records phase timings for analyzer loading, manifest loading, parsing,
+reduction, rendering, and total generation time. That source map is the join
+point for semantic analyzer edges. The generic corpus runner uses this with
+compiler feedback to track real-project slice size,
 diagnostics, runtime, and timeout outcomes over repeated random root selection:
 
 ```sh

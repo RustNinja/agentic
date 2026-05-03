@@ -25,6 +25,8 @@ pub struct CheckReport {
     pub manifest_path: PathBuf,
     pub success: bool,
     pub timed_out: bool,
+    pub exit_code: i32,
+    pub duration_ms: u64,
     pub diagnostics: Vec<CheckDiagnostic>,
     pub stderr: String,
 }
@@ -84,11 +86,12 @@ fn check_workspace_with_program(
         command.env("CARGO_TARGET_DIR", target_dir);
     }
 
-    let (output, timed_out) = run_command(command, options.timeout)?;
+    let outcome = run_command(command, options.timeout)?;
+    let output = outcome.output;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let mut diagnostics = parse_cargo_messages(&stdout);
-    if timed_out {
+    if outcome.timed_out {
         diagnostics.push(timeout_failure_diagnostic(options.timeout));
     }
     if !output.status.success() && diagnostics.is_empty() {
@@ -100,7 +103,9 @@ fn check_workspace_with_program(
     Ok(CheckReport {
         manifest_path: options.manifest_path,
         success: output.status.success(),
-        timed_out,
+        timed_out: outcome.timed_out,
+        exit_code: output.status.code().unwrap_or(-1),
+        duration_ms: outcome.duration_ms,
         diagnostics,
         stderr,
     })
@@ -123,28 +128,53 @@ fn parse_cargo_messages(stdout: &str) -> Vec<CheckDiagnostic> {
         .collect()
 }
 
+struct CommandOutcome {
+    output: std::process::Output,
+    timed_out: bool,
+    duration_ms: u64,
+}
+
 fn run_command(
     mut command: Command,
     timeout: Option<Duration>,
-) -> Result<(std::process::Output, bool), Box<dyn std::error::Error>> {
+) -> Result<CommandOutcome, Box<dyn std::error::Error>> {
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     configure_timeout_process_group(&mut command);
     let mut child = command.spawn()?;
-    let Some(timeout) = timeout else {
-        return Ok((child.wait_with_output()?, false));
-    };
     let started = Instant::now();
+    let Some(timeout) = timeout else {
+        let output = child.wait_with_output()?;
+        return Ok(CommandOutcome {
+            output,
+            timed_out: false,
+            duration_ms: elapsed_ms(started),
+        });
+    };
 
     loop {
         if child.try_wait()?.is_some() {
-            return Ok((child.wait_with_output()?, false));
+            let output = child.wait_with_output()?;
+            return Ok(CommandOutcome {
+                output,
+                timed_out: false,
+                duration_ms: elapsed_ms(started),
+            });
         }
         if started.elapsed() >= timeout {
             kill_timed_out_child(&mut child);
-            return Ok((child.wait_with_output()?, true));
+            let output = child.wait_with_output()?;
+            return Ok(CommandOutcome {
+                output,
+                timed_out: true,
+                duration_ms: elapsed_ms(started),
+            });
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn elapsed_ms(started: Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
 }
 
 #[cfg(unix)]

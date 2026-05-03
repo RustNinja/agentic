@@ -226,16 +226,19 @@ def run_batch(
     report = json.loads(report_path.read_text())
     errors = count_diagnostics(report, "error")
     warnings = count_diagnostics(report, "warning")
+    duration_text = (
+        f" duration_ms={report['duration_ms']}" if report.get("duration_ms") is not None else ""
+    )
     if completed.returncode != 0 or errors or warnings:
         print(
             f"litter batch {batch} produced errors={errors} warnings={warnings}; "
-            f"target cleaned; output kept at {output_root}",
+            f"target cleaned; output kept at {output_root}{duration_text}",
             flush=True,
         )
         print_priority_diagnostics(report)
         return completed.returncode or 3
 
-    print(f"litter batch {batch}: target cleaned, warnings=0", flush=True)
+    print(f"litter batch {batch}: target cleaned, warnings=0{duration_text}", flush=True)
     prune_success_outputs(args.output_prefix, args.keep_success_outputs, batch)
     return 0
 
