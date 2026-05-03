@@ -227,7 +227,9 @@ impl Parser {
         item_impl: &ItemImpl,
         aliases: &HashMap<String, Vec<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(type_path) = local_type_path(module_path, &item_impl.self_ty, aliases) else {
+        let Some(type_path) =
+            self.canonical_impl_type_path(package, module_path, &item_impl.self_ty, aliases)
+        else {
             return Ok(());
         };
         let trait_path = item_impl
@@ -343,6 +345,100 @@ impl Parser {
         }
 
         Ok(())
+    }
+
+    fn canonical_impl_type_path(
+        &self,
+        package: &str,
+        module_path: &[String],
+        self_ty: &Type,
+        aliases: &HashMap<String, Vec<String>>,
+    ) -> Option<Vec<String>> {
+        let path = local_type_path(module_path, self_ty, aliases)?;
+        Some(self.canonical_type_path(package, module_path, path))
+    }
+
+    fn canonical_type_path(
+        &self,
+        package: &str,
+        module_path: &[String],
+        path: Vec<String>,
+    ) -> Vec<String> {
+        if self.has_type_like_item(package, &path) {
+            return path;
+        }
+
+        if let Some(path) = self.resolve_reexported_type_path(package, &path, &mut Vec::new()) {
+            return path;
+        }
+
+        if path.len() == module_path.len() + 1 && path.starts_with(module_path) {
+            if let Some(name) = path.last() {
+                for depth in (0..module_path.len()).rev() {
+                    let mut candidate = module_path[..depth].to_vec();
+                    candidate.push(name.clone());
+                    if self.has_type_like_item(package, &candidate) {
+                        return candidate;
+                    }
+                    if let Some(path) =
+                        self.resolve_reexported_type_path(package, &candidate, &mut Vec::new())
+                    {
+                        return path;
+                    }
+                }
+            }
+        }
+
+        path
+    }
+
+    fn resolve_reexported_type_path(
+        &self,
+        package: &str,
+        path: &[String],
+        visited: &mut Vec<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        if path.is_empty() || visited.iter().any(|seen| seen == path) {
+            return None;
+        }
+        visited.push(path.to_vec());
+
+        let name = path.last()?;
+        let module_path = &path[..path.len() - 1];
+        let aliases = self
+            .module_aliases
+            .get(&(package.to_string(), module_path.to_vec()))?;
+        let target = aliases.get(name)?;
+        let resolved = normalize_segments(module_path, target.clone())?;
+        if self.has_type_like_item(package, &resolved) {
+            return Some(resolved);
+        }
+        self.resolve_reexported_type_path(package, &resolved, visited)
+    }
+
+    fn has_type_like_item(&self, package: &str, path: &[String]) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        let name = path.last().expect("path is not empty");
+        let module_path = &path[..path.len() - 1];
+        [
+            ItemKind::Struct,
+            ItemKind::Enum,
+            ItemKind::Union,
+            ItemKind::Type,
+            ItemKind::Trait,
+        ]
+        .iter()
+        .any(|kind| {
+            let id = ItemId {
+                package: package.to_string(),
+                module_path: module_path.to_vec(),
+                name: name.clone(),
+                kind: *kind,
+            };
+            self.items.contains_key(&id)
+        })
     }
 }
 

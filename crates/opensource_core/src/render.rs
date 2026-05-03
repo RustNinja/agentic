@@ -1386,8 +1386,13 @@ fn transform_items(
                     .get(&(package.to_string(), module_path.to_vec()))
                     .cloned()
                     .unwrap_or_default();
-                let Some(type_path) = local_type_path(module_path, &item_impl.self_ty, &aliases)
-                else {
+                let Some(type_path) = resolved_local_type_path(
+                    project,
+                    package,
+                    module_path,
+                    &item_impl.self_ty,
+                    &aliases,
+                ) else {
                     continue;
                 };
                 let trait_path = item_impl
@@ -1401,6 +1406,9 @@ fn transform_items(
                     .unwrap_or_default();
                 let mut kept_impl_items = Vec::new();
                 let mut kept_method = false;
+                let trait_impl_is_required = trait_path.as_ref().is_some_and(|trait_path| {
+                    trait_impl_items_are_reachable(reduced, package, &type_path, trait_path)
+                });
 
                 for impl_item in &item_impl.items {
                     if let ImplItem::Fn(method) = impl_item {
@@ -1424,7 +1432,7 @@ fn transform_items(
                     }
                 }
 
-                if kept_method {
+                if kept_method || trait_impl_is_required {
                     if trait_path.is_some() {
                         kept_impl_items.clear();
                         for impl_item in &item_impl.items {
@@ -1447,6 +1455,7 @@ fn transform_items(
 
                     let mut item_impl = item_impl.clone();
                     item_impl.items = kept_impl_items;
+                    downgrade_uniffi_async_runtime_if_no_async_methods(&mut item_impl);
                     Some(Item::Impl(item_impl))
                 } else {
                     None
@@ -1808,6 +1817,116 @@ fn reachable_package_mentions_ident(
             })
 }
 
+fn retained_impl_attrs_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+
+    source.syntax.items.iter().any(|item| {
+        let Item::Impl(item_impl) = item else {
+            return false;
+        };
+        if !impl_has_reachable_method(project, reduced, package, module_path, item_impl, &aliases) {
+            return false;
+        }
+        item_impl
+            .attrs
+            .iter()
+            .any(|attr| token_stream_mentions_ident(&attr.to_token_stream(), ident))
+    })
+}
+
+fn impl_has_reachable_method(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    item_impl: &syn::ItemImpl,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> bool {
+    let Some(type_path) =
+        resolved_local_type_path(project, package, module_path, &item_impl.self_ty, aliases)
+    else {
+        return false;
+    };
+    let trait_path = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| normalized_path(module_path, path, aliases));
+    let trait_input_type_paths = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| trait_input_type_paths(module_path, path, aliases))
+        .unwrap_or_default();
+
+    item_impl.items.iter().any(|impl_item| {
+        let ImplItem::Fn(method) = impl_item else {
+            return false;
+        };
+        let id = CallableId::Method {
+            package: package.to_string(),
+            type_path: type_path.clone(),
+            trait_path: trait_path.clone(),
+            trait_input_type_paths: trait_input_type_paths.clone(),
+            method: method.sig.ident.to_string(),
+        };
+        reduced.reachable.contains(&id)
+    })
+}
+
+fn trait_impl_items_are_reachable(
+    reduced: &ReducedProject,
+    package: &str,
+    type_path: &[String],
+    trait_path: &[String],
+) -> bool {
+    path_item_is_reachable(
+        reduced,
+        package,
+        type_path,
+        &[
+            ItemKind::Struct,
+            ItemKind::Enum,
+            ItemKind::Union,
+            ItemKind::Type,
+        ],
+    ) && path_item_is_reachable(reduced, package, trait_path, &[ItemKind::Trait])
+}
+
+fn path_item_is_reachable(
+    reduced: &ReducedProject,
+    package: &str,
+    path: &[String],
+    kinds: &[ItemKind],
+) -> bool {
+    let Some((name, module_path)) = path.split_last() else {
+        return false;
+    };
+    kinds.iter().any(|kind| {
+        reduced.reachable_items.contains(&ItemId {
+            package: package.to_string(),
+            module_path: module_path.to_vec(),
+            name: name.clone(),
+            kind: *kind,
+        })
+    })
+}
+
 fn reachable_module_mentions_ident(
     project: &Project,
     reduced: &ReducedProject,
@@ -1839,6 +1958,7 @@ fn reachable_module_mentions_ident(
                     reachable_item_mentions_ident(project, reduced, package, item, record, ident)
                 })
             })
+        || retained_impl_attrs_mention_ident(project, reduced, package, module_path, ident)
 }
 
 fn reachable_module_has_method_call(
@@ -2062,6 +2182,24 @@ fn reachable_module_import_scope_mentions_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
+    reachable_module_import_scope_mentions_ident_excluding(
+        project,
+        reduced,
+        package,
+        module_path,
+        ident,
+        None,
+    )
+}
+
+fn reachable_module_import_scope_mentions_ident_excluding(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+    excluded_module_path: Option<&[String]>,
+) -> bool {
     reachable_module_mentions_ident(project, reduced, package, module_path, ident)
         || project
             .files
@@ -2069,15 +2207,20 @@ fn reachable_module_import_scope_mentions_ident(
             .filter(|source| source.package == package)
             .filter(|source| source.module_path.len() == module_path.len() + 1)
             .filter(|source| path_has_prefix(&source.module_path, module_path))
+            .filter(|source| {
+                excluded_module_path
+                    .map_or(true, |excluded| source.module_path.as_slice() != excluded)
+            })
             .filter(|source| module_should_render(project, reduced, package, &source.module_path))
             .filter(|source| file_has_super_glob_import(&source.syntax))
             .any(|source| {
-                reachable_module_import_scope_mentions_ident(
+                reachable_module_import_scope_mentions_ident_excluding(
                     project,
                     reduced,
                     package,
                     &source.module_path,
                     ident,
+                    excluded_module_path,
                 )
             })
 }
@@ -2129,12 +2272,26 @@ fn module_glob_is_used_in_module(
         callable_package == target_package
             && callable_module == target_path
             && reduced.reachable.contains(callable)
-            && reachable_module_mentions_ident(project, reduced, package, module_path, name)
+            && reachable_module_import_scope_mentions_ident_excluding(
+                project,
+                reduced,
+                package,
+                module_path,
+                name,
+                Some(target_path),
+            )
     }) || project.items.keys().any(|item| {
         item.package == target_package
             && item.module_path == target_path
             && reduced.reachable_items.contains(item)
-            && reachable_module_mentions_ident(project, reduced, package, module_path, &item.name)
+            && reachable_module_import_scope_mentions_ident_excluding(
+                project,
+                reduced,
+                package,
+                module_path,
+                &item.name,
+                Some(target_path),
+            )
     })
 }
 
@@ -2197,6 +2354,31 @@ fn strip_opensourced_attrs_from_trait_item(item: &mut TraitItem) {
         TraitItem::Verbatim(_) => {}
         _ => {}
     }
+}
+
+fn downgrade_uniffi_async_runtime_if_no_async_methods(item_impl: &mut syn::ItemImpl) {
+    if impl_items_contain_async_method(&item_impl.items) {
+        return;
+    }
+
+    for attr in &mut item_impl.attrs {
+        if is_uniffi_export_async_runtime_attr(attr) {
+            *attr = parse_quote!(#[uniffi::export]);
+        }
+    }
+}
+
+fn impl_items_contain_async_method(items: &[ImplItem]) -> bool {
+    items
+        .iter()
+        .any(|item| matches!(item, ImplItem::Fn(method) if method.sig.asyncness.is_some()))
+}
+
+fn is_uniffi_export_async_runtime_attr(attr: &syn::Attribute) -> bool {
+    attr.path().segments.len() == 2
+        && attr.path().segments[0].ident == "uniffi"
+        && attr.path().segments[1].ident == "export"
+        && attr.to_token_stream().to_string().contains("async_runtime")
 }
 
 fn allow_dead_code_if_not_public(vis: &syn::Visibility, attrs: &mut Vec<syn::Attribute>) {
@@ -2633,7 +2815,7 @@ fn external_use_target_should_drop(
     if is_public_use {
         !reachable_package_mentions_ident(project, reduced, _package, leaf)
     } else {
-        !reachable_module_mentions_ident(project, reduced, _package, module_path, leaf)
+        !reachable_module_import_scope_mentions_ident(project, reduced, _package, module_path, leaf)
     }
 }
 
@@ -3058,6 +3240,94 @@ fn local_type_path(
         aliases,
     );
     normalize_segments(module_path, segments)
+}
+
+fn resolved_local_type_path(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    self_ty: &Type,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    let path = local_type_path(module_path, self_ty, aliases)?;
+    Some(canonical_type_path(project, package, module_path, path))
+}
+
+fn canonical_type_path(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    path: Vec<String>,
+) -> Vec<String> {
+    if find_type_like_item(project, package, &path).is_some() {
+        return path;
+    }
+
+    if let Some(path) = resolve_reexported_type_path(project, package, &path, &mut Vec::new()) {
+        return path;
+    }
+
+    if path.len() == module_path.len() + 1 && path.starts_with(module_path) {
+        if let Some(name) = path.last() {
+            for depth in (0..module_path.len()).rev() {
+                let mut candidate = module_path[..depth].to_vec();
+                candidate.push(name.clone());
+                if find_type_like_item(project, package, &candidate).is_some() {
+                    return candidate;
+                }
+                if let Some(path) =
+                    resolve_reexported_type_path(project, package, &candidate, &mut Vec::new())
+                {
+                    return path;
+                }
+            }
+        }
+    }
+
+    path
+}
+
+fn resolve_reexported_type_path(
+    project: &Project,
+    package: &str,
+    path: &[String],
+    visited: &mut Vec<Vec<String>>,
+) -> Option<Vec<String>> {
+    if path.is_empty() || visited.iter().any(|seen| seen == path) {
+        return None;
+    }
+    visited.push(path.to_vec());
+
+    let (target_package, target_path) = resolve_reexported_use_path(project, package, path)?;
+    if target_package != package {
+        return None;
+    }
+    if find_type_like_item(project, package, &target_path).is_some() {
+        return Some(target_path);
+    }
+    resolve_reexported_type_path(project, package, &target_path, visited)
+}
+
+fn find_type_like_item(project: &Project, package: &str, path: &[String]) -> Option<ItemId> {
+    let name = path.last()?.clone();
+    let module_path = path[..path.len() - 1].to_vec();
+    [
+        ItemKind::Struct,
+        ItemKind::Enum,
+        ItemKind::Union,
+        ItemKind::Type,
+        ItemKind::Trait,
+    ]
+    .into_iter()
+    .find_map(|kind| {
+        let id = ItemId {
+            package: package.to_string(),
+            module_path: module_path.clone(),
+            name: name.clone(),
+            kind,
+        };
+        project.items.contains_key(&id).then_some(id)
+    })
 }
 
 fn normalized_path(
