@@ -28,6 +28,7 @@ pub struct Package {
 
 #[derive(Debug, Clone)]
 pub struct PackageTarget {
+    pub name: String,
     pub kind: Vec<String>,
     pub src_path: PathBuf,
 }
@@ -137,6 +138,7 @@ fn entry_target(
         .and_then(Value::as_str)
     {
         return Ok(PackageTarget {
+            name: package_name_from_manifest(manifest),
             kind: vec!["lib".to_string()],
             src_path: package_root.join(path),
         });
@@ -145,15 +147,26 @@ fn entry_target(
     let default_lib = package_root.join("src/lib.rs");
     if default_lib.exists() {
         return Ok(PackageTarget {
+            name: package_name_from_manifest(manifest),
             kind: vec!["lib".to_string()],
             src_path: default_lib,
         });
     }
 
     Ok(PackageTarget {
+        name: package_name_from_manifest(manifest),
         kind: vec!["bin".to_string()],
         src_path: package_root.join("src/main.rs"),
     })
+}
+
+fn package_name_from_manifest(manifest: &Value) -> String {
+    manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(Value::as_str)
+        .unwrap_or("package")
+        .to_string()
 }
 
 fn metadata_marker_target(
@@ -382,6 +395,7 @@ struct MetadataTarget {
 impl From<MetadataTarget> for PackageTarget {
     fn from(target: MetadataTarget) -> Self {
         Self {
+            name: target.name,
             kind: target.kind,
             src_path: target.src_path,
         }

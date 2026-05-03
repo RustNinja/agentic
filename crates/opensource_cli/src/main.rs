@@ -12,8 +12,8 @@ use serde::Serialize;
 use opensource_core::{
     check_workspace, generate_with_analyzer, preflight_workspace, repair_workspace,
     write_generate_report, write_preflight_report, write_repair_report, write_report, AnalyzerMode,
-    CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions, PreflightDiagnostic,
-    PreflightOptions, PreflightReport, RepairOptions,
+    CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions, GeneratedTargetReport,
+    PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
 };
 
 fn main() {
@@ -186,6 +186,34 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "{} production hazard(s) reported before compiler feedback",
             report.production.hazards.len()
         ),
+        report_path: slice_report_path(&options),
+        error_count: None,
+        warning_count: None,
+        semantic_warning_hazards: None,
+    });
+    let uncovered_targets =
+        uncovered_validation_targets(&report.targets, &options.cargo_check_args);
+    if !uncovered_targets.is_empty() {
+        let reason = format!(
+            "selected target(s) are not covered by cargo check args: {}",
+            uncovered_targets.join(", ")
+        );
+        validation.gates.push(ValidationGateReport {
+            name: "target_coverage".to_string(),
+            status: "failed".to_string(),
+            reason: reason.clone(),
+            report_path: slice_report_path(&options),
+            error_count: None,
+            warning_count: None,
+            semantic_warning_hazards: None,
+        });
+        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        return Err(reason.into());
+    }
+    validation.gates.push(ValidationGateReport {
+        name: "target_coverage".to_string(),
+        status: "passed".to_string(),
+        reason: "selected targets are covered by cargo check arguments".to_string(),
         report_path: slice_report_path(&options),
         error_count: None,
         warning_count: None,
@@ -617,6 +645,37 @@ fn validation_report_path(options: &CliOptions) -> Option<PathBuf> {
             || options.run_check)
             .then(|| options.output_root.join("slice-validation.json"))
     })
+}
+
+fn uncovered_validation_targets(
+    targets: &[GeneratedTargetReport],
+    cargo_args: &[String],
+) -> Vec<String> {
+    targets
+        .iter()
+        .filter(|target| target.kind.iter().any(|kind| kind == "example"))
+        .filter(|target| !example_target_is_covered(&target.name, cargo_args))
+        .map(|target| format!("{} example {}", target.package, target.name))
+        .collect()
+}
+
+fn example_target_is_covered(name: &str, cargo_args: &[String]) -> bool {
+    if cargo_args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--all-targets" | "--examples"))
+    {
+        return true;
+    }
+    for index in 0..cargo_args.len() {
+        let arg = &cargo_args[index];
+        if arg == "--example" && cargo_args.get(index + 1).is_some_and(|value| value == name) {
+            return true;
+        }
+        if arg == &format!("--example={name}") {
+            return true;
+        }
+    }
+    false
 }
 
 fn finish_validation(
@@ -1513,12 +1572,15 @@ fn same_path(left: &Path, right: &Path) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use opensource_core::{CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport};
+    use opensource_core::{
+        CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport, GeneratedTargetReport,
+    };
 
     use super::{
         baseline_limited_feedback_is_accepted, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
-        semantic_hazard_warning_count, slice_report_path, validation_report_path,
+        semantic_hazard_warning_count, slice_report_path, uncovered_validation_targets,
+        validation_report_path,
     };
 
     #[test]
@@ -1755,6 +1817,27 @@ mod tests {
             validation_report_path(&options),
             Some(PathBuf::from("validation.json"))
         );
+    }
+
+    #[test]
+    fn example_targets_require_matching_validation_args() {
+        let targets = vec![GeneratedTargetReport {
+            package: "app".to_string(),
+            name: "demo".to_string(),
+            kind: vec!["example".to_string()],
+            src_path: PathBuf::from("/workspace/app/examples/demo.rs"),
+        }];
+
+        assert_eq!(
+            uncovered_validation_targets(&targets, &[]),
+            ["app example demo"]
+        );
+        assert!(uncovered_validation_targets(&targets, &["--all-targets".to_string()]).is_empty());
+        assert!(uncovered_validation_targets(
+            &targets,
+            &["--example".to_string(), "demo".to_string()]
+        )
+        .is_empty());
     }
 
     #[test]

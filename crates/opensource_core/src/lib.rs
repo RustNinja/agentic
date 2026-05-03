@@ -43,11 +43,20 @@ pub struct GenerateReport {
     pub root: RootId,
     pub roots: Vec<RootId>,
     pub packages: Vec<String>,
+    pub targets: Vec<GeneratedTargetReport>,
     pub reachable: Vec<CallableId>,
     pub reachable_items: Vec<ItemId>,
     pub source_map: SourceMapReport,
     pub files_written: usize,
     pub timings: GenerateTimingReport,
+}
+
+#[derive(Debug, Clone)]
+pub struct GeneratedTargetReport {
+    pub package: String,
+    pub name: String,
+    pub kind: Vec<String>,
+    pub src_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -138,6 +147,7 @@ pub fn generate_with_analyzer(
 
     let mut reachable_items = reduced.reachable_items.iter().cloned().collect::<Vec<_>>();
     reachable_items.sort();
+    let targets = target_report(&project, &packages);
     let source_map = source_map_report(&project, &reduced);
     let production = production_readiness_report(&analyzer, &project, &reduced);
 
@@ -147,12 +157,28 @@ pub fn generate_with_analyzer(
         root: reduced.root,
         roots: reduced.roots,
         packages,
+        targets,
         reachable,
         reachable_items,
         source_map,
         files_written,
         timings,
     })
+}
+
+fn target_report(project: &Project, packages: &[String]) -> Vec<GeneratedTargetReport> {
+    packages
+        .iter()
+        .filter_map(|package_name| {
+            let package = project.workspace.packages.get(package_name)?;
+            Some(GeneratedTargetReport {
+                package: package_name.clone(),
+                name: package.entry_target.name.clone(),
+                kind: package.entry_target.kind.clone(),
+                src_path: package.entry_target.src_path.clone(),
+            })
+        })
+        .collect()
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -783,6 +809,7 @@ struct GenerateReportJson {
     root: String,
     roots: Vec<String>,
     packages: Vec<String>,
+    targets: Vec<GeneratedTargetReportJson>,
     reachable: Vec<String>,
     reachable_items: Vec<String>,
     source_map: SourceMapReportJson,
@@ -798,6 +825,11 @@ impl GenerateReportJson {
             root: report.root.to_string(),
             roots: report.roots.iter().map(ToString::to_string).collect(),
             packages: report.packages.clone(),
+            targets: report
+                .targets
+                .iter()
+                .map(GeneratedTargetReportJson::from_report)
+                .collect(),
             reachable: report.reachable.iter().map(ToString::to_string).collect(),
             reachable_items: report
                 .reachable_items
@@ -806,6 +838,25 @@ impl GenerateReportJson {
                 .collect(),
             source_map: SourceMapReportJson::from_report(&report.source_map),
             files_written: report.files_written,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct GeneratedTargetReportJson {
+    package: String,
+    name: String,
+    kind: Vec<String>,
+    src_path: PathBuf,
+}
+
+impl GeneratedTargetReportJson {
+    fn from_report(report: &GeneratedTargetReport) -> Self {
+        Self {
+            package: report.package.clone(),
+            name: report.name.clone(),
+            kind: report.kind.clone(),
+            src_path: report.src_path.clone(),
         }
     }
 }

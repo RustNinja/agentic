@@ -131,6 +131,10 @@ Validation runs write `slice-validation.json` by default. That report is the
 authoritative gate verdict: final status, rejection reason when present,
 baseline/preflight/feedback gate states, cargo check arguments, and per-attempt
 feedback or repair outcomes.
+If the selected root lives in a non-default target such as an example, validation
+rejects runs whose cargo check arguments do not cover that target; pass
+`--cargo-check-arg --all-targets`, `--cargo-check-arg --examples`, or the
+matching `--cargo-check-arg --example --cargo-check-arg <name>`.
 
 `--baseline-check` runs `cargo check --message-format=json` against the source
 workspace before slicing and writes `slice-baseline.json`. By default a failing
@@ -169,8 +173,9 @@ configuration.
 
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
 mode/notes, production-readiness hazards, roots, packages, reachable
-callables/items, files written, and a source map for parsed callables/items with
-file spans and reachability flags. It also records phase timings for analyzer
+callables/items, generated target metadata, files written, and a source map for
+parsed callables/items with file spans and reachability flags. It also records
+phase timings for analyzer
 loading, manifest loading, parsing, reduction, rendering, and total generation
 time. That source map is the join point for semantic analyzer edges. The generic
 corpus runner carries the same production hazard fields into each JSONL row and
