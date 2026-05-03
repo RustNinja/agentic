@@ -6,7 +6,7 @@ use std::{
 
 use serde::{Deserialize, Serialize};
 
-use crate::feedback::{CheckDiagnostic, CheckSpan};
+use crate::feedback::{CheckDiagnostic, CheckSpan, CheckSuggestion};
 
 #[derive(Debug, Clone)]
 pub struct RepairOptions {
@@ -20,6 +20,8 @@ pub struct RepairReport {
     pub removed_imports: usize,
     #[serde(default)]
     pub normalized_paths: usize,
+    #[serde(default)]
+    pub applied_suggestions: usize,
     pub added_dead_code_allows: usize,
     pub deferred_dead_code_allows: usize,
     pub skipped_diagnostics: usize,
@@ -34,6 +36,8 @@ pub struct RepairFileChange {
     pub removed_imports: usize,
     #[serde(default)]
     pub normalized_paths: usize,
+    #[serde(default)]
+    pub applied_suggestions: usize,
     pub added_dead_code_allows: usize,
 }
 
@@ -42,6 +46,7 @@ impl RepairReport {
         self.removed_items
             + self.removed_imports
             + self.normalized_paths
+            + self.applied_suggestions
             + self.added_dead_code_allows
     }
 }
@@ -52,12 +57,26 @@ pub fn repair_workspace(
     let mut item_candidates_by_file = BTreeMap::<PathBuf, Vec<DeadItemCandidate>>::new();
     let mut import_candidates_by_file = BTreeMap::<PathBuf, Vec<ImportSpanCandidate>>::new();
     let mut syntax_candidates_by_file = BTreeMap::<PathBuf, Vec<PathSyntaxCandidate>>::new();
+    let mut suggestion_candidates_by_file = BTreeMap::<PathBuf, Vec<SuggestionCandidate>>::new();
     let mut allow_candidates_by_file = BTreeMap::<PathBuf, Vec<AllowDeadCodeCandidate>>::new();
     let mut skipped_diagnostics = 0;
 
     for diagnostic in &options.diagnostics {
         if diagnostic.level == "error" {
             let mut repaired = false;
+            for suggestion in &diagnostic.suggestions {
+                let Some(path) = diagnostic_path(&options.output_root, &suggestion.file_name)
+                else {
+                    continue;
+                };
+                if let Some(candidate) = suggestion_candidate(suggestion) {
+                    suggestion_candidates_by_file
+                        .entry(path)
+                        .or_default()
+                        .push(candidate);
+                    repaired = true;
+                }
+            }
             for span in diagnostic.spans.iter().filter(|span| span.is_primary) {
                 let Some(path) = diagnostic_path(&options.output_root, &span.file_name) else {
                     continue;
@@ -143,10 +162,37 @@ pub fn repair_workspace(
         ..RepairReport::default()
     };
     let has_structural_repairs = !syntax_candidates_by_file.is_empty()
+        || !suggestion_candidates_by_file.is_empty()
         || !item_candidates_by_file.is_empty()
         || !import_candidates_by_file.is_empty();
+    let mut suggestion_changed_files = BTreeSet::new();
+    for (path, mut candidates) in suggestion_candidates_by_file {
+        if !path.exists() {
+            continue;
+        }
+        candidates.sort_by(|left, right| {
+            right
+                .byte_start
+                .cmp(&left.byte_start)
+                .then_with(|| right.line_start.cmp(&left.line_start))
+                .then_with(|| right.column_start.cmp(&left.column_start))
+                .then_with(|| right.replacement.cmp(&left.replacement))
+        });
+        candidates.dedup();
+        let mut source = fs::read_to_string(&path)?;
+        let applied_suggestions = apply_suggestions(&mut source, &candidates);
+        if applied_suggestions > 0 {
+            report.applied_suggestions += applied_suggestions;
+            suggestion_changed_files.insert(path.clone());
+            record_file_change(&mut report, &path, 0, 0, 0, applied_suggestions, 0);
+            fs::write(path, source)?;
+        }
+    }
     for (path, mut candidates) in syntax_candidates_by_file {
         if !path.exists() {
+            continue;
+        }
+        if suggestion_changed_files.contains(&path) {
             continue;
         }
         candidates.sort_by(|left, right| {
@@ -167,12 +213,15 @@ pub fn repair_workspace(
             }
         }
         if normalized_paths > 0 {
-            record_file_change(&mut report, &path, 0, 0, normalized_paths, 0);
+            record_file_change(&mut report, &path, 0, 0, normalized_paths, 0, 0);
         }
         fs::write(path, source)?;
     }
     for (path, mut candidates) in item_candidates_by_file {
         if !path.exists() {
+            continue;
+        }
+        if suggestion_changed_files.contains(&path) {
             continue;
         }
         candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
@@ -186,12 +235,15 @@ pub fn repair_workspace(
             }
         }
         if removed_items > 0 {
-            record_file_change(&mut report, &path, removed_items, 0, 0, 0);
+            record_file_change(&mut report, &path, removed_items, 0, 0, 0, 0);
         }
         fs::write(path, source)?;
     }
     for (path, mut candidates) in import_candidates_by_file {
         if !path.exists() {
+            continue;
+        }
+        if suggestion_changed_files.contains(&path) {
             continue;
         }
         candidates.sort_by(|left, right| {
@@ -220,7 +272,7 @@ pub fn repair_workspace(
             }
         }
         if removed_imports > 0 {
-            record_file_change(&mut report, &path, 0, removed_imports, 0, 0);
+            record_file_change(&mut report, &path, 0, removed_imports, 0, 0, 0);
         }
         fs::write(path, source)?;
     }
@@ -246,7 +298,7 @@ pub fn repair_workspace(
                 }
             }
             if added_allows > 0 {
-                record_file_change(&mut report, &path, 0, 0, 0, added_allows);
+                record_file_change(&mut report, &path, 0, 0, 0, 0, added_allows);
             }
             fs::write(path, source)?;
         }
@@ -261,6 +313,7 @@ fn record_file_change(
     removed_items: usize,
     removed_imports: usize,
     normalized_paths: usize,
+    applied_suggestions: usize,
     added_dead_code_allows: usize,
 ) {
     if let Some(change) = report
@@ -271,6 +324,7 @@ fn record_file_change(
         change.removed_items += removed_items;
         change.removed_imports += removed_imports;
         change.normalized_paths += normalized_paths;
+        change.applied_suggestions += applied_suggestions;
         change.added_dead_code_allows += added_dead_code_allows;
         return;
     }
@@ -279,6 +333,7 @@ fn record_file_change(
         removed_items,
         removed_imports,
         normalized_paths,
+        applied_suggestions,
         added_dead_code_allows,
     });
 }
@@ -322,6 +377,24 @@ struct PathSyntaxCandidate {
     column_end: usize,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SuggestionCandidate {
+    line_start: usize,
+    line_end: usize,
+    column_start: usize,
+    column_end: usize,
+    byte_start: Option<usize>,
+    byte_end: Option<usize>,
+    replacement: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct SuggestionEdit {
+    start: usize,
+    end: usize,
+    replacement: String,
+}
+
 #[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum PathSyntaxRepairKind {
     MalformedUseRoot,
@@ -356,6 +429,102 @@ fn canonicalize_existing_prefix(path: &Path) -> PathBuf {
                 .unwrap_or(parent)
         })
         .unwrap_or_else(|| path.to_path_buf())
+}
+
+fn suggestion_candidate(suggestion: &CheckSuggestion) -> Option<SuggestionCandidate> {
+    if suggestion.suggestion_applicability.as_deref() != Some("MachineApplicable") {
+        return None;
+    }
+    if suggestion.suggested_replacement.len() > 256 * 1024 {
+        return None;
+    }
+    if suggestion.suggested_replacement.contains('\0') {
+        return None;
+    }
+    Some(SuggestionCandidate {
+        line_start: suggestion.line_start.try_into().ok()?,
+        line_end: suggestion.line_end.try_into().ok()?,
+        column_start: suggestion.column_start.try_into().ok()?,
+        column_end: suggestion.column_end.try_into().ok()?,
+        byte_start: suggestion
+            .byte_start
+            .and_then(|value| value.try_into().ok()),
+        byte_end: suggestion.byte_end.and_then(|value| value.try_into().ok()),
+        replacement: suggestion.suggested_replacement.clone(),
+    })
+}
+
+fn apply_suggestions(source: &mut String, candidates: &[SuggestionCandidate]) -> usize {
+    let mut edits = candidates
+        .iter()
+        .filter_map(|candidate| suggestion_edit(source, candidate))
+        .filter(|edit| source.get(edit.start..edit.end) != Some(edit.replacement.as_str()))
+        .collect::<Vec<_>>();
+    edits.sort_by(|left, right| {
+        left.start
+            .cmp(&right.start)
+            .then_with(|| left.end.cmp(&right.end))
+            .then_with(|| left.replacement.cmp(&right.replacement))
+    });
+    edits.dedup();
+
+    let mut accepted = Vec::new();
+    let mut previous_range = None::<(usize, usize)>;
+    for edit in edits {
+        if previous_range.is_some_and(|(start, end)| {
+            edit.start < end || (edit.start == start && edit.end == end)
+        }) {
+            continue;
+        }
+        previous_range = Some((edit.start, edit.end));
+        accepted.push(edit);
+    }
+
+    let applied = accepted.len();
+    for edit in accepted.into_iter().rev() {
+        source.replace_range(edit.start..edit.end, &edit.replacement);
+    }
+    applied
+}
+
+fn suggestion_edit(source: &str, candidate: &SuggestionCandidate) -> Option<SuggestionEdit> {
+    let (start, end) = match (candidate.byte_start, candidate.byte_end) {
+        (Some(start), Some(end)) => (start, end),
+        _ => (
+            source_location_to_byte_index(source, candidate.line_start, candidate.column_start)?,
+            source_location_to_byte_index(source, candidate.line_end, candidate.column_end)?,
+        ),
+    };
+    if start > end || end > source.len() {
+        return None;
+    }
+    if !source.is_char_boundary(start) || !source.is_char_boundary(end) {
+        return None;
+    }
+    Some(SuggestionEdit {
+        start,
+        end,
+        replacement: candidate.replacement.clone(),
+    })
+}
+
+fn source_location_to_byte_index(source: &str, line_number: usize, column: usize) -> Option<usize> {
+    if line_number == 0 || column == 0 {
+        return None;
+    }
+    let mut offset = 0usize;
+    for (index, line) in source.split_inclusive('\n').enumerate() {
+        if index + 1 == line_number {
+            let line_without_newline = line.strip_suffix('\n').unwrap_or(line);
+            let column_index = column_to_byte_index(line_without_newline, column);
+            return (column_index <= line_without_newline.len()).then_some(offset + column_index);
+        }
+        offset += line.len();
+    }
+    if line_number == source.lines().count() + 1 && column == 1 {
+        return Some(source.len());
+    }
+    None
 }
 
 fn dead_candidate_name(message: &str, span: &CheckSpan) -> Option<String> {
@@ -1237,7 +1406,7 @@ mod tests {
 
     use crate::{
         repair::{repair_workspace, RepairOptions},
-        CheckDiagnostic, CheckSpan,
+        CheckDiagnostic, CheckSpan, CheckSuggestion,
     };
 
     #[test]
@@ -1566,6 +1735,50 @@ mod tests {
         assert!(source.contains("::std::fmt::Error"));
     }
 
+    #[test]
+    fn applies_machine_applicable_compiler_suggestions_inside_output() {
+        let root = temp_output("repair-machine-suggestion");
+        let file = root.join("src/lib.rs");
+        let source = "pub fn run() {\n    let _: i32 = \"1\";\n}\n";
+        let start = source.find("\"1\"").unwrap() as u64;
+        let end = start + 3;
+        write(&file, source);
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![CheckDiagnostic {
+                level: "error".to_string(),
+                message: "mismatched types".to_string(),
+                code: Some("E0308".to_string()),
+                package_id: None,
+                target: None,
+                rendered: None,
+                spans: Vec::new(),
+                suggestions: vec![CheckSuggestion {
+                    level: "help".to_string(),
+                    message: "replace the string literal with an integer literal".to_string(),
+                    file_name: "src/lib.rs".to_string(),
+                    line_start: 2,
+                    line_end: 2,
+                    column_start: 18,
+                    column_end: 21,
+                    byte_start: Some(start),
+                    byte_end: Some(end),
+                    suggested_replacement: "1".to_string(),
+                    suggestion_applicability: Some("MachineApplicable".to_string()),
+                }],
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(report.applied_suggestions, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.changed_files[0].applied_suggestions, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(source.contains("let _: i32 = 1;"));
+        assert!(!source.contains("\"1\""));
+    }
+
     fn warning(
         code: &str,
         message: &str,
@@ -1591,6 +1804,7 @@ mod tests {
                 is_primary: true,
                 text: vec![text.to_string()],
             }],
+            suggestions: Vec::new(),
         }
     }
 
@@ -1619,6 +1833,7 @@ mod tests {
                 is_primary: true,
                 text: vec![text.to_string()],
             }],
+            suggestions: Vec::new(),
         }
     }
 

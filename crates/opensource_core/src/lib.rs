@@ -21,7 +21,8 @@ use syn::{parse::Parser, punctuated::Punctuated, visit::Visit, Attribute, Macro,
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{
     check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport, CheckSpan,
-    CheckTarget, FeedbackHazard, FeedbackWideningCandidate, FeedbackWideningReport,
+    CheckSuggestion, CheckTarget, FeedbackHazard, FeedbackWideningCandidate,
+    FeedbackWideningReport,
 };
 pub use model::{CallableId, ItemId, RootId, SourceSpan};
 pub use preflight::{

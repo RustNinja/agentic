@@ -49,6 +49,8 @@ pub struct CheckDiagnostic {
     pub target: Option<CheckTarget>,
     pub rendered: Option<String>,
     pub spans: Vec<CheckSpan>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggestions: Vec<CheckSuggestion>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -71,6 +73,24 @@ pub struct CheckSpan {
     pub text: Vec<String>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckSuggestion {
+    pub level: String,
+    pub message: String,
+    pub file_name: String,
+    pub line_start: u64,
+    pub line_end: u64,
+    pub column_start: u64,
+    pub column_end: u64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_start: Option<u64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub byte_end: Option<u64>,
+    pub suggested_replacement: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suggestion_applicability: Option<String>,
+}
+
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct FeedbackWideningReport {
     pub candidates: Vec<FeedbackWideningCandidate>,
@@ -85,6 +105,10 @@ pub struct FeedbackWideningCandidate {
     pub symbol: Option<String>,
     pub file_name: Option<String>,
     pub line_start: Option<u64>,
+    #[serde(default)]
+    pub suggestions: usize,
+    #[serde(default)]
+    pub machine_applicable_suggestions: usize,
     pub action: String,
     pub message: String,
 }
@@ -277,6 +301,14 @@ fn classify_widening_candidate(diagnostic: &CheckDiagnostic) -> Option<FeedbackW
         symbol: diagnostic_symbol(diagnostic),
         file_name: primary.map(|span| span.file_name.clone()),
         line_start: primary.map(|span| span.line_start),
+        suggestions: diagnostic.suggestions.len(),
+        machine_applicable_suggestions: diagnostic
+            .suggestions
+            .iter()
+            .filter(|suggestion| {
+                suggestion.suggestion_applicability.as_deref() == Some("MachineApplicable")
+            })
+            .count(),
         action: action.to_string(),
         message: diagnostic.message.clone(),
     })
@@ -447,6 +479,8 @@ fn diagnostic_from_compiler_message(message: &Value) -> Option<CheckDiagnostic> 
         .and_then(Value::as_array)
         .map(|spans| spans.iter().filter_map(span_from_value).collect())
         .unwrap_or_default();
+    let mut suggestions = Vec::new();
+    collect_suggestions(diagnostic, &mut suggestions);
 
     Some(CheckDiagnostic {
         level,
@@ -456,6 +490,7 @@ fn diagnostic_from_compiler_message(message: &Value) -> Option<CheckDiagnostic> 
         target,
         rendered,
         spans,
+        suggestions,
     })
 }
 
@@ -492,6 +527,7 @@ fn timeout_failure_diagnostic(timeout: Option<Duration>) -> CheckDiagnostic {
             "cargo check was terminated after exceeding the feedback timeout of {seconds}s\n"
         )),
         spans: Vec::new(),
+        suggestions: Vec::new(),
     }
 }
 
@@ -516,6 +552,7 @@ fn stderr_failure_diagnostic(stderr: &str) -> Option<CheckDiagnostic> {
         target: None,
         rendered: Some(stderr.to_string()),
         spans: Vec::new(),
+        suggestions: Vec::new(),
     })
 }
 
@@ -543,6 +580,49 @@ fn span_from_value(span: &Value) -> Option<CheckSpan> {
     })
 }
 
+fn collect_suggestions(diagnostic: &Value, suggestions: &mut Vec<CheckSuggestion>) {
+    let level = diagnostic
+        .get("level")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    let message = diagnostic
+        .get("message")
+        .and_then(Value::as_str)
+        .unwrap_or_default();
+    if let Some(spans) = diagnostic.get("spans").and_then(Value::as_array) {
+        suggestions.extend(
+            spans
+                .iter()
+                .filter_map(|span| suggestion_from_span(level, message, span)),
+        );
+    }
+    if let Some(children) = diagnostic.get("children").and_then(Value::as_array) {
+        for child in children {
+            collect_suggestions(child, suggestions);
+        }
+    }
+}
+
+fn suggestion_from_span(level: &str, message: &str, span: &Value) -> Option<CheckSuggestion> {
+    let suggested_replacement = span.get("suggested_replacement")?.as_str()?.to_string();
+    Some(CheckSuggestion {
+        level: level.to_string(),
+        message: message.to_string(),
+        file_name: span.get("file_name")?.as_str()?.to_string(),
+        line_start: span.get("line_start")?.as_u64()?,
+        line_end: span.get("line_end")?.as_u64()?,
+        column_start: span.get("column_start")?.as_u64()?,
+        column_end: span.get("column_end")?.as_u64()?,
+        byte_start: span.get("byte_start").and_then(Value::as_u64),
+        byte_end: span.get("byte_end").and_then(Value::as_u64),
+        suggested_replacement,
+        suggestion_applicability: span
+            .get("suggestion_applicability")
+            .and_then(Value::as_str)
+            .map(str::to_string),
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::{
@@ -559,7 +639,7 @@ mod tests {
 
     #[test]
     fn parses_compiler_message_diagnostics() {
-        let json = r#"{"reason":"compiler-message","package_id":"broken 0.1.0 (path+file:///tmp/broken)","target":{"kind":["lib"],"crate_types":["lib"],"name":"broken","src_path":"/tmp/broken/src/lib.rs","edition":"2021","doc":true,"doctest":true,"test":true},"message":{"rendered":"error[E0425]: cannot find value `missing` in this scope\n --> src/lib.rs:2:5\n","children":[],"code":{"code":"E0425","explanation":null},"level":"error","message":"cannot find value `missing` in this scope","spans":[{"byte_end":32,"byte_start":25,"column_end":12,"column_start":5,"expansion":null,"file_name":"src/lib.rs","is_primary":true,"label":"not found in this scope","line_end":2,"line_start":2,"suggested_replacement":null,"suggestion_applicability":null,"text":[{"highlight_end":12,"highlight_start":5,"text":"    missing"}]}]}}"#;
+        let json = r#"{"reason":"compiler-message","package_id":"broken 0.1.0 (path+file:///tmp/broken)","target":{"kind":["lib"],"crate_types":["lib"],"name":"broken","src_path":"/tmp/broken/src/lib.rs","edition":"2021","doc":true,"doctest":true,"test":true},"message":{"rendered":"error[E0425]: cannot find value `missing` in this scope\n --> src/lib.rs:2:5\n","children":[{"children":[],"code":null,"level":"help","message":"consider importing this unit struct","rendered":null,"spans":[{"byte_end":0,"byte_start":0,"column_end":1,"column_start":1,"expansion":null,"file_name":"src/lib.rs","is_primary":true,"label":null,"line_end":1,"line_start":1,"suggested_replacement":"use crate::support::Worker;\n\n","suggestion_applicability":"MaybeIncorrect","text":[]}]}],"code":{"code":"E0425","explanation":null},"level":"error","message":"cannot find value `missing` in this scope","spans":[{"byte_end":32,"byte_start":25,"column_end":12,"column_start":5,"expansion":null,"file_name":"src/lib.rs","is_primary":true,"label":"not found in this scope","line_end":2,"line_start":2,"suggested_replacement":null,"suggestion_applicability":null,"text":[{"highlight_end":12,"highlight_start":5,"text":"    missing"}]}]}}"#;
 
         let diagnostics = parse_cargo_messages(json);
 
@@ -583,6 +663,17 @@ mod tests {
         );
         assert_eq!(diagnostics[0].spans[0].file_name, "src/lib.rs");
         assert!(diagnostics[0].spans[0].is_primary);
+        assert_eq!(diagnostics[0].suggestions.len(), 1);
+        assert_eq!(
+            diagnostics[0].suggestions[0].suggested_replacement,
+            "use crate::support::Worker;\n\n"
+        );
+        assert_eq!(
+            diagnostics[0].suggestions[0]
+                .suggestion_applicability
+                .as_deref(),
+            Some("MaybeIncorrect")
+        );
     }
 
     #[test]
@@ -610,6 +701,7 @@ mod tests {
                 && candidate.symbol.as_deref() == Some("crate::worker::Task")
                 && candidate.file_name.as_deref() == Some("src/lib.rs")
                 && candidate.line_start == Some(7)
+                && candidate.suggestions == 0
         }));
         assert!(widening.candidates.iter().any(|candidate| {
             candidate.kind == "missing-method-or-associated-item"
@@ -858,6 +950,7 @@ mod tests {
                 is_primary: true,
                 text: Vec::new(),
             }],
+            suggestions: Vec::new(),
         }
     }
 }

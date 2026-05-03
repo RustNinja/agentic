@@ -1190,10 +1190,11 @@ fn run_feedback_repair_loop(
         })?;
         write_repair_report(&repair_report, &repair_report_path)?;
         println!(
-            "repair: removed_items={}, removed_imports={}, normalized_paths={}, added_dead_code_allows={}, deferred_dead_code_allows={}, skipped_diagnostics={}, changed_files={}, total_changes={}; report: {}",
+            "repair: removed_items={}, removed_imports={}, normalized_paths={}, applied_suggestions={}, added_dead_code_allows={}, deferred_dead_code_allows={}, skipped_diagnostics={}, changed_files={}, total_changes={}; report: {}",
             repair_report.removed_items,
             repair_report.removed_imports,
             repair_report.normalized_paths,
+            repair_report.applied_suggestions,
             repair_report.added_dead_code_allows,
             repair_report.deferred_dead_code_allows,
             repair_report.skipped_diagnostics,
@@ -1622,9 +1623,19 @@ fn print_feedback(report: &CheckReport, limit: usize, report_path: &Path) {
             .as_deref()
             .map(|symbol| format!(" `{symbol}`"))
             .unwrap_or_default();
+        let suggestions = if candidate.machine_applicable_suggestions > 0 {
+            format!(
+                " ({} machine-applicable suggestion(s))",
+                candidate.machine_applicable_suggestions
+            )
+        } else if candidate.suggestions > 0 {
+            format!(" ({} compiler suggestion(s))", candidate.suggestions)
+        } else {
+            String::new()
+        };
         println!(
-            "  widening {}{}{}: {}",
-            candidate.kind, symbol, location, candidate.action
+            "  widening {}{}{}{}: {}",
+            candidate.kind, symbol, location, suggestions, candidate.action
         );
     }
 
@@ -2143,6 +2154,7 @@ mod tests {
             target: None,
             rendered: None,
             spans: Vec::new(),
+            suggestions: Vec::new(),
         }
     }
 
@@ -2170,6 +2182,7 @@ mod tests {
                 is_primary: true,
                 text: Vec::new(),
             }],
+            suggestions: Vec::new(),
         }
     }
 
@@ -2182,6 +2195,7 @@ mod tests {
             target: None,
             rendered: Some(rendered.to_string()),
             spans: Vec::new(),
+            suggestions: Vec::new(),
         }
     }
 
@@ -2198,6 +2212,7 @@ mod tests {
             target: None,
             rendered: None,
             spans: Vec::new(),
+            suggestions: Vec::new(),
         }
     }
 
@@ -2220,6 +2235,7 @@ mod tests {
             }),
             rendered: None,
             spans: Vec::new(),
+            suggestions: Vec::new(),
         }
     }
 
