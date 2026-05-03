@@ -6,9 +6,10 @@ use std::{
 };
 
 use opensource_core::{
-    check_workspace, generate_with_analyzer, preflight_workspace, write_generate_report,
-    write_preflight_report, write_report, AnalyzerMode, CheckDiagnostic, CheckOptions, CheckReport,
-    GenerateOptions, PreflightDiagnostic, PreflightOptions, PreflightReport,
+    check_workspace, generate_with_analyzer, preflight_workspace, repair_workspace,
+    write_generate_report, write_preflight_report, write_repair_report, write_report, AnalyzerMode,
+    CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions, PreflightDiagnostic,
+    PreflightOptions, PreflightReport, RepairOptions,
 };
 
 fn main() {
@@ -95,14 +96,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         println!("slice report: {}", report_path.display());
     }
 
-    if options.run_preflight || options.feedback_iterations > 0 {
+    if options.run_preflight
+        || options.feedback_iterations > 0
+        || options.feedback_repair_iterations > 0
+    {
         let report = run_preflight(&options)?;
         if !report.success {
             return Err("generated workspace failed fast preflight validation".into());
         }
     }
 
-    if options.feedback_iterations > 0 {
+    if options.feedback_repair_iterations > 0 {
+        run_feedback_repair_loop(&options)?;
+    } else if options.feedback_iterations > 0 {
         run_feedback_loop(&options)?;
     } else if options.run_check {
         run_plain_check(&options.output_root)?;
@@ -115,9 +121,11 @@ struct CliOptions {
     analyzer_mode: AnalyzerMode,
     run_check: bool,
     feedback_iterations: usize,
+    feedback_repair_iterations: usize,
     feedback_limit: usize,
     feedback_report: Option<PathBuf>,
     feedback_timeout: Option<Duration>,
+    repair_report: Option<PathBuf>,
     slice_report: Option<PathBuf>,
     run_preflight: bool,
     preflight_report: Option<PathBuf>,
@@ -129,9 +137,11 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     let mut analyzer_mode = AnalyzerMode::Syn;
     let mut run_check = false;
     let mut feedback_iterations = 0;
+    let mut feedback_repair_iterations = 0;
     let mut feedback_limit = 12;
     let mut feedback_report = None;
     let mut feedback_timeout = Some(Duration::from_secs(600));
+    let mut repair_report = None;
     let mut slice_report = None;
     let mut run_preflight = false;
     let mut preflight_report = None;
@@ -155,6 +165,8 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
             run_preflight = true;
         } else if arg == OsStr::new("--feedback-loop") {
             feedback_iterations = parse_usize_arg("--feedback-loop", args.next())?;
+        } else if arg == OsStr::new("--feedback-repair-loop") {
+            feedback_repair_iterations = parse_usize_arg("--feedback-repair-loop", args.next())?;
         } else if arg == OsStr::new("--feedback-limit") {
             feedback_limit = parse_usize_arg("--feedback-limit", args.next())?;
         } else if arg == OsStr::new("--feedback-timeout") {
@@ -163,6 +175,11 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
             feedback_report = Some(PathBuf::from(
                 args.next()
                     .ok_or("--feedback-report requires a following path")?,
+            ));
+        } else if arg == OsStr::new("--repair-report") {
+            repair_report = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--repair-report requires a following path")?,
             ));
         } else if arg == OsStr::new("--slice-report") {
             slice_report = Some(PathBuf::from(
@@ -190,9 +207,11 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
         analyzer_mode,
         run_check,
         feedback_iterations,
+        feedback_repair_iterations,
         feedback_limit,
         feedback_report,
         feedback_timeout,
+        repair_report,
         slice_report,
         run_preflight,
         preflight_report,
@@ -281,6 +300,107 @@ fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Err
         report_path.display()
     )
     .into())
+}
+
+fn run_feedback_repair_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let feedback_report_path = options
+        .feedback_report
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("slice-feedback.json"));
+    let repair_report_path = options
+        .repair_report
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("slice-repair.json"));
+    let mut seen_diagnostics = std::collections::BTreeSet::new();
+
+    for attempt in 1..=options.feedback_repair_iterations {
+        println!(
+            "feedback repair attempt {attempt}/{}: cargo check --message-format=json",
+            options.feedback_repair_iterations
+        );
+        let report = check_workspace(CheckOptions {
+            manifest_path: options.output_root.join("Cargo.toml"),
+            target_dir: Some(options.output_root.join("target-feedback")),
+            timeout: options.feedback_timeout,
+        })?;
+        write_report(&report, &feedback_report_path)?;
+        print_feedback(&report, options.feedback_limit, &feedback_report_path);
+
+        if report.success {
+            return Ok(());
+        }
+        if report.timed_out {
+            break;
+        }
+
+        let signature = diagnostics_signature(&report.diagnostics);
+        if !seen_diagnostics.insert(signature) {
+            return Err(format!(
+                "feedback repair made no diagnostic progress; report written to {}",
+                feedback_report_path.display()
+            )
+            .into());
+        }
+
+        let repair_report = repair_workspace(RepairOptions {
+            output_root: options.output_root.clone(),
+            diagnostics: report.diagnostics,
+        })?;
+        write_repair_report(&repair_report, &repair_report_path)?;
+        println!(
+            "repair: removed_items={}, removed_imports={}, skipped_diagnostics={}, total_changes={}; report: {}",
+            repair_report.removed_items,
+            repair_report.removed_imports,
+            repair_report.skipped_diagnostics,
+            repair_report.total_changes(),
+            repair_report_path.display()
+        );
+
+        if repair_report.total_changes() == 0 {
+            break;
+        }
+
+        let preflight = run_preflight(options)?;
+        if !preflight.success {
+            return Err("repair produced a structurally invalid generated workspace".into());
+        }
+    }
+
+    Err(format!(
+        "generated workspace failed compiler repair loop; feedback report written to {}, repair report written to {}",
+        feedback_report_path.display(),
+        repair_report_path.display()
+    )
+    .into())
+}
+
+fn diagnostics_signature(diagnostics: &[CheckDiagnostic]) -> String {
+    let mut parts = diagnostics
+        .iter()
+        .map(|diagnostic| {
+            let spans = diagnostic
+                .spans
+                .iter()
+                .filter(|span| span.is_primary)
+                .map(|span| {
+                    format!(
+                        "{}:{}:{}:{}",
+                        span.file_name, span.line_start, span.column_start, span.column_end
+                    )
+                })
+                .collect::<Vec<_>>()
+                .join(",");
+            format!(
+                "{}|{}|{}|{}",
+                diagnostic.level,
+                diagnostic.code.as_deref().unwrap_or(""),
+                diagnostic.message,
+                spans
+            )
+        })
+        .collect::<Vec<_>>();
+    parts.sort();
+    parts.join("\n")
 }
 
 fn print_preflight(report: &PreflightReport, limit: usize, report_path: &Path) {
@@ -396,8 +516,9 @@ fn print_diagnostic(diagnostic: &CheckDiagnostic) {
 fn usage() -> String {
     concat!(
         "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--preflight] [--feedback] ",
-        "[--feedback-loop <n>] [--feedback-limit <n>] [--feedback-timeout <seconds>] ",
-        "[--feedback-report <path>] [--slice-report <path>] [--preflight-report <path>] ",
+        "[--feedback-loop <n>] [--feedback-repair-loop <n>] [--feedback-limit <n>] ",
+        "[--feedback-timeout <seconds>] [--feedback-report <path>] [--repair-report <path>] ",
+        "[--slice-report <path>] [--preflight-report <path>] ",
         "<workspace-root> <output-root>"
     )
     .to_string()

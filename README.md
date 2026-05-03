@@ -82,6 +82,7 @@ cargo test --workspace
 cargo run -p opensource_cli --bin slicers -- --check . /tmp/slicers-proof
 cargo run -p opensource_cli --bin slicers -- --preflight . /tmp/slicers-preflight
 cargo run -p opensource_cli --bin slicers -- --feedback . /tmp/slicers-feedback
+cargo run -p opensource_cli --bin slicers -- --feedback-repair-loop 3 . /tmp/slicers-repair
 cargo run -p opensource_cli --bin slicers -- --slice-report /tmp/slicers-report.json . /tmp/slicers-proof
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
@@ -98,6 +99,10 @@ workspace, prints prioritized compiler diagnostics, and writes
 compiler feedback pass up to `n` times and fails with the JSON report path when
 the slice still does not compile. Feedback checks have a 600-second timeout by
 default; use `--feedback-timeout 0` to disable it or pass another second count.
+`--feedback-repair-loop <n>` runs bounded compiler feedback with conservative
+source repairs between attempts. The first repair tier only handles diagnostics
+that are safe to edit mechanically, such as `unused_imports` and item-level
+`dead_code`, and stops on repeated diagnostics or no-progress rounds.
 This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A
 rust-analyzer HIR or rustc-driver backend remains the next precision step for

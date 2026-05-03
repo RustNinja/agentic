@@ -6,6 +6,7 @@ mod parse;
 mod preflight;
 mod reduce;
 mod render;
+mod repair;
 
 use std::{
     fs,
@@ -13,12 +14,15 @@ use std::{
 };
 
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
-pub use feedback::{check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport};
+pub use feedback::{
+    check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport, CheckSpan,
+};
 pub use model::{CallableId, ItemId, RootId, SourceSpan};
 pub use preflight::{
     preflight_workspace, write_preflight_report, PreflightDiagnostic, PreflightOptions,
     PreflightReport,
 };
+pub use repair::{repair_workspace, write_repair_report, RepairOptions, RepairReport};
 use serde::Serialize;
 
 #[derive(Debug, Clone)]
