@@ -146,6 +146,7 @@ scripts/corpus_feedback_loop.py \
   --validation preflight \
   --roots-per-batch 5 \
   --feedback-loop 1 \
+  --deny-warnings \
   --feedback-timeout 600 \
   --report reports/corpus_feedback.jsonl
 ```
@@ -159,7 +160,8 @@ interesting or suspicious cases with `--validation feedback`, and use
 `--validation repair` when a corpus batch should exercise the conservative
 compiler repair loop and record `slice-repair.json` metrics. Pass
 `--feedback-target-dir` for feedback or repair batches when running a corpus
-against dependency-heavy projects.
+against dependency-heavy projects, and `--deny-warnings` when corpus success
+must mean warning-free compiler feedback.
 
 Workspace/package discovery is backed by `cargo metadata --no-deps`, so Cargo is
 the source of truth for workspace members, excludes, target entry paths,

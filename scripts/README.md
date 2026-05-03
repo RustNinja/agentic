@@ -16,6 +16,7 @@ scripts/corpus_feedback_loop.py \
   --validation preflight \
   --roots-per-batch 5 \
   --feedback-loop 1 \
+  --deny-warnings \
   --feedback-timeout 600 \
   --report reports/corpus_feedback.jsonl
 ```
@@ -29,7 +30,9 @@ predicted generated shape without compiling dependencies. Use
 `--validation feedback` for slower compiler-confirmed runs, or
 `--validation repair` to run the bounded compiler repair loop and capture repair
 metrics for each generated slice. Use `--feedback-target-dir` on feedback or
-repair corpus runs to reuse dependency builds across generated outputs.
+repair corpus runs to reuse dependency builds across generated outputs. Use
+`--deny-warnings` for production gates that require warning-free generated
+feedback.
 
 ## Litter Feedback Loop
 

@@ -202,6 +202,11 @@ def parse_args() -> argparse.Namespace:
         help="classify generated warnings as corpus failures",
     )
     parser.add_argument(
+        "--deny-warnings",
+        action="store_true",
+        help="pass slicers --deny-warnings during feedback or repair validation",
+    )
+    parser.add_argument(
         "--keep-going",
         action="store_true",
         help="continue after failed batches instead of stopping at first failure",
@@ -708,6 +713,8 @@ def slicers_command(
                 str(args.feedback_target_dir.resolve()),
             ]
         )
+    if args.validation != "preflight" and args.deny_warnings:
+        command.append("--deny-warnings")
     command.extend(
         [
             str(source),
@@ -826,6 +833,13 @@ def build_row(
         "source": str(source),
         "source_git_head": git_head(source),
         "seed": args.seed,
+        "validation": {
+            "tier": args.validation,
+            "feedback_loop": args.feedback_loop,
+            "feedback_timeout": args.feedback_timeout,
+            "deny_warnings": args.deny_warnings,
+            "stop_on_warning": args.stop_on_warning,
+        },
         "roots": [candidate.display(source) for candidate in roots],
         "candidate_counts": candidate_counts,
         "baseline": baseline,
