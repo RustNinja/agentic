@@ -25,6 +25,7 @@ jobs:
       - run: cargo test --workspace
       - run: >
           cargo run -p opensource_cli --bin slicers -- --production
+          --cargo-check-arg --all-targets
           --baseline-target-dir "$RUNNER_TEMP/slicers-baseline-target"
           --feedback-target-dir "$RUNNER_TEMP/slicers-feedback-target"
           . "$RUNNER_TEMP/slicers-production"
