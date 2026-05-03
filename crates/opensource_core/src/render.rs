@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     env, fs,
     path::{Component, Path, PathBuf},
 };
@@ -726,6 +726,7 @@ fn write_package_manifest(
         package_name,
         "dependencies",
         DependencyRetention::SourceMentioned,
+        DependencyUsageScope::General,
         package_usage,
         &feature_required_aliases,
         &mut retained_dependency_aliases,
@@ -741,6 +742,7 @@ fn write_package_manifest(
             package_name,
             "build-dependencies",
             DependencyRetention::BuildScript,
+            DependencyUsageScope::Any,
             package_usage,
             &feature_required_aliases,
             &mut retained_dependency_aliases,
@@ -922,6 +924,7 @@ fn retained_workspace_dependencies(
                         package_name,
                         alias,
                         retention,
+                        DependencyUsageScope::Any,
                         package_usage,
                     )
                 {
@@ -946,6 +949,13 @@ enum DependencyRetention {
     BuildScript,
 }
 
+#[derive(Clone, Copy)]
+enum DependencyUsageScope<'a> {
+    Any,
+    General,
+    Target(&'a str),
+}
+
 #[allow(clippy::too_many_arguments)]
 fn transformed_dependencies(
     project: &Project,
@@ -953,6 +963,7 @@ fn transformed_dependencies(
     package_name: &str,
     table_name: &str,
     retention: DependencyRetention,
+    usage_scope: DependencyUsageScope<'_>,
     package_usage: &PackageSourceUsage,
     feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
@@ -998,6 +1009,7 @@ fn transformed_dependencies(
             package_name,
             alias,
             retention,
+            usage_scope,
             package_usage,
         ) || is_feature_required
         {
@@ -1025,19 +1037,29 @@ fn transformed_target_dependencies(
         .packages
         .get(package_name)
         .ok_or_else(|| format!("unknown package {package_name}"))?;
-    let Some(targets) = package.manifest.get("target").and_then(Value::as_table) else {
+
+    let source_targets = package.manifest.get("target").and_then(Value::as_table);
+    let mut target_names = package_usage
+        .target_names()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    if let Some(targets) = source_targets {
+        target_names.extend(targets.keys().cloned());
+    }
+    if target_names.is_empty() {
         return Ok(None);
-    };
+    }
 
     let mut rendered_targets = Table::new();
-    for (target_name, target_value) in targets {
-        let Some(target_table) = target_value.as_table() else {
-            continue;
-        };
+    for target_name in target_names {
         let mut rendered_target = Table::new();
+        let mut rendered_dependencies = Table::new();
 
-        if let Some(source_dependencies) =
-            target_table.get("dependencies").and_then(Value::as_table)
+        if let Some(source_dependencies) = source_targets
+            .and_then(|targets| targets.get(&target_name))
+            .and_then(Value::as_table)
+            .and_then(|target_table| target_table.get("dependencies"))
+            .and_then(Value::as_table)
         {
             let dependencies = transformed_dependency_table(
                 project,
@@ -1045,18 +1067,56 @@ fn transformed_target_dependencies(
                 package_name,
                 source_dependencies,
                 DependencyRetention::SourceMentioned,
+                DependencyUsageScope::Any,
                 package_usage,
                 feature_required_aliases,
                 retained_aliases,
             );
-            if !dependencies.is_empty() {
-                rendered_target.insert("dependencies".to_string(), Value::Table(dependencies));
+            rendered_dependencies.extend(dependencies);
+        }
+
+        if let Some(source_dependencies) = package
+            .manifest
+            .get("dependencies")
+            .and_then(Value::as_table)
+        {
+            let mut promoted_retained_aliases = BTreeSet::new();
+            let promoted_dependencies = transformed_dependency_table(
+                project,
+                reduced,
+                package_name,
+                source_dependencies,
+                DependencyRetention::SourceMentioned,
+                DependencyUsageScope::Target(&target_name),
+                package_usage,
+                feature_required_aliases,
+                &mut promoted_retained_aliases,
+            );
+            for (alias, value) in promoted_dependencies {
+                if package_usage.mentions_dependency_in_scope(
+                    &alias,
+                    DependencyUsageScope::Target(&target_name),
+                ) && !package_usage
+                    .mentions_dependency_in_scope(&alias, DependencyUsageScope::General)
+                {
+                    retained_aliases.insert(alias.clone());
+                    rendered_dependencies.entry(alias).or_insert(value);
+                }
             }
         }
 
+        if !rendered_dependencies.is_empty() {
+            rendered_target.insert(
+                "dependencies".to_string(),
+                Value::Table(rendered_dependencies),
+            );
+        }
+
         if build_script_should_render_with_usage(package, package_usage) {
-            if let Some(source_dependencies) = target_table
-                .get("build-dependencies")
+            if let Some(source_dependencies) = source_targets
+                .and_then(|targets| targets.get(&target_name))
+                .and_then(Value::as_table)
+                .and_then(|target_table| target_table.get("build-dependencies"))
                 .and_then(Value::as_table)
             {
                 let build_dependencies = transformed_dependency_table(
@@ -1065,6 +1125,7 @@ fn transformed_target_dependencies(
                     package_name,
                     source_dependencies,
                     DependencyRetention::BuildScript,
+                    DependencyUsageScope::Any,
                     package_usage,
                     feature_required_aliases,
                     retained_aliases,
@@ -1079,7 +1140,7 @@ fn transformed_target_dependencies(
         }
 
         if !rendered_target.is_empty() {
-            rendered_targets.insert(target_name.clone(), Value::Table(rendered_target));
+            rendered_targets.insert(target_name, Value::Table(rendered_target));
         }
     }
 
@@ -1093,6 +1154,7 @@ fn transformed_dependency_table(
     package_name: &str,
     source_dependencies: &Table,
     retention: DependencyRetention,
+    usage_scope: DependencyUsageScope<'_>,
     package_usage: &PackageSourceUsage,
     feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
@@ -1131,6 +1193,7 @@ fn transformed_dependency_table(
             package_name,
             alias,
             retention,
+            usage_scope,
             package_usage,
         ) || is_feature_required
         {
@@ -1154,6 +1217,7 @@ fn dependency_should_render(
     package_name: &str,
     alias: &str,
     retention: DependencyRetention,
+    usage_scope: DependencyUsageScope<'_>,
     package_usage: &PackageSourceUsage,
 ) -> bool {
     retention == DependencyRetention::BuildScript
@@ -1162,17 +1226,67 @@ fn dependency_should_render(
             .packages
             .get(package_name)
             .is_some_and(|package| package_should_preserve_source_tree(project, reduced, package))
-        || package_usage.mentions_dependency(alias)
+        || package_usage.mentions_dependency_in_scope(alias, usage_scope)
 }
 
 #[derive(Default)]
 struct PackageSourceUsage {
+    all: TokenUsage,
+    general: TokenUsage,
+    targets: BTreeMap<String, TokenUsage>,
+}
+
+impl PackageSourceUsage {
+    fn record_file(&mut self, file: &syn::File, target_names: &BTreeSet<String>) {
+        self.all.record_file(file);
+        if target_names.is_empty() {
+            self.general.record_file(file);
+        } else {
+            for target_name in target_names {
+                self.targets
+                    .entry(target_name.clone())
+                    .or_default()
+                    .record_file(file);
+            }
+        }
+    }
+
+    fn mentions_ident(&self, ident: &str) -> bool {
+        self.all.mentions_ident(ident)
+    }
+
+    fn mentions_dependency(&self, alias: &str) -> bool {
+        self.all.mentions_dependency(alias)
+    }
+
+    fn mentions_dependency_in_scope(
+        &self,
+        alias: &str,
+        usage_scope: DependencyUsageScope<'_>,
+    ) -> bool {
+        match usage_scope {
+            DependencyUsageScope::Any => self.mentions_dependency(alias),
+            DependencyUsageScope::General => self.general.mentions_dependency(alias),
+            DependencyUsageScope::Target(target_name) => self
+                .targets
+                .get(target_name)
+                .is_some_and(|usage| usage.mentions_dependency(alias)),
+        }
+    }
+
+    fn target_names(&self) -> impl Iterator<Item = &String> {
+        self.targets.keys()
+    }
+}
+
+#[derive(Default)]
+struct TokenUsage {
     idents: BTreeSet<String>,
     path_roots: BTreeSet<String>,
     use_idents: BTreeSet<String>,
 }
 
-impl PackageSourceUsage {
+impl TokenUsage {
     fn record_file(&mut self, file: &syn::File) {
         collect_token_usage(&file.to_token_stream(), self);
         for item in &file.items {
@@ -1217,9 +1331,121 @@ fn package_source_usage(
             &source.module_path,
             &source.syntax,
         );
-        usage.record_file(&file);
+        let target_names = module_cfg_target_names(project, &source.package, &source.module_path);
+        usage.record_file(&file, &target_names);
     }
     usage
+}
+
+fn module_cfg_target_names(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+) -> BTreeSet<String> {
+    let mut target_names = BTreeSet::new();
+    for depth in 1..=module_path.len() {
+        let parent_path = &module_path[..depth - 1];
+        let module_name = &module_path[depth - 1];
+        let Some(source) = project
+            .files
+            .values()
+            .find(|source| source.package == package && source.module_path == parent_path)
+        else {
+            continue;
+        };
+        let Some(item_mod) = source.syntax.items.iter().find_map(|item| {
+            let Item::Mod(item_mod) = item else {
+                return None;
+            };
+            (item_mod.ident == module_name.as_str()).then_some(item_mod)
+        }) else {
+            continue;
+        };
+        target_names.extend(item_mod.attrs.iter().filter_map(|attr| {
+            cfg_attr_target_name(attr)
+                .map(|target_name| canonical_target_name(project, package, &target_name))
+        }));
+    }
+    target_names
+}
+
+fn canonical_target_name(project: &Project, package: &str, target_name: &str) -> String {
+    let compact_name = compact_target_name(target_name);
+    project
+        .workspace
+        .packages
+        .get(package)
+        .and_then(|package| package.manifest.get("target"))
+        .and_then(Value::as_table)
+        .and_then(|targets| {
+            targets
+                .keys()
+                .find(|existing| compact_target_name(existing) == compact_name)
+                .cloned()
+        })
+        .unwrap_or_else(|| target_name.to_string())
+}
+
+fn compact_target_name(target_name: &str) -> String {
+    let mut output = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in target_name.chars() {
+        if in_string {
+            output.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            output.push(ch);
+        } else if !ch.is_whitespace() {
+            output.push(ch);
+        }
+    }
+    output
+}
+
+fn cfg_attr_target_name(attr: &syn::Attribute) -> Option<String> {
+    if !attr.path().is_ident("cfg") {
+        return None;
+    }
+    let meta = attr.parse_args::<syn::Meta>().ok()?;
+    Some(format!(
+        "cfg({})",
+        compact_token_stream(&meta.to_token_stream())
+    ))
+}
+
+fn compact_token_stream(tokens: &TokenStream) -> String {
+    let mut output = String::new();
+    for token in tokens.clone() {
+        match token {
+            TokenTree::Ident(ident) => output.push_str(&ident.to_string()),
+            TokenTree::Punct(punct) => output.push(punct.as_char()),
+            TokenTree::Literal(literal) => output.push_str(&literal.to_string()),
+            TokenTree::Group(group) => {
+                let (open, close) = match group.delimiter() {
+                    proc_macro2::Delimiter::Parenthesis => ('(', ')'),
+                    proc_macro2::Delimiter::Brace => ('{', '}'),
+                    proc_macro2::Delimiter::Bracket => ('[', ']'),
+                    proc_macro2::Delimiter::None => (' ', ' '),
+                };
+                if group.delimiter() == proc_macro2::Delimiter::None {
+                    output.push_str(&compact_token_stream(&group.stream()));
+                } else {
+                    output.push(open);
+                    output.push_str(&compact_token_stream(&group.stream()));
+                    output.push(close);
+                }
+            }
+        }
+    }
+    output
 }
 
 fn package_source_usages(
@@ -1238,7 +1464,7 @@ fn package_source_usages(
         .collect()
 }
 
-fn collect_token_usage(tokens: &TokenStream, usage: &mut PackageSourceUsage) {
+fn collect_token_usage(tokens: &TokenStream, usage: &mut TokenUsage) {
     let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
     for token in &token_trees {
         match token {
@@ -1283,7 +1509,7 @@ fn collect_use_tree_idents(tree: &UseTree, idents: &mut BTreeSet<String>) {
     }
 }
 
-fn known_macro_dependency_usage(usage: &PackageSourceUsage, alias: &str, code_name: &str) -> bool {
+fn known_macro_dependency_usage(usage: &TokenUsage, alias: &str, code_name: &str) -> bool {
     match code_name {
         "serde" | "serde_derive" => {
             usage.mentions_ident("Serialize")

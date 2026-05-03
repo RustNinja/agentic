@@ -223,6 +223,46 @@ fn keeps_private_parent_reexports_used_by_rendered_child_modules() {
     );
 }
 
+#[test]
+fn moves_cfg_gated_dependencies_to_matching_target_table() {
+    let workspace = temp_path("cfg-target-workspace");
+    let output = temp_path("cfg-target-output");
+    write_cfg_target_dependency_fixture_workspace(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let manifest = read_output(&output, "app/Cargo.toml");
+    assert!(
+        !manifest.contains("[dependencies.heavy]"),
+        "cfg-only dependency should not be retained as always-on:\n{manifest}",
+    );
+    assert!(
+        manifest.contains("[target.'cfg(target_os=\"ios\")'.dependencies.heavy]"),
+        "cfg-only dependency should be promoted into the matching target table:\n{manifest}",
+    );
+
+    let target_dir = temp_path("cfg-target-build");
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .output()
+        .expect("cargo check should start");
+
+    assert!(
+        output.status.success(),
+        "host cargo check should not build the target-only dependency\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 fn write_fixture_workspace(root: &Path) {
     let opensourced_path = repo_root().join("crates/opensourced");
     let opensourced_path = toml_path(&opensourced_path);
@@ -451,6 +491,83 @@ pub fn unused_math() -> u32 {
 #[cfg(test)]
 pub fn math_test_only() -> u32 {
     5
+}
+"#,
+    );
+}
+
+fn write_cfg_target_dependency_fixture_workspace(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    let opensourced_path = toml_path(&opensourced_path);
+    let heavy_root = root.with_file_name(format!(
+        "{}-heavy",
+        root.file_name().unwrap().to_string_lossy()
+    ));
+    let heavy_path = toml_path(&heavy_root);
+
+    write_file(
+        &root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = { path = "OPEN_SOURCED_PATH" }
+"#
+        .replace("OPEN_SOURCED_PATH", &opensourced_path)
+        .as_str(),
+    );
+
+    write_file(
+        &root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+heavy = {{ path = "{heavy_path}" }}
+"#,
+        ),
+    );
+
+    write_file(
+        &root.join("app/src/lib.rs"),
+        r#"#[cfg(target_os = "ios")]
+pub mod gated;
+
+pub fn host_safe() -> i32 {
+    1
+}
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/gated.rs"),
+        r#"#[opensourced::opensourced]
+pub fn selected() -> &'static str {
+    heavy::value()
+}
+"#,
+    );
+
+    write_file(
+        &heavy_root.join("Cargo.toml"),
+        r#"[package]
+name = "heavy"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+
+    write_file(
+        &heavy_root.join("src/lib.rs"),
+        r#"compile_error!("target-only dependency was built on the host");
+
+pub fn value() -> &'static str {
+    "heavy"
 }
 "#,
     );
