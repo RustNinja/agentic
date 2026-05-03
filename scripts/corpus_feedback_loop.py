@@ -1097,6 +1097,7 @@ def build_row(
     production = (generation or {}).get("production") or {}
     production_hazards = production.get("hazards") or []
     validation_status = (validation_report or {}).get("status")
+    validation_gates = validation_gate_statuses(validation_report)
     cargo_check_args = validation_cargo_check_args(args, roots)
     passed = classification in {
         "slice_check_passed",
@@ -1127,7 +1128,8 @@ def build_row(
             "stop_on_warning": args.stop_on_warning,
             "report_status": validation_status,
             "report_reason": (validation_report or {}).get("reason"),
-            "report_gates": validation_gate_statuses(validation_report),
+            "report_gates": validation_gates,
+            "production_ready_status": validation_gates.get("production_ready"),
             "report_attempts": len((validation_report or {}).get("attempts") or []),
         },
         "roots": [candidate.display(cargo_source.cargo_root) for candidate in roots],
@@ -1172,14 +1174,25 @@ def build_row(
             "diagnostic_codes": diagnostic_codes(diagnostics),
             "widening_candidates": len(widening_candidates),
             "widening_candidate_kinds": keyed_values(widening_candidates, "kind"),
+            "widening_candidate_suggestions": sum_ints(
+                widening_candidates, "suggestions"
+            ),
+            "widening_candidate_machine_suggestions": sum_ints(
+                widening_candidates, "machine_applicable_suggestions"
+            ),
             "widening_hazards": len(feedback_hazards),
             "widening_hazard_kinds": keyed_values(feedback_hazards, "kind"),
+            "suggestions": diagnostic_suggestion_count(diagnostics),
+            "machine_applicable_suggestions": diagnostic_suggestion_count(
+                diagnostics, applicability="MachineApplicable"
+            ),
             "first_diagnostics": summarize_diagnostics(diagnostics),
         },
         "repair": {
             "removed_items": (repair or {}).get("removed_items"),
             "removed_imports": (repair or {}).get("removed_imports"),
             "normalized_paths": (repair or {}).get("normalized_paths"),
+            "applied_suggestions": (repair or {}).get("applied_suggestions"),
             "added_dead_code_allows": (repair or {}).get("added_dead_code_allows"),
             "deferred_dead_code_allows": (repair or {}).get("deferred_dead_code_allows"),
             "skipped_diagnostics": (repair or {}).get("skipped_diagnostics"),
@@ -1360,6 +1373,26 @@ def keyed_values(items: list[dict[str, Any]], key: str) -> list[str]:
     return values
 
 
+def sum_ints(items: list[dict[str, Any]], key: str) -> int:
+    total = 0
+    for item in items:
+        value = item.get(key)
+        if isinstance(value, int):
+            total += value
+    return total
+
+
+def diagnostic_suggestion_count(
+    diagnostics: list[dict[str, Any]], applicability: str | None = None
+) -> int:
+    count = 0
+    for diagnostic in diagnostics:
+        for suggestion in diagnostic.get("suggestions") or []:
+            if applicability is None or suggestion.get("suggestion_applicability") == applicability:
+                count += 1
+    return count
+
+
 def feedback_errors_are_baseline_known(
     feedback: dict[str, Any] | None,
     baseline: dict[str, Any] | None,
@@ -1380,6 +1413,7 @@ def repair_total_changes(repair: dict[str, Any] | None) -> int | None:
         int(repair.get("removed_items") or 0)
         + int(repair.get("removed_imports") or 0)
         + int(repair.get("normalized_paths") or 0)
+        + int(repair.get("applied_suggestions") or 0)
         + int(repair.get("added_dead_code_allows") or 0)
     )
 
@@ -1438,7 +1472,13 @@ def print_batch_summary(row: dict[str, Any]) -> None:
     diagnostic_block = feedback if feedback["first_diagnostics"] else preflight
     repair_text = ""
     if repair["total_changes"] is not None:
-        repair_text = f"repair_changes={repair['total_changes']} "
+        repair_text = (
+            f"repair_changes={repair['total_changes']} "
+            f"suggestions={repair.get('applied_suggestions')} "
+        )
+    readiness_text = ""
+    if row["validation"].get("production_ready_status"):
+        readiness_text = f"production_ready={row['validation']['production_ready_status']} "
     print(
         "corpus batch "
         f"{row['iteration']}: {row['classification']} "
@@ -1447,6 +1487,7 @@ def print_batch_summary(row: dict[str, Any]) -> None:
         f"preflight_errors={preflight['errors']} "
         f"feedback_errors={feedback['errors']} warnings={feedback['warnings']} "
         f"{repair_text}"
+        f"{readiness_text}"
         f"output={row['slice']['output']}",
         flush=True,
     )
