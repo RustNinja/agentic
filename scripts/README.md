@@ -26,7 +26,9 @@ and prunes older successful outputs. Use `--baseline-check` to separate source
 environment failures from slicer failures, and `--continuous` for soak runs.
 Use `--validation preflight` when build time is the bottleneck; it validates the
 predicted generated shape without compiling dependencies. Use
-`--validation feedback` for slower compiler-confirmed runs.
+`--validation feedback` for slower compiler-confirmed runs, or
+`--validation repair` to run the bounded compiler repair loop and capture repair
+metrics for each generated slice.
 
 ## Litter Feedback Loop
 

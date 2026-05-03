@@ -131,8 +131,10 @@ The corpus runner discovers package targets through `cargo metadata --no-deps`,
 injects the local marker dependency only into packages selected for that batch,
 restores git-backed sources before and after mutation by default, preserves
 failed outputs for debugging, and appends one JSONL metrics row per batch.
-Use `--validation preflight` for fast no-build corpus exploration, then rerun
-interesting or suspicious cases with `--validation feedback`.
+Use `--validation preflight` for fast no-build corpus exploration, rerun
+interesting or suspicious cases with `--validation feedback`, and use
+`--validation repair` when a corpus batch should exercise the conservative
+compiler repair loop and record `slice-repair.json` metrics.
 
 Workspace/package discovery is backed by `cargo metadata --no-deps`, so Cargo is
 the source of truth for workspace members, excludes, target entry paths,

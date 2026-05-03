@@ -326,8 +326,14 @@ fn run_feedback_repair_loop(options: &CliOptions) -> Result<(), Box<dyn std::err
         write_report(&report, &feedback_report_path)?;
         print_feedback(&report, options.feedback_limit, &feedback_report_path);
 
-        if report.success {
+        let repairable_warnings = repairable_warning_count(&report.diagnostics);
+        if report.success && repairable_warnings == 0 {
             return Ok(());
+        }
+        if report.success {
+            println!(
+                "feedback: cargo check passed but {repairable_warnings} repairable warning(s) remain; attempting conservative repair"
+            );
         }
         if report.timed_out {
             break;
@@ -372,6 +378,19 @@ fn run_feedback_repair_loop(options: &CliOptions) -> Result<(), Box<dyn std::err
         repair_report_path.display()
     )
     .into())
+}
+
+fn repairable_warning_count(diagnostics: &[CheckDiagnostic]) -> usize {
+    diagnostics
+        .iter()
+        .filter(|diagnostic| {
+            diagnostic.level == "warning"
+                && matches!(
+                    diagnostic.code.as_deref(),
+                    Some("dead_code" | "unused_imports")
+                )
+        })
+        .count()
 }
 
 fn diagnostics_signature(diagnostics: &[CheckDiagnostic]) -> String {

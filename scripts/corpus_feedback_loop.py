@@ -170,9 +170,12 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--validation",
-        choices=("preflight", "feedback"),
+        choices=("preflight", "feedback", "repair"),
         default="feedback",
-        help="validation tier: preflight is fast and does not build dependencies",
+        help=(
+            "validation tier: preflight is fast and does not build dependencies; "
+            "repair runs the conservative compiler repair loop"
+        ),
     )
     parser.add_argument(
         "--case-timeout",
@@ -274,6 +277,7 @@ def run_batch(
     slice_report_path = output_root / "slice-report.json"
     preflight_report_path = output_root / "slice-preflight.json"
     feedback_report_path = output_root / "slice-feedback.json"
+    repair_report_path = output_root / "slice-repair.json"
 
     baseline = None
     roots: list[Candidate] = []
@@ -298,6 +302,8 @@ def run_batch(
                     command_result,
                     None,
                     None,
+                    None,
+                    None,
                     "baseline_failed",
                 )
 
@@ -317,12 +323,14 @@ def run_batch(
             slice_report_path,
             preflight_report_path,
             feedback_report_path,
+            repair_report_path,
         )
         command_result = run_command(command, repo, args.case_timeout)
 
         generation = read_json(slice_report_path)
         preflight = read_json(preflight_report_path)
         feedback = read_json(feedback_report_path)
+        repair = read_json(repair_report_path)
         classification = classify(command_result, preflight, feedback, args)
         return build_row(
             args,
@@ -337,6 +345,7 @@ def run_batch(
             generation,
             preflight,
             feedback,
+            repair,
             classification,
         )
     except Exception as error:
@@ -350,6 +359,7 @@ def run_batch(
             candidate_counts,
             baseline,
             command_result,
+            None,
             None,
             None,
             None,
@@ -637,6 +647,7 @@ def slicers_command(
     slice_report_path: Path,
     preflight_report_path: Path,
     feedback_report_path: Path,
+    repair_report_path: Path,
 ) -> list[str]:
     features = list(args.features)
     if args.analyzer == "ra-hir" and "ra-hir" not in features:
@@ -658,6 +669,19 @@ def slicers_command(
     )
     if args.validation == "preflight":
         command.append("--preflight")
+    elif args.validation == "repair":
+        command.extend(
+            [
+                "--feedback-repair-loop",
+                str(args.feedback_loop),
+                "--feedback-timeout",
+                str(args.feedback_timeout),
+                "--feedback-report",
+                str(feedback_report_path),
+                "--repair-report",
+                str(repair_report_path),
+            ]
+        )
     else:
         command.extend(
             [
@@ -769,6 +793,7 @@ def build_row(
     generation: dict[str, Any] | None,
     preflight: dict[str, Any] | None,
     feedback: dict[str, Any] | None,
+    repair: dict[str, Any] | None,
     classification: str,
     error: str | None = None,
 ) -> dict[str, Any]:
@@ -821,6 +846,12 @@ def build_row(
             "diagnostic_codes": diagnostic_codes(diagnostics),
             "first_diagnostics": summarize_diagnostics(diagnostics),
         },
+        "repair": {
+            "removed_items": (repair or {}).get("removed_items"),
+            "removed_imports": (repair or {}).get("removed_imports"),
+            "skipped_diagnostics": (repair or {}).get("skipped_diagnostics"),
+            "total_changes": repair_total_changes(repair),
+        },
         "classification": classification,
         "passed": passed,
         "elapsed_ms": int((time.monotonic() - started) * 1000),
@@ -861,6 +892,12 @@ def diagnostic_codes(diagnostics: list[dict[str, Any]]) -> list[str]:
         if code and code not in codes:
             codes.append(str(code))
     return codes
+
+
+def repair_total_changes(repair: dict[str, Any] | None) -> int | None:
+    if repair is None:
+        return None
+    return int(repair.get("removed_items") or 0) + int(repair.get("removed_imports") or 0)
 
 
 def summarize_diagnostics(
@@ -907,7 +944,11 @@ def append_jsonl(path: Path, row: dict[str, Any]) -> None:
 def print_batch_summary(row: dict[str, Any]) -> None:
     feedback = row["feedback"]
     preflight = row["preflight"]
+    repair = row["repair"]
     diagnostic_block = feedback if feedback["first_diagnostics"] else preflight
+    repair_text = ""
+    if repair["total_changes"] is not None:
+        repair_text = f"repair_changes={repair['total_changes']} "
     print(
         "corpus batch "
         f"{row['iteration']}: {row['classification']} "
@@ -915,6 +956,7 @@ def print_batch_summary(row: dict[str, Any]) -> None:
         f"files={row['slice']['files_written']} "
         f"preflight_errors={preflight['errors']} "
         f"feedback_errors={feedback['errors']} warnings={feedback['warnings']} "
+        f"{repair_text}"
         f"output={row['slice']['output']}",
         flush=True,
     )
