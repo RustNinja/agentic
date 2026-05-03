@@ -134,8 +134,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for item in &report.reachable_items {
         println!("  {item}");
     }
-    if let Some(report_path) = &options.slice_report {
-        write_generate_report(&report, report_path)?;
+    if let Some(report_path) = slice_report_path(&options) {
+        write_generate_report(&report, &report_path)?;
         println!("slice report: {}", report_path.display());
     }
     if let Some(report) = &baseline {
@@ -185,6 +185,7 @@ struct CliOptions {
     slice_report: Option<PathBuf>,
     run_preflight: bool,
     preflight_report: Option<PathBuf>,
+    production_preset: bool,
     workspace_root: PathBuf,
     output_root: PathBuf,
 }
@@ -214,6 +215,7 @@ where
     let mut slice_report = None;
     let mut run_preflight = false;
     let mut preflight_report = None;
+    let mut production_preset = false;
     let mut positional = Vec::new();
     let mut args = args.into_iter();
 
@@ -221,6 +223,7 @@ where
         if arg == OsStr::new("--check") {
             run_check = true;
         } else if arg == OsStr::new("--production") {
+            production_preset = true;
             run_baseline_check = true;
             run_preflight = true;
             feedback_repair_iterations = feedback_repair_iterations.max(3);
@@ -319,6 +322,7 @@ where
         slice_report,
         run_preflight,
         preflight_report,
+        production_preset,
         workspace_root: workspace_root.clone(),
         output_root: output_root.clone(),
     })
@@ -396,6 +400,14 @@ fn baseline_report_path(options: &CliOptions) -> PathBuf {
         .baseline_report
         .clone()
         .unwrap_or_else(|| options.output_root.join("slice-baseline.json"))
+}
+
+fn slice_report_path(options: &CliOptions) -> Option<PathBuf> {
+    options.slice_report.clone().or_else(|| {
+        options
+            .production_preset
+            .then(|| options.output_root.join("slice-report.json"))
+    })
 }
 
 fn run_feedback_loop(
@@ -923,7 +935,7 @@ mod tests {
 
     use super::{
         baseline_limited_feedback_is_accepted, feedback_errors_are_baseline_known,
-        feedback_is_accepted, parse_args_from, semantic_hazard_warning_count,
+        feedback_is_accepted, parse_args_from, semantic_hazard_warning_count, slice_report_path,
     };
 
     #[test]
@@ -1043,8 +1055,13 @@ mod tests {
         assert!(options.run_baseline_check);
         assert!(options.run_preflight);
         assert!(options.deny_warnings);
+        assert!(options.production_preset);
         assert_eq!(options.feedback_repair_iterations, 3);
         assert_eq!(options.feedback_iterations, 0);
+        assert_eq!(
+            slice_report_path(&options),
+            Some(PathBuf::from("out/slice-report.json"))
+        );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
     }
@@ -1062,6 +1079,22 @@ mod tests {
         assert_eq!(options.feedback_repair_iterations, 5);
         assert!(options.run_baseline_check);
         assert!(options.deny_warnings);
+    }
+
+    #[test]
+    fn explicit_slice_report_overrides_production_default() {
+        let options = parse_options([
+            "--production",
+            "--slice-report",
+            "custom.json",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(
+            slice_report_path(&options),
+            Some(PathBuf::from("custom.json"))
+        );
     }
 
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {
