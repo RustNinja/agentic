@@ -172,6 +172,57 @@ fn reduces_external_and_nested_modules_with_aliases() {
     assert!(status.success(), "generated workspace did not compile");
 }
 
+#[test]
+fn keeps_private_parent_reexports_used_by_rendered_child_modules() {
+    let workspace = temp_path("parent-reexport-workspace");
+    let output = temp_path("parent-reexport-output");
+    write_parent_reexport_fixture_workspace(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let ssh_mod = read_output(&output, "app/src/ssh/mod.rs");
+    assert!(
+        ssh_mod.contains("pub(crate) use crate::ssh_scripts::posix::{"),
+        "parent reexport group was not retained:\n{ssh_mod}",
+    );
+    assert!(
+        ssh_mod.contains("PACKAGE_MANAGER_PROBE"),
+        "missing child-imported reexport:\n{ssh_mod}",
+    );
+    assert!(
+        ssh_mod.contains("PROFILE_INIT"),
+        "missing child-imported reexport:\n{ssh_mod}",
+    );
+    assert_not_present(&ssh_mod, ["UNUSED_SCRIPT_CONST", "unused_ssh"]);
+
+    let child = read_output(&output, "app/src/ssh/codex_binary.rs");
+    assert!(
+        child.contains("use super::{PACKAGE_MANAGER_PROBE, PROFILE_INIT};"),
+        "child import should remain wired through the parent reexport:\n{child}",
+    );
+
+    let target_dir = temp_path("parent-reexport-target");
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", target_dir)
+        .output()
+        .expect("cargo check should start");
+
+    assert!(
+        output.status.success(),
+        "generated workspace did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
 fn write_fixture_workspace(root: &Path) {
     let opensourced_path = repo_root().join("crates/opensourced");
     let opensourced_path = toml_path(&opensourced_path);
@@ -401,6 +452,131 @@ pub fn unused_math() -> u32 {
 pub fn math_test_only() -> u32 {
     5
 }
+"#,
+    );
+}
+
+fn write_parent_reexport_fixture_workspace(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    let opensourced_path = toml_path(&opensourced_path);
+
+    write_file(
+        &root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = { path = "OPEN_SOURCED_PATH" }
+"#
+        .replace("OPEN_SOURCED_PATH", &opensourced_path)
+        .as_str(),
+    );
+
+    write_file(
+        &root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/lib.rs"),
+        r#"pub mod local_server;
+pub mod ssh;
+pub mod ssh_scripts;
+
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_script() -> String {
+    ssh::codex_binary::resolve_codex_binary_script_posix()
+}
+
+pub fn unused_root() -> String {
+    "unused".to_string()
+}
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/local_server.rs"),
+        r#"pub fn shell_candidate_lines() -> Vec<&'static str> {
+    vec!["/usr/bin/codex", "/opt/codex/bin/codex"]
+}
+
+pub fn unused_local_server() -> &'static str {
+    "unused"
+}
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/ssh/mod.rs"),
+        r#"pub mod codex_binary;
+
+pub(crate) use crate::ssh_scripts::posix::{
+    PACKAGE_MANAGER_PROBE, PROFILE_INIT, UNUSED_SCRIPT_CONST,
+};
+
+pub fn unused_ssh() -> &'static str {
+    "unused"
+}
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/ssh/codex_binary.rs"),
+        r#"use super::{PACKAGE_MANAGER_PROBE, PROFILE_INIT};
+
+pub fn resolve_codex_binary_script_posix() -> String {
+    let shared_lines = crate::local_server::shell_candidate_lines().join("\n");
+    crate::ssh_scripts::render(
+        crate::ssh_scripts::posix::RESOLVE_CODEX_BINARY,
+        &[
+            ("PROFILE_INIT", PROFILE_INIT),
+            ("PACKAGE_MANAGER_PROBE", PACKAGE_MANAGER_PROBE),
+            ("SHARED_LINES", &shared_lines),
+        ],
+    )
+}
+
+pub fn unused_codex_binary() -> &'static str {
+    "unused"
+}
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/ssh_scripts/mod.rs"),
+        r#"pub(crate) mod posix;
+
+pub(crate) fn render(template: &str, replacements: &[(&str, &str)]) -> String {
+    let mut rendered = template.to_string();
+    for (key, value) in replacements {
+        rendered = rendered.replace(key, value);
+    }
+    rendered
+}
+
+pub(crate) fn unused_render() -> &'static str {
+    "unused"
+}
+"#,
+    );
+
+    write_file(
+        &root.join("app/src/ssh_scripts/posix.rs"),
+        r#"pub(crate) const PROFILE_INIT: &str = "source ~/.profile";
+pub(crate) const PACKAGE_MANAGER_PROBE: &str = "command -v codex";
+pub(crate) const RESOLVE_CODEX_BINARY: &str =
+    "PROFILE_INIT\nPACKAGE_MANAGER_PROBE\nSHARED_LINES";
+pub(crate) const UNUSED_SCRIPT_CONST: &str = "unused";
 "#,
     );
 }

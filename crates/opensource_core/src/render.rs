@@ -2933,21 +2933,17 @@ fn reachable_module_import_scope_mentions_ident_excluding(
         .filter(|source| path_has_prefix(&source.module_path, module_path))
         .filter(|source| excluded_module_path != Some(source.module_path.as_slice()))
         .filter(|source| module_should_render(project, reduced, package, &source.module_path))
-        .filter(|source| file_has_super_glob_import(&source.syntax))
         .any(|source| {
-            reachable_module_import_scope_mentions_ident_excluding(
+            child_module_import_scope_mentions_parent_ident(
                 project,
                 reduced,
                 package,
-                &source.module_path,
+                source.module_path.as_slice(),
+                &source.syntax.items,
                 ident,
                 excluded_module_path,
             )
         })
-}
-
-fn file_has_super_glob_import(file: &syn::File) -> bool {
-    items_have_super_glob_import(&file.items)
 }
 
 fn items_have_super_glob_import(items: &[Item]) -> bool {
@@ -2975,9 +2971,6 @@ fn inline_child_modules_import_scope_mentions_ident(
         let Some((_, child_items)) = &item_mod.content else {
             return false;
         };
-        if !items_have_super_glob_import(child_items) {
-            return false;
-        }
 
         let mut child_path = module_path.to_vec();
         child_path.push(item_mod.ident.to_string());
@@ -2988,17 +2981,106 @@ fn inline_child_modules_import_scope_mentions_ident(
             return false;
         }
 
-        reachable_module_mentions_ident(project, reduced, package, &child_path, ident)
-            || inline_child_modules_import_scope_mentions_ident(
-                project,
-                reduced,
-                package,
-                &child_path,
-                child_items,
-                ident,
-                excluded_module_path,
-            )
+        child_module_import_scope_mentions_parent_ident(
+            project,
+            reduced,
+            package,
+            &child_path,
+            child_items,
+            ident,
+            excluded_module_path,
+        )
     })
+}
+
+fn child_module_import_scope_mentions_parent_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    child_module_path: &[String],
+    child_items: &[Item],
+    ident: &str,
+    excluded_module_path: Option<&[String]>,
+) -> bool {
+    let visible_names = super_import_visible_names_for_parent_ident(child_items, ident);
+    if visible_names.iter().any(|visible_name| {
+        reachable_module_import_scope_mentions_ident_excluding(
+            project,
+            reduced,
+            package,
+            child_module_path,
+            visible_name,
+            excluded_module_path,
+        )
+    }) {
+        return true;
+    }
+
+    items_have_super_glob_import(child_items)
+        && reachable_module_import_scope_mentions_ident_excluding(
+            project,
+            reduced,
+            package,
+            child_module_path,
+            ident,
+            excluded_module_path,
+        )
+}
+
+fn super_import_visible_names_for_parent_ident(items: &[Item], ident: &str) -> BTreeSet<String> {
+    let mut visible_names = BTreeSet::new();
+    for item in items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_super_import_visible_names(&item_use.tree, Vec::new(), ident, &mut visible_names);
+    }
+    visible_names
+}
+
+fn collect_super_import_visible_names(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    ident: &str,
+    visible_names: &mut BTreeSet<String>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_super_import_visible_names(&path.tree, prefix, ident, visible_names);
+        }
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            prefix.push(name.ident.to_string());
+            if use_path_imports_parent_ident(&prefix, ident) {
+                visible_names.insert(visible_name);
+            }
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            if use_path_imports_parent_ident(&prefix, ident) {
+                visible_names.insert(rename.rename.to_string());
+            }
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_super_import_visible_names(nested, prefix.clone(), ident, visible_names);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn use_path_imports_parent_ident(path: &[String], ident: &str) -> bool {
+    path.first().is_some_and(|first| first == "super")
+        && path.get(1).is_some_and(|candidate| candidate == ident)
 }
 
 fn use_tree_has_super_glob_import(tree: &UseTree) -> bool {
