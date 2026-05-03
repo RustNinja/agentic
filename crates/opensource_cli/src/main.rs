@@ -191,6 +191,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         warning_count: None,
         semantic_warning_hazards: None,
     });
+    if production_readiness_blocks_validation(&options, &report.production.status) {
+        let reason =
+            "production readiness reported error hazards before compiler feedback".to_string();
+        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        return Err(reason.into());
+    }
     let uncovered_targets =
         uncovered_validation_targets(&report.targets, &options.cargo_check_args);
     if !uncovered_targets.is_empty() {
@@ -272,6 +278,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         run_plain_check(&options)?;
     }
 
+    record_final_production_readiness(&options, &mut validation);
     finish_validation(&options, &mut validation, "accepted", None)?;
     Ok(())
 }
@@ -1268,6 +1275,54 @@ fn feedback_target_dir(options: &CliOptions) -> PathBuf {
         .unwrap_or_else(|| options.output_root.join("target-feedback"))
 }
 
+fn production_readiness_blocks_validation(options: &CliOptions, status: &str) -> bool {
+    options.production_preset && status == "hazards_detected"
+}
+
+fn record_final_production_readiness(options: &CliOptions, validation: &mut ValidationReport) {
+    if !options.production_preset {
+        return;
+    }
+    if validation
+        .gates
+        .iter()
+        .any(|gate| gate.name == "production_ready")
+    {
+        return;
+    }
+
+    let feedback_status = validation
+        .gates
+        .iter()
+        .rev()
+        .find(|gate| matches!(gate.name.as_str(), "feedback-repair" | "feedback"))
+        .map(|gate| gate.status.as_str())
+        .unwrap_or("missing_feedback");
+    let (status, reason) = match feedback_status {
+        "accepted" => (
+            "accepted",
+            "production preset passed baseline, generation, preflight, target coverage, and compiler feedback",
+        ),
+        "baseline_limited" => (
+            "baseline_limited",
+            "production preset matched an allowed failing source baseline; generated workspace is not cleanly production-ready",
+        ),
+        _ => (
+            "failed",
+            "production preset did not produce an accepted compiler feedback gate",
+        ),
+    };
+    validation.gates.push(ValidationGateReport {
+        name: "production_ready".to_string(),
+        status: status.to_string(),
+        reason: reason.to_string(),
+        report_path: validation_report_path(options),
+        error_count: None,
+        warning_count: None,
+        semantic_warning_hazards: None,
+    });
+}
+
 fn baseline_target_dir(options: &CliOptions) -> PathBuf {
     options
         .baseline_target_dir
@@ -1724,8 +1779,9 @@ mod tests {
     use super::{
         baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
+        production_readiness_blocks_validation, record_final_production_readiness,
         semantic_hazard_warning_count, slice_report_path, uncovered_validation_targets,
-        validation_report_path,
+        validation_report_path, ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -2015,6 +2071,41 @@ mod tests {
     }
 
     #[test]
+    fn production_preset_fails_closed_on_error_readiness_hazards() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let feedback_only = parse_options(["--feedback", "workspace", "out"]);
+
+        assert!(production_readiness_blocks_validation(
+            &production,
+            "hazards_detected"
+        ));
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            "requires_feedback"
+        ));
+        assert!(!production_readiness_blocks_validation(
+            &feedback_only,
+            "hazards_detected"
+        ));
+    }
+
+    #[test]
+    fn production_preset_records_final_readiness_after_feedback_accepts() {
+        let options = parse_options(["--production", "workspace", "out"]);
+        let mut validation = ValidationReport::new(&options);
+        validation.gates.push(gate("feedback-repair", "accepted"));
+
+        record_final_production_readiness(&options, &mut validation);
+
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "production_ready")
+            .expect("production_ready gate should be recorded");
+        assert_eq!(gate.status, "accepted");
+    }
+
+    #[test]
     fn positional_cargo_manifest_uses_parent_as_workspace_root() {
         let nested = parse_options(["repo/rust/Cargo.toml", "out"]);
         let current_dir = parse_options(["Cargo.toml", "out"]);
@@ -2242,5 +2333,17 @@ mod tests {
     fn parse_options<const N: usize>(args: [&str; N]) -> super::CliOptions {
         parse_args_from(args.into_iter().map(std::ffi::OsString::from))
             .expect("arguments should parse")
+    }
+
+    fn gate(name: &str, status: &str) -> ValidationGateReport {
+        ValidationGateReport {
+            name: name.to_string(),
+            status: status.to_string(),
+            reason: String::new(),
+            report_path: None,
+            error_count: None,
+            warning_count: None,
+            semantic_warning_hazards: None,
+        }
     }
 }
