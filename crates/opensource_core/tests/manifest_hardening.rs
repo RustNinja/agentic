@@ -125,6 +125,57 @@ fn slices_marked_bin_target_when_package_also_has_lib_target() {
 }
 
 #[test]
+fn slices_marked_example_target_and_preserves_manifest_entry() {
+    let workspace = temp_path("example-target-workspace");
+    let output = temp_path("example-target-output");
+    let target_dir = temp_path("example-target-build");
+    write_example_target_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app"]);
+    let manifest = read(output.join("app/Cargo.toml"));
+    assert!(manifest.contains("[[example]]"));
+    assert!(manifest.contains("name = \"demo\""));
+    assert!(manifest.contains("path = \"examples/demo.rs\""));
+
+    let source = read(output.join("app/examples/demo.rs"));
+    let helper = read(output.join("app/examples/helper.rs"));
+    assert!(source.contains("mod helper"));
+    assert!(source.contains("fn main()"));
+    assert!(source.contains("pub fn selected"));
+    assert!(helper.contains("pub fn format_value"));
+    assert!(!source.contains("dead_example"));
+    assert!(!helper.contains("dead_helper"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .arg("--package")
+        .arg("app")
+        .arg("--example")
+        .arg("demo")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated example-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/examples/demo.rs:\n{}\napp/examples/helper.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        source,
+        helper,
+    );
+}
+
+#[test]
 fn slices_path_attributed_external_modules() {
     let workspace = temp_path("path-attr-workspace");
     let output = temp_path("path-attr-output");
@@ -2593,6 +2644,76 @@ fn helper(value: &str) -> String {
 }
 
 fn dead_command() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_example_target_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+
+[dev-dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"pub fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("app/examples/demo.rs"),
+        r#"mod helper;
+
+use opensourced::opensourced;
+
+fn main() {
+    println!("{}", selected("runtime"));
+}
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    helper::format_value(value)
+}
+
+fn dead_example() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("app/examples/helper.rs"),
+        r#"pub fn format_value(value: &str) -> String {
+    format!("example:{value}")
+}
+
+pub fn dead_helper() -> String {
     "dead".to_string()
 }
 "#,

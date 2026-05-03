@@ -324,7 +324,7 @@ pub fn write_reduced_workspace(
                 &source.module_path,
                 &source.syntax,
             );
-            if is_binary_entry_source(source) {
+            if is_main_like_entry_source(package, source) {
                 prune_stub_binary_root_uses(&mut transformed);
                 ensure_main_function(&mut transformed);
             }
@@ -817,9 +817,23 @@ fn build_script_is_uniffi_only(path: &Path) -> bool {
         })
 }
 
-fn is_binary_entry_source(source: &SourceFile) -> bool {
+fn is_main_like_entry_source(package: &Package, source: &SourceFile) -> bool {
     if !source.module_path.is_empty() {
         return false;
+    }
+    if package
+        .entry_target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "bin" | "example"))
+        && source.path.canonicalize().is_ok_and(|path| {
+            package
+                .lib_path
+                .canonicalize()
+                .is_ok_and(|entry| path == entry)
+        })
+    {
+        return true;
     }
     if source
         .path
@@ -1183,8 +1197,10 @@ fn write_package_manifest(
         );
     }
 
-    if let Some(value) = transformed_bin_targets(package)? {
-        manifest.insert("bin".to_string(), value);
+    for target_table in ["bin", "example"] {
+        if let Some(value) = transformed_named_targets(package, target_table)? {
+            manifest.insert(target_table.to_string(), value);
+        }
     }
 
     let requested_features = requested_local_features(project, reduced, package_name);
@@ -1248,18 +1264,23 @@ fn write_package_manifest(
     Ok(())
 }
 
-fn transformed_bin_targets(package: &Package) -> Result<Option<Value>, Box<dyn std::error::Error>> {
-    let Some(value) = package.manifest.get("bin") else {
+fn transformed_named_targets(
+    package: &Package,
+    target_table: &str,
+) -> Result<Option<Value>, Box<dyn std::error::Error>> {
+    let Some(value) = package.manifest.get(target_table) else {
         return Ok(None);
     };
-    let Some(bins) = value.as_array() else {
+    let Some(targets) = value.as_array() else {
         return Ok(Some(value.clone()));
     };
 
     let entry_source = package.lib_path.canonicalize()?;
-    let retained = bins
+    let retained = targets
         .iter()
-        .filter(|bin| bin_target_matches_entry_source(package, bin, &entry_source))
+        .filter(|target| {
+            named_target_matches_entry_source(package, target_table, target, &entry_source)
+        })
         .cloned()
         .collect::<Vec<_>>();
 
@@ -1303,8 +1324,13 @@ fn package_depends_on(package: &Package, dependency_name: &str) -> bool {
         .any(|dependency| dependency_name_matches(dependency, dependency_name))
 }
 
-fn bin_target_matches_entry_source(package: &Package, bin: &Value, entry_source: &Path) -> bool {
-    let Some(table) = bin.as_table() else {
+fn named_target_matches_entry_source(
+    package: &Package,
+    target_table: &str,
+    target: &Value,
+    entry_source: &Path,
+) -> bool {
+    let Some(table) = target.as_table() else {
         return false;
     };
 
@@ -1319,14 +1345,26 @@ fn bin_target_matches_entry_source(package: &Package, bin: &Value, entry_source:
     let Some(name) = table.get("name").and_then(Value::as_str) else {
         return false;
     };
-    [
-        package.root.join("src/main.rs"),
-        package.root.join("src/bin").join(format!("{name}.rs")),
-        package.root.join("src/bin").join(name).join("main.rs"),
-    ]
-    .into_iter()
-    .filter_map(|path| path.canonicalize().ok())
-    .any(|path| path == entry_source)
+
+    default_named_target_paths(package, target_table, name)
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .any(|path| path == entry_source)
+}
+
+fn default_named_target_paths(package: &Package, target_table: &str, name: &str) -> Vec<PathBuf> {
+    match target_table {
+        "bin" => vec![
+            package.root.join("src/main.rs"),
+            package.root.join("src/bin").join(format!("{name}.rs")),
+            package.root.join("src/bin").join(name).join("main.rs"),
+        ],
+        "example" => vec![
+            package.root.join("examples").join(format!("{name}.rs")),
+            package.root.join("examples").join(name).join("main.rs"),
+        ],
+        _ => Vec::new(),
+    }
 }
 
 fn default_workspace_package() -> Value {

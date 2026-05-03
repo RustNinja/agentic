@@ -21,8 +21,15 @@ pub struct Package {
     pub name: String,
     pub root: PathBuf,
     pub lib_path: PathBuf,
+    pub entry_target: PackageTarget,
     pub dependencies: Vec<Dependency>,
     pub manifest: Value,
+}
+
+#[derive(Debug, Clone)]
+pub struct PackageTarget {
+    pub kind: Vec<String>,
+    pub src_path: PathBuf,
 }
 
 #[derive(Debug, Clone)]
@@ -60,7 +67,8 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
             .canonicalize()?;
         let manifest = read_manifest(&manifest_path)?;
 
-        let lib_path = entry_source_path(&package_root, &manifest, &metadata_package.targets)?;
+        let entry_target = entry_target(&package_root, &manifest, &metadata_package.targets)?;
+        let lib_path = entry_target.src_path.clone();
 
         let dependencies = metadata_dependencies(&metadata_package.dependencies);
 
@@ -70,6 +78,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
                 name: metadata_package.name,
                 root: package_root,
                 lib_path,
+                entry_target,
                 dependencies,
                 manifest,
             },
@@ -109,17 +118,17 @@ fn load_cargo_metadata(manifest_path: &Path) -> Result<CargoMetadata, Box<dyn st
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-fn entry_source_path(
+fn entry_target(
     package_root: &Path,
     manifest: &Value,
     targets: &[MetadataTarget],
-) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    if let Some(path) = metadata_marker_source_path(targets)? {
-        return Ok(path);
+) -> Result<PackageTarget, Box<dyn std::error::Error>> {
+    if let Some(target) = metadata_marker_target(targets)? {
+        return Ok(target.into());
     }
 
-    if let Some(path) = metadata_entry_source_path(package_root, targets) {
-        return Ok(path);
+    if let Some(target) = metadata_entry_target(package_root, targets) {
+        return Ok(target.into());
     }
 
     if let Some(path) = manifest
@@ -127,35 +136,46 @@ fn entry_source_path(
         .and_then(|lib| lib.get("path"))
         .and_then(Value::as_str)
     {
-        return Ok(package_root.join(path));
+        return Ok(PackageTarget {
+            kind: vec!["lib".to_string()],
+            src_path: package_root.join(path),
+        });
     }
 
     let default_lib = package_root.join("src/lib.rs");
     if default_lib.exists() {
-        return Ok(default_lib);
+        return Ok(PackageTarget {
+            kind: vec!["lib".to_string()],
+            src_path: default_lib,
+        });
     }
 
-    Ok(package_root.join("src/main.rs"))
+    Ok(PackageTarget {
+        kind: vec!["bin".to_string()],
+        src_path: package_root.join("src/main.rs"),
+    })
 }
 
-fn metadata_marker_source_path(
+fn metadata_marker_target(
     targets: &[MetadataTarget],
-) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
-    let mut paths = targets
+) -> Result<Option<MetadataTarget>, Box<dyn std::error::Error>> {
+    let mut marked_targets = targets
         .iter()
         .filter(|target| target_is_parse_candidate(target))
-        .map(|target| target.src_path.clone())
+        .filter(|target| source_contains_opensourced_marker(&target.src_path))
+        .cloned()
         .collect::<Vec<_>>();
-    paths.sort();
-    paths.dedup();
-    let marked_paths = paths
-        .into_iter()
-        .filter(|path| source_contains_opensourced_marker(path))
-        .collect::<Vec<_>>();
-    if marked_paths.len() > 1 {
-        let paths = marked_paths
+    marked_targets.sort_by(|left, right| {
+        left.src_path
+            .cmp(&right.src_path)
+            .then_with(|| left.name.cmp(&right.name))
+            .then_with(|| left.kind.cmp(&right.kind))
+    });
+    marked_targets.dedup_by(|left, right| left.src_path == right.src_path);
+    if marked_targets.len() > 1 {
+        let paths = marked_targets
             .iter()
-            .map(|path| path.display().to_string())
+            .map(|target| target.src_path.display().to_string())
             .collect::<Vec<_>>()
             .join(", ");
         return Err(format!(
@@ -163,7 +183,7 @@ fn metadata_marker_source_path(
         )
         .into());
     }
-    Ok(marked_paths.into_iter().next())
+    Ok(marked_targets.into_iter().next())
 }
 
 fn target_is_parse_candidate(target: &MetadataTarget) -> bool {
@@ -273,26 +293,29 @@ fn module_source_name(name: &str) -> &str {
     name.strip_prefix("r#").unwrap_or(name)
 }
 
-fn metadata_entry_source_path(package_root: &Path, targets: &[MetadataTarget]) -> Option<PathBuf> {
+fn metadata_entry_target(
+    package_root: &Path,
+    targets: &[MetadataTarget],
+) -> Option<MetadataTarget> {
     for preferred_kind in ["lib", "proc-macro"] {
         if let Some(target) = targets
             .iter()
             .find(|target| target.kind.iter().any(|kind| kind == preferred_kind))
         {
-            return Some(target.src_path.clone());
+            return Some(target.clone());
         }
     }
     let default_bin = package_root.join("src/main.rs");
     if let Some(target) = targets.iter().find(|target| {
         target.kind.iter().any(|kind| kind == "bin") && target.src_path == default_bin
     }) {
-        return Some(target.src_path.clone());
+        return Some(target.clone());
     }
     if let Some(target) = targets
         .iter()
         .find(|target| target.kind.iter().any(|kind| kind == "bin"))
     {
-        return Some(target.src_path.clone());
+        return Some(target.clone());
     }
     targets
         .iter()
@@ -302,7 +325,7 @@ fn metadata_entry_source_path(package_root: &Path, targets: &[MetadataTarget]) -
                 .iter()
                 .all(|kind| !matches!(kind.as_str(), "test" | "bench" | "example"))
         })
-        .map(|target| target.src_path.clone())
+        .cloned()
 }
 
 fn metadata_dependencies(metadata_dependencies: &[MetadataDependency]) -> Vec<Dependency> {
@@ -349,8 +372,18 @@ struct MetadataDependency {
     rename: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Clone, Debug, Deserialize)]
 struct MetadataTarget {
+    name: String,
     kind: Vec<String>,
     src_path: PathBuf,
+}
+
+impl From<MetadataTarget> for PackageTarget {
+    fn from(target: MetadataTarget) -> Self {
+        Self {
+            kind: target.kind,
+            src_path: target.src_path,
+        }
+    }
 }
