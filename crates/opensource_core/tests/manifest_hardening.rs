@@ -137,17 +137,20 @@ fn slices_marked_example_target_and_preserves_manifest_entry() {
     })
     .expect("reduction should succeed");
 
-    assert_eq!(report.packages, ["app", "support"]);
+    assert_eq!(report.packages, ["app", "lib_support", "support"]);
     let manifest = read(output.join("app/Cargo.toml"));
     assert!(manifest.contains("[[example]]"));
     assert!(manifest.contains("name = \"demo\""));
     assert!(manifest.contains("path = \"examples/demo.rs\""));
+    assert!(manifest.contains("[dependencies.lib_support]"));
     assert!(manifest.contains("[dev-dependencies.support]"));
 
     let source = read(output.join("app/examples/demo.rs"));
     let lib = read(output.join("app/src/lib.rs"));
+    let lib_support = read(output.join("lib_support/src/lib.rs"));
     let support = read(output.join("support/src/lib.rs"));
     assert!(lib.contains("pub fn library_label"));
+    assert!(lib_support.contains("pub fn label"));
     assert!(source.contains("fn main()"));
     assert!(source.contains("pub fn selected"));
     assert!(support.contains("pub fn format_value"));
@@ -167,13 +170,14 @@ fn slices_marked_example_target_and_preserves_manifest_entry() {
         .expect("cargo check should start");
     assert!(
         cargo_check.status.success(),
-        "generated example-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/examples/demo.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        "generated example-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/examples/demo.rs:\n{}\nlib_support/src/lib.rs:\n{}\nsupport/src/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         manifest,
         lib,
         source,
+        lib_support,
         support,
     );
 }
@@ -191,17 +195,20 @@ fn slices_marked_integration_test_target_and_preserves_manifest_entry() {
     })
     .expect("reduction should succeed");
 
-    assert_eq!(report.packages, ["app", "support"]);
+    assert_eq!(report.packages, ["app", "lib_support", "support"]);
     let manifest = read(output.join("app/Cargo.toml"));
     assert!(manifest.contains("[[test]]"));
     assert!(manifest.contains("name = \"behavior\""));
     assert!(manifest.contains("path = \"tests/behavior.rs\""));
+    assert!(manifest.contains("[dependencies.lib_support]"));
     assert!(manifest.contains("[dev-dependencies.support]"));
 
     let source = read(output.join("app/tests/behavior.rs"));
     let lib = read(output.join("app/src/lib.rs"));
+    let lib_support = read(output.join("lib_support/src/lib.rs"));
     let support = read(output.join("support/src/lib.rs"));
     assert!(lib.contains("pub fn library_label"));
+    assert!(lib_support.contains("pub fn label"));
     assert!(source.contains("#[test]"));
     assert!(source.contains("fn selected_behavior"));
     assert!(support.contains("pub fn format_value"));
@@ -221,13 +228,14 @@ fn slices_marked_integration_test_target_and_preserves_manifest_entry() {
         .expect("cargo check should start");
     assert!(
         cargo_check.status.success(),
-        "generated test-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/tests/behavior.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        "generated test-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/tests/behavior.rs:\n{}\nlib_support/src/lib.rs:\n{}\nsupport/src/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         manifest,
         lib,
         source,
+        lib_support,
         support,
     );
 }
@@ -245,17 +253,20 @@ fn slices_marked_bench_target_and_preserves_manifest_entry() {
     })
     .expect("reduction should succeed");
 
-    assert_eq!(report.packages, ["app", "support"]);
+    assert_eq!(report.packages, ["app", "lib_support", "support"]);
     let manifest = read(output.join("app/Cargo.toml"));
     assert!(manifest.contains("[[bench]]"));
     assert!(manifest.contains("name = \"throughput\""));
     assert!(manifest.contains("path = \"benches/throughput.rs\""));
+    assert!(manifest.contains("[dependencies.lib_support]"));
     assert!(manifest.contains("[dev-dependencies.support]"));
 
     let source = read(output.join("app/benches/throughput.rs"));
     let lib = read(output.join("app/src/lib.rs"));
+    let lib_support = read(output.join("lib_support/src/lib.rs"));
     let support = read(output.join("support/src/lib.rs"));
     assert!(lib.contains("pub fn library_label"));
+    assert!(lib_support.contains("pub fn label"));
     assert!(source.contains("pub fn selected_bench_value"));
     assert!(support.contains("pub fn format_value"));
     assert!(!source.contains("dead_bench"));
@@ -274,13 +285,14 @@ fn slices_marked_bench_target_and_preserves_manifest_entry() {
         .expect("cargo check should start");
     assert!(
         cargo_check.status.success(),
-        "generated bench-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/benches/throughput.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        "generated bench-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/benches/throughput.rs:\n{}\nlib_support/src/lib.rs:\n{}\nsupport/src/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         manifest,
         lib,
         source,
+        lib_support,
         support,
     );
 }
@@ -2768,7 +2780,7 @@ fn write_example_target_fixture(root: &Path) {
     write(
         root.join("Cargo.toml"),
         r#"[workspace]
-members = ["app", "support"]
+members = ["app", "lib_support", "support"]
 resolver = "2"
 "#,
     );
@@ -2784,6 +2796,9 @@ edition = "2021"
 name = "demo"
 path = "examples/demo.rs"
 
+[dependencies]
+lib_support = {{ path = "../lib_support" }}
+
 [dev-dependencies]
 opensourced = {{ path = "{}" }}
 support = {{ path = "../support" }}
@@ -2794,7 +2809,7 @@ support = {{ path = "../support" }}
     write(
         root.join("app/src/lib.rs"),
         r#"pub fn library_label(value: &str) -> String {
-    format!("lib:{value}")
+    lib_support::label(value)
 }
 
 pub fn dead_lib() -> i32 {
@@ -2816,6 +2831,25 @@ pub fn selected(value: &str) -> String {
 }
 
 fn dead_example() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("lib_support/Cargo.toml"),
+        r#"[package]
+name = "lib_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("lib_support/src/lib.rs"),
+        r#"pub fn label(value: &str) -> String {
+    format!("lib:{value}")
+}
+
+pub fn dead_label() -> String {
     "dead".to_string()
 }
 "#,
@@ -2849,7 +2883,7 @@ fn write_test_target_fixture(root: &Path) {
     write(
         root.join("Cargo.toml"),
         r#"[workspace]
-members = ["app", "support"]
+members = ["app", "lib_support", "support"]
 resolver = "2"
 "#,
     );
@@ -2865,6 +2899,9 @@ edition = "2021"
 name = "behavior"
 path = "tests/behavior.rs"
 
+[dependencies]
+lib_support = {{ path = "../lib_support" }}
+
 [dev-dependencies]
 opensourced = {{ path = "{}" }}
 support = {{ path = "../support" }}
@@ -2875,7 +2912,7 @@ support = {{ path = "../support" }}
     write(
         root.join("app/src/lib.rs"),
         r#"pub fn library_label(value: &str) -> String {
-    format!("lib:{value}")
+    lib_support::label(value)
 }
 
 pub fn dead_lib() -> i32 {
@@ -2895,6 +2932,25 @@ fn selected_behavior() {
 }
 
 fn dead_test() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("lib_support/Cargo.toml"),
+        r#"[package]
+name = "lib_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("lib_support/src/lib.rs"),
+        r#"pub fn label(value: &str) -> String {
+    format!("lib:{value}")
+}
+
+pub fn dead_label() -> String {
     "dead".to_string()
 }
 "#,
@@ -2928,7 +2984,7 @@ fn write_bench_target_fixture(root: &Path) {
     write(
         root.join("Cargo.toml"),
         r#"[workspace]
-members = ["app", "support"]
+members = ["app", "lib_support", "support"]
 resolver = "2"
 "#,
     );
@@ -2944,6 +3000,9 @@ edition = "2021"
 name = "throughput"
 path = "benches/throughput.rs"
 
+[dependencies]
+lib_support = {{ path = "../lib_support" }}
+
 [dev-dependencies]
 opensourced = {{ path = "{}" }}
 support = {{ path = "../support" }}
@@ -2954,7 +3013,7 @@ support = {{ path = "../support" }}
     write(
         root.join("app/src/lib.rs"),
         r#"pub fn library_label(value: &str) -> String {
-    format!("lib:{value}")
+    lib_support::label(value)
 }
 
 pub fn dead_lib() -> i32 {
@@ -2972,6 +3031,25 @@ pub fn selected_bench_value(value: &str) -> String {
 }
 
 fn dead_bench() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("lib_support/Cargo.toml"),
+        r#"[package]
+name = "lib_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("lib_support/src/lib.rs"),
+        r#"pub fn label(value: &str) -> String {
+    format!("lib:{value}")
+}
+
+pub fn dead_label() -> String {
     "dead".to_string()
 }
 "#,

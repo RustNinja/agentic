@@ -1,4 +1,7 @@
-use std::collections::{BTreeSet, HashMap, VecDeque};
+use std::{
+    collections::{BTreeSet, HashMap, VecDeque},
+    path::{Path as FsPath, PathBuf},
+};
 
 use proc_macro2::{Literal, TokenStream, TokenTree};
 use quote::ToTokens;
@@ -206,6 +209,14 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
     retain_entire_packages(
         project,
         &build_dependency_packages,
+        &mut reachable,
+        &mut reachable_items,
+    );
+    let library_support_dependency_packages =
+        add_local_library_support_dependency_packages(project, &mut packages);
+    retain_entire_packages(
+        project,
+        &library_support_dependency_packages,
         &mut reachable,
         &mut reachable_items,
     );
@@ -1139,6 +1150,34 @@ fn add_local_build_dependency_packages(
     retained_build_dependencies
 }
 
+fn add_local_library_support_dependency_packages(
+    project: &Project,
+    packages: &mut BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut retained_library_dependencies = BTreeSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for package_name in packages.clone() {
+            let Some(package) = project.workspace.packages.get(&package_name) else {
+                continue;
+            };
+            if !package_should_copy_library_support_source(package) {
+                continue;
+            }
+
+            for dependency_package in local_library_dependency_packages(project, &package.manifest)
+            {
+                for package in package_closure(project, &dependency_package) {
+                    retained_library_dependencies.insert(package.clone());
+                    changed |= packages.insert(package);
+                }
+            }
+        }
+    }
+    retained_library_dependencies
+}
+
 fn retain_entire_packages(
     project: &Project,
     packages: &BTreeSet<String>,
@@ -1203,6 +1242,61 @@ fn collect_local_dependency_packages(
             packages.insert(package);
         }
     }
+}
+
+fn local_library_dependency_packages(project: &Project, manifest: &Value) -> BTreeSet<String> {
+    let mut packages = BTreeSet::new();
+
+    if let Some(table) = manifest.get("dependencies").and_then(Value::as_table) {
+        collect_local_dependency_packages(project, table, &mut packages);
+    }
+
+    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            if let Some(table) = target.get("dependencies").and_then(Value::as_table) {
+                collect_local_dependency_packages(project, table, &mut packages);
+            }
+        }
+    }
+
+    packages
+}
+
+fn package_should_copy_library_support_source(package: &crate::manifest::Package) -> bool {
+    package
+        .entry_target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "example" | "test" | "bench"))
+        && package_library_source_path(package).is_some()
+}
+
+fn package_library_source_path(package: &crate::manifest::Package) -> Option<PathBuf> {
+    if package
+        .entry_target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "lib" | "proc-macro"))
+    {
+        return None;
+    }
+    if let Some(path) = package
+        .manifest
+        .get("lib")
+        .and_then(|lib| lib.get("path"))
+        .and_then(Value::as_str)
+    {
+        return existing_package_path(&package.root, path);
+    }
+    existing_package_path(&package.root, "src/lib.rs")
+}
+
+fn existing_package_path(root: &FsPath, path: &str) -> Option<PathBuf> {
+    let path = root.join(path);
+    path.exists().then_some(path)
 }
 
 fn dependency_package_name(alias: &str, value: &Value) -> String {
