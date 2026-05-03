@@ -985,6 +985,198 @@ fn keeps_optional_dependency_requested_by_retained_local_package_feature() {
 }
 
 #[test]
+fn retains_mutex_guard_field_method_and_associated_const_imports() {
+    let workspace = temp_path("mutex-field-workspace");
+    let output = temp_path("mutex-field-output");
+    let target_dir = temp_path("mutex-field-target");
+    write_mutex_field_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(source.contains("Duration"));
+    assert!(source.contains("fn push"));
+    assert!(source.contains("const INTERVAL"));
+    assert!(source.contains("Weak"));
+    assert!(source.contains("SqlInterruptHandle"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated mutex field slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn retains_marker_trait_impls_external_trait_imports_and_method_arg_impls() {
+    let workspace = temp_path("external-trait-workspace");
+    let output = temp_path("external-trait-output");
+    let target_dir = temp_path("external-trait-target");
+    write_external_trait_method_arg_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("app/src/lib.rs"));
+    assert!(lib.contains("Engine"));
+    assert!(lib.contains("impl Eq for Guid"));
+    assert!(lib.contains("impl Visitor"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external trait slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_associated_conversion_impls_for_external_targets() {
+    let workspace = temp_path("associated-conversion-workspace");
+    let output = temp_path("associated-conversion-output");
+    let target_dir = temp_path("associated-conversion-target");
+    write_associated_conversion_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("app/src/lib.rs"));
+    assert!(lib.contains("impl From<Timestamp> for SystemTime"));
+    assert!(lib.contains("impl From<SystemTime> for Timestamp"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated associated conversion slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_extension_traits_macro_reexports_try_conversions_and_impl_trait_bounds() {
+    let workspace = temp_path("feedback-layer-workspace");
+    let output = temp_path("feedback-layer-output");
+    let target_dir = temp_path("feedback-layer-target");
+    write_feedback_layer_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("app/src/lib.rs"));
+    let db = read(output.join("app/src/db.rs"));
+    assert!(lib.contains("error_support"));
+    assert!(db.contains("trait ConnExt"));
+    assert!(db.contains("impl ConnExt for SystemTime"));
+    assert!(db.contains("fmt::Display for RepeatDisplay"));
+    assert!(db.contains("impl From<std::io::Error> for LocalError"));
+    assert!(db.contains("impl std::error::Error for Interrupted"));
+    assert!(db.contains("fn is_valid"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated feedback layer slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}\nsrc/db.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+        db,
+    );
+}
+
+#[test]
+fn retains_struct_literals_glob_reexported_functions_collect_impls_and_attr_macro_helpers() {
+    let workspace = temp_path("feedback-places-workspace");
+    let output = temp_path("feedback-places-output");
+    let target_dir = temp_path("feedback-places-target");
+    write_feedback_places_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app_db = read(output.join("app/src/db.rs"));
+    let helper_lib = read(output.join("helper/src/lib.rs"));
+    let helper_chunks = read(output.join("helper/src/chunks.rs"));
+    let error_support = read(output.join("error-support/src/lib.rs"));
+    assert!(app_db.contains("struct PlacesInitializer"));
+    assert!(app_db.contains("impl Initializer for PlacesInitializer"));
+    assert!(app_db.contains("struct HistoryRecord"));
+    assert!(app_db.contains("impl std::iter::FromIterator<VisitType> for VisitTransitionSet"));
+    assert!(helper_lib.contains("pub use chunks::*"));
+    assert!(helper_chunks.contains("pub fn each_chunk"));
+    assert!(error_support.contains("convert_log_report_error"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated feedback places slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/src/db.rs:\n{}\nhelper/src/lib.rs:\n{}\nhelper/src/chunks.rs:\n{}\nerror-support/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_db,
+        helper_lib,
+        helper_chunks,
+        error_support,
+    );
+}
+
+#[test]
 fn resolves_external_workspace_path_dependencies_from_original_root() {
     let workspace = temp_path("external-workspace-dep-workspace");
     let output = temp_path("external-workspace-dep-output");
@@ -3988,6 +4180,644 @@ feature_dep = { path = "../feature_dep", optional = true }
         "feature_dep",
         r#"pub fn value() -> &'static str {
     "feature"
+}
+"#,
+    );
+}
+
+fn write_mutex_field_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lazy_static = "1"
+opensourced.workspace = true
+parking_lot = "0.12"
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use std::{
+    collections::HashMap,
+    sync::Weak,
+    time::{Duration, Instant},
+};
+
+use opensourced::opensourced;
+use parking_lot::Mutex;
+
+static GLOBALS: Mutex<Globals> = Mutex::new(Globals::new());
+
+lazy_static::lazy_static! {
+    static ref REGISTERED_INTERRUPTS: Mutex<Vec<Weak<dyn AsRef<SqlInterruptHandle> + Send + Sync>>> = Mutex::new(Vec::new());
+}
+
+#[opensourced]
+pub fn selected(message: String) {
+    GLOBALS.lock().breadcrumbs.push(message);
+    let _registered_count = REGISTERED_INTERRUPTS.lock().len();
+}
+
+pub struct SqlInterruptHandle;
+
+impl AsRef<SqlInterruptHandle> for SqlInterruptHandle {
+    fn as_ref(&self) -> &SqlInterruptHandle {
+        self
+    }
+}
+
+struct Globals {
+    breadcrumbs: BreadcrumbRingBuffer,
+    rate_limiter: RateLimiter,
+}
+
+impl Globals {
+    const fn new() -> Self {
+        Self {
+            breadcrumbs: BreadcrumbRingBuffer::new(),
+            rate_limiter: RateLimiter::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct BreadcrumbRingBuffer {
+    breadcrumbs: Vec<String>,
+    pos: usize,
+}
+
+impl BreadcrumbRingBuffer {
+    const MAX_ITEMS: usize = 20;
+
+    const fn new() -> Self {
+        Self {
+            breadcrumbs: Vec::new(),
+            pos: 0,
+        }
+    }
+
+    fn push(&mut self, breadcrumb: String) {
+        if self.breadcrumbs.len() < Self::MAX_ITEMS {
+            self.breadcrumbs.push(breadcrumb);
+        } else {
+            self.breadcrumbs[self.pos] = breadcrumb;
+            self.pos = (self.pos + 1) % Self::MAX_ITEMS;
+        }
+    }
+}
+
+struct RateLimiter {
+    last_report: Option<HashMap<String, Instant>>,
+}
+
+impl RateLimiter {
+    const INTERVAL: Duration = Duration::from_secs(180);
+
+    const fn new() -> Self {
+        Self { last_report: None }
+    }
+}
+"#,
+    );
+}
+
+fn write_external_trait_method_arg_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.21"
+opensourced.workspace = true
+serde = "1"
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use std::{cmp::Ordering, fmt};
+
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use opensourced::opensourced;
+use serde::de::{self, Deserializer, Visitor};
+
+#[derive(Clone)]
+pub struct Guid(String);
+
+impl Guid {
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl Ord for Guid {
+    #[opensourced]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_bytes().cmp(other.as_bytes())
+    }
+}
+
+impl PartialOrd for Guid {
+    #[opensourced]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Guid {
+    #[opensourced]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for Guid {}
+
+struct GuidVisitor;
+
+impl Visitor<'_> for GuidVisitor {
+    type Value = Guid;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a guid")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(Guid(value.to_string()))
+    }
+}
+
+#[opensourced]
+pub fn selected<'de, D>(deserializer: D) -> Result<Guid, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = [0u8; 9];
+    let mut output = [0u8; 12];
+    URL_SAFE_NO_PAD.encode_slice(bytes, &mut output).unwrap();
+    let left = Guid("a".to_string());
+    let right = Guid("b".to_string());
+    let _ordering = Ord::cmp(&left, &right);
+    let _same = PartialEq::eq(&left, &right);
+    deserializer.deserialize_str(GuidVisitor)
+}
+"#,
+    );
+}
+
+fn write_associated_conversion_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use opensourced::opensourced;
+
+#[derive(Copy, Clone)]
+pub struct Timestamp(pub u64);
+
+impl Timestamp {
+    #[opensourced]
+    pub fn checked_sub(self, d: Duration) -> Option<Timestamp> {
+        SystemTime::from(self).checked_sub(d).map(Timestamp::from)
+    }
+}
+
+impl From<SystemTime> for Timestamp {
+    fn from(st: SystemTime) -> Self {
+        let d = st.duration_since(UNIX_EPOCH).unwrap();
+        Timestamp((d.as_secs()) * 1000 + (u64::from(d.subsec_nanos()) / 1_000_000))
+    }
+}
+
+impl From<Timestamp> for SystemTime {
+    fn from(ts: Timestamp) -> Self {
+        UNIX_EPOCH + Duration::from_millis(ts.0)
+    }
+}
+
+impl From<u64> for Timestamp {
+    fn from(ts: u64) -> Self {
+        Timestamp(ts)
+    }
+}
+"#,
+    );
+}
+
+fn write_feedback_layer_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "error-support"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("error-support/Cargo.toml"),
+        r#"[package]
+name = "error-support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("error-support/src/lib.rs"),
+        r#"#[macro_export]
+macro_rules! debug {
+    ($($tokens:tt)*) => {};
+}
+
+#[macro_export]
+macro_rules! warn {
+    ($($tokens:tt)*) => {};
+}
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support = { path = "../error-support" }
+opensourced.workspace = true
+thiserror = "2"
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"#![allow(unused_macros)]
+
+mod db;
+
+use error_support::{debug, warn};
+
+pub use db::selected;
+"#,
+    );
+    write(
+        root.join("app/src/db.rs"),
+        r#"use std::{fmt, time::SystemTime};
+
+use crate::{debug, warn};
+use opensourced::opensourced;
+use thiserror::Error;
+
+type Result<T> = std::result::Result<T, LocalError>;
+
+#[derive(Debug, Error)]
+pub enum LocalError {
+    #[error("io")]
+    Io,
+    #[error("interrupted {0}")]
+    Interrupted(#[from] Interrupted),
+}
+
+impl From<std::io::Error> for LocalError {
+    fn from(_: std::io::Error) -> Self {
+        Self::Io
+    }
+}
+
+#[derive(Debug)]
+pub struct Interrupted;
+
+impl Interrupted {
+    fn is_valid(&self) -> bool {
+        true
+    }
+}
+
+impl fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+pub trait ConnExt {
+    fn conn(&self) -> &SystemTime;
+
+    fn set_pragma(&self) -> std::result::Result<(), std::io::Error> {
+        let _ = self.conn();
+        fallible()
+    }
+}
+
+impl ConnExt for SystemTime {
+    fn conn(&self) -> &SystemTime {
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RepeatDisplay<'a, F> {
+    count: usize,
+    sep: &'a str,
+    fmt_one: F,
+}
+
+impl<F> fmt::Display for RepeatDisplay<'_, F>
+where
+    F: Fn(usize, &mut fmt::Formatter<'_>) -> fmt::Result,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for i in 0..self.count {
+            if i != 0 {
+                f.write_str(self.sep)?;
+            }
+            (self.fmt_one)(i, f)?;
+        }
+        Ok(())
+    }
+}
+
+fn repeat_display<F>(count: usize, sep: &str, fmt_one: F) -> RepeatDisplay<'_, F>
+where
+    F: Fn(usize, &mut fmt::Formatter<'_>) -> fmt::Result,
+{
+    RepeatDisplay { count, sep, fmt_one }
+}
+
+pub fn repeat_sql_vars(count: usize) -> impl fmt::Display {
+    repeat_display(count, ",", |_, f| write!(f, "?"))
+}
+
+fn fallible() -> std::result::Result<(), std::io::Error> {
+    Ok(())
+}
+
+#[opensourced]
+pub fn selected(conn: &SystemTime, interrupted: Interrupted) -> Result<impl fmt::Display> {
+    debug!("selected");
+    warn!("selected");
+    assert!(interrupted.is_valid(), "invalid interrupted");
+    conn.set_pragma()?;
+    fallible()?;
+    Ok(repeat_sql_vars(1))
+}
+"#,
+    );
+}
+
+fn write_feedback_places_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "helper", "error-support", "error-support-macros"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("error-support-macros/Cargo.toml"),
+        r#"[package]
+name = "error-support-macros"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+    );
+    write(
+        root.join("error-support-macros/src/lib.rs"),
+        r#"use proc_macro::TokenStream;
+
+#[proc_macro_attribute]
+pub fn handle_error(_args: TokenStream, input: TokenStream) -> TokenStream {
+    input
+}
+"#,
+    );
+    write(
+        root.join("error-support/Cargo.toml"),
+        r#"[package]
+name = "error-support"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support-macros = { path = "../error-support-macros" }
+"#,
+    );
+    write(
+        root.join("error-support/src/lib.rs"),
+        r#"pub use error_support_macros::handle_error;
+
+pub fn convert_log_report_error<E>(error: E) -> E {
+    error
+}
+"#,
+    );
+    write(
+        root.join("helper/Cargo.toml"),
+        r#"[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("helper/src/lib.rs"),
+        r#"mod chunks;
+pub use chunks::*;
+
+pub fn unused_root() {}
+"#,
+    );
+    write(
+        root.join("helper/src/chunks.rs"),
+        r#"pub fn each_chunk<T, F>(items: &[T], mut do_chunk: F)
+where
+    F: FnMut(&[T]),
+{
+    do_chunk(items);
+}
+
+pub fn unused_chunk() {}
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support = { path = "../error-support" }
+helper = { path = "../helper" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"mod db;
+
+pub use db::selected;
+"#,
+    );
+    write(
+        root.join("app/src/db.rs"),
+        r#"use error_support::handle_error;
+use opensourced::opensourced;
+
+#[derive(Debug)]
+pub struct LocalError;
+
+struct PlacesInitializer {
+    seed: usize,
+}
+
+trait Initializer {
+    fn seed(&self) -> usize;
+}
+
+impl Initializer for PlacesInitializer {
+    fn seed(&self) -> usize {
+        self.seed
+    }
+}
+
+fn open_with_initializer<I: Initializer>(initializer: &I) -> usize {
+    initializer.seed()
+}
+
+struct HistoryRecord {
+    id: String,
+}
+
+#[derive(Clone)]
+pub enum VisitType {
+    Link,
+}
+
+pub struct VisitTransitionSet(Vec<VisitType>);
+
+impl VisitTransitionSet {
+    fn for_specific(types: &[VisitType]) -> VisitTransitionSet {
+        types.iter().cloned().collect()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl std::iter::FromIterator<VisitType> for VisitTransitionSet {
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = VisitType>,
+    {
+        let mut items = Vec::new();
+        for item in iter {
+            items.push(item);
+        }
+        Self(items)
+    }
+}
+
+#[opensourced]
+#[handle_error(LocalError)]
+pub fn selected(values: Vec<VisitType>) -> std::result::Result<usize, LocalError> {
+    let initializer = PlacesInitializer { seed: 1 };
+    let record = HistoryRecord {
+        id: "history".to_string(),
+    };
+    let transitions = VisitTransitionSet::for_specific(&values);
+    helper::each_chunk(&values, |_| {});
+    Ok(open_with_initializer(&initializer) + record.id.len() + transitions.len())
 }
 "#,
     );

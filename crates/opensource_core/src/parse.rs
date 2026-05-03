@@ -165,7 +165,12 @@ impl Parser {
                 | Item::Const(_)
                 | Item::Static(_)
                 | Item::Macro(_) => {
-                    if let Some((name, kind)) = item_name_and_kind(item) {
+                    if let Some((name, kind)) = item_name_and_kind(item).or_else(|| {
+                        let Item::Macro(item_macro) = item else {
+                            return None;
+                        };
+                        bitflags_struct_name(item_macro).map(|name| (name, ItemKind::Struct))
+                    }) {
                         let id = ItemId {
                             package: package.to_string(),
                             module_path: module_path.to_vec(),
@@ -354,6 +359,12 @@ impl Parser {
         self_ty: &Type,
         aliases: &HashMap<String, Vec<String>>,
     ) -> Option<Vec<String>> {
+        if let Some(path) = raw_local_type_path(module_path, self_ty) {
+            let canonical = self.canonical_type_path(package, module_path, path);
+            if self.has_type_like_item(package, &canonical) {
+                return Some(canonical);
+            }
+        }
         let path = local_type_path(module_path, self_ty, aliases)?;
         Some(self.canonical_type_path(package, module_path, path))
     }
@@ -486,6 +497,29 @@ fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
     }
 }
 
+fn bitflags_struct_name(item: &syn::ItemMacro) -> Option<String> {
+    if !item
+        .mac
+        .path
+        .segments
+        .last()
+        .is_some_and(|segment| segment.ident == "bitflags")
+    {
+        return None;
+    }
+    let mut saw_struct = false;
+    for token in item.mac.tokens.clone() {
+        let TokenTree::Ident(ident) = token else {
+            continue;
+        };
+        if saw_struct {
+            return Some(ident.to_string());
+        }
+        saw_struct = ident == "struct";
+    }
+    None
+}
+
 fn collect_aliases(
     items: &[Item],
     parent_aliases: Option<&HashMap<String, Vec<String>>>,
@@ -578,6 +612,21 @@ fn local_type_path(
         aliases,
     );
     normalize_segments(module_path, segments)
+}
+
+fn raw_local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>> {
+    let Type::Path(type_path) = self_ty else {
+        return None;
+    };
+    normalize_segments(
+        module_path,
+        type_path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
 }
 
 fn normalized_path(

@@ -5,9 +5,9 @@ use quote::ToTokens;
 use syn::{
     parse::Parser,
     visit::{self, Visit},
-    Expr, ExprCall, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, FnArg, GenericArgument,
-    ImplItem, Item, ItemMacro, Local, Macro, Member, Meta, Pat, PatTupleStruct, Path,
-    PathArguments, ReturnType, Type, TypePath, UseTree,
+    Expr, ExprCall, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, ExprStruct, FnArg,
+    GenericArgument, ImplItem, Item, ItemMacro, Local, Macro, Member, Meta, Pat, PatTupleStruct,
+    Path, PathArguments, ReturnType, Stmt, Type, TypePath, UseTree,
 };
 
 use crate::model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId};
@@ -859,8 +859,14 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
                 self_type: None,
             };
             let mut visitor = DependencyVisitor::new(resolver);
+            for attr in &record.item.attrs {
+                visitor.visit_attribute(attr);
+            }
             visitor.visit_signature(&record.item.sig);
             visitor.add_expected_parse_types_from_return(&record.item.sig.output);
+            visitor.add_expected_error_types_from_return(&record.item.sig.output);
+            visitor.add_expected_collect_types_from_return(&record.item.sig.output);
+            visitor.add_impl_trait_return_dependencies(&record.item.sig.output, &record.item.block);
             visitor.add_fn_inputs(&record.item.sig.inputs);
             visitor.visit_block(&record.item.block);
             visitor.dependencies
@@ -889,13 +895,19 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
                 visitor.dependencies.items.insert(item);
             }
             if let Some(trait_path) = trait_path {
-                if let Some(item) = visitor.resolver.resolve_local_trait_item(trait_path) {
+                if let Some(item) = visitor.resolver.resolve_trait_item(trait_path) {
                     visitor.dependencies.items.insert(item);
                 }
+            }
+            for attr in &record.item.attrs {
+                visitor.visit_attribute(attr);
             }
             visitor.visit_impl_peers(callable, record, trait_path.is_some());
             visitor.visit_signature(&record.item.sig);
             visitor.add_expected_parse_types_from_return(&record.item.sig.output);
+            visitor.add_expected_error_types_from_return(&record.item.sig.output);
+            visitor.add_expected_collect_types_from_return(&record.item.sig.output);
+            visitor.add_impl_trait_return_dependencies(&record.item.sig.output, &record.item.block);
             visitor.add_fn_inputs(&record.item.sig.inputs);
             visitor.visit_block(&record.item.block);
             visitor.dependencies
@@ -1002,6 +1014,8 @@ struct DependencyVisitor<'a> {
     dependencies: DependencySet,
     variables: HashMap<String, TypeRef>,
     expected_parse_types: BTreeSet<TypeRef>,
+    expected_error_types: BTreeSet<TypeRef>,
+    expected_collect_types: BTreeSet<TypeRef>,
 }
 
 impl<'a> DependencyVisitor<'a> {
@@ -1011,6 +1025,8 @@ impl<'a> DependencyVisitor<'a> {
             dependencies: DependencySet::default(),
             variables: HashMap::new(),
             expected_parse_types: BTreeSet::new(),
+            expected_error_types: BTreeSet::new(),
+            expected_collect_types: BTreeSet::new(),
         }
     }
 
@@ -1057,8 +1073,16 @@ impl<'a> DependencyVisitor<'a> {
                 if name == "self" {
                     return self.resolver.self_type.clone();
                 }
-                self.variables.get(&name).cloned()
+                self.variables
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| self.resolver.type_from_value_path(&path.path))
+                    .or_else(|| self.resolver.resolve_type_path(&path.path))
             }
+            Expr::Path(path) => self
+                .resolver
+                .type_from_value_path(&path.path)
+                .or_else(|| self.resolver.resolve_type_path(&path.path)),
             Expr::Call(call) => self.wrapper_constructor_arg_type(call).or_else(|| {
                 if let Expr::Path(path) = call.func.as_ref() {
                     self.resolver.type_from_expr_path_call(path)
@@ -1067,6 +1091,11 @@ impl<'a> DependencyVisitor<'a> {
                 }
             }),
             Expr::MethodCall(call) => self.method_call_return_type(call),
+            Expr::Try(expr) => self
+                .expression_type_arguments(&expr.expr)
+                .into_iter()
+                .next()
+                .or_else(|| self.receiver_type(&expr.expr)),
             Expr::Field(field) => {
                 let receiver = self.receiver_type(&field.base)?;
                 self.resolver.field_type(&receiver, &field.member)
@@ -1101,14 +1130,27 @@ impl<'a> DependencyVisitor<'a> {
                 }
             }),
             Expr::MethodCall(call) => self.method_call_return_type(call),
+            Expr::Try(expr) => self
+                .expression_type_arguments(&expr.expr)
+                .into_iter()
+                .next()
+                .or_else(|| self.infer_expr_type(&expr.expr)),
             Expr::Field(field) => {
                 let receiver = self.receiver_type(&field.base)?;
                 self.resolver.field_type(&receiver, &field.member)
             }
             Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments.first()?.ident.to_string();
-                self.variables.get(&name).cloned()
+                self.variables
+                    .get(&name)
+                    .cloned()
+                    .or_else(|| self.resolver.type_from_value_path(&path.path))
+                    .or_else(|| self.resolver.resolve_type_path(&path.path))
             }
+            Expr::Path(path) => self
+                .resolver
+                .type_from_value_path(&path.path)
+                .or_else(|| self.resolver.resolve_type_path(&path.path)),
             Expr::Struct(expr) => self.resolver.resolve_type_path(&expr.path),
             Expr::Reference(reference) => self.infer_expr_type(&reference.expr),
             Expr::Paren(paren) => self.infer_expr_type(&paren.expr),
@@ -1124,6 +1166,9 @@ impl<'a> DependencyVisitor<'a> {
                 .and_then(|initial| self.infer_expr_type(initial));
         }
         if matches!(call.method.to_string().as_str(), "as_ref" | "clone") {
+            return self.receiver_type(&call.receiver);
+        }
+        if call.method == "lock" && call.args.is_empty() {
             return self.receiver_type(&call.receiver);
         }
         let receiver = self.receiver_type(&call.receiver)?;
@@ -1163,6 +1208,34 @@ impl<'a> DependencyVisitor<'a> {
     fn add_expected_parse_types_from_return(&mut self, output: &ReturnType) {
         self.expected_parse_types
             .extend(self.resolver.type_arguments_from_return_type(output));
+    }
+
+    fn add_expected_error_types_from_return(&mut self, output: &ReturnType) {
+        if let Some(type_ref) = self.resolver.error_type_from_return_type(output) {
+            self.expected_error_types.insert(type_ref);
+        }
+    }
+
+    fn add_expected_collect_types_from_return(&mut self, output: &ReturnType) {
+        if let Some(type_ref) = self.resolver.type_from_return_type(output) {
+            self.expected_collect_types.insert(type_ref);
+        }
+    }
+
+    fn add_impl_trait_return_dependencies(&mut self, output: &ReturnType, block: &syn::Block) {
+        let trait_names = impl_trait_return_bound_names(output);
+        if trait_names.is_empty() {
+            return;
+        }
+        let Some(expression) = final_block_expression(block) else {
+            return;
+        };
+        let Some(type_ref) = self.infer_expr_type(expression) else {
+            return;
+        };
+        for trait_name in trait_names {
+            self.add_trait_impls_for_type_named(&type_ref, &trait_name);
+        }
     }
 
     fn result_ok_type(&self, expression: &Expr) -> Option<TypeRef> {
@@ -1276,10 +1349,21 @@ impl<'a> DependencyVisitor<'a> {
 
     fn add_external_call_arg_trait_impls(&mut self, call: &ExprCall) {
         for argument in &call.args {
-            let Expr::Reference(_) = argument else {
-                continue;
-            };
-            if let Some(type_ref) = self.receiver_type(argument) {
+            if let Some(type_ref) = self
+                .receiver_type(argument)
+                .or_else(|| self.infer_expr_type(argument))
+            {
+                self.add_trait_impls_for_type(&type_ref);
+            }
+        }
+    }
+
+    fn add_external_method_arg_trait_impls(&mut self, call: &ExprMethodCall) {
+        for argument in &call.args {
+            if let Some(type_ref) = self
+                .receiver_type(argument)
+                .or_else(|| self.infer_expr_type(argument))
+            {
                 self.add_trait_impls_for_type(&type_ref);
             }
         }
@@ -1356,6 +1440,39 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_extension_trait_dependencies_for_method(
+        &mut self,
+        type_ref: &TypeRef,
+        method_name: &str,
+    ) {
+        let type_refs = self.resolver.type_ref_candidates(type_ref);
+        for callable in self.resolver.project.methods.keys() {
+            let CallableId::Method {
+                package,
+                type_path,
+                trait_path: Some(trait_path),
+                ..
+            } = callable
+            else {
+                continue;
+            };
+            if !type_refs.iter().any(|candidate| {
+                package == &candidate.package
+                    && conversion_input_matches_receiver(type_path, candidate)
+            }) {
+                continue;
+            }
+            let Some(trait_item) = self.resolver.resolve_local_trait_item(trait_path) else {
+                continue;
+            };
+            if !trait_item_contains_method(self.resolver.project, &trait_item, method_name) {
+                continue;
+            }
+            self.dependencies.items.insert(trait_item);
+            self.dependencies.callables.insert(callable.clone());
+        }
+    }
+
     fn add_conversion_impls_by_trait(&mut self, trait_name: &str, method_name: &str) {
         for callable in self.resolver.project.methods.keys() {
             let CallableId::Method {
@@ -1381,8 +1498,71 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_conversion_impls_for_associated_call_arg(&mut self, path: &Path, call: &ExprCall) {
+        let segments = path_segments(path);
+        let Some(method) = segments.last().map(String::as_str) else {
+            return;
+        };
+        let Some((trait_name, method_name)) = (match method {
+            "from" => Some(("From", "from")),
+            "try_from" => Some(("TryFrom", "try_from")),
+            _ => None,
+        }) else {
+            return;
+        };
+        if segments.len() < 2 {
+            return;
+        }
+
+        if let Some(target) = self
+            .resolver
+            .resolve_type_segments(&segments[..segments.len() - 1])
+            .or_else(|| {
+                segments.get(segments.len() - 2).map(|name| TypeRef {
+                    package: self.resolver.package.to_string(),
+                    type_path: vec![name.clone()],
+                })
+            })
+        {
+            for callable in
+                self.resolver
+                    .resolve_conversion_impls_to_target(&target, trait_name, method_name)
+            {
+                self.dependencies.callables.insert(callable);
+            }
+        }
+
+        let Some(first_arg) = call.args.first() else {
+            return;
+        };
+        let Some(receiver) = self
+            .receiver_type(first_arg)
+            .or_else(|| self.infer_expr_type(first_arg))
+        else {
+            return;
+        };
+
+        for callable in self
+            .resolver
+            .resolve_conversion_impls(&receiver, trait_name, method_name)
+        {
+            self.dependencies.callables.insert(callable);
+        }
+    }
+
     fn add_unresolved_method_fallback(&mut self, method_name: &str) {
-        if !matches!(method_name, "config" | "is_connected" | "spawn_detached") {
+        if !matches!(
+            method_name,
+            "allow_coenrollment"
+                | "config"
+                | "defaults_hash"
+                | "is_connected"
+                | "is_valid_for_places"
+                | "is_valid_for_sync_server"
+                | "name"
+                | "schema_hash"
+                | "spawn_detached"
+        ) {
             return;
         }
         for callable in self.resolver.project.methods.keys() {
@@ -1390,15 +1570,22 @@ impl<'a> DependencyVisitor<'a> {
                 package,
                 type_path,
                 method,
+                trait_path,
                 ..
             } = callable
             else {
                 continue;
             };
-            if package == self.resolver.package
-                && method == method_name
+            if method == method_name
                 && unresolved_method_fallback_type_matches(method_name, type_path)
+                && (package == self.resolver.package
+                    || unresolved_method_fallback_can_cross_packages(method_name))
             {
+                if let Some(trait_path) = trait_path {
+                    if let Some(trait_item) = self.resolver.resolve_local_trait_item(trait_path) {
+                        self.dependencies.items.insert(trait_item);
+                    }
+                }
                 self.dependencies.callables.insert(callable.clone());
             }
         }
@@ -1440,6 +1627,26 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_expression_macro_dependencies(&mut self, mac: &Macro) {
+        if !macro_path_ends_with(&mac.path, "assert")
+            && !macro_path_ends_with(&mac.path, "assert_eq")
+            && !macro_path_ends_with(&mac.path, "assert_ne")
+            && !macro_path_ends_with(&mac.path, "debug_assert")
+            && !macro_path_ends_with(&mac.path, "debug_assert_eq")
+            && !macro_path_ends_with(&mac.path, "debug_assert_ne")
+        {
+            return;
+        }
+
+        let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
+        let Ok(arguments) = parser.parse2(mac.tokens.clone()) else {
+            return;
+        };
+        for argument in arguments {
+            self.visit_expr(&argument);
+        }
+    }
+
     fn add_local_initializer_trait_dependencies(&mut self, local: &Local, type_ref: &TypeRef) {
         if local
             .init
@@ -1473,6 +1680,9 @@ impl<'a> DependencyVisitor<'a> {
             for type_ref in self.resolver.type_refs_in_type(&field.ty) {
                 for trait_name in &derive_traits {
                     self.add_trait_impls_for_type_named(&type_ref, trait_name);
+                    if trait_name == "Error" {
+                        self.add_trait_impls_for_type_named(&type_ref, "Display");
+                    }
                 }
             }
         }
@@ -1500,6 +1710,80 @@ impl<'a> DependencyVisitor<'a> {
     fn add_parse_method_trait_dependencies(&mut self) {
         for type_ref in self.expected_parse_types.clone() {
             self.add_trait_impls_for_type_named(&type_ref, "FromStr");
+        }
+    }
+
+    fn add_collect_method_trait_dependencies(&mut self) {
+        for type_ref in self.expected_collect_types.clone() {
+            self.add_trait_impls_for_type_named(&type_ref, "FromIterator");
+        }
+    }
+
+    fn add_method_turbofish_trait_dependencies(&mut self, call: &ExprMethodCall) {
+        let trait_name = match call.method.to_string().as_str() {
+            "get" => "FromSql",
+            _ => return,
+        };
+        let Some(arguments) = &call.turbofish else {
+            self.add_local_trait_impls_named(trait_name);
+            return;
+        };
+        let type_refs = arguments
+            .args
+            .iter()
+            .filter_map(|argument| {
+                let GenericArgument::Type(ty) = argument else {
+                    return None;
+                };
+                self.resolver.resolve_receiver_type(ty)
+            })
+            .collect::<BTreeSet<_>>();
+        for type_ref in type_refs {
+            self.add_trait_impls_for_type_named(&type_ref, trait_name);
+        }
+    }
+
+    fn add_rusqlite_param_macro_trait_dependencies(&mut self, mac: &Macro) {
+        if !macro_path_ends_with(&mac.path, "params")
+            && !macro_path_ends_with(&mac.path, "named_params")
+        {
+            return;
+        }
+
+        for segments in token_path_candidates(&mac.tokens) {
+            if segments.len() == 1 {
+                if let Some(type_ref) = self.variables.get(&segments[0]).cloned() {
+                    self.add_trait_impls_for_type_named(&type_ref, "ToSql");
+                }
+                continue;
+            }
+            if segments.len() < 2 {
+                continue;
+            }
+            let type_segments = self
+                .resolver
+                .apply_alias(segments[..segments.len() - 1].to_vec());
+            if let Some(type_ref) = self.resolver.resolve_type_segments(&type_segments) {
+                self.add_trait_impls_for_type_named(&type_ref, "ToSql");
+            }
+        }
+    }
+
+    fn add_local_trait_impls_named(&mut self, trait_name: &str) {
+        for callable in self.resolver.project.methods.keys() {
+            let CallableId::Method {
+                package,
+                trait_path: Some(trait_path),
+                ..
+            } = callable
+            else {
+                continue;
+            };
+            if package == self.resolver.package
+                && trait_path.last().is_some_and(|name| name == trait_name)
+            {
+                self.dependencies.callables.insert(callable.clone());
+            }
         }
     }
 
@@ -1657,8 +1941,35 @@ impl<'ast> Visit<'ast> for UnresolvedExternalCallVisitor<'_, '_> {
     }
 }
 
+fn expr_contains_collect_call(expression: &Expr) -> bool {
+    let mut visitor = CollectMethodVisitor { found: false };
+    visitor.visit_expr(expression);
+    visitor.found
+}
+
+struct CollectMethodVisitor {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for CollectMethodVisitor {
+    fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        if call.method == "collect" {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+}
+
 impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
+        self.add_macro_path(attribute.path());
+        self.add_item_path(attribute.path());
+        if macro_path_ends_with(attribute.path(), "handle_error") {
+            if let Ok(path) = syn::parse_str::<Path>("error_support::convert_log_report_error") {
+                self.add_call_path(&path);
+            }
+        }
         for segments in string_literal_path_candidates(&attribute.meta.to_token_stream()) {
             let Ok(path) = syn::parse_str::<Path>(&segments.join("::")) else {
                 continue;
@@ -1672,6 +1983,13 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_local(&mut self, local: &'ast Local) {
         if let Some((name, type_ref)) = self.local_binding_type(local) {
             self.add_local_initializer_trait_dependencies(local, &type_ref);
+            if local
+                .init
+                .as_ref()
+                .is_some_and(|init| expr_contains_collect_call(&init.expr))
+            {
+                self.add_trait_impls_for_type_named(&type_ref, "FromIterator");
+            }
             self.variables.insert(name, type_ref);
         }
         visit::visit_local(self, local);
@@ -1687,6 +2005,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             for callable in &resolved_callables {
                 self.dependencies.callables.insert(callable.clone());
             }
+            self.add_external_call_arg_trait_impls(call);
             if resolved_callables.is_empty() && path.path.segments.len() >= 2 {
                 if let Some(method) = path.path.segments.last() {
                     self.add_unresolved_method_fallback(&method.ident.to_string());
@@ -1700,14 +2019,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                         }
                     }
                 }
-                if resolved_callables.is_empty() {
-                    self.add_external_call_arg_trait_impls(call);
-                }
                 if is_conversion_adapter_path(&path.path, "Into", "into") {
                     self.add_conversion_impls_by_trait("From", "from");
                 } else if is_conversion_adapter_path(&path.path, "TryInto", "try_into") {
                     self.add_conversion_impls_by_trait("TryFrom", "try_from");
                 }
+                self.add_conversion_impls_for_associated_call_arg(&path.path, call);
             }
         }
         visit::visit_expr_call(self, call);
@@ -1794,6 +2111,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 for type_ref in self.resolver.type_refs_in_type(&field.ty) {
                     for trait_name in &derive_traits {
                         self.add_trait_impls_for_type_named(&type_ref, trait_name);
+                        if trait_name == "Error" {
+                            self.add_trait_impls_for_type_named(&type_ref, "Display");
+                        }
                     }
                 }
             }
@@ -1804,8 +2124,17 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_macro(&mut self, mac: &'ast Macro) {
         self.add_macro_path(&mac.path);
         self.add_format_macro_trait_dependencies(mac);
+        self.add_expression_macro_dependencies(mac);
+        self.add_rusqlite_param_macro_trait_dependencies(mac);
         self.add_macro_token_dependencies(&mac.tokens);
         visit::visit_macro(self, mac);
+    }
+
+    fn visit_expr_try(&mut self, expr: &'ast syn::ExprTry) {
+        for type_ref in self.expected_error_types.clone() {
+            self.add_trait_impls_for_type_named(&type_ref, "From");
+        }
+        visit::visit_expr_try(self, expr);
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
@@ -1815,6 +2144,8 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         if self.visit_single_payload_closure_method_call(call) {
             return;
         }
+        self.add_unresolved_method_fallback(&call.method.to_string());
+        self.add_method_turbofish_trait_dependencies(call);
         if let Some(receiver) = self.receiver_type(&call.receiver) {
             let method = call.method.to_string();
             let resolved_methods = self.resolver.resolve_methods(&receiver, &method);
@@ -1823,8 +2154,11 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.dependencies.callables.insert(callable);
             }
             if !has_resolved_method {
+                self.add_unresolved_method_fallback(&method);
                 self.add_trait_impls_for_type_named(&receiver, "Deref");
                 self.add_trait_impls_for_type_named(&receiver, "DerefMut");
+                self.add_extension_trait_dependencies_for_method(&receiver, &method);
+                self.add_external_method_arg_trait_impls(call);
             }
             if call.method == "into" {
                 for callable in self
@@ -1844,6 +2178,8 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_trait_impls_for_type_named(&receiver, "Display");
             } else if call.method == "parse" {
                 self.add_parse_method_trait_dependencies();
+            } else if call.method == "collect" {
+                self.add_collect_method_trait_dependencies();
             }
         } else if call.method == "into" {
             self.add_conversion_impls_by_trait("From", "from");
@@ -1851,10 +2187,18 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_conversion_impls_by_trait("TryFrom", "try_from");
         } else if call.method == "parse" {
             self.add_parse_method_trait_dependencies();
+        } else if call.method == "collect" {
+            self.add_collect_method_trait_dependencies();
         } else {
             self.add_unresolved_method_fallback(&call.method.to_string());
+            self.add_external_method_arg_trait_impls(call);
         }
         visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_struct(&mut self, expr: &'ast ExprStruct) {
+        self.add_item_path(&expr.path);
+        visit::visit_expr_struct(self, expr);
     }
 
     fn visit_expr_path(&mut self, path: &'ast ExprPath) {
@@ -1991,13 +2335,18 @@ impl Resolver<'_> {
             return Some(id);
         }
 
-        let alias = self.resolve_alias_target(&package, &module_path, &name)?;
-        let id = CallableId::Free {
-            package: alias.package,
-            module_path: alias.module_path,
-            name: alias.name,
-        };
-        self.project.functions.contains_key(&id).then_some(id)
+        if let Some(alias) = self.resolve_alias_target(&package, &module_path, &name) {
+            let id = CallableId::Free {
+                package: alias.package,
+                module_path: alias.module_path,
+                name: alias.name,
+            };
+            if self.project.functions.contains_key(&id) {
+                return Some(id);
+            }
+        }
+
+        self.find_glob_reexport_function(&package, &module_path, &name, &mut BTreeSet::new())
     }
 
     fn resolve_associated_method(&self, path: &Path) -> Option<CallableId> {
@@ -2167,6 +2516,23 @@ impl Resolver<'_> {
         })
     }
 
+    fn type_from_value_path(&self, path: &Path) -> Option<TypeRef> {
+        let item = self.resolve_item_path(path)?;
+        let record = self.project.items.get(&item)?;
+        let resolver = Resolver {
+            project: self.project,
+            package: &record.package,
+            module_path: &record.module_path,
+            aliases: &record.aliases,
+            self_type: None,
+        };
+        match &record.item {
+            Item::Const(item_const) => resolver.resolve_receiver_type(&item_const.ty),
+            Item::Static(item_static) => resolver.resolve_receiver_type(&item_static.ty),
+            _ => None,
+        }
+    }
+
     fn return_type_from_callable(&self, callable: &CallableId) -> Option<TypeRef> {
         match callable {
             CallableId::Free { .. } => {
@@ -2242,6 +2608,64 @@ impl Resolver<'_> {
         self.resolve_receiver_type(ty)
     }
 
+    fn error_type_from_return_type(&self, output: &ReturnType) -> Option<TypeRef> {
+        let ReturnType::Type(_, ty) = output else {
+            return None;
+        };
+        self.result_error_type(ty)
+    }
+
+    fn result_error_type(&self, ty: &Type) -> Option<TypeRef> {
+        match ty {
+            Type::Path(type_path) => {
+                if let Some(error_type) = self.result_error_type_from_path(&type_path.path) {
+                    return Some(error_type);
+                }
+                let alias = self.resolve_type_path(&type_path.path)?;
+                let item = self.resolver_item_for_type(&alias)?;
+                let record = self.project.items.get(&item)?;
+                let Item::Type(type_alias) = &record.item else {
+                    return None;
+                };
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.result_error_type(&type_alias.ty)
+            }
+            Type::Reference(reference) => self.result_error_type(&reference.elem),
+            Type::Group(group) => self.result_error_type(&group.elem),
+            Type::Paren(paren) => self.result_error_type(&paren.elem),
+            _ => None,
+        }
+    }
+
+    fn result_error_type_from_path(&self, path: &Path) -> Option<TypeRef> {
+        let last = path.segments.last()?;
+        if last.ident != "Result" {
+            return None;
+        }
+        let PathArguments::AngleBracketed(arguments) = &last.arguments else {
+            return None;
+        };
+        let mut type_arguments = arguments.args.iter().filter_map(|argument| {
+            let GenericArgument::Type(ty) = argument else {
+                return None;
+            };
+            Some(ty)
+        });
+        type_arguments.next()?;
+        let error_type = type_arguments.next()?;
+        self.resolve_receiver_type(error_type)
+    }
+
+    fn resolver_item_for_type(&self, type_ref: &TypeRef) -> Option<ItemId> {
+        self.find_item(&type_ref.package, &type_ref.type_path, &type_like_kinds())
+    }
+
     fn resolve_type(&self, ty: &Type) -> Option<TypeRef> {
         match ty {
             Type::Path(type_path) => self.resolve_type_path(&type_path.path),
@@ -2251,6 +2675,11 @@ impl Resolver<'_> {
     }
 
     fn resolve_receiver_type(&self, ty: &Type) -> Option<TypeRef> {
+        if let Type::Path(type_path) = ty {
+            if let Some(type_ref) = self.resolve_single_type_argument(&type_path.path) {
+                return Some(type_ref);
+            }
+        }
         if let Some(type_ref) = self.resolve_type(ty) {
             return Some(type_ref);
         }
@@ -2259,7 +2688,7 @@ impl Resolver<'_> {
             Type::Reference(reference) => self.resolve_receiver_type(&reference.elem),
             Type::Group(group) => self.resolve_receiver_type(&group.elem),
             Type::Paren(paren) => self.resolve_receiver_type(&paren.elem),
-            Type::Path(type_path) => self.resolve_single_type_argument(&type_path.path),
+            Type::Path(_) => None,
             _ => None,
         }
     }
@@ -2269,7 +2698,7 @@ impl Resolver<'_> {
         let wrapper = last.ident.to_string();
         if !matches!(
             wrapper.as_str(),
-            "Box" | "Rc" | "Arc" | "Cow" | "Pin" | "Ref" | "RefMut"
+            "Box" | "Rc" | "Arc" | "Cow" | "Pin" | "Ref" | "RefMut" | "Mutex" | "RwLock"
         ) {
             return None;
         }
@@ -2387,8 +2816,45 @@ impl Resolver<'_> {
             .collect()
     }
 
+    fn resolve_conversion_impls_to_target(
+        &self,
+        target: &TypeRef,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Vec<CallableId> {
+        let target_name = target.type_path.last();
+        self.project
+            .methods
+            .keys()
+            .filter_map(|id| {
+                let CallableId::Method {
+                    package,
+                    type_path,
+                    trait_path: Some(trait_path),
+                    method,
+                    ..
+                } = id
+                else {
+                    return None;
+                };
+                (method == method_name
+                    && trait_path
+                        .last()
+                        .is_some_and(|candidate| candidate == trait_name)
+                    && (package == &target.package || package == self.package)
+                    && (type_path == &target.type_path
+                        || target_name.is_some_and(|name| type_path.last() == Some(name))))
+                .then(|| id.clone())
+            })
+            .collect()
+    }
+
     fn resolve_type_path(&self, path: &Path) -> Option<TypeRef> {
-        let segments = self.apply_alias(path_segments(path));
+        let raw_segments = path_segments(path);
+        if let Some(type_ref) = self.resolve_type_segments(&raw_segments) {
+            return Some(type_ref);
+        }
+        let segments = self.apply_alias(raw_segments);
         self.resolve_type_segments(&segments)
     }
 
@@ -2584,7 +3050,9 @@ impl Resolver<'_> {
     }
 
     fn resolve_type_segments(&self, segments: &[String]) -> Option<TypeRef> {
-        let item = self.resolve_item_segments(segments)?;
+        let Some(item) = self.resolve_item_segments(segments) else {
+            return self.external_type_segments(segments);
+        };
         matches!(
             item.kind,
             ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type | ItemKind::Trait
@@ -2595,14 +3063,56 @@ impl Resolver<'_> {
         })
     }
 
+    fn external_type_segments(&self, segments: &[String]) -> Option<TypeRef> {
+        let first = segments.first()?;
+        if !matches!(first.as_str(), "std" | "core" | "alloc")
+            && !self.package_has_dependency_named(first)
+        {
+            return None;
+        }
+        Some(TypeRef {
+            package: self.package.to_string(),
+            type_path: segments.to_vec(),
+        })
+    }
+
+    fn package_has_dependency_named(&self, name: &str) -> bool {
+        let Some(package) = self.project.workspace.packages.get(self.package) else {
+            return false;
+        };
+        package
+            .dependencies
+            .iter()
+            .any(|dependency| dependency_name_matches(dependency, name))
+    }
+
     fn resolve_local_type_item(&self, type_path: &[String]) -> Option<ItemId> {
         self.find_item(self.package, type_path, &type_like_kinds())
     }
 
     fn resolve_local_trait_item(&self, trait_path: &[String]) -> Option<ItemId> {
-        let segments = self.apply_alias(trait_path.to_vec());
-        self.resolve_item_segments(&segments)
-            .filter(|item| item.kind == ItemKind::Trait)
+        self.find_item(self.package, trait_path, &[ItemKind::Trait])
+            .or_else(|| {
+                let segments = self.apply_alias(trait_path.to_vec());
+                self.resolve_item_segments(&segments)
+                    .filter(|item| item.kind == ItemKind::Trait)
+            })
+    }
+
+    fn resolve_trait_item(&self, trait_path: &[String]) -> Option<ItemId> {
+        if let Some(item) = self.resolve_local_trait_item(trait_path) {
+            return Some(item);
+        }
+        let name = trait_path.last()?;
+        let mut matches = self
+            .project
+            .items
+            .keys()
+            .filter(|item| item.kind == ItemKind::Trait && item.name == *name)
+            .cloned()
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.into_iter().next()
     }
 
     fn resolve_item_path(&self, path: &Path) -> Option<ItemId> {
@@ -2644,7 +3154,20 @@ impl Resolver<'_> {
                 return Some(item);
             }
         }
-        None
+        let Some(name) = segments.last() else {
+            return None;
+        };
+        let package = segments
+            .first()
+            .and_then(|first| self.resolve_dependency(first))
+            .unwrap_or_else(|| self.package.to_string());
+        self.project
+            .items
+            .keys()
+            .find(|item| {
+                item.package == package && item.kind == ItemKind::Macro && item.name == *name
+            })
+            .cloned()
     }
 
     fn find_item(&self, package: &str, path: &[String], kinds: &[ItemKind]) -> Option<ItemId> {
@@ -2738,6 +3261,63 @@ impl Resolver<'_> {
                 visited,
             ) {
                 return Some(item);
+            }
+        }
+
+        None
+    }
+
+    fn find_glob_reexport_function(
+        &self,
+        package: &str,
+        module_path: &[String],
+        name: &str,
+        visited: &mut BTreeSet<(String, Vec<String>, String)>,
+    ) -> Option<CallableId> {
+        if !visited.insert((package.to_string(), module_path.to_vec(), name.to_string())) {
+            return None;
+        }
+
+        let source = self
+            .project
+            .files
+            .values()
+            .find(|source| source.package == package && source.module_path == module_path)?;
+        for glob_path in visible_glob_use_paths(&source.syntax.items) {
+            let aliases = self
+                .project
+                .module_aliases
+                .get(&(package.to_string(), module_path.to_vec()))
+                .cloned()
+                .unwrap_or_default();
+            let resolver = Resolver {
+                project: self.project,
+                package,
+                module_path,
+                aliases: &aliases,
+                self_type: None,
+            };
+            let glob_path = resolver.apply_alias(glob_path);
+            let Some((target_package, target_module_path)) = resolver.resolve_prefix(&glob_path)
+            else {
+                continue;
+            };
+
+            let id = CallableId::Free {
+                package: target_package.clone(),
+                module_path: target_module_path.clone(),
+                name: name.to_string(),
+            };
+            if self.project.functions.contains_key(&id) {
+                return Some(id);
+            }
+            if let Some(callable) = self.find_glob_reexport_function(
+                &target_package,
+                &target_module_path,
+                name,
+                visited,
+            ) {
+                return Some(callable);
             }
         }
 
@@ -2952,6 +3532,69 @@ fn trait_path_is_conversion_like(trait_path: &[String]) -> bool {
     })
 }
 
+fn trait_item_contains_method(project: &Project, item: &ItemId, method_name: &str) -> bool {
+    let Some(record) = project.items.get(item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    item_trait.items.iter().any(|trait_item| {
+        let syn::TraitItem::Fn(function) = trait_item else {
+            return false;
+        };
+        function.sig.ident == method_name
+    })
+}
+
+fn impl_trait_return_bound_names(output: &ReturnType) -> BTreeSet<String> {
+    let ReturnType::Type(_, ty) = output else {
+        return BTreeSet::new();
+    };
+    let mut names = BTreeSet::new();
+    collect_impl_trait_bound_names(ty, &mut names);
+    names
+}
+
+fn collect_impl_trait_bound_names(ty: &Type, names: &mut BTreeSet<String>) {
+    match ty {
+        Type::ImplTrait(impl_trait) => {
+            for bound in &impl_trait.bounds {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    continue;
+                };
+                if let Some(segment) = trait_bound.path.segments.last() {
+                    names.insert(segment.ident.to_string());
+                }
+            }
+        }
+        Type::Path(type_path) => {
+            for segment in &type_path.path.segments {
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    continue;
+                };
+                for argument in &arguments.args {
+                    let GenericArgument::Type(ty) = argument else {
+                        continue;
+                    };
+                    collect_impl_trait_bound_names(ty, names);
+                }
+            }
+        }
+        Type::Reference(reference) => collect_impl_trait_bound_names(&reference.elem, names),
+        Type::Group(group) => collect_impl_trait_bound_names(&group.elem, names),
+        Type::Paren(paren) => collect_impl_trait_bound_names(&paren.elem, names),
+        _ => {}
+    }
+}
+
+fn final_block_expression(block: &syn::Block) -> Option<&Expr> {
+    match block.stmts.last()? {
+        Stmt::Expr(expr, None) => Some(expr),
+        _ => None,
+    }
+}
+
 fn conversion_input_matches_receiver(input_path: &[String], receiver: &TypeRef) -> bool {
     input_path == receiver.type_path
         || input_path.ends_with(&receiver.type_path)
@@ -2979,8 +3622,21 @@ fn unresolved_method_fallback_type_matches(method_name: &str, type_path: &[Strin
     matches!(
         (method_name, type_name),
         ("config", "ServerSession")
+            | ("allow_coenrollment", "FeatureDef")
+            | ("defaults_hash", "Vec")
             | ("is_connected", "ReconnectingIpcClient")
+            | ("is_valid_for_places", "Guid")
+            | ("is_valid_for_sync_server", "Guid")
+            | ("name", "FeatureDef")
+            | ("schema_hash", "Vec")
             | ("spawn_detached", "MobileClient")
+    )
+}
+
+fn unresolved_method_fallback_can_cross_packages(method_name: &str) -> bool {
+    matches!(
+        method_name,
+        "is_valid_for_places" | "is_valid_for_sync_server"
     )
 }
 

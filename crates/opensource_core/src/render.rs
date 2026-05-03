@@ -1083,6 +1083,12 @@ fn known_macro_dependency_usage(usage: &PackageSourceUsage, alias: &str, code_na
                 || usage.mentions_ident("serde")
         }
         "thiserror" => usage.mentions_ident("Error") && usage.mentions_ident("error"),
+        "bitflags" => usage.mentions_ident("bitflags"),
+        "error_support" => error_support_macro_idents()
+            .iter()
+            .any(|ident| usage.mentions_ident(ident)),
+        "error_support_macros" => usage.mentions_ident("handle_error"),
+        "lazy_static" => usage.mentions_ident("lazy_static"),
         "uniffi" => {
             usage.mentions_ident("Record")
                 || usage.mentions_ident("Object")
@@ -1118,6 +1124,14 @@ fn known_macro_dependency_package_mentions(
             reachable_package_mentions_ident(project, reduced, package, "Error")
                 && reachable_package_mentions_ident(project, reduced, package, "error")
         }
+        "bitflags" => reachable_package_mentions_ident(project, reduced, package, "bitflags"),
+        "error_support" => error_support_macro_idents()
+            .iter()
+            .any(|ident| reachable_package_mentions_ident(project, reduced, package, ident)),
+        "error_support_macros" => {
+            reachable_package_mentions_ident(project, reduced, package, "handle_error")
+        }
+        "lazy_static" => reachable_package_mentions_ident(project, reduced, package, "lazy_static"),
         "uniffi" => {
             reachable_package_mentions_ident(project, reduced, package, "Record")
                 || reachable_package_mentions_ident(project, reduced, package, "Object")
@@ -1135,6 +1149,47 @@ fn known_macro_dependency_package_mentions(
         }
         _ => false,
     }
+}
+
+fn known_macro_dependency_target_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    target: &[String],
+) -> bool {
+    let Some(first) = target.first() else {
+        return false;
+    };
+    let Some(leaf) = target.last() else {
+        return false;
+    };
+    match dependency_code_name(first).as_str() {
+        "bitflags" if leaf == "bitflags" => true,
+        "error_support_macros" if leaf == "handle_error" => true,
+        "lazy_static" if leaf == "lazy_static" => true,
+        "serde" | "serde_derive" if matches!(leaf.as_str(), "Deserialize" | "Serialize") => {
+            reachable_package_mentions_ident(project, reduced, package, leaf)
+        }
+        "serde" | "serde_derive" => false,
+        "thiserror" if leaf == "Error" => true,
+        "error_support" if error_support_macro_idents().contains(&leaf.as_str()) => {
+            reachable_package_mentions_ident(project, reduced, package, leaf)
+        }
+        code_name => known_macro_dependency_package_mentions(project, reduced, package, code_name),
+    }
+}
+
+fn error_support_macro_idents() -> &'static [&'static str] {
+    &[
+        "breadcrumb",
+        "debug",
+        "error",
+        "info",
+        "report_error",
+        "trace",
+        "trace_error",
+        "warn",
+    ]
 }
 
 fn dependency_code_name(alias: &str) -> String {
@@ -1517,6 +1572,17 @@ fn transform_items(
                 let trait_impl_is_required = trait_path.as_ref().is_some_and(|trait_path| {
                     trait_impl_items_are_reachable(reduced, package, &type_path, trait_path)
                 });
+                let marker_trait_impl_is_required = trait_path
+                    .as_ref()
+                    .and_then(|path| path.last())
+                    .is_some_and(|trait_name| {
+                        marker_trait_impl_should_remain(reduced, package, &type_path, trait_name)
+                    })
+                    && item_impl
+                        .items
+                        .iter()
+                        .filter(|impl_item| !impl_item_is_test(impl_item))
+                        .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
 
                 for impl_item in &item_impl.items {
                     if let ImplItem::Fn(method) = impl_item {
@@ -1540,7 +1606,7 @@ fn transform_items(
                     }
                 }
 
-                if kept_method || trait_impl_is_required {
+                if kept_method || trait_impl_is_required || marker_trait_impl_is_required {
                     if trait_path.is_some() {
                         kept_impl_items.clear();
                         for impl_item in &item_impl.items {
@@ -1959,6 +2025,64 @@ fn retained_impl_attrs_mention_ident(
     })
 }
 
+fn retained_impl_non_fn_items_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+
+    source.syntax.items.iter().any(|item| {
+        let Item::Impl(item_impl) = item else {
+            return false;
+        };
+        if !impl_has_reachable_method(project, reduced, package, module_path, item_impl, &aliases) {
+            return false;
+        }
+        item_impl.items.iter().any(|impl_item| {
+            !matches!(impl_item, ImplItem::Fn(_))
+                && !impl_item_is_test(impl_item)
+                && token_stream_mentions_ident(&impl_item.to_token_stream(), ident)
+        })
+    })
+}
+
+fn retained_macro_invocations_mention_ident(
+    project: &Project,
+    _reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+
+    source.syntax.items.iter().any(|item| match item {
+        Item::Macro(item_macro) if item_macro.ident.is_none() => {
+            token_stream_mentions_ident(&item_macro.mac.tokens, ident)
+        }
+        _ => false,
+    })
+}
+
 fn impl_has_reachable_method(
     project: &Project,
     reduced: &ReducedProject,
@@ -2016,6 +2140,54 @@ fn trait_impl_items_are_reachable(
     ) && path_item_is_reachable(reduced, package, trait_path, &[ItemKind::Trait])
 }
 
+fn reachable_trait_impl_method_for_type_named(
+    reduced: &ReducedProject,
+    package: &str,
+    type_path: &[String],
+    trait_name: &str,
+) -> bool {
+    reduced.reachable.iter().any(|callable| {
+        let CallableId::Method {
+            package: callable_package,
+            type_path: callable_type,
+            trait_path: Some(trait_path),
+            ..
+        } = callable
+        else {
+            return false;
+        };
+        callable_package == package
+            && callable_type == type_path
+            && trait_path.last().is_some_and(|name| name == trait_name)
+    })
+}
+
+fn marker_trait_impl_should_remain(
+    reduced: &ReducedProject,
+    package: &str,
+    type_path: &[String],
+    trait_name: &str,
+) -> bool {
+    if !path_item_is_reachable(
+        reduced,
+        package,
+        type_path,
+        &[
+            ItemKind::Struct,
+            ItemKind::Enum,
+            ItemKind::Union,
+            ItemKind::Type,
+        ],
+    ) {
+        return false;
+    }
+    match trait_name {
+        "Eq" => reachable_trait_impl_method_for_type_named(reduced, package, type_path, "Ord"),
+        "Error" => true,
+        _ => false,
+    }
+}
+
 fn path_item_is_reachable(
     reduced: &ReducedProject,
     package: &str,
@@ -2067,6 +2239,8 @@ fn reachable_module_mentions_ident(
                 })
             })
         || retained_impl_attrs_mention_ident(project, reduced, package, module_path, ident)
+        || retained_impl_non_fn_items_mention_ident(project, reduced, package, module_path, ident)
+        || retained_macro_invocations_mention_ident(project, reduced, package, module_path, ident)
 }
 
 fn reachable_module_has_method_call(
@@ -2633,6 +2807,12 @@ fn prune_use_tree(
         UseTree::Path(path) => {
             if prefix.is_empty()
                 && use_ident_is_pruned_local_dependency(project, reduced, package, &path.ident)
+                && !known_macro_dependency_package_mentions(
+                    project,
+                    reduced,
+                    package,
+                    &dependency_code_name(&path.ident.to_string()),
+                )
             {
                 return None;
             }
@@ -2713,11 +2893,15 @@ fn use_target_should_drop(
     target: &[String],
     is_public_use: bool,
 ) -> bool {
+    if known_macro_dependency_target_should_remain(project, reduced, package, target) {
+        return false;
+    }
+
     if target
         .first()
         .is_some_and(|first| use_name_is_pruned_local_dependency(project, reduced, package, first))
     {
-        return true;
+        return !known_macro_dependency_target_should_remain(project, reduced, package, target);
     }
 
     if target
@@ -2791,6 +2975,14 @@ fn use_target_should_drop(
 
     if project_has_module(project, &target_package, &target_path) {
         return !module_should_render(project, reduced, &target_package, &target_path);
+    }
+
+    if target.last().is_some_and(|leaf| {
+        reduced.reachable_items.iter().any(|item| {
+            item.package == package && item.kind == ItemKind::Trait && item.name == *leaf
+        })
+    }) {
+        return false;
     }
 
     target.last().is_some_and(|leaf| {
@@ -3173,7 +3365,13 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
         ]),
         (Some("serde"), "Serialize") => Some(&["serialize"]),
         (Some("sha1"), "Digest") => Some(&["chain_update", "finalize", "reset", "update"]),
-        (Some("base64"), "Engine") => Some(&["decode", "decode_slice", "encode", "encode_string"]),
+        (Some("base64"), "Engine") => Some(&[
+            "decode",
+            "decode_slice",
+            "encode",
+            "encode_slice",
+            "encode_string",
+        ]),
         _ => None,
     }
 }
@@ -3277,16 +3475,43 @@ fn resolve_reexported_use_path(
     package: &str,
     path: &[String],
 ) -> Option<(String, Vec<String>)> {
+    resolve_reexported_use_path_inner(project, package, path, &mut BTreeSet::new())
+}
+
+fn resolve_reexported_use_path_inner(
+    project: &Project,
+    package: &str,
+    path: &[String],
+    visited: &mut BTreeSet<(String, Vec<String>)>,
+) -> Option<(String, Vec<String>)> {
+    if !visited.insert((package.to_string(), path.to_vec())) {
+        return None;
+    }
     let name = path.last()?;
     let module_path = &path[..path.len() - 1];
     let aliases = project
         .module_aliases
         .get(&(package.to_string(), module_path.to_vec()))?;
     let target = aliases.get(name)?;
-    resolve_use_target_path(project, package, module_path, target)
+    let (target_package, target_path) =
+        resolve_use_target_path(project, package, module_path, target)?;
+    resolve_reexported_use_path_inner(project, &target_package, &target_path, visited)
+        .or(Some((target_package, target_path)))
 }
 
 fn find_use_function(project: &Project, package: &str, path: &[String]) -> Option<CallableId> {
+    find_use_function_direct(project, package, path).or_else(|| {
+        let name = path.last()?;
+        let module_path = path[..path.len() - 1].to_vec();
+        find_glob_reexport_function(project, package, &module_path, name, &mut BTreeSet::new())
+    })
+}
+
+fn find_use_function_direct(
+    project: &Project,
+    package: &str,
+    path: &[String],
+) -> Option<CallableId> {
     let name = path.last()?.clone();
     let module_path = path[..path.len() - 1].to_vec();
     let id = CallableId::Free {
@@ -3298,6 +3523,14 @@ fn find_use_function(project: &Project, package: &str, path: &[String]) -> Optio
 }
 
 fn find_use_item(project: &Project, package: &str, path: &[String]) -> Option<ItemId> {
+    find_use_item_direct(project, package, path).or_else(|| {
+        let name = path.last()?;
+        let module_path = path[..path.len() - 1].to_vec();
+        find_glob_reexport_item(project, package, &module_path, name, &mut BTreeSet::new())
+    })
+}
+
+fn find_use_item_direct(project: &Project, package: &str, path: &[String]) -> Option<ItemId> {
     let name = path.last()?.clone();
     let module_path = path[..path.len() - 1].to_vec();
     [
@@ -3322,6 +3555,105 @@ fn find_use_item(project: &Project, package: &str, path: &[String]) -> Option<It
     })
 }
 
+fn find_glob_reexport_function(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    name: &str,
+    visited: &mut BTreeSet<(String, Vec<String>, String)>,
+) -> Option<CallableId> {
+    if !visited.insert((package.to_string(), module_path.to_vec(), name.to_string())) {
+        return None;
+    }
+    let source = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)?;
+    for glob_path in visible_glob_use_paths(&source.syntax.items) {
+        let Some((target_package, target_module_path)) =
+            resolve_use_target_path(project, package, module_path, &glob_path)
+        else {
+            continue;
+        };
+        let mut target_path = target_module_path.clone();
+        target_path.push(name.to_string());
+        if let Some(callable) = find_use_function_direct(project, &target_package, &target_path) {
+            return Some(callable);
+        }
+        if let Some(callable) = find_glob_reexport_function(
+            project,
+            &target_package,
+            &target_module_path,
+            name,
+            visited,
+        ) {
+            return Some(callable);
+        }
+    }
+    None
+}
+
+fn find_glob_reexport_item(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    name: &str,
+    visited: &mut BTreeSet<(String, Vec<String>, String)>,
+) -> Option<ItemId> {
+    if !visited.insert((package.to_string(), module_path.to_vec(), name.to_string())) {
+        return None;
+    }
+    let source = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)?;
+    for glob_path in visible_glob_use_paths(&source.syntax.items) {
+        let Some((target_package, target_module_path)) =
+            resolve_use_target_path(project, package, module_path, &glob_path)
+        else {
+            continue;
+        };
+        let mut target_path = target_module_path.clone();
+        target_path.push(name.to_string());
+        if let Some(item) = find_use_item_direct(project, &target_package, &target_path) {
+            return Some(item);
+        }
+        if let Some(item) =
+            find_glob_reexport_item(project, &target_package, &target_module_path, name, visited)
+        {
+            return Some(item);
+        }
+    }
+    None
+}
+
+fn visible_glob_use_paths(items: &[Item]) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for item in items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_glob_use_paths(&item_use.tree, Vec::new(), &mut paths);
+    }
+    paths
+}
+
+fn collect_glob_use_paths(tree: &UseTree, mut prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_glob_use_paths(&path.tree, prefix, paths);
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_glob_use_paths(nested, prefix.clone(), paths);
+            }
+        }
+        UseTree::Glob(_) => paths.push(prefix),
+        UseTree::Name(_) | UseTree::Rename(_) => {}
+    }
+}
+
 fn project_has_module(project: &Project, package: &str, module_path: &[String]) -> bool {
     module_path.is_empty()
         || project
@@ -3335,6 +3667,9 @@ fn local_type_path(
     self_ty: &Type,
     aliases: &std::collections::HashMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
+    if let Type::Reference(reference) = self_ty {
+        return local_type_path(module_path, &reference.elem, aliases);
+    }
     let Type::Path(type_path) = self_ty else {
         return None;
     };
@@ -3350,6 +3685,24 @@ fn local_type_path(
     normalize_segments(module_path, segments)
 }
 
+fn raw_local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>> {
+    if let Type::Reference(reference) = self_ty {
+        return raw_local_type_path(module_path, &reference.elem);
+    }
+    let Type::Path(type_path) = self_ty else {
+        return None;
+    };
+    normalize_segments(
+        module_path,
+        type_path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
+}
+
 fn resolved_local_type_path(
     project: &Project,
     package: &str,
@@ -3357,6 +3710,12 @@ fn resolved_local_type_path(
     self_ty: &Type,
     aliases: &std::collections::HashMap<String, Vec<String>>,
 ) -> Option<Vec<String>> {
+    if let Some(path) = raw_local_type_path(module_path, self_ty) {
+        let canonical = canonical_type_path(project, package, module_path, path);
+        if find_type_like_item(project, package, &canonical).is_some() {
+            return Some(canonical);
+        }
+    }
     let path = local_type_path(module_path, self_ty, aliases)?;
     Some(canonical_type_path(project, package, module_path, path))
 }
