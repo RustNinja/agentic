@@ -14,7 +14,7 @@ use std::{
 
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport};
-pub use model::{CallableId, ItemId, RootId};
+pub use model::{CallableId, ItemId, RootId, SourceSpan};
 pub use preflight::{
     preflight_workspace, write_preflight_report, PreflightDiagnostic, PreflightOptions,
     PreflightReport,
@@ -35,7 +35,28 @@ pub struct GenerateReport {
     pub packages: Vec<String>,
     pub reachable: Vec<CallableId>,
     pub reachable_items: Vec<ItemId>,
+    pub source_map: SourceMapReport,
     pub files_written: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct SourceMapReport {
+    pub callables: Vec<CallableLocation>,
+    pub items: Vec<ItemLocation>,
+}
+
+#[derive(Debug, Clone)]
+pub struct CallableLocation {
+    pub id: CallableId,
+    pub reachable: bool,
+    pub span: SourceSpan,
+}
+
+#[derive(Debug, Clone)]
+pub struct ItemLocation {
+    pub id: ItemId,
+    pub reachable: bool,
+    pub span: SourceSpan,
 }
 
 pub fn generate(options: GenerateOptions) -> Result<GenerateReport, Box<dyn std::error::Error>> {
@@ -60,6 +81,7 @@ pub fn generate_with_analyzer(
 
     let mut reachable_items = reduced.reachable_items.iter().cloned().collect::<Vec<_>>();
     reachable_items.sort();
+    let source_map = source_map_report(&project, &reduced);
 
     Ok(GenerateReport {
         analyzer,
@@ -68,8 +90,40 @@ pub fn generate_with_analyzer(
         packages,
         reachable,
         reachable_items,
+        source_map,
         files_written,
     })
+}
+
+fn source_map_report(project: &model::Project, reduced: &model::ReducedProject) -> SourceMapReport {
+    let mut callables = project
+        .functions
+        .values()
+        .map(|record| CallableLocation {
+            id: record.id.clone(),
+            reachable: reduced.reachable.contains(&record.id),
+            span: record.span.clone(),
+        })
+        .chain(project.methods.iter().map(|(id, record)| CallableLocation {
+            id: id.clone(),
+            reachable: reduced.reachable.contains(id),
+            span: record.span.clone(),
+        }))
+        .collect::<Vec<_>>();
+    callables.sort_by_key(|location| location.id.to_string());
+
+    let mut items = project
+        .items
+        .iter()
+        .map(|(id, record)| ItemLocation {
+            id: id.clone(),
+            reachable: reduced.reachable_items.contains(id),
+            span: record.span.clone(),
+        })
+        .collect::<Vec<_>>();
+    items.sort_by_key(|location| location.id.to_string());
+
+    SourceMapReport { callables, items }
 }
 
 pub fn write_generate_report(
@@ -92,6 +146,7 @@ struct GenerateReportJson {
     packages: Vec<String>,
     reachable: Vec<String>,
     reachable_items: Vec<String>,
+    source_map: SourceMapReportJson,
     files_written: usize,
 }
 
@@ -108,7 +163,65 @@ impl GenerateReportJson {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
+            source_map: SourceMapReportJson::from_report(&report.source_map),
             files_written: report.files_written,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SourceMapReportJson {
+    callables: Vec<CallableLocationJson>,
+    items: Vec<ItemLocationJson>,
+}
+
+impl SourceMapReportJson {
+    fn from_report(report: &SourceMapReport) -> Self {
+        Self {
+            callables: report
+                .callables
+                .iter()
+                .map(CallableLocationJson::from_report)
+                .collect(),
+            items: report
+                .items
+                .iter()
+                .map(ItemLocationJson::from_report)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct CallableLocationJson {
+    id: String,
+    reachable: bool,
+    span: SourceSpan,
+}
+
+impl CallableLocationJson {
+    fn from_report(location: &CallableLocation) -> Self {
+        Self {
+            id: location.id.to_string(),
+            reachable: location.reachable,
+            span: location.span.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct ItemLocationJson {
+    id: String,
+    reachable: bool,
+    span: SourceSpan,
+}
+
+impl ItemLocationJson {
+    fn from_report(location: &ItemLocation) -> Self {
+        Self {
+            id: location.id.to_string(),
+            reachable: location.reachable,
+            span: location.span.clone(),
         }
     }
 }
@@ -341,6 +454,23 @@ mod tests {
             value["packages"].as_array().unwrap().len(),
             report.packages.len()
         );
+        let callables = value["source_map"]["callables"].as_array().unwrap();
+        let root_location = callables
+            .iter()
+            .find(|location| location["id"] == "a::open_source_entry")
+            .expect("root callable should have a source-map entry");
+        assert_eq!(root_location["reachable"], true);
+        assert!(root_location["span"]["file"]
+            .as_str()
+            .unwrap()
+            .ends_with("fixtures/a/src/lib.rs"));
+        assert!(root_location["span"]["start_line"].as_u64().unwrap() > 0);
+
+        let internal_location = callables
+            .iter()
+            .find(|location| location["id"] == "a::internal_entry")
+            .expect("unreachable callable should still have a source-map entry");
+        assert_eq!(internal_location["reachable"], false);
     }
 
     #[test]

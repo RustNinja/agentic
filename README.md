@@ -104,10 +104,11 @@ rust-analyzer HIR or rustc-driver backend remains the next precision step for
 resolving hard name-resolution cases before rendering.
 
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
-mode/notes, roots, packages, reachable callables/items, and files written. The
-generic corpus runner uses this with compiler feedback to track real-project
-slice size, diagnostics, runtime, and timeout outcomes over repeated random root
-selection:
+mode/notes, roots, packages, reachable callables/items, files written, and a
+source map for parsed callables/items with file spans and reachability flags.
+That source map is the join point for semantic analyzer edges. The generic
+corpus runner uses this with compiler feedback to track real-project slice size,
+diagnostics, runtime, and timeout outcomes over repeated random root selection:
 
 ```sh
 scripts/corpus_feedback_loop.py \

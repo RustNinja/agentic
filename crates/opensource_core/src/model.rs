@@ -4,6 +4,7 @@ use std::{
     path::PathBuf,
 };
 
+use serde::{Deserialize, Serialize};
 use syn::{File, ImplItem, ImplItemFn, Item, ItemFn};
 
 use crate::manifest::Workspace;
@@ -29,6 +30,7 @@ pub struct FunctionRecord {
     pub id: CallableId,
     pub package: String,
     pub module_path: Vec<String>,
+    pub span: SourceSpan,
     pub item: ItemFn,
     pub aliases: HashMap<String, Vec<String>>,
 }
@@ -36,6 +38,7 @@ pub struct FunctionRecord {
 #[derive(Clone)]
 pub struct MethodRecord {
     pub module_path: Vec<String>,
+    pub span: SourceSpan,
     pub item: ImplItemFn,
     pub impl_items: Vec<ImplItem>,
     pub trait_input_type_paths: Vec<Vec<String>>,
@@ -46,8 +49,18 @@ pub struct MethodRecord {
 pub struct ItemRecord {
     pub package: String,
     pub module_path: Vec<String>,
+    pub span: SourceSpan,
     pub item: Item,
     pub aliases: HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+pub struct SourceSpan {
+    pub file: PathBuf,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
 }
 
 #[derive(Debug, Clone)]

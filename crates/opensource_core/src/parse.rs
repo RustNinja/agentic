@@ -4,8 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use proc_macro2::TokenTree;
+use proc_macro2::{Span, TokenTree};
 use quote::ToTokens;
+use syn::spanned::Spanned;
 use syn::{
     GenericArgument, ImplItem, Item, ItemImpl, ItemMod, ItemUse, PathArguments, Type, UseTree,
 };
@@ -13,7 +14,8 @@ use syn::{
 use crate::{
     manifest::Workspace,
     model::{
-        CallableId, FunctionRecord, ItemId, ItemKind, ItemRecord, MethodRecord, Project, SourceFile,
+        CallableId, FunctionRecord, ItemId, ItemKind, ItemRecord, MethodRecord, Project,
+        SourceFile, SourceSpan,
     },
     reduce::is_cfg_test_attr,
 };
@@ -88,7 +90,7 @@ impl Parser {
         self.module_aliases
             .insert((package.to_string(), module_path.clone()), aliases.clone());
 
-        self.collect_items(package, &module_path, &syntax.items, &aliases)?;
+        self.collect_items(package, &module_path, &file_path, &syntax.items, &aliases)?;
 
         self.files.insert(
             file_path.clone(),
@@ -132,6 +134,7 @@ impl Parser {
         &mut self,
         package: &str,
         module_path: &[String],
+        file_path: &Path,
         items: &[Item],
         aliases: &HashMap<String, Vec<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -149,13 +152,14 @@ impl Parser {
                             id,
                             package: package.to_string(),
                             module_path: module_path.to_vec(),
+                            span: source_span(file_path, function.span()),
                             item: function.clone(),
                             aliases: aliases.clone(),
                         },
                     );
                 }
                 Item::Impl(item_impl) => {
-                    self.collect_impl(package, module_path, item_impl, aliases)?;
+                    self.collect_impl(package, module_path, file_path, item_impl, aliases)?;
                 }
                 Item::Struct(_)
                 | Item::Enum(_)
@@ -182,6 +186,7 @@ impl Parser {
                             ItemRecord {
                                 package: package.to_string(),
                                 module_path: module_path.to_vec(),
+                                span: source_span(file_path, item.span()),
                                 item: item.clone(),
                                 aliases: aliases.clone(),
                             },
@@ -203,6 +208,7 @@ impl Parser {
                         ItemRecord {
                             package: package.to_string(),
                             module_path: module_path.to_vec(),
+                            span: source_span(file_path, item.span()),
                             item: item.clone(),
                             aliases: aliases.clone(),
                         },
@@ -215,7 +221,7 @@ impl Parser {
                             (package.to_string(), child_path.clone()),
                             child_aliases.clone(),
                         );
-                        self.collect_items(package, &child_path, items, &child_aliases)?;
+                        self.collect_items(package, &child_path, file_path, items, &child_aliases)?;
                     }
                 }
                 _ => {}
@@ -229,6 +235,7 @@ impl Parser {
         &mut self,
         package: &str,
         module_path: &[String],
+        file_path: &Path,
         item_impl: &ItemImpl,
         aliases: &HashMap<String, Vec<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -260,6 +267,7 @@ impl Parser {
                     id.clone(),
                     MethodRecord {
                         module_path: module_path.to_vec(),
+                        span: source_span(file_path, method.span()),
                         item: method.clone(),
                         impl_items: item_impl.items.clone(),
                         trait_input_type_paths: trait_input_type_paths.clone(),
@@ -518,6 +526,18 @@ fn bitflags_struct_name(item: &syn::ItemMacro) -> Option<String> {
         saw_struct = ident == "struct";
     }
     None
+}
+
+fn source_span(file_path: &Path, span: Span) -> SourceSpan {
+    let start = span.start();
+    let end = span.end();
+    SourceSpan {
+        file: file_path.to_path_buf(),
+        start_line: start.line,
+        start_column: start.column,
+        end_line: end.line,
+        end_column: end.column,
+    }
 }
 
 fn collect_aliases(
