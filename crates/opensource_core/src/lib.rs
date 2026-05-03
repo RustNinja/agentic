@@ -339,6 +339,16 @@ fn add_syntactic_production_hazards(
             ),
         ));
     }
+    if counts.custom_macro_invocations > 0 {
+        hazards.push(production_hazard(
+            "custom_macro_invocations",
+            "warning",
+            format!(
+                "{} retained non-builtin macro invocation(s) may expand code outside the static parse tree",
+                counts.custom_macro_invocations
+            ),
+        ));
+    }
 }
 
 #[derive(Default)]
@@ -347,6 +357,7 @@ struct SyntacticHazardCounts {
     nonliteral_file_include_macros: usize,
     custom_attribute_macros: usize,
     custom_derive_macros: usize,
+    custom_macro_invocations: usize,
 }
 
 impl SyntacticHazardCounts {
@@ -355,6 +366,7 @@ impl SyntacticHazardCounts {
         self.nonliteral_file_include_macros += other.nonliteral_file_include_macros;
         self.custom_attribute_macros += other.custom_attribute_macros;
         self.custom_derive_macros += other.custom_derive_macros;
+        self.custom_macro_invocations += other.custom_macro_invocations;
     }
 }
 
@@ -403,6 +415,9 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
         {
             self.counts.nonliteral_file_include_macros += 1;
         }
+        if macro_invocation_requires_expansion_boundary(mac) {
+            self.counts.custom_macro_invocations += 1;
+        }
 
         syn::visit::visit_macro(self, mac);
     }
@@ -417,6 +432,66 @@ fn macro_path_ends_with(mac: &Macro, name: &str) -> bool {
 
 fn macro_has_literal_path(mac: &Macro) -> bool {
     syn::parse2::<syn::LitStr>(mac.tokens.clone()).is_ok()
+}
+
+fn macro_invocation_requires_expansion_boundary(mac: &Macro) -> bool {
+    let Some(last) = mac.path.segments.last() else {
+        return false;
+    };
+    if !builtin_macro_name(&last.ident.to_string()) {
+        return true;
+    }
+    if mac.path.leading_colon.is_some() {
+        return false;
+    }
+    if mac.path.segments.len() == 1 {
+        return false;
+    }
+    mac.path.segments.first().is_none_or(|segment| {
+        !matches!(segment.ident.to_string().as_str(), "std" | "core" | "alloc")
+    })
+}
+
+fn builtin_macro_name(name: &str) -> bool {
+    matches!(
+        name,
+        "assert"
+            | "assert_eq"
+            | "assert_ne"
+            | "cfg"
+            | "column"
+            | "compile_error"
+            | "concat"
+            | "dbg"
+            | "debug_assert"
+            | "debug_assert_eq"
+            | "debug_assert_ne"
+            | "env"
+            | "eprint"
+            | "eprintln"
+            | "file"
+            | "format"
+            | "format_args"
+            | "include"
+            | "include_bytes"
+            | "include_str"
+            | "line"
+            | "matches"
+            | "module_path"
+            | "option_env"
+            | "panic"
+            | "print"
+            | "println"
+            | "stringify"
+            | "thread_local"
+            | "todo"
+            | "try"
+            | "unimplemented"
+            | "unreachable"
+            | "vec"
+            | "write"
+            | "writeln"
+    )
 }
 
 fn cfg_attr_nested_macro_counts(attribute: &Attribute) -> SyntacticHazardCounts {
@@ -1026,6 +1101,47 @@ pub fn entry() -> &'static str {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "nonliteral_file_include_macros"));
+    }
+
+    #[test]
+    fn reports_reachable_custom_macro_invocation_production_hazards() {
+        let root = temp_output("macro-invocation-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> Vec<i32> {
+    let value = project_macro!(1);
+    println!("{value}");
+    vec![value]
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("macro-invocation-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "custom_macro_invocations"));
     }
 
     #[test]
