@@ -23,7 +23,11 @@ jobs:
       - run: cargo fmt --all -- --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
-      - run: cargo run -p opensource_cli --bin slicers -- --feedback . "$RUNNER_TEMP/slicers-feedback"
+      - run: >
+          cargo run -p opensource_cli --bin slicers -- --production
+          --baseline-target-dir "$RUNNER_TEMP/slicers-baseline-target"
+          --feedback-target-dir "$RUNNER_TEMP/slicers-feedback-target"
+          . "$RUNNER_TEMP/slicers-production"
 
   ra-hir:
     name: rust-analyzer HIR smoke test
