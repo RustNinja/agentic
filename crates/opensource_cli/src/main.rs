@@ -355,9 +355,17 @@ struct ValidationAttemptReport {
     widening_candidates: usize,
     widening_hazards: usize,
     #[serde(skip_serializing_if = "Option::is_none")]
+    feedback_widened_roots: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     repair_report_path: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     repair_total_changes: Option<usize>,
+}
+
+#[derive(Default)]
+struct FeedbackWideningState {
+    diagnostics: Vec<CheckDiagnostic>,
+    seen_root_sets: BTreeSet<String>,
 }
 
 impl ValidationReport {
@@ -773,6 +781,7 @@ fn record_feedback_attempt(
         repairable_warnings,
         widening_candidates: report.widening.candidates.len(),
         widening_hazards: report.widening.hazards.len(),
+        feedback_widened_roots: None,
         repair_report_path,
         repair_total_changes,
     });
@@ -797,6 +806,74 @@ fn record_feedback_gate(
     );
 }
 
+#[allow(clippy::too_many_arguments)]
+fn try_widen_from_feedback(
+    options: &CliOptions,
+    validation: &mut ValidationReport,
+    state: &mut FeedbackWideningState,
+    stage: &str,
+    attempt: usize,
+    report: &CheckReport,
+    report_path: &Path,
+    semantic_warning_hazards: usize,
+    repairable_warnings: usize,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if report.error_count() == 0 {
+        return Ok(false);
+    }
+
+    state.diagnostics.extend(report.diagnostics.clone());
+    let widened_report = generate_with_analyzer_feedback(
+        GenerateOptions {
+            workspace_root: options.workspace_root.clone(),
+            output_root: options.output_root.clone(),
+        },
+        options.analyzer_mode,
+        &state.diagnostics,
+    )?;
+    let widened_roots = widened_report
+        .feedback_widened_roots
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    let widened_signature = widened_roots.join("\n");
+    if widened_signature.is_empty() || !state.seen_root_sets.insert(widened_signature) {
+        return Ok(false);
+    }
+
+    if let Some(report_path) = slice_report_path(options) {
+        write_generate_report(&widened_report, &report_path)?;
+    }
+    println!(
+        "feedback: widened {} root(s) from compiler diagnostics and re-rendered generated workspace",
+        widened_roots.len()
+    );
+    record_feedback_attempt(
+        validation,
+        stage,
+        attempt,
+        "widened",
+        "compiler feedback widened the generated workspace",
+        report,
+        report_path.to_path_buf(),
+        false,
+        semantic_warning_hazards,
+        repairable_warnings,
+        None,
+        None,
+    );
+    if let Some(recorded) = validation.attempts.last_mut() {
+        recorded.feedback_widened_roots = Some(widened_roots.len());
+    }
+
+    let preflight = run_preflight(options)?;
+    if !preflight.success {
+        return Err("feedback widening produced a structurally invalid generated workspace".into());
+    }
+
+    Ok(true)
+}
+
 fn run_feedback_loop(
     options: &CliOptions,
     baseline: Option<&CheckReport>,
@@ -807,6 +884,7 @@ fn run_feedback_loop(
         .clone()
         .unwrap_or_else(|| options.output_root.join("slice-feedback.json"));
     let mut seen_diagnostics = std::collections::BTreeSet::new();
+    let mut widening_state = FeedbackWideningState::default();
 
     for attempt in 1..=options.feedback_iterations {
         println!(
@@ -885,6 +963,45 @@ fn run_feedback_loop(
                 semantic_warnings,
             );
             return Ok(());
+        }
+        if report.timed_out {
+            record_feedback_attempt(
+                validation,
+                "feedback",
+                attempt,
+                "timed_out",
+                "feedback cargo check timed out",
+                &report,
+                report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warning_count(&report.diagnostics),
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback",
+                "failed",
+                "feedback cargo check timed out",
+                &report,
+                report_path.clone(),
+                semantic_warnings,
+            );
+            return Err("feedback cargo check timed out".into());
+        }
+        if try_widen_from_feedback(
+            options,
+            validation,
+            &mut widening_state,
+            "feedback",
+            attempt,
+            &report,
+            &report_path,
+            semantic_warnings,
+            repairable_warning_count(&report.diagnostics),
+        )? {
+            continue;
         }
 
         let signature = diagnostics_signature(&report.diagnostics);
@@ -965,8 +1082,7 @@ fn run_feedback_repair_loop(
         .unwrap_or_else(|| options.output_root.join("slice-repair.json"));
     let mut seen_diagnostics = std::collections::BTreeSet::new();
     let mut seen_diagnostic_shapes = std::collections::BTreeSet::new();
-    let mut seen_widened_roots = std::collections::BTreeSet::new();
-    let mut feedback_widening_diagnostics = Vec::new();
+    let mut widening_state = FeedbackWideningState::default();
     let mut repaired_previous_attempt = false;
 
     for attempt in 1..=options.feedback_repair_iterations {
@@ -1129,55 +1245,19 @@ fn run_feedback_repair_loop(
             break;
         }
 
-        if report.error_count() > 0 {
-            feedback_widening_diagnostics.extend(report.diagnostics.clone());
-            let widened_report = generate_with_analyzer_feedback(
-                GenerateOptions {
-                    workspace_root: options.workspace_root.clone(),
-                    output_root: options.output_root.clone(),
-                },
-                options.analyzer_mode,
-                &feedback_widening_diagnostics,
-            )?;
-            let widened_signature = widened_report
-                .feedback_widened_roots
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join("\n");
-            if !widened_signature.is_empty() && seen_widened_roots.insert(widened_signature) {
-                if let Some(report_path) = slice_report_path(options) {
-                    write_generate_report(&widened_report, &report_path)?;
-                }
-                println!(
-                    "feedback: widened {} root(s) from compiler diagnostics and re-rendered generated workspace",
-                    widened_report.feedback_widened_roots.len()
-                );
-                record_feedback_attempt(
-                    validation,
-                    "feedback-repair",
-                    attempt,
-                    "widened",
-                    "compiler feedback widened the generated workspace",
-                    &report,
-                    feedback_report_path.clone(),
-                    false,
-                    semantic_warnings,
-                    repairable_warnings,
-                    None,
-                    None,
-                );
-
-                let preflight = run_preflight(options)?;
-                if !preflight.success {
-                    return Err(
-                        "feedback widening produced a structurally invalid generated workspace"
-                            .into(),
-                    );
-                }
-                repaired_previous_attempt = false;
-                continue;
-            }
+        if try_widen_from_feedback(
+            options,
+            validation,
+            &mut widening_state,
+            "feedback-repair",
+            attempt,
+            &report,
+            &feedback_report_path,
+            semantic_warnings,
+            repairable_warnings,
+        )? {
+            repaired_previous_attempt = false;
+            continue;
         }
 
         let signature = diagnostics_signature(&report.diagnostics);
@@ -1823,7 +1903,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::path::PathBuf;
+    use std::{fs, path::PathBuf};
 
     use opensource_core::{
         CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport, GeneratedTargetReport,
@@ -1833,8 +1913,9 @@ mod tests {
         baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
         production_readiness_blocks_validation, record_final_production_readiness,
-        semantic_hazard_warning_count, slice_report_path, uncovered_validation_targets,
-        validation_report_path, ValidationGateReport, ValidationReport,
+        semantic_hazard_warning_count, slice_report_path, try_widen_from_feedback,
+        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
+        ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -2273,6 +2354,76 @@ mod tests {
         assert_eq!(options.cargo_check_args, ["--all-features", "--target"]);
     }
 
+    #[test]
+    fn feedback_widening_records_and_rerenders_from_compiler_diagnostics() {
+        let source = temp_path("cli-feedback-widen-source");
+        let output = temp_path("cli-feedback-widen-output");
+        let slice_report = temp_path("cli-feedback-widen-report").join("slice-report.json");
+        let opensourced_path = repo_root().join("crates/opensourced");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+
+pub fn helper() -> usize {
+    2
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            std::ffi::OsString::from("--feedback-loop"),
+            std::ffi::OsString::from("2"),
+            std::ffi::OsString::from("--slice-report"),
+            slice_report.clone().into_os_string(),
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        let mut validation = ValidationReport::new(&options);
+        let mut state = FeedbackWideningState::default();
+        let mut missing_helper = diagnostic("E0425", "cannot find value `helper` in this scope");
+        missing_helper.package_id = Some("app 0.1.0 (path+file:///tmp/app)".to_string());
+        let feedback_report = report(false, vec![missing_helper]);
+
+        let widened = try_widen_from_feedback(
+            &options,
+            &mut validation,
+            &mut state,
+            "feedback",
+            1,
+            &feedback_report,
+            &output.join("slice-feedback.json"),
+            0,
+            0,
+        )
+        .expect("feedback widening should succeed");
+
+        assert!(widened);
+        assert_eq!(validation.attempts.len(), 1);
+        assert_eq!(validation.attempts[0].status, "widened");
+        assert_eq!(validation.attempts[0].feedback_widened_roots, Some(1));
+        let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(generated.contains("pub fn helper"));
+        let report_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(slice_report).unwrap()).unwrap();
+        assert_eq!(report_json["feedback_widened_roots"][0], "app::helper");
+    }
+
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {
         CheckReport {
             manifest_path: PathBuf::from("/tmp/Cargo.toml"),
@@ -2398,5 +2549,33 @@ mod tests {
             warning_count: None,
             semantic_warning_hazards: None,
         }
+    }
+
+    fn repo_root() -> PathBuf {
+        let mut current = std::env::current_dir().expect("current directory should resolve");
+        loop {
+            if current.join("crates/opensourced/Cargo.toml").exists() {
+                return current;
+            }
+            assert!(
+                current.pop(),
+                "could not find repository root from current directory"
+            );
+        }
+    }
+
+    fn temp_path(label: &str) -> PathBuf {
+        let unique = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!("slicers-{label}-{unique}"))
+    }
+
+    fn write(path: PathBuf, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).unwrap();
+        }
+        fs::write(path, contents).unwrap();
     }
 }
