@@ -8,6 +8,42 @@ use std::{
 use opensource_core::{generate, GenerateOptions};
 
 #[test]
+fn cargo_metadata_workspace_excludes_define_loaded_members() {
+    let workspace = temp_path("metadata-exclude-workspace");
+    let output = temp_path("metadata-exclude-output");
+    let target_dir = temp_path("metadata-exclude-target");
+    write_metadata_exclude_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app"]);
+    assert!(output.join("app/src/lib.rs").exists());
+    assert!(
+        !output.join("dead").exists(),
+        "workspace.exclude members must not be rendered"
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated metadata-exclude slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+    );
+}
+
+#[test]
 fn slices_single_package_binary_crate_with_stub_main() {
     let workspace = temp_path("single-workspace");
     let output = temp_path("single-output");
@@ -6370,6 +6406,50 @@ edition = "2021"
         ),
     );
     write(root.join(name).join("src/lib.rs"), source);
+}
+
+fn write_metadata_exclude_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["crates/*"]
+exclude = ["crates/dead"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("crates/app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("crates/app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+    write(
+        root.join("crates/dead/Cargo.toml"),
+        r#"[not_a_package]
+name = "dead"
+"#,
+    );
 }
 
 fn write(path: PathBuf, contents: &str) {

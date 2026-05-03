@@ -93,6 +93,15 @@ the slicer stays fast and syntactic, then rustc gives precise diagnostics for
 the generated slice. A rust-analyzer HIR or rustc-driver backend remains the
 next precision step for resolving hard name-resolution cases before rendering.
 
+Workspace/package discovery is backed by `cargo metadata --no-deps`, so Cargo is
+the source of truth for workspace members, excludes, target entry paths,
+dependency aliases, dependency kinds, and package roots.
+
+Output roots are fail-closed: `slicers` refuses to write inside the input
+workspace, refuses to overwrite non-empty directories it did not create, and
+marks generated outputs with `.slicers-output` so repeat runs can replace only
+known generated directories.
+
 ## Additional Generated Fixtures
 
 `opensource_core` also has integration tests that generate temporary workspaces

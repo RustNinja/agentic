@@ -1,9 +1,11 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap},
     fs,
     path::{Path, PathBuf},
+    process::Command,
 };
 
+use serde::Deserialize;
 use toml::Value;
 
 #[derive(Debug)]
@@ -32,48 +34,39 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
     let root = root.canonicalize()?;
     let root_manifest = root.join("Cargo.toml");
     let root_value = read_manifest(&root_manifest)?;
-    let raw_members = root_value
-        .get("workspace")
-        .and_then(|workspace| workspace.get("members"))
-        .and_then(Value::as_array)
-        .map(|members| {
-            members
-                .iter()
-                .map(|member| {
-                    member
-                        .as_str()
-                        .map(str::to_string)
-                        .ok_or("workspace member must be a string")
-                })
-                .collect::<Result<Vec<_>, _>>()
-        })
-        .transpose()?
-        .unwrap_or_else(|| vec![".".to_string()]);
-    let members = expand_workspace_members(&root, &raw_members)?;
+    let metadata = load_cargo_metadata(&root_manifest)?;
+    let workspace_members = metadata
+        .workspace_members
+        .into_iter()
+        .collect::<BTreeSet<_>>();
 
     let mut packages = HashMap::new();
-    for member in &members {
-        let package_root = root.join(member).canonicalize()?;
-        let manifest_path = package_root.join("Cargo.toml");
+    for metadata_package in metadata
+        .packages
+        .into_iter()
+        .filter(|package| workspace_members.contains(&package.id))
+    {
+        let manifest_path = metadata_package.manifest_path;
+        let package_root = manifest_path
+            .parent()
+            .ok_or_else(|| {
+                format!(
+                    "package {} manifest path has no parent: {}",
+                    metadata_package.name,
+                    manifest_path.display()
+                )
+            })?
+            .canonicalize()?;
         let manifest = read_manifest(&manifest_path)?;
-        let package_table = manifest
-            .get("package")
-            .and_then(Value::as_table)
-            .ok_or_else(|| format!("missing [package] in {}", manifest_path.display()))?;
-        let name = package_table
-            .get("name")
-            .and_then(Value::as_str)
-            .ok_or_else(|| format!("missing package.name in {}", manifest_path.display()))?
-            .to_string();
 
-        let lib_path = entry_source_path(&package_root, &manifest);
+        let lib_path = entry_source_path(&package_root, &manifest, &metadata_package.targets);
 
-        let dependencies = parse_dependencies(&manifest);
+        let dependencies = metadata_dependencies(&metadata_package.dependencies);
 
         packages.insert(
-            name.clone(),
+            metadata_package.name.clone(),
             Package {
-                name,
+                name: metadata_package.name,
                 root: package_root,
                 lib_path,
                 dependencies,
@@ -94,7 +87,32 @@ fn read_manifest(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
     Ok(text.parse::<Value>()?)
 }
 
-fn entry_source_path(package_root: &Path, manifest: &Value) -> PathBuf {
+fn load_cargo_metadata(manifest_path: &Path) -> Result<CargoMetadata, Box<dyn std::error::Error>> {
+    let output = Command::new("cargo")
+        .arg("metadata")
+        .arg("--format-version=1")
+        .arg("--no-deps")
+        .arg("--manifest-path")
+        .arg(manifest_path)
+        .output()?;
+
+    if !output.status.success() {
+        return Err(format!(
+            "cargo metadata failed for {}\n{}",
+            manifest_path.display(),
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn entry_source_path(package_root: &Path, manifest: &Value, targets: &[MetadataTarget]) -> PathBuf {
+    if let Some(path) = metadata_entry_source_path(package_root, targets) {
+        return path;
+    }
+
     if let Some(path) = manifest
         .get("lib")
         .and_then(|lib| lib.get("path"))
@@ -111,103 +129,50 @@ fn entry_source_path(package_root: &Path, manifest: &Value) -> PathBuf {
     package_root.join("src/main.rs")
 }
 
-fn expand_workspace_members(
-    root: &Path,
-    raw_members: &[String],
-) -> Result<Vec<String>, Box<dyn std::error::Error>> {
-    let mut members = Vec::new();
-    for member in raw_members {
-        if member.contains('*') {
-            expand_member_pattern(root, PathBuf::new(), &path_components(member), &mut members)?;
-        } else {
-            members.push(member.clone());
+fn metadata_entry_source_path(package_root: &Path, targets: &[MetadataTarget]) -> Option<PathBuf> {
+    for preferred_kind in ["lib", "proc-macro"] {
+        if let Some(target) = targets
+            .iter()
+            .find(|target| target.kind.iter().any(|kind| kind == preferred_kind))
+        {
+            return Some(target.src_path.clone());
         }
     }
-    members.sort();
-    members.dedup();
-    Ok(members)
-}
-
-fn expand_member_pattern(
-    root: &Path,
-    relative: PathBuf,
-    remaining: &[String],
-    members: &mut Vec<String>,
-) -> Result<(), Box<dyn std::error::Error>> {
-    let Some((head, tail)) = remaining.split_first() else {
-        if root.join(&relative).join("Cargo.toml").exists() {
-            members.push(path_to_member(&relative));
-        }
-        return Ok(());
-    };
-
-    if head.contains('*') {
-        let read_root = root.join(&relative);
-        if !read_root.exists() {
-            return Ok(());
-        }
-        for entry in fs::read_dir(read_root)? {
-            let entry = entry?;
-            if !entry.file_type()?.is_dir() {
-                continue;
-            }
-            let name = entry.file_name().to_string_lossy().into_owned();
-            if wildcard_matches(head, &name) {
-                expand_member_pattern(root, relative.join(name), tail, members)?;
-            }
-        }
-        return Ok(());
+    let default_bin = package_root.join("src/main.rs");
+    if let Some(target) = targets.iter().find(|target| {
+        target.kind.iter().any(|kind| kind == "bin") && target.src_path == default_bin
+    }) {
+        return Some(target.src_path.clone());
     }
-
-    expand_member_pattern(root, relative.join(head), tail, members)
-}
-
-fn path_components(path: &str) -> Vec<String> {
-    path.split('/')
-        .filter(|component| !component.is_empty())
-        .map(str::to_string)
-        .collect()
-}
-
-fn path_to_member(path: &Path) -> String {
-    path.components()
-        .map(|component| component.as_os_str().to_string_lossy())
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
-fn wildcard_matches(pattern: &str, value: &str) -> bool {
-    if pattern == "*" {
-        return true;
+    if let Some(target) = targets
+        .iter()
+        .find(|target| target.kind.iter().any(|kind| kind == "bin"))
+    {
+        return Some(target.src_path.clone());
     }
-
-    let Some((prefix, suffix)) = pattern.split_once('*') else {
-        return pattern == value;
-    };
-
-    value.starts_with(prefix) && value.ends_with(suffix)
+    targets
+        .iter()
+        .find(|target| {
+            target
+                .kind
+                .iter()
+                .all(|kind| !matches!(kind.as_str(), "test" | "bench" | "example"))
+        })
+        .map(|target| target.src_path.clone())
 }
 
-fn parse_dependencies(manifest: &Value) -> Vec<Dependency> {
-    let mut dependencies = Vec::new();
-
-    for table_name in ["dependencies", "build-dependencies"] {
-        if let Some(table) = manifest.get(table_name).and_then(Value::as_table) {
-            parse_dependency_table(table, &mut dependencies);
-        }
-    }
-
-    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
-        for target in targets.values() {
-            let Some(target) = target.as_table() else {
-                continue;
-            };
-            if let Some(table) = target.get("dependencies").and_then(Value::as_table) {
-                parse_dependency_table(table, &mut dependencies);
-            }
-        }
-    }
-
+fn metadata_dependencies(metadata_dependencies: &[MetadataDependency]) -> Vec<Dependency> {
+    let mut dependencies = metadata_dependencies
+        .iter()
+        .filter(|dependency| dependency.kind.as_deref() != Some("dev"))
+        .map(|dependency| Dependency {
+            alias: dependency
+                .rename
+                .clone()
+                .unwrap_or_else(|| dependency.name.clone()),
+            package: dependency.name.clone(),
+        })
+        .collect::<Vec<_>>();
     dependencies.sort_by(|left, right| {
         left.alias
             .cmp(&right.alias)
@@ -218,21 +183,30 @@ fn parse_dependencies(manifest: &Value) -> Vec<Dependency> {
     dependencies
 }
 
-fn parse_dependency_table(table: &toml::value::Table, dependencies: &mut Vec<Dependency>) {
-    for (alias, value) in table {
-        let package = match value {
-            Value::String(_) => alias.clone(),
-            Value::Table(table) => table
-                .get("package")
-                .and_then(Value::as_str)
-                .unwrap_or(alias)
-                .to_string(),
-            _ => alias.clone(),
-        };
+#[derive(Debug, Deserialize)]
+struct CargoMetadata {
+    packages: Vec<MetadataPackage>,
+    workspace_members: Vec<String>,
+}
 
-        dependencies.push(Dependency {
-            alias: alias.clone(),
-            package,
-        });
-    }
+#[derive(Debug, Deserialize)]
+struct MetadataPackage {
+    id: String,
+    name: String,
+    dependencies: Vec<MetadataDependency>,
+    targets: Vec<MetadataTarget>,
+    manifest_path: PathBuf,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataDependency {
+    name: String,
+    kind: Option<String>,
+    rename: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+struct MetadataTarget {
+    kind: Vec<String>,
+    src_path: PathBuf,
 }

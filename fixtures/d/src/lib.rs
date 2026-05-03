@@ -39,6 +39,12 @@ impl Worker {
     }
 }
 
+impl Default for Worker {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Transform for Worker {
     fn transform(&self, value: Score) -> Score {
         self.run(value) + renamed_mix(value)

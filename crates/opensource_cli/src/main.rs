@@ -1,4 +1,8 @@
-use std::{ffi::OsStr, path::PathBuf, process::Command};
+use std::{
+    ffi::OsStr,
+    path::{Path, PathBuf},
+    process::Command,
+};
 
 use opensource_core::{
     check_workspace, generate_with_analyzer, write_report, AnalyzerMode, CheckDiagnostic,
@@ -173,7 +177,7 @@ fn parse_usize_arg(
     Ok(parsed)
 }
 
-fn run_plain_check(output_root: &PathBuf) -> Result<(), Box<dyn std::error::Error>> {
+fn run_plain_check(output_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
     let status = Command::new("cargo")
         .arg("check")
         .arg("--manifest-path")
@@ -215,7 +219,7 @@ fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Err
     .into())
 }
 
-fn print_feedback(report: &CheckReport, limit: usize, report_path: &PathBuf) {
+fn print_feedback(report: &CheckReport, limit: usize, report_path: &Path) {
     if report.success {
         println!(
             "feedback: cargo check passed with {} warning(s); report: {}",
@@ -283,7 +287,7 @@ fn usage() -> String {
     .to_string()
 }
 
-fn same_path(left: &PathBuf, right: &PathBuf) -> bool {
+fn same_path(left: &Path, right: &Path) -> bool {
     let Ok(left) = left.canonicalize() else {
         return false;
     };

@@ -290,11 +290,11 @@ impl Parser {
         let name = item_mod.ident.to_string();
         let source_name = module_source_name(&name);
         let file_path = module_dir.join(format!("{source_name}.rs"));
-        let mod_path = module_dir.join(&source_name).join("mod.rs");
+        let mod_path = module_dir.join(source_name).join("mod.rs");
         let (next_file, next_dir) = if file_path.exists() {
-            (file_path, module_dir.join(&source_name))
+            (file_path, module_dir.join(source_name))
         } else if mod_path.exists() {
-            (mod_path, module_dir.join(&source_name))
+            (mod_path, module_dir.join(source_name))
         } else {
             return Err(format!(
                 "module {name} has no matching source file in package {package} at {} (looked for {} and {})",
@@ -498,12 +498,12 @@ fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
 }
 
 fn bitflags_struct_name(item: &syn::ItemMacro) -> Option<String> {
-    if !item
+    if item
         .mac
         .path
         .segments
         .last()
-        .is_some_and(|segment| segment.ident == "bitflags")
+        .is_none_or(|segment| segment.ident != "bitflags")
     {
         return None;
     }

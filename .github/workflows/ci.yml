@@ -1,0 +1,37 @@
+name: CI
+
+on:
+  pull_request:
+  push:
+
+jobs:
+  test:
+    name: test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --all -- --check
+      - run: cargo clippy --workspace --all-targets -- -D warnings
+      - run: cargo test --workspace
+      - run: cargo run -p opensource_cli --bin slicers -- --feedback . "$RUNNER_TEMP/slicers-feedback"
+
+  ra-hir:
+    name: rust-analyzer HIR smoke test
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo test -p opensource_core --features ra-hir analyzer::tests::ra_hir_loads_workspace_and_initializes_semantics

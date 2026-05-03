@@ -27,14 +27,19 @@ pub fn reduce(project: &Project) -> Result<ReducedProject, Box<dyn std::error::E
                 .any(|attribute| is_opensourced_attr(attribute.path()))
         })
         .map(|record| record.id.clone())
-        .chain(project.methods.iter().filter_map(|(id, record)| {
-            record
-                .item
-                .attrs
+        .chain(
+            project
+                .methods
                 .iter()
-                .any(|attribute| is_opensourced_attr(attribute.path()))
-                .then(|| id.clone())
-        }))
+                .filter(|(_, record)| {
+                    record
+                        .item
+                        .attrs
+                        .iter()
+                        .any(|attribute| is_opensourced_attr(attribute.path()))
+                })
+                .map(|(id, _)| id.clone()),
+        )
         .collect::<Vec<_>>();
     callable_roots.sort();
     callable_roots.dedup();
@@ -447,7 +452,7 @@ fn retained_rendered_use_dependencies(
                 dependencies.extend(resolve_use_glob_dependencies(
                     &resolver,
                     &path,
-                    &reachable_idents,
+                    reachable_idents,
                 ));
             }
         }
@@ -1784,12 +1789,8 @@ impl<'a> DependencyVisitor<'a> {
             .segments
             .iter()
             .map(|segment| segment.ident.to_string());
-        let Some(wrapper) = segments.next() else {
-            return None;
-        };
-        let Some(function) = segments.next() else {
-            return None;
-        };
+        let wrapper = segments.next()?;
+        let function = segments.next()?;
         if segments.next().is_some()
             || function != "new"
             || !matches!(wrapper.as_str(), "Arc" | "Box" | "Rc")
@@ -1849,11 +1850,11 @@ impl<'a> DependencyVisitor<'a> {
         let Pat::TupleStruct(tuple) = pattern else {
             return;
         };
-        if !tuple
+        if tuple
             .path
             .segments
             .last()
-            .is_some_and(|segment| segment.ident == "Ok")
+            .is_none_or(|segment| segment.ident != "Ok")
         {
             return;
         }
@@ -4173,9 +4174,7 @@ impl Resolver<'_> {
                 return Some(item);
             }
         }
-        let Some(name) = segments.last() else {
-            return None;
-        };
+        let name = segments.last()?;
         let package = segments
             .first()
             .and_then(|first| self.resolve_dependency(first))

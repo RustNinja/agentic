@@ -197,6 +197,75 @@ mod tests {
         assert!(status.success(), "generated workspace did not compile");
     }
 
+    #[test]
+    fn refuses_to_overwrite_unmarked_nonempty_output() {
+        let output = temp_output("unmarked-output");
+        fs::create_dir_all(&output).unwrap();
+        fs::write(output.join("keep.txt"), "do not delete").unwrap();
+
+        let error = generate(GenerateOptions {
+            workspace_root: workspace_root(),
+            output_root: output.clone(),
+        })
+        .expect_err("unmarked non-empty outputs should fail closed");
+
+        assert!(
+            error.to_string().contains("not created by slicers"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            output.join("keep.txt").exists(),
+            "unmarked output contents must not be deleted"
+        );
+    }
+
+    #[test]
+    fn reruns_can_replace_marked_outputs() {
+        let output = temp_output("marked-output");
+        generate(GenerateOptions {
+            workspace_root: workspace_root(),
+            output_root: output.clone(),
+        })
+        .expect("initial reduction should succeed");
+        assert!(output.join(".slicers-output").exists());
+        fs::write(output.join("stale.txt"), "stale").unwrap();
+
+        generate(GenerateOptions {
+            workspace_root: workspace_root(),
+            output_root: output.clone(),
+        })
+        .expect("marked output should be replaceable");
+
+        assert!(output.join(".slicers-output").exists());
+        assert!(
+            !output.join("stale.txt").exists(),
+            "rerender should replace stale generated output contents"
+        );
+    }
+
+    #[test]
+    fn refuses_output_inside_input_workspace() {
+        let output = workspace_root().join("target/slicers-inside-workspace-output");
+        if output.exists() {
+            fs::remove_dir_all(&output).unwrap();
+        }
+
+        let error = generate(GenerateOptions {
+            workspace_root: workspace_root(),
+            output_root: output.clone(),
+        })
+        .expect_err("output inside source workspace should be rejected");
+
+        assert!(
+            error.to_string().contains("inside input workspace"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !output.exists(),
+            "rejected inside-workspace output should not be created"
+        );
+    }
+
     fn workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
