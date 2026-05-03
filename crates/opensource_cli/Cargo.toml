@@ -8,5 +8,9 @@ license.workspace = true
 name = "slicers"
 path = "src/main.rs"
 
+[features]
+default = []
+ra-hir = ["opensource_core/ra-hir"]
+
 [dependencies]
 opensource_core = { path = "../opensource_core" }

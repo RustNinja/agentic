@@ -1,8 +1,8 @@
 use std::{ffi::OsStr, path::PathBuf, process::Command};
 
 use opensource_core::{
-    check_workspace, generate, write_report, CheckDiagnostic, CheckOptions, CheckReport,
-    GenerateOptions,
+    check_workspace, generate_with_analyzer, write_report, AnalyzerMode, CheckDiagnostic,
+    CheckOptions, CheckReport, GenerateOptions,
 };
 
 fn main() {
@@ -19,11 +19,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("output root must be different from workspace root".into());
     }
 
-    let report = generate(GenerateOptions {
-        workspace_root: options.workspace_root.clone(),
-        output_root: options.output_root.clone(),
-    })?;
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: options.workspace_root.clone(),
+            output_root: options.output_root.clone(),
+        },
+        options.analyzer_mode,
+    )?;
 
+    println!(
+        "analyzer: {} ({})",
+        report.analyzer.mode.as_str(),
+        report.analyzer.engine
+    );
+    for note in &report.analyzer.notes {
+        println!("  analyzer note: {note}");
+    }
     if report.roots.len() == 1 {
         println!("root: {}", report.root);
     } else {
@@ -53,6 +64,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 struct CliOptions {
+    analyzer_mode: AnalyzerMode,
     run_check: bool,
     feedback_iterations: usize,
     feedback_limit: usize,
@@ -62,6 +74,7 @@ struct CliOptions {
 }
 
 fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
+    let mut analyzer_mode = AnalyzerMode::Syn;
     let mut run_check = false;
     let mut feedback_iterations = 0;
     let mut feedback_limit = 12;
@@ -72,6 +85,14 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     while let Some(arg) = args.next() {
         if arg == OsStr::new("--check") {
             run_check = true;
+        } else if arg == OsStr::new("--analyzer") {
+            let value = args
+                .next()
+                .ok_or("--analyzer requires a following value: syn or ra-hir")?;
+            let value = value
+                .to_str()
+                .ok_or("--analyzer value must be valid UTF-8")?;
+            analyzer_mode = value.parse::<AnalyzerMode>()?;
         } else if arg == OsStr::new("--feedback") {
             feedback_iterations = feedback_iterations.max(1);
         } else if arg == OsStr::new("--feedback-loop") {
@@ -96,6 +117,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     };
 
     Ok(CliOptions {
+        analyzer_mode,
         run_check,
         feedback_iterations,
         feedback_limit,
@@ -223,7 +245,7 @@ fn print_diagnostic(diagnostic: &CheckDiagnostic) {
 
 fn usage() -> String {
     concat!(
-        "usage: slicers [--check] [--feedback] [--feedback-loop <n>] ",
+        "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--feedback] [--feedback-loop <n>] ",
         "[--feedback-limit <n>] [--feedback-report <path>] ",
         "<workspace-root> <output-root>"
     )

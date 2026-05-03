@@ -1,3 +1,4 @@
+mod analyzer;
 mod feedback;
 mod manifest;
 mod model;
@@ -7,6 +8,7 @@ mod render;
 
 use std::path::PathBuf;
 
+pub use analyzer::{AnalyzerMode, AnalyzerReport};
 pub use feedback::{check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport};
 pub use model::{CallableId, ItemId, RootId};
 
@@ -18,6 +20,7 @@ pub struct GenerateOptions {
 
 #[derive(Debug, Clone)]
 pub struct GenerateReport {
+    pub analyzer: AnalyzerReport,
     pub root: RootId,
     pub roots: Vec<RootId>,
     pub packages: Vec<String>,
@@ -27,6 +30,14 @@ pub struct GenerateReport {
 }
 
 pub fn generate(options: GenerateOptions) -> Result<GenerateReport, Box<dyn std::error::Error>> {
+    generate_with_analyzer(options, AnalyzerMode::Syn)
+}
+
+pub fn generate_with_analyzer(
+    options: GenerateOptions,
+    analyzer_mode: AnalyzerMode,
+) -> Result<GenerateReport, Box<dyn std::error::Error>> {
+    let analyzer = analyzer::load_report(&options.workspace_root, analyzer_mode)?;
     let workspace = manifest::load_workspace(&options.workspace_root)?;
     let project = parse::parse_workspace(workspace)?;
     let reduced = reduce::reduce(&project)?;
@@ -42,6 +53,7 @@ pub fn generate(options: GenerateOptions) -> Result<GenerateReport, Box<dyn std:
     reachable_items.sort();
 
     Ok(GenerateReport {
+        analyzer,
         root: reduced.root,
         roots: reduced.roots,
         packages,
