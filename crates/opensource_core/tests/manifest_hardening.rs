@@ -1414,6 +1414,133 @@ fn retains_local_build_dependencies_for_retained_build_scripts() {
 }
 
 #[test]
+fn retains_fallback_ffi_imports_and_extern_crate_dependencies() {
+    let workspace = temp_path("fallback-ffi-workspace");
+    let output = temp_path("fallback-ffi-output");
+    let target_dir = temp_path("fallback-ffi-target");
+    write_fallback_ffi_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let manifest = read(output.join("ffi_like/Cargo.toml"));
+    let lib = read(output.join("ffi_like/src/lib.rs"));
+    let bindings = read(output.join("ffi_like/src/bindings.rs"));
+    let types = read(output.join("ffi_like/src/types.rs"));
+    assert!(
+        manifest.contains("itoa"),
+        "extern crate dependency should remain\n{manifest}"
+    );
+    assert!(lib.contains("extern crate itoa"));
+    assert!(lib.contains("pub use types::*"));
+    assert!(bindings.contains("use crate::*"));
+    assert!(bindings.contains("use std::os::raw::c_char"));
+    assert!(bindings.contains("pub type FfiHandle"));
+    assert!(types.contains("use std::os::raw::c_int"));
+    assert!(types.contains("pub type CrossHandle"));
+    assert!(types.contains("pub struct CrossAliasStr"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated fallback FFI slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nffi_like/Cargo.toml:\n{}\nsrc/lib.rs:\n{}\nsrc/bindings.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        lib,
+        bindings,
+    );
+}
+
+#[test]
+fn strips_features_from_unreferenced_retained_local_dependencies() {
+    let workspace = temp_path("unreferenced-local-feature-workspace");
+    let output = temp_path("unreferenced-local-feature-output");
+    let target_dir = temp_path("unreferenced-local-feature-target");
+    write_unreferenced_local_feature_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "helper"]);
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    assert!(
+        app_manifest.contains("helper"),
+        "helper package may remain as a reduced workspace member\n{app_manifest}"
+    );
+    assert!(
+        !app_manifest.contains("heavy"),
+        "unreferenced local dependency should not retain feature requests\n{app_manifest}"
+    );
+    assert!(app_manifest.contains("default-features = false"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated local feature slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+    );
+}
+
+#[test]
+fn retains_non_workspace_macro_reexport_dependencies() {
+    let workspace = temp_path("non-workspace-macro-reexport-workspace");
+    let output = temp_path("non-workspace-macro-reexport-output");
+    let target_dir = temp_path("non-workspace-macro-reexport-target");
+    write_non_workspace_macro_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let manifest = read(output.join("provider/Cargo.toml"));
+    let lib = read(output.join("provider/src/lib.rs"));
+    assert!(manifest.contains("error-support-macros"));
+    assert!(lib.contains("pub use error_support_macros::handle_error"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/Cargo.toml:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        lib,
+    );
+}
+
+#[test]
 fn keeps_optional_dependency_requested_by_retained_local_package_feature() {
     let workspace = temp_path("implicit-feature-workspace");
     let output = temp_path("implicit-feature-output");
@@ -3900,6 +4027,220 @@ pub fn selected() -> &'static str {
         "build_helper",
         r#"pub fn emit() {
     println!("cargo:rerun-if-changed=build.rs");
+}
+"#,
+    );
+}
+
+fn write_fallback_ffi_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["ffi_like"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("ffi_like/Cargo.toml"),
+        r#"[package]
+name = "ffi_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+itoa = "1"
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("ffi_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[allow(unused_extern_crates)]
+extern crate itoa;
+
+#[opensourced]
+pub type RootShared = u8;
+
+pub use types::*;
+pub mod types;
+pub mod bindings;
+"#,
+    );
+    write(
+        root.join("ffi_like/src/types.rs"),
+        r#"use std::os::raw::c_int;
+
+pub type CrossHandle = c_int;
+pub type CrossAlias = CrossAliasStr;
+
+pub struct CrossAliasStr {
+    pub raw: c_int,
+}
+"#,
+    );
+    write(
+        root.join("ffi_like/src/bindings.rs"),
+        r#"use crate::*;
+use std::os::raw::c_char;
+
+#[opensourced]
+pub type FfiValue = u8;
+
+pub type FfiHandle = u8;
+
+extern "C" {
+    pub fn ffi_selected(
+        handle: *mut FfiHandle,
+        cross_handle: *mut CrossHandle,
+        cross_alias: *mut CrossAlias,
+        shared: *mut RootShared,
+        name: *const c_char,
+    ) -> *mut FfiValue;
+}
+"#,
+    );
+}
+
+fn write_unreferenced_local_feature_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helper = { path = "../helper", features = ["heavy"] }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("helper/Cargo.toml"),
+        r#"[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+itoa = { version = "1", optional = true }
+opensourced.workspace = true
+
+[features]
+default = []
+heavy = ["dep:itoa"]
+"#,
+    );
+    write(
+        root.join("helper/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn helper_root() -> i32 {
+    2
+}
+"#,
+    );
+}
+
+fn write_non_workspace_macro_reexport_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["provider"]
+exclude = ["error-support-macros"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("error-support-macros/Cargo.toml"),
+        r#"[package]
+name = "error-support-macros"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+    );
+    write(
+        root.join("error-support-macros/src/lib.rs"),
+        r#"use proc_macro::TokenStream;
+
+#[proc_macro_attribute]
+pub fn handle_error(_args: TokenStream, input: TokenStream) -> TokenStream {
+    input
+}
+"#,
+    );
+    write(
+        root.join("provider/Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support-macros = { path = "../error-support-macros" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("provider/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub use error_support_macros::handle_error;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    1
 }
 "#,
     );

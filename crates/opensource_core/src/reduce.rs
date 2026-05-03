@@ -381,21 +381,27 @@ fn retained_rendered_use_dependencies(
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
+    let mut package_source_idents = HashMap::new();
+    let mut module_source_idents = HashMap::new();
+    let public_reexport_idents = public_reexport_idents_referenced_by_dependency_package(
+        project,
+        reachable,
+        reachable_items,
+    );
+
     for source in project
         .files
         .values()
         .filter(|source| candidate_packages.contains(&source.package))
-        .filter(|source| {
-            module_has_reachable_code(project, reachable, reachable_items, source)
-                || (source.module_path.is_empty()
-                    && package_public_api_is_referenced_by_reachable_packages(
-                        project,
-                        reachable,
-                        reachable_items,
-                        &source.package,
-                    ))
-        })
     {
+        let public_idents = public_reexport_idents.get(&source.package);
+        if !module_has_reachable_code(project, reachable, reachable_items, source)
+            && !(source.module_path.is_empty()
+                && public_idents.is_some_and(|idents| !idents.is_empty()))
+        {
+            continue;
+        }
+
         let aliases = project
             .module_aliases
             .get(&(source.package.clone(), source.module_path.clone()))
@@ -408,21 +414,30 @@ fn retained_rendered_use_dependencies(
             aliases: &aliases,
             self_type: None,
         };
-        let module_idents = reachable_import_scope_source_idents(
-            project,
-            reachable,
-            reachable_items,
-            &source.package,
-            &source.module_path,
-        );
-        let mut package_idents =
-            reachable_package_source_idents(project, reachable, reachable_items, &source.package);
-        package_idents.extend(public_reexport_idents_referenced_by_reachable_packages(
-            project,
-            reachable,
-            reachable_items,
-            &source.package,
-        ));
+        let module_key = (source.package.clone(), source.module_path.clone());
+        let module_idents = module_source_idents.entry(module_key).or_insert_with(|| {
+            reachable_import_scope_source_idents(
+                project,
+                reachable,
+                reachable_items,
+                &source.package,
+                &source.module_path,
+            )
+        });
+        let mut package_idents = package_source_idents
+            .entry(source.package.clone())
+            .or_insert_with(|| {
+                reachable_package_source_idents(
+                    project,
+                    reachable,
+                    reachable_items,
+                    &source.package,
+                )
+            })
+            .clone();
+        if let Some(public_idents) = public_idents {
+            package_idents.extend(public_idents.iter().cloned());
+        }
 
         for item in &source.syntax.items {
             let syn::Item::Use(item_use) = item else {
@@ -431,7 +446,7 @@ fn retained_rendered_use_dependencies(
             let reachable_idents = if matches!(item_use.vis, syn::Visibility::Public(_)) {
                 &package_idents
             } else {
-                &module_idents
+                &*module_idents
             };
             let mut named_paths = Vec::new();
             let mut glob_paths = Vec::new();
@@ -466,17 +481,19 @@ fn externally_referenced_public_reexport_dependencies(
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
+    let public_reexport_idents = public_reexport_idents_referenced_by_dependency_package(
+        project,
+        reachable,
+        reachable_items,
+    );
     for source in project
         .files
         .values()
         .filter(|source| candidate_packages.contains(&source.package))
     {
-        let public_idents = public_reexport_idents_referenced_by_reachable_packages(
-            project,
-            reachable,
-            reachable_items,
-            &source.package,
-        );
+        let Some(public_idents) = public_reexport_idents.get(&source.package) else {
+            continue;
+        };
         if public_idents.is_empty() {
             continue;
         }
@@ -1215,110 +1232,102 @@ fn reachable_package_idents(
     idents
 }
 
-fn public_reexport_idents_referenced_by_reachable_packages(
+fn public_reexport_idents_referenced_by_dependency_package(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
-    dependency_package: &str,
-) -> BTreeSet<String> {
-    let mut idents = BTreeSet::new();
-    for callable in reachable
-        .iter()
-        .filter(|callable| callable.package() != dependency_package)
-    {
+) -> HashMap<String, BTreeSet<String>> {
+    let mut idents_by_package = HashMap::new();
+    let mut root_cache = HashMap::new();
+
+    for callable in reachable {
         if let Some(record) = project.functions.get(callable) {
-            collect_dependency_public_path_idents(
+            collect_dependency_public_path_idents_by_package(
                 project,
                 &record.package,
-                dependency_package,
                 &record.item.to_token_stream(),
-                &mut idents,
+                &mut root_cache,
+                &mut idents_by_package,
             );
         }
         if let Some(record) = project.methods.get(callable) {
-            collect_dependency_public_path_idents(
+            collect_dependency_public_path_idents_by_package(
                 project,
                 callable.package(),
-                dependency_package,
                 &record.item.to_token_stream(),
-                &mut idents,
+                &mut root_cache,
+                &mut idents_by_package,
             );
         }
     }
-    for item in reachable_items
-        .iter()
-        .filter(|item| item.package() != dependency_package)
-    {
+    for item in reachable_items {
         if let Some(record) = project.items.get(item) {
-            collect_dependency_public_path_idents(
+            collect_dependency_public_path_idents_by_package(
                 project,
                 &record.package,
-                dependency_package,
                 &record.item.to_token_stream(),
-                &mut idents,
+                &mut root_cache,
+                &mut idents_by_package,
             );
         }
     }
-    idents
+    idents_by_package
 }
 
-fn package_public_api_is_referenced_by_reachable_packages(
-    project: &Project,
-    reachable: &BTreeSet<CallableId>,
-    reachable_items: &BTreeSet<ItemId>,
-    dependency_package: &str,
-) -> bool {
-    !public_reexport_idents_referenced_by_reachable_packages(
-        project,
-        reachable,
-        reachable_items,
-        dependency_package,
-    )
-    .is_empty()
-}
-
-fn collect_dependency_public_path_idents(
+fn collect_dependency_public_path_idents_by_package(
     project: &Project,
     caller_package: &str,
-    dependency_package: &str,
     tokens: &TokenStream,
-    idents: &mut BTreeSet<String>,
+    root_cache: &mut HashMap<(String, String), Vec<String>>,
+    idents_by_package: &mut HashMap<String, BTreeSet<String>>,
 ) {
     for segments in token_path_candidates(tokens) {
         if segments.len() < 2 {
             continue;
         }
-        if first_segment_targets_dependency(
-            project,
-            caller_package,
-            dependency_package,
-            &segments[0],
-        ) {
-            idents.insert(segments[1].clone());
+        let key = (caller_package.to_string(), segments[0].clone());
+        let dependency_packages = root_cache.entry(key).or_insert_with(|| {
+            dependency_packages_for_path_root(project, caller_package, &segments[0])
+        });
+        for dependency_package in dependency_packages {
+            if dependency_package == caller_package {
+                continue;
+            }
+            idents_by_package
+                .entry(dependency_package.clone())
+                .or_default()
+                .insert(segments[1].clone());
         }
     }
 }
 
-fn first_segment_targets_dependency(
+fn dependency_packages_for_path_root(
     project: &Project,
     caller_package: &str,
-    dependency_package: &str,
     first: &str,
-) -> bool {
-    if first == dependency_package || first == crate_code_name(dependency_package) {
-        return true;
+) -> Vec<String> {
+    let mut packages = BTreeSet::new();
+    packages.extend(
+        project
+            .workspace
+            .packages
+            .keys()
+            .filter(|package| *package == first || crate_code_name(package) == first)
+            .cloned(),
+    );
+
+    if let Some(package) = project.workspace.packages.get(caller_package) {
+        packages.extend(
+            package
+                .dependencies
+                .iter()
+                .filter(|dependency| dependency_name_matches(dependency, first))
+                .map(|dependency| dependency.package.clone())
+                .filter(|dependency| project.workspace.packages.contains_key(dependency)),
+        );
     }
 
-    project
-        .workspace
-        .packages
-        .get(caller_package)
-        .is_some_and(|package| {
-            package.dependencies.iter().any(|dependency| {
-                dependency.package == dependency_package
-                    && dependency_name_matches(dependency, first)
-            })
-        })
+    packages.into_iter().collect()
 }
 
 fn reachable_package_mentions_ident(

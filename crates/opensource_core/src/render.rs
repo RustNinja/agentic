@@ -1,5 +1,6 @@
 use std::{
-    collections::BTreeSet,
+    cell::RefCell,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Component, Path, PathBuf},
 };
@@ -16,11 +17,23 @@ use crate::{
     reduce::{is_cfg_test_attr, is_opensourced_attr, is_test_attr},
 };
 
+thread_local! {
+    static PUBLIC_REEXPORT_NAME_CACHE: RefCell<BTreeMap<String, BTreeSet<String>>> =
+        RefCell::new(BTreeMap::new());
+    static FALLBACK_DEPENDENCY_USAGE_CACHE: RefCell<BTreeMap<String, PackageSourceUsage>> =
+        RefCell::new(BTreeMap::new());
+    static PUBLIC_REEXPORT_DEPENDENCY_USAGE_CACHE: RefCell<BTreeMap<String, PackageSourceUsage>> =
+        RefCell::new(BTreeMap::new());
+}
+
 pub fn write_reduced_workspace(
     project: &Project,
     reduced: &ReducedProject,
     output_root: &Path,
 ) -> Result<usize, Box<dyn std::error::Error>> {
+    PUBLIC_REEXPORT_NAME_CACHE.with(|cache| cache.borrow_mut().clear());
+    FALLBACK_DEPENDENCY_USAGE_CACHE.with(|cache| cache.borrow_mut().clear());
+    PUBLIC_REEXPORT_DEPENDENCY_USAGE_CACHE.with(|cache| cache.borrow_mut().clear());
     if output_root.exists() {
         fs::remove_dir_all(output_root)?;
     }
@@ -897,10 +910,23 @@ fn transformed_dependencies(
 
         if project.workspace.packages.contains_key(&dependency_package) {
             if reduced.packages.contains(&dependency_package) {
+                let preserve_feature_requests = dependency_should_render(
+                    project,
+                    reduced,
+                    package_name,
+                    alias,
+                    retention,
+                    package_usage,
+                ) || is_feature_required;
                 retained_aliases.insert(alias.clone());
                 dependencies.insert(
                     alias.clone(),
-                    local_dependency_value(alias, &dependency_package, value),
+                    local_dependency_value(
+                        alias,
+                        &dependency_package,
+                        value,
+                        preserve_feature_requests,
+                    ),
                 );
             }
             continue;
@@ -995,10 +1021,23 @@ fn transformed_dependency_table(
 
         if project.workspace.packages.contains_key(&dependency_package) {
             if reduced.packages.contains(&dependency_package) {
+                let preserve_feature_requests = dependency_should_render(
+                    project,
+                    reduced,
+                    package_name,
+                    alias,
+                    retention,
+                    package_usage,
+                ) || is_feature_required;
                 retained_aliases.insert(alias.clone());
                 dependencies.insert(
                     alias.clone(),
-                    local_dependency_value(alias, &dependency_package, value),
+                    local_dependency_value(
+                        alias,
+                        &dependency_package,
+                        value,
+                        preserve_feature_requests,
+                    ),
                 );
             }
             continue;
@@ -1044,7 +1083,7 @@ fn dependency_should_render(
         || package_usage.mentions_dependency(alias)
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct PackageSourceUsage {
     idents: BTreeSet<String>,
     path_roots: BTreeSet<String>,
@@ -1052,15 +1091,6 @@ struct PackageSourceUsage {
 }
 
 impl PackageSourceUsage {
-    fn record_file(&mut self, file: &syn::File) {
-        collect_token_usage(&file.to_token_stream(), self);
-        for item in &file.items {
-            if let Item::Use(item_use) = item {
-                collect_use_tree_idents(&item_use.tree, &mut self.use_idents);
-            }
-        }
-    }
-
     fn mentions_ident(&self, ident: &str) -> bool {
         self.idents.contains(ident)
     }
@@ -1069,9 +1099,16 @@ impl PackageSourceUsage {
         let code_name = dependency_code_name(alias);
         self.path_roots.contains(&code_name)
             || self.use_idents.contains(&code_name)
+            || self.idents.contains(&code_name)
             || (alias != code_name
                 && (self.path_roots.contains(alias) || self.use_idents.contains(alias)))
             || known_macro_dependency_usage(self, alias, &code_name)
+    }
+
+    fn merge(&mut self, other: &Self) {
+        self.idents.extend(other.idents.iter().cloned());
+        self.path_roots.extend(other.path_roots.iter().cloned());
+        self.use_idents.extend(other.use_idents.iter().cloned());
     }
 }
 
@@ -1081,6 +1118,42 @@ fn package_source_usage(
     package_name: &str,
 ) -> PackageSourceUsage {
     let mut usage = PackageSourceUsage::default();
+    let fallback_dependency_usage =
+        fallback_dependency_usage_for_reduced_package(project, reduced, package_name);
+    usage.merge(&fallback_dependency_usage);
+    let public_reexport_dependency_usage =
+        public_reexport_dependency_usage_for_reduced_package(project, reduced, package_name);
+    usage.merge(&public_reexport_dependency_usage);
+    let public_reexport_names =
+        public_reexport_names_referenced_by_reduced_package(project, reduced, package_name);
+    for callable in reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package_name)
+    {
+        if let Some(record) = project.functions.get(callable) {
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+        }
+        if let Some(record) = project.methods.get(callable) {
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+        }
+    }
+    for item in reduced
+        .reachable_items
+        .iter()
+        .filter(|item| item.package == package_name)
+    {
+        let Some(record) = project.items.get(item) else {
+            continue;
+        };
+        if let Item::Struct(mut item_struct) = record.item.clone() {
+            prune_private_struct_fields(project, reduced, package_name, &mut item_struct);
+            collect_token_usage(&item_struct.to_token_stream(), &mut usage);
+        } else {
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+        }
+    }
+
     for source in project
         .files
         .values()
@@ -1089,14 +1162,28 @@ fn package_source_usage(
             module_should_render(project, reduced, &source.package, &source.module_path)
         })
     {
-        let file = transform_file(
+        usage.record_retained_fallback_items(
+            project,
+            reduced,
+            &source.package,
+            &source.module_path,
+            &source.syntax.items,
+        );
+        usage.record_retained_macro_invocations(
+            project,
+            reduced,
+            &source.package,
+            &source.module_path,
+            &source.syntax.items,
+        );
+        usage.record_referenced_uses(
             project,
             reduced,
             &source.package,
             &source.module_path,
             &source.syntax,
+            &public_reexport_names,
         );
-        usage.record_file(&file);
     }
     usage
 }
@@ -1124,25 +1211,230 @@ fn collect_token_usage(tokens: &TokenStream, usage: &mut PackageSourceUsage) {
     }
 }
 
-fn collect_use_tree_idents(tree: &UseTree, idents: &mut BTreeSet<String>) {
-    match tree {
-        UseTree::Path(path) => {
-            idents.insert(path.ident.to_string());
-            collect_use_tree_idents(&path.tree, idents);
+impl PackageSourceUsage {
+    fn record_referenced_uses(
+        &mut self,
+        project: &Project,
+        reduced: &ReducedProject,
+        package: &str,
+        module_path: &[String],
+        syntax: &syn::File,
+        public_reexport_names: &BTreeSet<String>,
+    ) {
+        for item in &syntax.items {
+            let Item::Use(item_use) = item else {
+                continue;
+            };
+            let is_public_use = !matches!(item_use.vis, syn::Visibility::Inherited);
+            self.record_referenced_use_tree(
+                project,
+                reduced,
+                package,
+                module_path,
+                &item_use.tree,
+                Vec::new(),
+                is_public_use,
+                public_reexport_names,
+            );
         }
-        UseTree::Name(name) => {
-            idents.insert(name.ident.to_string());
-        }
-        UseTree::Rename(rename) => {
-            idents.insert(rename.ident.to_string());
-            idents.insert(rename.rename.to_string());
-        }
-        UseTree::Group(group) => {
-            for item in &group.items {
-                collect_use_tree_idents(item, idents);
+    }
+
+    fn record_referenced_use_tree(
+        &mut self,
+        project: &Project,
+        reduced: &ReducedProject,
+        package: &str,
+        module_path: &[String],
+        tree: &UseTree,
+        mut prefix: Vec<String>,
+        is_public_use: bool,
+        public_reexport_names: &BTreeSet<String>,
+    ) {
+        match tree {
+            UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                self.record_referenced_use_tree(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    &path.tree,
+                    prefix,
+                    is_public_use,
+                    public_reexport_names,
+                );
+            }
+            UseTree::Name(name) => {
+                let visible_name = if name.ident == "self" {
+                    prefix
+                        .last()
+                        .cloned()
+                        .unwrap_or_else(|| name.ident.to_string())
+                } else {
+                    name.ident.to_string()
+                };
+                prefix.push(name.ident.to_string());
+                if self.use_target_is_referenced(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    &prefix,
+                    &visible_name,
+                    is_public_use,
+                    public_reexport_names,
+                ) {
+                    self.use_idents.extend(prefix);
+                    self.use_idents.insert(visible_name);
+                }
+            }
+            UseTree::Rename(rename) => {
+                prefix.push(rename.ident.to_string());
+                let visible_name = rename.rename.to_string();
+                if self.use_target_is_referenced(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    &prefix,
+                    &visible_name,
+                    is_public_use,
+                    public_reexport_names,
+                ) {
+                    self.use_idents.extend(prefix);
+                    self.use_idents.insert(visible_name);
+                }
+            }
+            UseTree::Group(group) => {
+                for item in &group.items {
+                    self.record_referenced_use_tree(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        item,
+                        prefix.clone(),
+                        is_public_use,
+                        public_reexport_names,
+                    );
+                }
+            }
+            UseTree::Glob(_) => {
+                if !use_prefix_should_drop(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    &prefix,
+                    is_public_use,
+                ) {
+                    self.use_idents.extend(prefix);
+                }
             }
         }
-        UseTree::Glob(_) => {}
+    }
+
+    fn record_retained_macro_invocations(
+        &mut self,
+        project: &Project,
+        reduced: &ReducedProject,
+        package: &str,
+        module_path: &[String],
+        items: &[Item],
+    ) {
+        for item in items {
+            match item {
+                Item::Macro(item_macro) if item_macro.ident.is_none() => {
+                    collect_token_usage(&item_macro.to_token_stream(), self)
+                }
+                Item::Mod(item_mod) => {
+                    let mut child_path = module_path.to_vec();
+                    child_path.push(item_mod.ident.to_string());
+                    if module_should_render(project, reduced, package, &child_path) {
+                        if let Some((_brace, child_items)) = &item_mod.content {
+                            self.record_retained_macro_invocations(
+                                project,
+                                reduced,
+                                package,
+                                &child_path,
+                                child_items,
+                            );
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn record_retained_fallback_items(
+        &mut self,
+        project: &Project,
+        reduced: &ReducedProject,
+        package: &str,
+        module_path: &[String],
+        items: &[Item],
+    ) {
+        for item in items {
+            match item {
+                Item::Mod(item_mod) => {
+                    let mut child_path = module_path.to_vec();
+                    child_path.push(item_mod.ident.to_string());
+                    if module_should_render(project, reduced, package, &child_path) {
+                        if let Some((_brace, child_items)) = &item_mod.content {
+                            self.record_retained_fallback_items(
+                                project,
+                                reduced,
+                                package,
+                                &child_path,
+                                child_items,
+                            );
+                        }
+                    }
+                }
+                _ if item_is_retained_fallback(item) => {
+                    collect_token_usage(&item.to_token_stream(), self);
+                }
+                _ => {}
+            }
+        }
+    }
+
+    fn use_target_is_referenced(
+        &self,
+        project: &Project,
+        reduced: &ReducedProject,
+        package: &str,
+        module_path: &[String],
+        target: &[String],
+        visible_name: &str,
+        is_public_use: bool,
+        public_reexport_names: &BTreeSet<String>,
+    ) -> bool {
+        if self.mentions_ident(visible_name) || self.path_roots.contains(visible_name) {
+            return true;
+        }
+        let Some(leaf) = external_use_leaf(target) else {
+            return false;
+        };
+        if known_macro_dependency_target_should_remain(project, reduced, package, target) {
+            return true;
+        }
+        if external_trait_import_should_remain(
+            project,
+            reduced,
+            package,
+            module_path,
+            target,
+            leaf,
+            is_public_use,
+        ) {
+            return true;
+        }
+        if !is_public_use {
+            return false;
+        }
+        public_reexport_names.contains(visible_name)
     }
 }
 
@@ -1283,6 +1575,14 @@ fn token_stream_mentions_ident(tokens: &TokenStream, ident: &str) -> bool {
     })
 }
 
+fn token_stream_mentions_any_ident(tokens: &TokenStream, idents: &BTreeSet<String>) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        TokenTree::Ident(candidate) => idents.contains(&candidate.to_string()),
+        TokenTree::Group(group) => token_stream_mentions_any_ident(&group.stream(), idents),
+        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+    })
+}
+
 fn item_has_template_attr(item: &Item) -> bool {
     item_attrs(item).iter().any(|attribute| {
         attribute.path().is_ident("template")
@@ -1312,25 +1612,127 @@ fn item_attrs(item: &Item) -> &[syn::Attribute] {
     }
 }
 
-fn token_stream_mentions_dependency_public_name(
+fn item_is_public_api(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::Const(syn::ItemConst {
+            vis: syn::Visibility::Public(_),
+            ..
+        }) | Item::Enum(syn::ItemEnum {
+            vis: syn::Visibility::Public(_),
+            ..
+        }) | Item::Fn(syn::ItemFn {
+            vis: syn::Visibility::Public(_),
+            ..
+        }) | Item::Mod(syn::ItemMod {
+            vis: syn::Visibility::Public(_),
+            ..
+        }) | Item::Static(syn::ItemStatic {
+            vis: syn::Visibility::Public(_),
+            ..
+        }) | Item::Struct(syn::ItemStruct {
+            vis: syn::Visibility::Public(_),
+            ..
+        }) | Item::Trait(syn::ItemTrait {
+            vis: syn::Visibility::Public(_),
+            ..
+        }) | Item::Type(syn::ItemType {
+            vis: syn::Visibility::Public(_),
+            ..
+        }) | Item::Union(syn::ItemUnion {
+            vis: syn::Visibility::Public(_),
+            ..
+        })
+    )
+}
+
+fn module_path_name_is_referenced(
+    module_path: &[String],
+    referenced_names: &BTreeSet<String>,
+) -> bool {
+    module_path
+        .last()
+        .is_some_and(|name| referenced_names.contains(name))
+}
+
+fn public_reexport_names_referenced_by_reduced_package(
+    project: &Project,
+    reduced: &ReducedProject,
+    dependency_package: &str,
+) -> BTreeSet<String> {
+    if let Some(cached) =
+        PUBLIC_REEXPORT_NAME_CACHE.with(|cache| cache.borrow().get(dependency_package).cloned())
+    {
+        return cached;
+    }
+
+    let mut names = BTreeSet::new();
+    for callable in reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() != dependency_package)
+    {
+        if let Some(record) = project.functions.get(callable) {
+            collect_dependency_public_path_idents(
+                project,
+                &record.package,
+                dependency_package,
+                &record.item.to_token_stream(),
+                &mut names,
+            );
+        }
+        if let Some(record) = project.methods.get(callable) {
+            collect_dependency_public_path_idents(
+                project,
+                callable.package(),
+                dependency_package,
+                &record.item.to_token_stream(),
+                &mut names,
+            );
+        }
+    }
+    for item in reduced
+        .reachable_items
+        .iter()
+        .filter(|item| item.package() != dependency_package)
+    {
+        if let Some(record) = project.items.get(item) {
+            collect_dependency_public_path_idents(
+                project,
+                &record.package,
+                dependency_package,
+                &record.item.to_token_stream(),
+                &mut names,
+            );
+        }
+    }
+    collect_dependency_glob_import_idents(project, reduced, dependency_package, &mut names);
+    PUBLIC_REEXPORT_NAME_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(dependency_package.to_string(), names.clone());
+    });
+    names
+}
+
+fn collect_dependency_public_path_idents(
     project: &Project,
     caller_package: &str,
     dependency_package: &str,
-    visible_name: &str,
     tokens: &TokenStream,
-) -> bool {
+    names: &mut BTreeSet<String>,
+) {
     let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
-    if token_trees.iter().any(|token| {
-        matches!(token, TokenTree::Group(group)
-        if token_stream_mentions_dependency_public_name(
-            project,
-            caller_package,
-            dependency_package,
-            visible_name,
-            &group.stream(),
-        ))
-    }) {
-        return true;
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            collect_dependency_public_path_idents(
+                project,
+                caller_package,
+                dependency_package,
+                &group.stream(),
+                names,
+            );
+        }
     }
 
     let mut index = 0;
@@ -1351,7 +1753,6 @@ fn token_stream_mentions_dependency_public_name(
         }
 
         if segments.len() >= 2
-            && segments[1] == visible_name
             && first_segment_targets_dependency(
                 project,
                 caller_package,
@@ -1359,13 +1760,112 @@ fn token_stream_mentions_dependency_public_name(
                 &segments[0],
             )
         {
-            return true;
+            names.insert(segments[1].clone());
         }
 
         index = cursor.max(index + 1);
     }
+}
 
-    false
+fn collect_dependency_glob_import_idents(
+    project: &Project,
+    reduced: &ReducedProject,
+    dependency_package: &str,
+    names: &mut BTreeSet<String>,
+) {
+    for source in project
+        .files
+        .values()
+        .filter(|source| source.package != dependency_package)
+    {
+        if !module_has_dependency_glob_import(
+            project,
+            &source.package,
+            &source.module_path,
+            &source.syntax.items,
+            dependency_package,
+        ) {
+            continue;
+        }
+        let mut usage = PackageSourceUsage::default();
+        collect_reachable_module_token_usage(
+            project,
+            reduced,
+            &source.package,
+            &source.module_path,
+            &mut usage,
+        );
+        names.extend(usage.idents);
+    }
+}
+
+fn module_has_dependency_glob_import(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+    dependency_package: &str,
+) -> bool {
+    visible_glob_use_paths(items).into_iter().any(|path| {
+        resolve_use_target_path(project, package, module_path, &path)
+            .is_some_and(|(target_package, _)| target_package == dependency_package)
+    })
+}
+
+fn collect_reachable_module_token_usage(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    usage: &mut PackageSourceUsage,
+) {
+    for callable in reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+    {
+        if let Some(record) = project.functions.get(callable) {
+            if record.module_path == module_path {
+                collect_token_usage(&record.item.to_token_stream(), usage);
+            }
+        }
+        if let Some(record) = project.methods.get(callable) {
+            if record.module_path == module_path {
+                collect_token_usage(&record.item.to_token_stream(), usage);
+            }
+        }
+    }
+    for item in reduced
+        .reachable_items
+        .iter()
+        .filter(|item| item.package == package && item.module_path == module_path)
+    {
+        if let Some(record) = project.items.get(item) {
+            collect_token_usage(&record.item.to_token_stream(), usage);
+        }
+    }
+
+    let fallback_dependency_usage =
+        fallback_dependency_usage_for_reduced_package(project, reduced, package);
+    let public_reexport_dependency_usage =
+        public_reexport_dependency_usage_for_reduced_package(project, reduced, package);
+    for (callable, record) in project.functions.iter().filter(|(callable, record)| {
+        record.package == package
+            && record.module_path == module_path
+            && public_reexport_dependency_usage.mentions_ident(callable_leaf_name(callable))
+    }) {
+        let _ = callable;
+        collect_token_usage(&record.item.to_token_stream(), usage);
+    }
+    for (item, record) in project.items.iter().filter(|(item, _)| {
+        item.package == package
+            && item.module_path == module_path
+            && (fallback_dependency_usage.mentions_ident(&item.name)
+                || public_reexport_dependency_usage.mentions_ident(&item.name))
+    }) {
+        let _ = item;
+        collect_token_usage(&record.item.to_token_stream(), usage);
+    }
 }
 
 fn token_trees_have_path_separator(tokens: &[TokenTree], index: usize) -> bool {
@@ -1616,11 +2116,20 @@ fn feature_reference_should_remain(
     !source_aliases.contains(dependency) || retained_aliases.contains(dependency)
 }
 
-fn local_dependency_value(alias: &str, package: &str, original: &Value) -> Value {
+fn local_dependency_value(
+    alias: &str,
+    package: &str,
+    original: &Value,
+    preserve_feature_requests: bool,
+) -> Value {
     let mut table = original.as_table().cloned().unwrap_or_default();
     table.remove("version");
     table.remove("workspace");
     table.insert("path".to_string(), Value::String(format!("../{package}")));
+    if !preserve_feature_requests {
+        table.remove("features");
+        table.insert("default-features".to_string(), Value::Boolean(false));
+    }
 
     if alias == package {
         table.remove("package");
@@ -1652,6 +2161,11 @@ fn transform_items(
 ) -> Vec<Item> {
     let retained_macro_definitions =
         retained_macro_definitions_for_generated_items(project, reduced, package, items);
+    let retained_fallback_usage = retained_fallback_item_usage(items);
+    let fallback_dependency_usage =
+        fallback_dependency_usage_for_reduced_package(project, reduced, package);
+    let public_reexport_dependency_usage =
+        public_reexport_dependency_usage_for_reduced_package(project, reduced, package);
 
     let mut transformed = Vec::new();
     for item in items {
@@ -1682,7 +2196,18 @@ fn transform_items(
                     module_path: module_path.to_vec(),
                     name: function.sig.ident.to_string(),
                 };
-                reduced.reachable.contains(&id).then(|| {
+                (reduced.reachable.contains(&id)
+                    || fallback_dependency_usage.mentions_ident(&function.sig.ident.to_string())
+                    || public_reexport_dependency_usage
+                        .mentions_ident(&function.sig.ident.to_string())
+                    || local_public_reexport_target_is_referenced(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        &function.sig.ident.to_string(),
+                    ))
+                .then(|| {
                     let mut function = function.clone();
                     strip_opensourced_attrs(&mut function.attrs);
                     allow_dead_code_if_not_public(&function.vis, &mut function.attrs);
@@ -1704,7 +2229,18 @@ fn transform_items(
                 Some(Item::Macro(item_macro.clone()))
             }
             Item::Struct(item_struct) => item_id(package, module_path, item).and_then(|id| {
-                reduced.reachable_items.contains(&id).then(|| {
+                (reduced.reachable_items.contains(&id)
+                    || retained_fallback_usage.mentions_ident(&id.name)
+                    || fallback_dependency_usage.mentions_ident(&id.name)
+                    || public_reexport_dependency_usage.mentions_ident(&id.name)
+                    || local_public_reexport_target_is_referenced(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        &id.name,
+                    ))
+                .then(|| {
                     let mut item_struct = item_struct.clone();
                     strip_opensourced_attrs(&mut item_struct.attrs);
                     prune_private_struct_fields(project, reduced, package, &mut item_struct);
@@ -1720,7 +2256,18 @@ fn transform_items(
             | Item::Const(_)
             | Item::Static(_)
             | Item::Macro(_) => item_id(package, module_path, item).and_then(|id| {
-                reduced.reachable_items.contains(&id).then(|| {
+                (reduced.reachable_items.contains(&id)
+                    || retained_fallback_usage.mentions_ident(&id.name)
+                    || fallback_dependency_usage.mentions_ident(&id.name)
+                    || public_reexport_dependency_usage.mentions_ident(&id.name)
+                    || local_public_reexport_target_is_referenced(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        &id.name,
+                    ))
+                .then(|| {
                     let mut item = item.clone();
                     strip_opensourced_attrs_from_item(&mut item);
                     allow_dead_code_for_non_public_item(&mut item);
@@ -1889,6 +2436,204 @@ fn transform_items(
     transformed
 }
 
+fn retained_fallback_item_usage(items: &[Item]) -> PackageSourceUsage {
+    let mut usage = PackageSourceUsage::default();
+    for item in items {
+        if item_is_retained_fallback(item) {
+            collect_token_usage(&item.to_token_stream(), &mut usage);
+        }
+    }
+    usage
+}
+
+fn fallback_dependency_usage_for_reduced_package(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+) -> PackageSourceUsage {
+    if let Some(cached) =
+        FALLBACK_DEPENDENCY_USAGE_CACHE.with(|cache| cache.borrow().get(package).cloned())
+    {
+        return cached;
+    }
+
+    let mut usage = PackageSourceUsage::default();
+    for source in project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+    {
+        if module_should_render_without_fallback_dependencies(
+            project,
+            reduced,
+            package,
+            &source.module_path,
+        ) {
+            collect_base_retained_fallback_item_usage(
+                project,
+                reduced,
+                package,
+                &source.module_path,
+                &source.syntax.items,
+                &mut usage,
+            );
+        }
+    }
+
+    let mut retained_dependency_items = BTreeSet::new();
+    loop {
+        let mut changed = false;
+        for (id, record) in project.items.iter().filter(|(id, _)| id.package == package) {
+            if retained_dependency_items.contains(id) || !usage.mentions_ident(&id.name) {
+                continue;
+            }
+            retained_dependency_items.insert(id.clone());
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    FALLBACK_DEPENDENCY_USAGE_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(package.to_string(), usage.clone());
+    });
+    usage
+}
+
+fn public_reexport_dependency_usage_for_reduced_package(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+) -> PackageSourceUsage {
+    if let Some(cached) =
+        PUBLIC_REEXPORT_DEPENDENCY_USAGE_CACHE.with(|cache| cache.borrow().get(package).cloned())
+    {
+        return cached;
+    }
+
+    let mut usage = PackageSourceUsage::default();
+    let mut retained_callables = BTreeSet::new();
+    let mut retained_items = BTreeSet::new();
+    let public_reexport_names =
+        public_reexport_names_referenced_by_reduced_package(project, reduced, package);
+
+    for (callable, record) in project.functions.iter().filter(|(callable, record)| {
+        record.package == package
+            && (local_public_reexport_target_is_referenced(
+                project,
+                reduced,
+                package,
+                &record.module_path,
+                callable_leaf_name(callable),
+            ) || (module_path_name_is_referenced(&record.module_path, &public_reexport_names)
+                && matches!(record.item.vis, syn::Visibility::Public(_))))
+    }) {
+        retained_callables.insert(callable.clone());
+        collect_token_usage(&record.item.to_token_stream(), &mut usage);
+    }
+
+    for (id, record) in project.items.iter().filter(|(id, record)| {
+        id.package == package
+            && (local_public_reexport_target_is_referenced(
+                project,
+                reduced,
+                package,
+                &id.module_path,
+                &id.name,
+            ) || (module_path_name_is_referenced(&id.module_path, &public_reexport_names)
+                && item_is_public_api(&record.item)))
+    }) {
+        retained_items.insert(id.clone());
+        collect_token_usage(&record.item.to_token_stream(), &mut usage);
+    }
+
+    loop {
+        let mut changed = false;
+        for (callable, record) in project
+            .functions
+            .iter()
+            .filter(|(_, record)| record.package == package)
+        {
+            if retained_callables.contains(callable)
+                || !usage.mentions_ident(callable_leaf_name(callable))
+            {
+                continue;
+            }
+            retained_callables.insert(callable.clone());
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+            changed = true;
+        }
+        for (id, record) in project.items.iter().filter(|(id, _)| id.package == package) {
+            if retained_items.contains(id) || !usage.mentions_ident(&id.name) {
+                continue;
+            }
+            retained_items.insert(id.clone());
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+            changed = true;
+        }
+        if !changed {
+            break;
+        }
+    }
+
+    PUBLIC_REEXPORT_DEPENDENCY_USAGE_CACHE.with(|cache| {
+        cache
+            .borrow_mut()
+            .insert(package.to_string(), usage.clone());
+    });
+    usage
+}
+
+fn collect_base_retained_fallback_item_usage(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+    usage: &mut PackageSourceUsage,
+) {
+    for item in items {
+        match item {
+            Item::Mod(item_mod) => {
+                let mut child_path = module_path.to_vec();
+                child_path.push(item_mod.ident.to_string());
+                if module_should_render_without_fallback_dependencies(
+                    project,
+                    reduced,
+                    package,
+                    &child_path,
+                ) {
+                    if let Some((_brace, child_items)) = &item_mod.content {
+                        collect_base_retained_fallback_item_usage(
+                            project,
+                            reduced,
+                            package,
+                            &child_path,
+                            child_items,
+                            usage,
+                        );
+                    }
+                }
+            }
+            _ if item_is_retained_fallback(item) => {
+                collect_token_usage(&item.to_token_stream(), usage);
+            }
+            _ => {}
+        }
+    }
+}
+
+fn item_is_retained_fallback(item: &Item) -> bool {
+    matches!(
+        item,
+        Item::ExternCrate(_) | Item::ForeignMod(_) | Item::TraitAlias(_) | Item::Verbatim(_)
+    )
+}
+
 fn module_contains_root(
     project: &Project,
     reduced: &ReducedProject,
@@ -1927,6 +2672,27 @@ fn module_should_render(
     package: &str,
     module_path: &[String],
 ) -> bool {
+    module_should_render_without_fallback_dependencies(project, reduced, package, module_path)
+        || module_public_api_is_referenced_by_retained_fallback_dependencies(
+            project,
+            reduced,
+            package,
+            module_path,
+        )
+        || module_public_api_is_referenced_by_public_reexport_dependencies(
+            project,
+            reduced,
+            package,
+            module_path,
+        )
+}
+
+fn module_should_render_without_fallback_dependencies(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
     if module_path.is_empty() {
         return true;
     }
@@ -1953,6 +2719,126 @@ fn module_should_render(
         .reachable_items
         .iter()
         .any(|item| item.package == package && path_has_prefix(&item.module_path, module_path))
+        || module_public_api_is_referenced_by_reduced_package(
+            project,
+            reduced,
+            package,
+            module_path,
+        )
+}
+
+fn module_public_api_is_referenced_by_retained_fallback_dependencies(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    if module_path.is_empty() {
+        return true;
+    }
+    let usage = fallback_dependency_usage_for_reduced_package(project, reduced, package);
+    if usage.idents.is_empty() {
+        return false;
+    }
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+    source
+        .syntax
+        .items
+        .iter()
+        .any(|item| item_exports_any_referenced_name(item, &usage.idents))
+}
+
+fn module_public_api_is_referenced_by_public_reexport_dependencies(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    if module_path.is_empty() {
+        return true;
+    }
+    let usage = public_reexport_dependency_usage_for_reduced_package(project, reduced, package);
+    if usage.idents.is_empty() {
+        return false;
+    }
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+    source
+        .syntax
+        .items
+        .iter()
+        .any(|item| item_exports_any_referenced_name(item, &usage.idents))
+}
+
+fn module_public_api_is_referenced_by_reduced_package(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    if module_path.is_empty() {
+        return true;
+    }
+    let referenced_names =
+        public_reexport_names_referenced_by_reduced_package(project, reduced, package);
+    if referenced_names.is_empty() {
+        return false;
+    }
+    if module_path_name_is_referenced(module_path, &referenced_names) {
+        return true;
+    }
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+    source
+        .syntax
+        .items
+        .iter()
+        .any(|item| item_exports_any_referenced_name(item, &referenced_names))
+}
+
+fn item_exports_any_referenced_name(item: &Item, referenced_names: &BTreeSet<String>) -> bool {
+    match item {
+        Item::Fn(function) => referenced_names.contains(&function.sig.ident.to_string()),
+        Item::Struct(item) => referenced_names.contains(&item.ident.to_string()),
+        Item::Enum(item) => referenced_names.contains(&item.ident.to_string()),
+        Item::Union(item) => referenced_names.contains(&item.ident.to_string()),
+        Item::Type(item) => referenced_names.contains(&item.ident.to_string()),
+        Item::Trait(item) => referenced_names.contains(&item.ident.to_string()),
+        Item::Const(item) => referenced_names.contains(&item.ident.to_string()),
+        Item::Static(item) => referenced_names.contains(&item.ident.to_string()),
+        Item::Macro(item) => item
+            .ident
+            .as_ref()
+            .is_some_and(|ident| referenced_names.contains(&ident.to_string())),
+        Item::ForeignMod(item) => item.items.iter().any(|foreign_item| match foreign_item {
+            syn::ForeignItem::Fn(function) => {
+                referenced_names.contains(&function.sig.ident.to_string())
+            }
+            syn::ForeignItem::Static(item) => referenced_names.contains(&item.ident.to_string()),
+            syn::ForeignItem::Type(item) => referenced_names.contains(&item.ident.to_string()),
+            syn::ForeignItem::Macro(item) => {
+                token_stream_mentions_any_ident(&item.mac.tokens, referenced_names)
+            }
+            _ => false,
+        }),
+        _ => false,
+    }
 }
 
 fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
@@ -2227,6 +3113,24 @@ fn reachable_reduced_packages_mention_ident(
         .any(|package| reachable_package_mentions_ident(project, reduced, package, ident))
 }
 
+fn reachable_reduced_packages_token_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    ident: &str,
+) -> bool {
+    reduced.reachable.iter().any(|callable| {
+        project.functions.get(callable).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+        }) || project.methods.get(callable).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+        })
+    }) || reduced.reachable_items.iter().any(|item| {
+        project.items.get(item).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+        })
+    })
+}
+
 fn retained_impl_attrs_mention_ident(
     project: &Project,
     reduced: &ReducedProject,
@@ -2314,6 +3218,57 @@ fn retained_macro_invocations_mention_ident(
     source.syntax.items.iter().any(|item| match item {
         Item::Macro(item_macro) if item_macro.ident.is_none() => {
             token_stream_mentions_ident(&item_macro.mac.tokens, ident)
+        }
+        _ => false,
+    })
+}
+
+fn retained_fallback_items_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+
+    source.syntax.items.iter().any(|item| match item {
+        Item::Mod(item_mod) => {
+            let mut child_path = module_path.to_vec();
+            child_path.push(item_mod.ident.to_string());
+            if !module_should_render(project, reduced, package, &child_path) {
+                return false;
+            }
+            item_mod
+                .content
+                .as_ref()
+                .is_some_and(|(_brace, child_items)| {
+                    retained_fallback_items_mention_ident_in_items(child_items, ident)
+                })
+        }
+        _ if item_is_retained_fallback(item) => {
+            token_stream_mentions_ident(&item.to_token_stream(), ident)
+        }
+        _ => false,
+    })
+}
+
+fn retained_fallback_items_mention_ident_in_items(items: &[Item], ident: &str) -> bool {
+    items.iter().any(|item| match item {
+        Item::Mod(item_mod) => item_mod
+            .content
+            .as_ref()
+            .is_some_and(|(_brace, child_items)| {
+                retained_fallback_items_mention_ident_in_items(child_items, ident)
+            }),
+        _ if item_is_retained_fallback(item) => {
+            token_stream_mentions_ident(&item.to_token_stream(), ident)
         }
         _ => false,
     })
@@ -2477,6 +3432,73 @@ fn reachable_module_mentions_ident(
         || retained_impl_attrs_mention_ident(project, reduced, package, module_path, ident)
         || retained_impl_non_fn_items_mention_ident(project, reduced, package, module_path, ident)
         || retained_macro_invocations_mention_ident(project, reduced, package, module_path, ident)
+        || retained_fallback_items_mention_ident(project, reduced, package, module_path, ident)
+        || retained_fallback_dependency_items_mention_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || retained_public_reexport_dependency_items_mention_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+}
+
+fn retained_fallback_dependency_items_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let usage = fallback_dependency_usage_for_reduced_package(project, reduced, package);
+    if usage.idents.is_empty() {
+        return false;
+    }
+
+    project
+        .items
+        .iter()
+        .filter(|(item_id, _)| item_id.package == package && item_id.module_path == module_path)
+        .filter(|(item_id, _)| usage.mentions_ident(&item_id.name))
+        .any(|(_, record)| token_stream_mentions_ident(&record.item.to_token_stream(), ident))
+}
+
+fn retained_public_reexport_dependency_items_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let usage = public_reexport_dependency_usage_for_reduced_package(project, reduced, package);
+    if usage.idents.is_empty() {
+        return false;
+    }
+
+    project
+        .functions
+        .iter()
+        .filter(|(callable, record)| {
+            record.package == package
+                && record.module_path == module_path
+                && usage.mentions_ident(callable_leaf_name(callable))
+        })
+        .any(|(_, record)| token_stream_mentions_ident(&record.item.to_token_stream(), ident))
+        || project
+            .items
+            .iter()
+            .filter(|(item_id, _)| {
+                item_id.package == package
+                    && item_id.module_path == module_path
+                    && usage.mentions_ident(&item_id.name)
+            })
+            .any(|(_, record)| token_stream_mentions_ident(&record.item.to_token_stream(), ident))
 }
 
 fn reachable_module_has_template_attr(
@@ -2899,7 +3921,7 @@ fn use_tree_contains_glob(tree: &UseTree) -> bool {
     }
 }
 
-fn module_glob_is_used_in_module(
+fn local_glob_import_is_used(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
@@ -2907,39 +3929,117 @@ fn module_glob_is_used_in_module(
     target_package: &str,
     target_path: &[String],
 ) -> bool {
-    project.functions.keys().any(|callable| {
-        let CallableId::Free {
-            package: callable_package,
-            module_path: callable_module,
-            name,
-        } = callable
-        else {
+    let usage = retained_module_usage(project, reduced, package, module_path);
+    usage.idents.iter().any(|ident| {
+        if matches!(
+            ident.as_str(),
+            "crate" | "self" | "super" | "std" | "core" | "alloc"
+        ) {
             return false;
-        };
-        callable_package == target_package
-            && callable_module == target_path
-            && reduced.reachable.contains(callable)
-            && reachable_module_import_scope_mentions_ident_excluding(
+        }
+        let mut candidate_path = target_path.to_vec();
+        candidate_path.push(ident.clone());
+        find_use_function(project, target_package, &candidate_path)
+            .is_some_and(|callable| reduced.reachable.contains(&callable))
+            || find_use_item(project, target_package, &candidate_path).is_some_and(|item| {
+                reduced.reachable_items.contains(&item)
+                    || (item.kind == ItemKind::Mod
+                        && module_should_render(
+                            project,
+                            reduced,
+                            &item.package,
+                            &path_from_item(&item),
+                        ))
+            })
+            || target_module_has_retained_macro_invocation(
                 project,
                 reduced,
-                package,
-                module_path,
-                name,
-                Some(target_path),
-            )
-    }) || project.items.keys().any(|item| {
-        item.package == target_package
-            && item.module_path == target_path
-            && reduced.reachable_items.contains(item)
-            && reachable_module_import_scope_mentions_ident_excluding(
-                project,
-                reduced,
-                package,
-                module_path,
-                &item.name,
-                Some(target_path),
+                target_package,
+                target_path,
             )
     })
+}
+
+fn target_module_has_retained_macro_invocation(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    else {
+        return false;
+    };
+    source.syntax.items.iter().any(|item| {
+        matches!(
+            item,
+            Item::Macro(item_macro)
+                if item_macro.ident.is_none()
+                    && should_retain_macro_invocation(project, reduced, package, item_macro)
+        )
+    })
+}
+
+fn retained_module_usage(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> PackageSourceUsage {
+    let mut usage = PackageSourceUsage::default();
+    for callable in reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+    {
+        if let Some(record) = project
+            .functions
+            .get(callable)
+            .filter(|record| record.module_path == module_path)
+        {
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+        }
+        if let Some(record) = project
+            .methods
+            .get(callable)
+            .filter(|record| record.module_path == module_path)
+        {
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+        }
+    }
+    for item in reduced
+        .reachable_items
+        .iter()
+        .filter(|item| item.package == package && item.module_path == module_path)
+    {
+        if let Some(record) = project.items.get(item) {
+            collect_token_usage(&record.item.to_token_stream(), &mut usage);
+        }
+    }
+    if let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    {
+        usage.record_retained_macro_invocations(
+            project,
+            reduced,
+            package,
+            module_path,
+            &source.syntax.items,
+        );
+        usage.record_retained_fallback_items(
+            project,
+            reduced,
+            package,
+            module_path,
+            &source.syntax.items,
+        );
+    }
+    usage
 }
 
 fn callable_mentions_ident(callable: &CallableId, ident: &str) -> bool {
@@ -2959,6 +4059,13 @@ fn callable_mentions_ident(callable: &CallableId, ident: &str) -> bool {
                     .as_ref()
                     .is_some_and(|path| path.iter().any(|segment| segment == ident))
         }
+    }
+}
+
+fn callable_leaf_name(callable: &CallableId) -> &str {
+    match callable {
+        CallableId::Free { name, .. } => name,
+        CallableId::Method { method, .. } => method,
     }
 }
 
@@ -3317,44 +4424,164 @@ fn public_reexport_name_is_referenced_by_reduced_package(
     package: &str,
     visible_name: &str,
 ) -> bool {
-    reduced
-        .reachable
-        .iter()
-        .filter(|callable| callable.package() != package)
-        .any(|callable| {
-            project.functions.get(callable).is_some_and(|record| {
-                token_stream_mentions_dependency_public_name(
+    public_reexport_names_referenced_by_reduced_package(project, reduced, package)
+        .contains(visible_name)
+}
+
+fn local_public_reexport_target_is_referenced(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    target_module_path: &[String],
+    target_name: &str,
+) -> bool {
+    let referenced_names =
+        public_reexport_names_referenced_by_reduced_package(project, reduced, package);
+    if referenced_names.is_empty() {
+        return false;
+    }
+
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .any(|source| {
+            source.syntax.items.iter().any(|item| {
+                let Item::Use(item_use) = item else {
+                    return false;
+                };
+                if matches!(item_use.vis, syn::Visibility::Inherited) {
+                    return false;
+                }
+                public_use_tree_reexports_target(
                     project,
-                    &record.package,
                     package,
-                    visible_name,
-                    &record.item.to_token_stream(),
+                    &source.module_path,
+                    &item_use.tree,
+                    Vec::new(),
+                    target_module_path,
+                    target_name,
                 )
-            }) || project.methods.get(callable).is_some_and(|record| {
-                token_stream_mentions_dependency_public_name(
-                    project,
-                    callable.package(),
-                    package,
-                    visible_name,
-                    &record.item.to_token_stream(),
-                )
-            })
-        })
-        || reduced
-            .reachable_items
-            .iter()
-            .filter(|item| item.package() != package)
-            .any(|item| {
-                project.items.get(item).is_some_and(|record| {
-                    token_stream_mentions_dependency_public_name(
-                        project,
-                        &record.package,
-                        package,
-                        visible_name,
-                        &record.item.to_token_stream(),
-                    )
+                .is_some_and(|visible_name| {
+                    referenced_names.contains(&visible_name)
+                        || reachable_reduced_packages_token_mentions_ident(
+                            project,
+                            reduced,
+                            &visible_name,
+                        )
                 })
             })
+        })
+}
+
+fn public_use_tree_reexports_target(
+    project: &Project,
+    package: &str,
+    use_module_path: &[String],
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    target_module_path: &[String],
+    target_name: &str,
+) -> Option<String> {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            public_use_tree_reexports_target(
+                project,
+                package,
+                use_module_path,
+                &path.tree,
+                prefix,
+                target_module_path,
+                target_name,
+            )
+        }
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            prefix.push(name.ident.to_string());
+            use_target_matches_local_item(
+                project,
+                package,
+                use_module_path,
+                &prefix,
+                target_module_path,
+                target_name,
+            )
+            .then_some(visible_name)
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            use_target_matches_local_item(
+                project,
+                package,
+                use_module_path,
+                &prefix,
+                target_module_path,
+                target_name,
+            )
+            .then(|| rename.rename.to_string())
+        }
+        UseTree::Group(group) => group.items.iter().find_map(|item| {
+            public_use_tree_reexports_target(
+                project,
+                package,
+                use_module_path,
+                item,
+                prefix.clone(),
+                target_module_path,
+                target_name,
+            )
+        }),
+        UseTree::Glob(_) => use_target_matches_local_module(
+            project,
+            package,
+            use_module_path,
+            &prefix,
+            target_module_path,
+        )
+        .then(|| target_name.to_string()),
+    }
+}
+
+fn use_target_matches_local_item(
+    project: &Project,
+    package: &str,
+    use_module_path: &[String],
+    target: &[String],
+    target_module_path: &[String],
+    target_name: &str,
+) -> bool {
+    let Some((target_package, target_path)) =
+        resolve_use_target_path(project, package, use_module_path, target)
+    else {
+        return false;
+    };
+    target_package == package
+        && target_path.len() == target_module_path.len() + 1
+        && target_path.starts_with(target_module_path)
+        && target_path.last().is_some_and(|name| name == target_name)
+}
+
+fn use_target_matches_local_module(
+    project: &Project,
+    package: &str,
+    use_module_path: &[String],
+    target: &[String],
+    target_module_path: &[String],
+) -> bool {
+    let Some((target_package, target_path)) =
+        resolve_use_target_path(project, package, use_module_path, target)
+    else {
+        return false;
+    };
+    target_package == package && target_path == target_module_path
 }
 
 fn use_target_should_drop(
@@ -3533,7 +4760,7 @@ fn use_prefix_should_drop(
             }
             !is_public_use
                 && !prefix.first().is_some_and(|first| first == "super")
-                && !module_glob_is_used_in_module(
+                && !local_glob_import_is_used(
                     project,
                     reduced,
                     package,
