@@ -166,6 +166,26 @@ fn slices_path_attributed_external_modules() {
 }
 
 #[test]
+fn rejects_markers_spread_across_multiple_package_targets() {
+    let workspace = temp_path("multi-target-marker-workspace");
+    let output = temp_path("multi-target-marker-output");
+    write_multi_target_marker_fixture(&workspace);
+
+    let error = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output,
+    })
+    .expect_err("markers across multiple target roots should fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("multiple package targets contain #[opensourced] markers"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
 fn slices_multiple_marked_function_roots() {
     let workspace = temp_path("multi-root-workspace");
     let output = temp_path("multi-root-output");
@@ -2623,6 +2643,51 @@ fn helper(value: &str) -> String {
 
 fn dead_custom() -> String {
     "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_multi_target_marker_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "multi_target_marker_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+
+[[bin]]
+name = "tool"
+path = "src/bin/tool.rs"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn lib_selected() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("src/bin/tool.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn bin_selected() -> i32 {
+    2
 }
 "#,
     );

@@ -60,7 +60,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
             .canonicalize()?;
         let manifest = read_manifest(&manifest_path)?;
 
-        let lib_path = entry_source_path(&package_root, &manifest, &metadata_package.targets);
+        let lib_path = entry_source_path(&package_root, &manifest, &metadata_package.targets)?;
 
         let dependencies = metadata_dependencies(&metadata_package.dependencies);
 
@@ -109,13 +109,17 @@ fn load_cargo_metadata(manifest_path: &Path) -> Result<CargoMetadata, Box<dyn st
     Ok(serde_json::from_slice(&output.stdout)?)
 }
 
-fn entry_source_path(package_root: &Path, manifest: &Value, targets: &[MetadataTarget]) -> PathBuf {
-    if let Some(path) = metadata_marker_source_path(targets) {
-        return path;
+fn entry_source_path(
+    package_root: &Path,
+    manifest: &Value,
+    targets: &[MetadataTarget],
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if let Some(path) = metadata_marker_source_path(targets)? {
+        return Ok(path);
     }
 
     if let Some(path) = metadata_entry_source_path(package_root, targets) {
-        return path;
+        return Ok(path);
     }
 
     if let Some(path) = manifest
@@ -123,18 +127,20 @@ fn entry_source_path(package_root: &Path, manifest: &Value, targets: &[MetadataT
         .and_then(|lib| lib.get("path"))
         .and_then(Value::as_str)
     {
-        return package_root.join(path);
+        return Ok(package_root.join(path));
     }
 
     let default_lib = package_root.join("src/lib.rs");
     if default_lib.exists() {
-        return default_lib;
+        return Ok(default_lib);
     }
 
-    package_root.join("src/main.rs")
+    Ok(package_root.join("src/main.rs"))
 }
 
-fn metadata_marker_source_path(targets: &[MetadataTarget]) -> Option<PathBuf> {
+fn metadata_marker_source_path(
+    targets: &[MetadataTarget],
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     let mut paths = targets
         .iter()
         .filter(|target| target_is_parse_candidate(target))
@@ -142,9 +148,22 @@ fn metadata_marker_source_path(targets: &[MetadataTarget]) -> Option<PathBuf> {
         .collect::<Vec<_>>();
     paths.sort();
     paths.dedup();
-    paths
+    let marked_paths = paths
         .into_iter()
-        .find(|path| source_contains_opensourced_marker(path))
+        .filter(|path| source_contains_opensourced_marker(path))
+        .collect::<Vec<_>>();
+    if marked_paths.len() > 1 {
+        let paths = marked_paths
+            .iter()
+            .map(|path| path.display().to_string())
+            .collect::<Vec<_>>()
+            .join(", ");
+        return Err(format!(
+            "multiple package targets contain #[opensourced] markers; slice one target at a time: {paths}"
+        )
+        .into());
+    }
+    Ok(marked_paths.into_iter().next())
 }
 
 fn target_is_parse_candidate(target: &MetadataTarget) -> bool {
