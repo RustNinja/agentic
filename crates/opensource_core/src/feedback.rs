@@ -1,8 +1,14 @@
 use std::{
+    ffi::OsStr,
     fs,
     path::{Path, PathBuf},
-    process::Command,
+    process::{Command, Stdio},
+    thread,
+    time::{Duration, Instant},
 };
+
+#[cfg(unix)]
+use std::os::unix::process::CommandExt;
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -11,12 +17,14 @@ use serde_json::Value;
 pub struct CheckOptions {
     pub manifest_path: PathBuf,
     pub target_dir: Option<PathBuf>,
+    pub timeout: Option<Duration>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckReport {
     pub manifest_path: PathBuf,
     pub success: bool,
+    pub timed_out: bool,
     pub diagnostics: Vec<CheckDiagnostic>,
     pub stderr: String,
 }
@@ -58,7 +66,14 @@ impl CheckReport {
 }
 
 pub fn check_workspace(options: CheckOptions) -> Result<CheckReport, Box<dyn std::error::Error>> {
-    let mut command = Command::new("cargo");
+    check_workspace_with_program(OsStr::new("cargo"), options)
+}
+
+fn check_workspace_with_program(
+    program: &OsStr,
+    options: CheckOptions,
+) -> Result<CheckReport, Box<dyn std::error::Error>> {
+    let mut command = Command::new(program);
     command
         .arg("check")
         .arg("--manifest-path")
@@ -69,10 +84,13 @@ pub fn check_workspace(options: CheckOptions) -> Result<CheckReport, Box<dyn std
         command.env("CARGO_TARGET_DIR", target_dir);
     }
 
-    let output = command.output()?;
+    let (output, timed_out) = run_command(command, options.timeout)?;
     let stdout = String::from_utf8_lossy(&output.stdout);
     let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
     let mut diagnostics = parse_cargo_messages(&stdout);
+    if timed_out {
+        diagnostics.push(timeout_failure_diagnostic(options.timeout));
+    }
     if !output.status.success() && diagnostics.is_empty() {
         if let Some(diagnostic) = stderr_failure_diagnostic(&stderr) {
             diagnostics.push(diagnostic);
@@ -82,6 +100,7 @@ pub fn check_workspace(options: CheckOptions) -> Result<CheckReport, Box<dyn std
     Ok(CheckReport {
         manifest_path: options.manifest_path,
         success: output.status.success(),
+        timed_out,
         diagnostics,
         stderr,
     })
@@ -102,6 +121,53 @@ fn parse_cargo_messages(stdout: &str) -> Vec<CheckDiagnostic> {
         .filter(|message| message.get("reason").and_then(Value::as_str) == Some("compiler-message"))
         .filter_map(|message| diagnostic_from_value(message.get("message")?))
         .collect()
+}
+
+fn run_command(
+    mut command: Command,
+    timeout: Option<Duration>,
+) -> Result<(std::process::Output, bool), Box<dyn std::error::Error>> {
+    command.stdout(Stdio::piped()).stderr(Stdio::piped());
+    configure_timeout_process_group(&mut command);
+    let mut child = command.spawn()?;
+    let Some(timeout) = timeout else {
+        return Ok((child.wait_with_output()?, false));
+    };
+    let started = Instant::now();
+
+    loop {
+        if child.try_wait()?.is_some() {
+            return Ok((child.wait_with_output()?, false));
+        }
+        if started.elapsed() >= timeout {
+            kill_timed_out_child(&mut child);
+            return Ok((child.wait_with_output()?, true));
+        }
+        thread::sleep(Duration::from_millis(50));
+    }
+}
+
+#[cfg(unix)]
+fn configure_timeout_process_group(command: &mut Command) {
+    command.process_group(0);
+}
+
+#[cfg(not(unix))]
+fn configure_timeout_process_group(_command: &mut Command) {}
+
+#[cfg(unix)]
+fn kill_timed_out_child(child: &mut std::process::Child) {
+    let process_group = -(child.id() as libc::pid_t);
+    // Kill the process group so build scripts do not outlive the timed-out cargo process.
+    let killed_group = unsafe { libc::kill(process_group, libc::SIGKILL) == 0 };
+    if !killed_group {
+        let _ = child.kill();
+    }
+}
+
+#[cfg(not(unix))]
+fn kill_timed_out_child(child: &mut std::process::Child) {
+    let _ = child.kill();
 }
 
 fn diagnostic_from_value(message: &Value) -> Option<CheckDiagnostic> {
@@ -129,6 +195,19 @@ fn diagnostic_from_value(message: &Value) -> Option<CheckDiagnostic> {
         rendered,
         spans,
     })
+}
+
+fn timeout_failure_diagnostic(timeout: Option<Duration>) -> CheckDiagnostic {
+    let seconds = timeout.map(|timeout| timeout.as_secs()).unwrap_or_default();
+    CheckDiagnostic {
+        level: "error".to_string(),
+        message: format!("cargo check exceeded feedback timeout of {seconds}s"),
+        code: Some("cargo-timeout".to_string()),
+        rendered: Some(format!(
+            "cargo check was terminated after exceeding the feedback timeout of {seconds}s\n"
+        )),
+        spans: Vec::new(),
+    }
 }
 
 fn stderr_failure_diagnostic(stderr: &str) -> Option<CheckDiagnostic> {
@@ -179,7 +258,12 @@ fn span_from_value(span: &Value) -> Option<CheckSpan> {
 
 #[cfg(test)]
 mod tests {
-    use super::{parse_cargo_messages, stderr_failure_diagnostic};
+    use std::{fs, time::Duration};
+
+    use super::{
+        check_workspace_with_program, parse_cargo_messages, stderr_failure_diagnostic,
+        timeout_failure_diagnostic, CheckOptions,
+    };
 
     #[test]
     fn parses_compiler_message_diagnostics() {
@@ -226,5 +310,56 @@ mod tests {
             diagnostic.message,
             "error: failed to select a version for `rc_crypto`"
         );
+    }
+
+    #[test]
+    fn reports_feedback_timeout_as_structured_diagnostic() {
+        let diagnostic = timeout_failure_diagnostic(Some(Duration::from_secs(42)));
+
+        assert_eq!(diagnostic.level, "error");
+        assert_eq!(diagnostic.code.as_deref(), Some("cargo-timeout"));
+        assert_eq!(
+            diagnostic.message,
+            "cargo check exceeded feedback timeout of 42s"
+        );
+        assert!(diagnostic.spans.is_empty());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn terminates_feedback_command_after_timeout() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let root = std::env::temp_dir().join(format!(
+            "opensourced-feedback-timeout-{}",
+            std::process::id()
+        ));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let fake_cargo = root.join("fake-cargo");
+        fs::write(
+            &fake_cargo,
+            "#!/bin/sh\nsleep 5\necho '{\"reason\":\"build-finished\",\"success\":true}'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_cargo).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_cargo, permissions).unwrap();
+
+        let report = check_workspace_with_program(
+            fake_cargo.as_os_str(),
+            CheckOptions {
+                manifest_path: root.join("Cargo.toml"),
+                target_dir: None,
+                timeout: Some(Duration::from_millis(50)),
+            },
+        )
+        .expect("fake cargo should run");
+
+        assert!(report.timed_out);
+        assert!(!report.success);
+        assert_eq!(report.diagnostics[0].code.as_deref(), Some("cargo-timeout"));
+
+        let _ = fs::remove_dir_all(root);
     }
 }

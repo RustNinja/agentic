@@ -779,6 +779,7 @@ dependencies = [
 name = "opensource_core"
 version = "0.1.0"
 dependencies = [
+ "libc",
  "prettyplease",
  "proc-macro2",
  "quote",

@@ -88,10 +88,12 @@ cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 workspace, prints prioritized compiler diagnostics, and writes
 `slice-feedback.json` under the slice output. `--feedback-loop <n>` repeats that
 compiler feedback pass up to `n` times and fails with the JSON report path when
-the slice still does not compile. This is the current production feedback layer:
-the slicer stays fast and syntactic, then rustc gives precise diagnostics for
-the generated slice. A rust-analyzer HIR or rustc-driver backend remains the
-next precision step for resolving hard name-resolution cases before rendering.
+the slice still does not compile. Feedback checks have a 600-second timeout by
+default; use `--feedback-timeout 0` to disable it or pass another second count.
+This is the current production feedback layer: the slicer stays fast and
+syntactic, then rustc gives precise diagnostics for the generated slice. A
+rust-analyzer HIR or rustc-driver backend remains the next precision step for
+resolving hard name-resolution cases before rendering.
 
 Workspace/package discovery is backed by `cargo metadata --no-deps`, so Cargo is
 the source of truth for workspace members, excludes, target entry paths,

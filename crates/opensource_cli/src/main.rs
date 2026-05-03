@@ -2,6 +2,7 @@ use std::{
     ffi::OsStr,
     path::{Path, PathBuf},
     process::Command,
+    time::Duration,
 };
 
 use opensource_core::{
@@ -104,6 +105,7 @@ struct CliOptions {
     feedback_iterations: usize,
     feedback_limit: usize,
     feedback_report: Option<PathBuf>,
+    feedback_timeout: Option<Duration>,
     workspace_root: PathBuf,
     output_root: PathBuf,
 }
@@ -114,6 +116,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
     let mut feedback_iterations = 0;
     let mut feedback_limit = 12;
     let mut feedback_report = None;
+    let mut feedback_timeout = Some(Duration::from_secs(600));
     let mut positional = Vec::new();
     let mut args = std::env::args_os().skip(1);
 
@@ -134,6 +137,8 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
             feedback_iterations = parse_usize_arg("--feedback-loop", args.next())?;
         } else if arg == OsStr::new("--feedback-limit") {
             feedback_limit = parse_usize_arg("--feedback-limit", args.next())?;
+        } else if arg == OsStr::new("--feedback-timeout") {
+            feedback_timeout = parse_feedback_timeout(args.next())?;
         } else if arg == OsStr::new("--feedback-report") {
             feedback_report = Some(PathBuf::from(
                 args.next()
@@ -157,6 +162,7 @@ fn parse_args() -> Result<CliOptions, Box<dyn std::error::Error>> {
         feedback_iterations,
         feedback_limit,
         feedback_report,
+        feedback_timeout,
         workspace_root: workspace_root.clone(),
         output_root: output_root.clone(),
     })
@@ -175,6 +181,17 @@ fn parse_usize_arg(
         return Err(format!("{flag} must be greater than zero").into());
     }
     Ok(parsed)
+}
+
+fn parse_feedback_timeout(
+    value: Option<std::ffi::OsString>,
+) -> Result<Option<Duration>, Box<dyn std::error::Error>> {
+    let value = value.ok_or("--feedback-timeout requires a following number of seconds")?;
+    let value = value
+        .to_str()
+        .ok_or("--feedback-timeout value must be valid UTF-8")?;
+    let seconds = value.parse::<u64>()?;
+    Ok((seconds > 0).then(|| Duration::from_secs(seconds)))
 }
 
 fn run_plain_check(output_root: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -203,6 +220,7 @@ fn run_feedback_loop(options: &CliOptions) -> Result<(), Box<dyn std::error::Err
         let report = check_workspace(CheckOptions {
             manifest_path: options.output_root.join("Cargo.toml"),
             target_dir: Some(options.output_root.join("target-feedback")),
+            timeout: options.feedback_timeout,
         })?;
         write_report(&report, &report_path)?;
         print_feedback(&report, options.feedback_limit, &report_path);
@@ -281,7 +299,7 @@ fn print_diagnostic(diagnostic: &CheckDiagnostic) {
 fn usage() -> String {
     concat!(
         "usage: slicers [--analyzer <syn|ra-hir>] [--check] [--feedback] [--feedback-loop <n>] ",
-        "[--feedback-limit <n>] [--feedback-report <path>] ",
+        "[--feedback-limit <n>] [--feedback-timeout <seconds>] [--feedback-report <path>] ",
         "<workspace-root> <output-root>"
     )
     .to_string()
