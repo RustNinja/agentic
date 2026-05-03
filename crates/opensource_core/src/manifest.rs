@@ -71,7 +71,7 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
         let entry_target = entry_target(&package_root, &manifest, &metadata_package.targets)?;
         let lib_path = entry_target.src_path.clone();
 
-        let dependencies = metadata_dependencies(&metadata_package.dependencies);
+        let dependencies = metadata_dependencies(&metadata_package.dependencies, &entry_target);
 
         packages.insert(
             metadata_package.name.clone(),
@@ -341,10 +341,14 @@ fn metadata_entry_target(
         .cloned()
 }
 
-fn metadata_dependencies(metadata_dependencies: &[MetadataDependency]) -> Vec<Dependency> {
+fn metadata_dependencies(
+    metadata_dependencies: &[MetadataDependency],
+    entry_target: &PackageTarget,
+) -> Vec<Dependency> {
+    let include_dev_dependencies = target_uses_dev_dependencies(entry_target);
     let mut dependencies = metadata_dependencies
         .iter()
-        .filter(|dependency| dependency.kind.as_deref() != Some("dev"))
+        .filter(|dependency| dependency.kind.as_deref() != Some("dev") || include_dev_dependencies)
         .map(|dependency| Dependency {
             alias: dependency
                 .rename
@@ -361,6 +365,13 @@ fn metadata_dependencies(metadata_dependencies: &[MetadataDependency]) -> Vec<De
     dependencies.dedup_by(|left, right| left.alias == right.alias && left.package == right.package);
 
     dependencies
+}
+
+fn target_uses_dev_dependencies(target: &PackageTarget) -> bool {
+    target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "example" | "test" | "bench"))
 }
 
 #[derive(Debug, Deserialize)]

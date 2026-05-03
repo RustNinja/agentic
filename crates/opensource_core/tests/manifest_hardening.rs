@@ -137,20 +137,20 @@ fn slices_marked_example_target_and_preserves_manifest_entry() {
     })
     .expect("reduction should succeed");
 
-    assert_eq!(report.packages, ["app"]);
+    assert_eq!(report.packages, ["app", "support"]);
     let manifest = read(output.join("app/Cargo.toml"));
     assert!(manifest.contains("[[example]]"));
     assert!(manifest.contains("name = \"demo\""));
     assert!(manifest.contains("path = \"examples/demo.rs\""));
+    assert!(manifest.contains("[dev-dependencies.support]"));
 
     let source = read(output.join("app/examples/demo.rs"));
-    let helper = read(output.join("app/examples/helper.rs"));
-    assert!(source.contains("mod helper"));
+    let support = read(output.join("support/src/lib.rs"));
     assert!(source.contains("fn main()"));
     assert!(source.contains("pub fn selected"));
-    assert!(helper.contains("pub fn format_value"));
+    assert!(support.contains("pub fn format_value"));
     assert!(!source.contains("dead_example"));
-    assert!(!helper.contains("dead_helper"));
+    assert!(!support.contains("dead_support"));
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -165,13 +165,13 @@ fn slices_marked_example_target_and_preserves_manifest_entry() {
         .expect("cargo check should start");
     assert!(
         cargo_check.status.success(),
-        "generated example-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/examples/demo.rs:\n{}\napp/examples/helper.rs:\n{}",
+        "generated example-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/examples/demo.rs:\n{}\nsupport/src/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         manifest,
         source,
-        helper,
+        support,
     );
 }
 
@@ -2658,7 +2658,7 @@ fn write_example_target_fixture(root: &Path) {
     write(
         root.join("Cargo.toml"),
         r#"[workspace]
-members = ["app"]
+members = ["app", "support"]
 resolver = "2"
 "#,
     );
@@ -2676,6 +2676,7 @@ path = "examples/demo.rs"
 
 [dev-dependencies]
 opensourced = {{ path = "{}" }}
+support = {{ path = "../support" }}
 "#,
             manifest_path(&opensourced_path)
         ),
@@ -2689,9 +2690,7 @@ opensourced = {{ path = "{}" }}
     );
     write(
         root.join("app/examples/demo.rs"),
-        r#"mod helper;
-
-use opensourced::opensourced;
+        r#"use opensourced::opensourced;
 
 fn main() {
     println!("{}", selected("runtime"));
@@ -2699,7 +2698,7 @@ fn main() {
 
 #[opensourced]
 pub fn selected(value: &str) -> String {
-    helper::format_value(value)
+    support::format_value(value)
 }
 
 fn dead_example() -> String {
@@ -2708,12 +2707,20 @@ fn dead_example() -> String {
 "#,
     );
     write(
-        root.join("app/examples/helper.rs"),
+        root.join("support/Cargo.toml"),
+        r#"[package]
+name = "support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support/src/lib.rs"),
         r#"pub fn format_value(value: &str) -> String {
     format!("example:{value}")
 }
 
-pub fn dead_helper() -> String {
+pub fn dead_support() -> String {
     "dead".to_string()
 }
 "#,

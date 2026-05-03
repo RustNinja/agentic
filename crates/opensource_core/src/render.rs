@@ -1222,6 +1222,26 @@ fn write_package_manifest(
         manifest.insert("dependencies".to_string(), Value::Table(dependencies));
     }
 
+    if package_target_uses_dev_dependencies(package) {
+        let dev_dependencies = transformed_dependencies(
+            project,
+            reduced,
+            package_name,
+            "dev-dependencies",
+            DependencyRetention::SourceMentioned,
+            DependencyUsageScope::General,
+            package_usage,
+            &feature_required_aliases,
+            &mut retained_dependency_aliases,
+        )?;
+        if !dev_dependencies.is_empty() {
+            manifest.insert(
+                "dev-dependencies".to_string(),
+                Value::Table(dev_dependencies),
+            );
+        }
+    }
+
     if build_script_should_render_with_usage(package, package_usage) {
         let build_dependencies = transformed_dependencies(
             project,
@@ -1262,6 +1282,14 @@ fn write_package_manifest(
         toml::to_string_pretty(&Value::Table(manifest))?,
     )?;
     Ok(())
+}
+
+fn package_target_uses_dev_dependencies(package: &Package) -> bool {
+    package
+        .entry_target
+        .kind
+        .iter()
+        .any(|kind| matches!(kind.as_str(), "example" | "test" | "bench"))
 }
 
 fn transformed_named_targets(
