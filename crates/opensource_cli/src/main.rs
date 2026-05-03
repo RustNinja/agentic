@@ -91,6 +91,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             semantic.unqueried_paths
         );
     }
+    println!(
+        "production readiness: {} ({} hazard(s))",
+        report.production.status,
+        report.production.hazards.len()
+    );
+    for hazard in report
+        .production
+        .hazards
+        .iter()
+        .take(options.feedback_limit)
+    {
+        println!(
+            "  production {} {}: {}",
+            hazard.severity, hazard.code, hazard.message
+        );
+    }
     if report.roots.len() == 1 {
         println!("root: {}", report.root);
     } else {

@@ -849,6 +849,8 @@ def build_row(
     errors = count_diagnostics(diagnostics, "error")
     semantic_warnings = semantic_hazard_warning_count(diagnostics, baseline)
     preflight_diagnostics = (preflight or {}).get("diagnostics", [])
+    production = (generation or {}).get("production") or {}
+    production_hazards = production.get("hazards") or []
     passed = classification in {
         "slice_check_passed",
         "slice_preflight_passed",
@@ -885,6 +887,9 @@ def build_row(
             "roots": (generation or {}).get("roots", []),
             "reachable_callables": len((generation or {}).get("reachable", [])),
             "reachable_items": len((generation or {}).get("reachable_items", [])),
+            "production_status": production.get("status"),
+            "production_hazards": len(production_hazards),
+            "production_hazard_codes": production_hazard_codes(production_hazards),
         },
         "preflight": {
             "success": (preflight or {}).get("success"),
@@ -1021,6 +1026,15 @@ def semantic_warning_is_hazard(diagnostic: dict[str, Any]) -> bool:
         return True
     message = str(diagnostic.get("message") or "")
     return "unreachable pattern" in message or "irrefutable" in message
+
+
+def production_hazard_codes(hazards: list[dict[str, Any]]) -> list[str]:
+    codes: list[str] = []
+    for hazard in hazards:
+        code = hazard.get("code")
+        if isinstance(code, str) and code not in codes:
+            codes.append(code)
+    return codes
 
 
 def feedback_errors_are_baseline_known(

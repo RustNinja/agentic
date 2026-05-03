@@ -37,7 +37,8 @@ predicted generated shape without compiling dependencies. Use
 metrics for each generated slice. Use `--feedback-target-dir` on feedback or
 repair corpus runs to reuse dependency builds across generated outputs. Use
 `--deny-warnings` for production gates that require warning-free generated
-feedback.
+feedback. Each corpus row includes production-readiness status and hazard codes
+from the generated `slice-report.json`.
 
 ## Litter Feedback Loop
 

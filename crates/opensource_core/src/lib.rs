@@ -35,6 +35,7 @@ pub struct GenerateOptions {
 #[derive(Debug, Clone)]
 pub struct GenerateReport {
     pub analyzer: AnalyzerReport,
+    pub production: ProductionReadinessReport,
     pub root: RootId,
     pub roots: Vec<RootId>,
     pub packages: Vec<String>,
@@ -53,6 +54,19 @@ pub struct GenerateTimingReport {
     pub parse_ms: u64,
     pub reduce_ms: u64,
     pub render_ms: u64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionReadinessReport {
+    pub status: String,
+    pub hazards: Vec<ProductionHazardReport>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionHazardReport {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
 }
 
 #[derive(Debug, Clone)]
@@ -121,9 +135,11 @@ pub fn generate_with_analyzer(
     let mut reachable_items = reduced.reachable_items.iter().cloned().collect::<Vec<_>>();
     reachable_items.sort();
     let source_map = source_map_report(&project, &reduced);
+    let production = production_readiness_report(&analyzer);
 
     Ok(GenerateReport {
         analyzer,
+        production,
         root: reduced.root,
         roots: reduced.roots,
         packages,
@@ -170,6 +186,115 @@ fn source_map_report(project: &model::Project, reduced: &model::ReducedProject) 
     SourceMapReport { callables, items }
 }
 
+fn production_readiness_report(analyzer: &AnalyzerReport) -> ProductionReadinessReport {
+    let mut hazards = Vec::new();
+    if !analyzer.loaded {
+        hazards.push(production_hazard(
+            "analyzer_unavailable",
+            "error",
+            "configured analyzer did not load; generated reachability used fallback evidence",
+        ));
+    }
+
+    let Some(semantic) = &analyzer.semantic else {
+        hazards.push(production_hazard(
+            "semantic_analyzer_unavailable",
+            "warning",
+            "no semantic analyzer inventory was available; compiler feedback is required before trusting the slice",
+        ));
+        return production_readiness_status(hazards);
+    };
+
+    if semantic.failed_files > 0 {
+        hazards.push(production_hazard(
+            "semantic_file_failures",
+            "warning",
+            format!(
+                "{} source file(s) failed semantic analysis",
+                semantic.failed_files
+            ),
+        ));
+    }
+    if semantic.skipped_files > 0 {
+        hazards.push(production_hazard(
+            "semantic_file_budget_exhausted",
+            "warning",
+            format!(
+                "{} source file(s) were skipped by semantic analysis budget",
+                semantic.skipped_files
+            ),
+        ));
+    }
+    if semantic.unresolved_method_calls > 0 {
+        hazards.push(production_hazard(
+            "semantic_unresolved_method_calls",
+            "warning",
+            format!(
+                "{} queried method call(s) did not resolve semantically",
+                semantic.unresolved_method_calls
+            ),
+        ));
+    }
+    if semantic.unqueried_method_calls > 0 {
+        hazards.push(production_hazard(
+            "semantic_method_call_budget_exhausted",
+            "warning",
+            format!(
+                "{} method call(s) were not queried because the semantic budget was exhausted",
+                semantic.unqueried_method_calls
+            ),
+        ));
+    }
+    if semantic.unresolved_paths > 0 {
+        hazards.push(production_hazard(
+            "semantic_unresolved_paths",
+            "warning",
+            format!(
+                "{} queried path(s) did not resolve semantically",
+                semantic.unresolved_paths
+            ),
+        ));
+    }
+    if semantic.unqueried_paths > 0 {
+        hazards.push(production_hazard(
+            "semantic_path_budget_exhausted",
+            "warning",
+            format!(
+                "{} path(s) were not queried because the semantic budget was exhausted",
+                semantic.unqueried_paths
+            ),
+        ));
+    }
+
+    production_readiness_status(hazards)
+}
+
+fn production_hazard(
+    code: &str,
+    severity: &str,
+    message: impl Into<String>,
+) -> ProductionHazardReport {
+    ProductionHazardReport {
+        code: code.to_string(),
+        severity: severity.to_string(),
+        message: message.into(),
+    }
+}
+
+fn production_readiness_status(hazards: Vec<ProductionHazardReport>) -> ProductionReadinessReport {
+    let status = if hazards.iter().any(|hazard| hazard.severity == "error") {
+        "hazards_detected"
+    } else if hazards.is_empty() {
+        "ready_for_feedback"
+    } else {
+        "requires_feedback"
+    };
+    ProductionReadinessReport {
+        status: status.to_string(),
+        hazards,
+    }
+}
+
 pub fn write_generate_report(
     report: &GenerateReport,
     path: &Path,
@@ -185,6 +310,7 @@ pub fn write_generate_report(
 #[derive(Serialize)]
 struct GenerateReportJson {
     analyzer: AnalyzerReportJson,
+    production: ProductionReadinessReport,
     timings: GenerateTimingReportJson,
     root: String,
     roots: Vec<String>,
@@ -199,6 +325,7 @@ impl GenerateReportJson {
     fn from_report(report: &GenerateReport) -> Self {
         Self {
             analyzer: AnalyzerReportJson::from_report(&report.analyzer),
+            production: report.production.clone(),
             timings: GenerateTimingReportJson::from_report(&report.timings),
             root: report.root.to_string(),
             roots: report.roots.iter().map(ToString::to_string).collect(),
@@ -517,6 +644,12 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(report_path).unwrap()).unwrap();
         assert_eq!(value["analyzer"]["mode"], "syn");
+        assert_eq!(value["production"]["status"], "requires_feedback");
+        assert!(value["production"]["hazards"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|hazard| hazard["code"] == "semantic_analyzer_unavailable"));
         assert_eq!(value["root"], report.root.to_string());
         assert_eq!(value["files_written"], report.files_written);
         assert_eq!(value["timings"]["total_ms"], report.timings.total_ms);
