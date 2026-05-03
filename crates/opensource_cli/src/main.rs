@@ -35,6 +35,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     for note in &report.analyzer.notes {
         println!("  analyzer note: {note}");
     }
+    if let Some(semantic) = &report.analyzer.semantic {
+        println!(
+            "  analyzer semantic files: {}/{} analyzed ({} failed)",
+            semantic.analyzed_files, semantic.source_files, semantic.failed_files
+        );
+        println!(
+            "  analyzer method calls: {}/{} resolved ({} unresolved)",
+            semantic.resolved_method_calls, semantic.method_calls, semantic.unresolved_method_calls
+        );
+        println!(
+            "  analyzer paths: {}/{} resolved ({} unresolved)",
+            semantic.resolved_paths, semantic.paths, semantic.unresolved_paths
+        );
+    }
     if report.roots.len() == 1 {
         println!("root: {}", report.root);
     } else {

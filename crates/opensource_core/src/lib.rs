@@ -8,7 +8,7 @@ mod render;
 
 use std::path::PathBuf;
 
-pub use analyzer::{AnalyzerMode, AnalyzerReport};
+pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport};
 pub use model::{CallableId, ItemId, RootId};
 

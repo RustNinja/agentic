@@ -35,6 +35,20 @@ pub struct AnalyzerReport {
     pub loaded: bool,
     pub engine: String,
     pub notes: Vec<String>,
+    pub semantic: Option<SemanticReport>,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct SemanticReport {
+    pub source_files: usize,
+    pub analyzed_files: usize,
+    pub failed_files: usize,
+    pub method_calls: usize,
+    pub resolved_method_calls: usize,
+    pub unresolved_method_calls: usize,
+    pub paths: usize,
+    pub resolved_paths: usize,
+    pub unresolved_paths: usize,
 }
 
 impl AnalyzerReport {
@@ -44,6 +58,7 @@ impl AnalyzerReport {
             loaded: true,
             engine: "syn".to_string(),
             notes: vec!["using syntactic resolver".to_string()],
+            semantic: None,
         }
     }
 }
@@ -86,14 +101,17 @@ pub fn load_report(
 #[cfg(feature = "ra-hir")]
 mod rust_analyzer {
     use std::{
-        path::Path,
+        ffi::OsStr,
+        panic::{self, AssertUnwindSafe},
+        path::{Component, Path},
         sync::atomic::{AtomicUsize, Ordering},
     };
 
     use ra_ap_load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
     use ra_ap_project_model::CargoConfig;
+    use ra_ap_syntax::{ast, AstNode};
 
-    use super::{AnalyzerMode, AnalyzerReport, SemanticProvider};
+    use super::{AnalyzerMode, AnalyzerReport, SemanticProvider, SemanticReport};
 
     pub struct RustAnalyzerSemanticProvider {
         report: AnalyzerReport,
@@ -118,10 +136,10 @@ mod rust_analyzer {
                 progress_events.fetch_add(1, Ordering::Relaxed);
             };
 
-            let (database, _vfs, proc_macro_client) =
+            let (database, vfs, proc_macro_client) =
                 load_workspace_at(workspace_root, &cargo_config, &load_config, &progress)?;
 
-            let _semantics = ra_ap_ide::Semantics::new(&database);
+            let semantic = collect_semantic_report(&database, &vfs, workspace_root);
             let mut notes = vec![
                 "rust-analyzer RootDatabase loaded".to_string(),
                 "HIR Semantics initialized".to_string(),
@@ -135,6 +153,20 @@ mod rust_analyzer {
                 "proc macro client active: {}",
                 proc_macro_client.is_some()
             ));
+            notes.push(format!(
+                "HIR semantic inventory: {} files analyzed, {}/{} method calls resolved, {}/{} paths resolved",
+                semantic.analyzed_files,
+                semantic.resolved_method_calls,
+                semantic.method_calls,
+                semantic.resolved_paths,
+                semantic.paths
+            ));
+            if semantic.failed_files > 0 {
+                notes.push(format!(
+                    "HIR semantic inventory skipped {} files after analyzer panics",
+                    semantic.failed_files
+                ));
+            }
 
             Ok(Self {
                 report: AnalyzerReport {
@@ -142,6 +174,7 @@ mod rust_analyzer {
                     loaded: true,
                     engine: "rust-analyzer HIR".to_string(),
                     notes,
+                    semantic: Some(semantic),
                 },
                 _database: database,
             })
@@ -159,6 +192,107 @@ mod rust_analyzer {
     ) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
         let provider = RustAnalyzerSemanticProvider::load(workspace_root)?;
         Ok(provider.report().clone())
+    }
+
+    fn collect_semantic_report(
+        database: &ra_ap_ide::RootDatabase,
+        vfs: &ra_ap_vfs::Vfs,
+        workspace_root: &Path,
+    ) -> SemanticReport {
+        ra_ap_hir::attach_db(database, || {
+            collect_semantic_report_attached(database, vfs, workspace_root)
+        })
+    }
+
+    fn collect_semantic_report_attached(
+        database: &ra_ap_ide::RootDatabase,
+        vfs: &ra_ap_vfs::Vfs,
+        workspace_root: &Path,
+    ) -> SemanticReport {
+        let canonical_workspace_root = workspace_root
+            .canonicalize()
+            .unwrap_or_else(|_| workspace_root.to_path_buf());
+        let semantics = ra_ap_ide::Semantics::new(database);
+        let mut report = SemanticReport::default();
+
+        for (file_id, vfs_path) in vfs.iter() {
+            if !is_workspace_rust_file(vfs_path, workspace_root, &canonical_workspace_root) {
+                continue;
+            }
+
+            report.source_files += 1;
+            match panic::catch_unwind(AssertUnwindSafe(|| {
+                collect_file_semantics(&semantics, file_id)
+            })) {
+                Ok(file_report) => {
+                    report.analyzed_files += 1;
+                    report.method_calls += file_report.method_calls;
+                    report.resolved_method_calls += file_report.resolved_method_calls;
+                    report.paths += file_report.paths;
+                    report.resolved_paths += file_report.resolved_paths;
+                }
+                Err(_) => {
+                    report.failed_files += 1;
+                }
+            }
+        }
+
+        report.unresolved_method_calls = report
+            .method_calls
+            .saturating_sub(report.resolved_method_calls);
+        report.unresolved_paths = report.paths.saturating_sub(report.resolved_paths);
+        report
+    }
+
+    fn collect_file_semantics(
+        semantics: &ra_ap_ide::Semantics<'_, ra_ap_ide::RootDatabase>,
+        file_id: ra_ap_ide::FileId,
+    ) -> SemanticReport {
+        let source = semantics.parse_guess_edition(file_id);
+        let mut report = SemanticReport::default();
+
+        for node in source.syntax().descendants() {
+            if let Some(method_call) = ast::MethodCallExpr::cast(node.clone()) {
+                report.method_calls += 1;
+                if semantics.resolve_method_call(&method_call).is_some() {
+                    report.resolved_method_calls += 1;
+                }
+            }
+
+            if let Some(path) = ast::Path::cast(node) {
+                report.paths += 1;
+                if semantics.resolve_path(&path).is_some() {
+                    report.resolved_paths += 1;
+                }
+            }
+        }
+
+        report
+    }
+
+    fn is_workspace_rust_file(
+        vfs_path: &ra_ap_vfs::VfsPath,
+        workspace_root: &Path,
+        canonical_workspace_root: &Path,
+    ) -> bool {
+        let Some(abs_path) = vfs_path.as_path() else {
+            return false;
+        };
+        let path: &Path = abs_path.as_ref();
+        let is_rust_file = path.extension().and_then(OsStr::to_str) == Some("rs");
+        let is_local =
+            path.starts_with(workspace_root) || path.starts_with(canonical_workspace_root);
+        let is_target_artifact = path
+            .strip_prefix(workspace_root)
+            .ok()
+            .or_else(|| path.strip_prefix(canonical_workspace_root).ok())
+            .is_some_and(|relative| {
+                relative.components().any(|component| {
+                    matches!(component, Component::Normal(name) if name == OsStr::new("target"))
+                })
+            });
+
+        is_rust_file && is_local && !is_target_artifact
     }
 }
 
@@ -188,6 +322,7 @@ mod tests {
         assert_eq!(report.mode, AnalyzerMode::Syn);
         assert!(report.loaded);
         assert_eq!(report.engine, "syn");
+        assert!(report.semantic.is_none());
     }
 
     #[test]
@@ -210,6 +345,14 @@ mod tests {
             .iter()
             .any(|note| note.contains("RootDatabase")));
         assert!(report.notes.iter().any(|note| note.contains("Semantics")));
+        let semantic = report
+            .semantic
+            .as_ref()
+            .expect("ra-hir should collect semantic inventory");
+        assert!(semantic.source_files > 0);
+        assert!(semantic.analyzed_files > 0);
+        assert!(semantic.method_calls >= semantic.resolved_method_calls);
+        assert!(semantic.paths >= semantic.resolved_paths);
     }
 
     fn workspace_root() -> PathBuf {
