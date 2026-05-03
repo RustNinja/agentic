@@ -1555,12 +1555,16 @@ impl<'a> DependencyVisitor<'a> {
             method_name,
             "allow_coenrollment"
                 | "config"
+                | "create_list"
                 | "defaults_hash"
                 | "is_connected"
                 | "is_valid_for_places"
                 | "is_valid_for_sync_server"
+                | "map_backend_error"
                 | "name"
                 | "schema_hash"
+                | "send"
+                | "set_value"
                 | "spawn_detached"
         ) {
             return;
@@ -2082,6 +2086,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_item_macro(&mut self, item: &'ast ItemMacro) {
+        self.add_macro_token_dependencies(&item.mac.tokens);
         if let Some(ident) = &item.ident {
             let id = ItemId {
                 package: self.resolver.package.to_string(),
@@ -2090,7 +2095,6 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 kind: ItemKind::Macro,
             };
             self.dependencies.items.insert(id);
-            self.add_macro_token_dependencies(&item.mac.tokens);
         }
     }
 
@@ -2273,6 +2277,12 @@ impl DependencyVisitor<'_> {
             self.add_macro_path(&path);
             if let Some(type_ref) = self.resolver.resolve_type_path(&path) {
                 referenced_types.insert(type_ref);
+            }
+        }
+
+        if candidate_method_names.contains("eq_ignore_ascii_case") {
+            for type_ref in &referenced_types {
+                self.add_trait_impls_for_type_named(type_ref, "Deref");
             }
         }
 
@@ -3623,12 +3633,16 @@ fn unresolved_method_fallback_type_matches(method_name: &str, type_path: &[Strin
         (method_name, type_name),
         ("config", "ServerSession")
             | ("allow_coenrollment", "FeatureDef")
+            | ("create_list", "Dao")
             | ("defaults_hash", "Vec")
             | ("is_connected", "ReconnectingIpcClient")
             | ("is_valid_for_places", "Guid")
             | ("is_valid_for_sync_server", "Guid")
+            | ("map_backend_error", "Result")
             | ("name", "FeatureDef")
             | ("schema_hash", "Vec")
+            | ("send", "Arc")
+            | ("set_value", "Header")
             | ("spawn_detached", "MobileClient")
     )
 }
@@ -3636,7 +3650,7 @@ fn unresolved_method_fallback_type_matches(method_name: &str, type_path: &[Strin
 fn unresolved_method_fallback_can_cross_packages(method_name: &str) -> bool {
     matches!(
         method_name,
-        "is_valid_for_places" | "is_valid_for_sync_server"
+        "is_valid_for_places" | "is_valid_for_sync_server" | "map_backend_error"
     )
 }
 

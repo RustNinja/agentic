@@ -1175,6 +1175,7 @@ fn known_macro_dependency_target_should_remain(
         "error_support" if error_support_macro_idents().contains(&leaf.as_str()) => {
             reachable_package_mentions_ident(project, reduced, package, leaf)
         }
+        "error_support" => false,
         code_name => known_macro_dependency_package_mentions(project, reduced, package, code_name),
     }
 }
@@ -1640,13 +1641,42 @@ fn transform_items(
                 strip_opensourced_attrs(&mut item_mod.attrs);
                 let mut child_path = module_path.to_vec();
                 child_path.push(item_mod.ident.to_string());
+                let module_item_is_reachable = reduced.reachable_items.contains(&ItemId {
+                    package: package.to_string(),
+                    module_path: module_path.to_vec(),
+                    name: item_mod.ident.to_string(),
+                    kind: ItemKind::Mod,
+                });
                 if module_contains_root(project, reduced, package, &child_path) {
                     item_mod.vis = parse_quote!(pub);
                 }
 
                 if let Some((brace, child_items)) = &item_mod.content {
-                    let child_items =
+                    let mut child_items =
                         transform_items(project, reduced, package, &child_path, child_items);
+                    if child_items.is_empty()
+                        && (module_item_is_reachable
+                            || reachable_package_mentions_ident(
+                                project,
+                                reduced,
+                                package,
+                                &item_mod.ident.to_string(),
+                            ))
+                    {
+                        child_items = item_mod
+                            .content
+                            .as_ref()
+                            .map(|(_, original_items)| {
+                                original_items
+                                    .iter()
+                                    .filter(|item| {
+                                        matches!(item, Item::Macro(item_macro) if item_macro.ident.is_none())
+                                    })
+                                    .cloned()
+                                    .collect()
+                            })
+                            .unwrap_or_default();
+                    }
                     if child_items.is_empty() {
                         continue;
                     }
@@ -1857,7 +1887,10 @@ fn macro_invocation_feeds_reachable_code(
 ) -> bool {
     macro_token_idents(&item_macro.mac.tokens)
         .iter()
-        .any(|ident| reachable_package_mentions_ident(project, reduced, package, ident))
+        .any(|ident| {
+            reachable_package_mentions_ident(project, reduced, package, ident)
+                || reachable_reduced_packages_mention_ident(project, reduced, ident)
+        })
 }
 
 fn macro_token_idents(tokens: &TokenStream) -> BTreeSet<String> {
@@ -1989,6 +2022,17 @@ fn reachable_package_mentions_ident(
                     reachable_item_mentions_ident(project, reduced, package, item, record, ident)
                 })
             })
+}
+
+fn reachable_reduced_packages_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    ident: &str,
+) -> bool {
+    reduced
+        .packages
+        .iter()
+        .any(|package| reachable_package_mentions_ident(project, reduced, package, ident))
 }
 
 fn retained_impl_attrs_mention_ident(
@@ -2851,7 +2895,9 @@ fn prune_use_tree(
                 module_path,
                 &prefix,
                 is_public_use,
-            ) || reachable_package_mentions_ident(project, reduced, package, &alias))
+            ) || reachable_package_mentions_ident(project, reduced, package, &alias)
+                || (is_public_use
+                    && reachable_reduced_packages_mention_ident(project, reduced, &alias)))
             .then(|| UseTree::Rename(rename.clone()))
         }
         UseTree::Group(group) => {
@@ -2952,6 +2998,9 @@ fn use_target_should_drop(
         if !is_public_use && item.kind != ItemKind::Trait && !leaf_is_used_in_module {
             return true;
         }
+        if (is_public_use || leaf_is_used_in_module) && item.kind == ItemKind::Mod {
+            return false;
+        }
         return !reduced.reachable_items.contains(&item);
     }
     if let Some((alias_package, alias_path)) =
@@ -2966,6 +3015,9 @@ fn use_target_should_drop(
         if let Some(item) = find_use_item(project, &alias_package, &alias_path) {
             if !is_public_use && item.kind != ItemKind::Trait && !leaf_is_used_in_module {
                 return true;
+            }
+            if (is_public_use || leaf_is_used_in_module) && item.kind == ItemKind::Mod {
+                return false;
             }
             return !reduced.reachable_items.contains(&item);
         }
@@ -3204,7 +3256,10 @@ fn is_known_std_trait_import(leaf: &str) -> bool {
 }
 
 fn is_known_external_trait_import(leaf: &str) -> bool {
-    matches!(leaf, "Deserialize" | "Digest" | "Engine" | "Serialize")
+    matches!(
+        leaf,
+        "Deserialize" | "Digest" | "Engine" | "MapBackendError" | "Serialize"
+    )
 }
 
 fn external_trait_import_should_remain(
@@ -3372,6 +3427,7 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
             "encode_slice",
             "encode_string",
         ]),
+        (Some("viaduct"), "MapBackendError") => Some(&["map_backend_error"]),
         _ => None,
     }
 }
@@ -3539,6 +3595,7 @@ fn find_use_item_direct(project: &Project, package: &str, path: &[String]) -> Op
         ItemKind::Union,
         ItemKind::Type,
         ItemKind::Trait,
+        ItemKind::Mod,
         ItemKind::Const,
         ItemKind::Static,
         ItemKind::Macro,

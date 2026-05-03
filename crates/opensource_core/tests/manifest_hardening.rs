@@ -1177,6 +1177,44 @@ fn retains_struct_literals_glob_reexported_functions_collect_impls_and_attr_macr
 }
 
 #[test]
+fn retains_inline_generated_modules_macro_deref_helpers_and_backend_bridges() {
+    let workspace = temp_path("feedback-viaduct-workspace");
+    let output = temp_path("feedback-viaduct-output");
+    let target_dir = temp_path("feedback-viaduct-target");
+    write_feedback_viaduct_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app = read(output.join("app/src/lib.rs"));
+    assert!(app.contains("mod msg_types"));
+    assert!(app.contains("include!(\"generated.rs\")"));
+    assert!(app.contains("impl std::ops::Deref for HeaderName"));
+    assert!(app.contains("fn set_value"));
+    assert!(app.contains("impl old_backend::Backend for Arc<dyn Backend>"));
+    assert!(!app.contains("ErrorHandling"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated feedback viaduct slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app,
+    );
+}
+
+#[test]
 fn resolves_external_workspace_path_dependencies_from_original_root() {
     let workspace = temp_path("external-workspace-dep-workspace");
     let output = temp_path("external-workspace-dep-output");
@@ -4637,6 +4675,188 @@ pub fn selected(conn: &SystemTime, interrupted: Interrupted) -> Result<impl fmt:
     fallible()?;
     Ok(repeat_sql_vars(1))
 }
+"#,
+    );
+}
+
+fn write_feedback_viaduct_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "error-support"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("error-support/Cargo.toml"),
+        r#"[package]
+name = "error-support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("error-support/src/lib.rs"),
+        r#"#[macro_export]
+macro_rules! warn {
+    ($($tokens:tt)*) => {};
+}
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support = { path = "../error-support" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use error_support::{warn, ErrorHandling};
+use opensourced::opensourced;
+use std::borrow::Cow;
+use std::sync::Arc;
+
+pub(crate) mod msg_types {
+    include!("generated.rs");
+}
+
+mod ffi {
+    use crate::msg_types;
+
+    pub fn message() -> msg_types::Message {
+        msg_types::Message
+    }
+}
+
+mod old_backend {
+    pub trait Backend: Send + Sync + 'static {
+        fn send(&self) -> u8;
+    }
+
+    pub fn set_backend(_: &'static dyn Backend) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+pub trait Backend: Send + Sync + 'static {
+    fn send_request(&self) -> u8;
+}
+
+pub fn init_backend(backend: Arc<dyn Backend>) -> Result<(), ()> {
+    old_backend::set_backend(Box::leak(Box::new(backend.clone())))?;
+    Ok(())
+}
+
+impl old_backend::Backend for Arc<dyn Backend> {
+    fn send(&self) -> u8 {
+        self.send_request()
+    }
+}
+
+#[derive(PartialEq)]
+pub struct HeaderName(Cow<'static, str>);
+
+impl HeaderName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for HeaderName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+macro_rules! partialeq_boilerplate {
+    ($T0:ty, $T1:ty) => {
+        impl<'a> PartialEq<$T0> for $T1 {
+            fn eq(&self, other: &$T0) -> bool {
+                (&*self).eq_ignore_ascii_case(&*other)
+            }
+        }
+        impl<'a> PartialEq<$T1> for $T0 {
+            fn eq(&self, other: &$T1) -> bool {
+                PartialEq::eq(other, self)
+            }
+        }
+    };
+}
+
+partialeq_boilerplate!(HeaderName, str);
+partialeq_boilerplate!(HeaderName, &'a str);
+
+pub struct Header {
+    name: HeaderName,
+    value: String,
+}
+
+impl Header {
+    pub fn new(name: HeaderName, value: impl Into<String>) -> Self {
+        Self {
+            name,
+            value: value.into(),
+        }
+    }
+
+    fn set_value(&mut self, value: impl AsRef<str>) -> Result<(), ()> {
+        self.value.clear();
+        self.value.push_str(value.as_ref());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct Headers {
+    headers: Vec<Header>,
+}
+
+impl Headers {
+    pub fn insert(&mut self, name: HeaderName, value: impl AsRef<str> + Into<String>) -> Result<(), ()> {
+        if let Some(entry) = self.headers.iter_mut().find(|header| header.name == name) {
+            entry.set_value(value)?;
+        } else {
+            self.headers.push(Header::new(name, value));
+        }
+        Ok(())
+    }
+}
+
+#[opensourced]
+pub fn selected(
+    backend: Arc<dyn Backend>,
+    headers: &mut Headers,
+    name: HeaderName,
+) -> Result<bool, ()> {
+    warn!("selected");
+    let _message = ffi::message();
+    init_backend(backend)?;
+    headers.insert(name, "updated")?;
+    Ok(true)
+}
+"#,
+    );
+    write(
+        root.join("app/src/generated.rs"),
+        r#"pub struct Message;
 "#,
     );
 }
