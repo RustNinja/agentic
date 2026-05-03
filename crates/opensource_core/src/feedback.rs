@@ -43,8 +43,21 @@ pub struct CheckDiagnostic {
     pub level: String,
     pub message: String,
     pub code: Option<String>,
+    #[serde(default)]
+    pub package_id: Option<String>,
+    #[serde(default)]
+    pub target: Option<CheckTarget>,
     pub rendered: Option<String>,
     pub spans: Vec<CheckSpan>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CheckTarget {
+    pub name: String,
+    #[serde(default)]
+    pub kind: Vec<String>,
+    #[serde(default)]
+    pub src_path: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -166,7 +179,7 @@ fn parse_cargo_messages(stdout: &str) -> Vec<CheckDiagnostic> {
         .lines()
         .filter_map(|line| serde_json::from_str::<Value>(line).ok())
         .filter(|message| message.get("reason").and_then(Value::as_str) == Some("compiler-message"))
-        .filter_map(|message| diagnostic_from_value(message.get("message")?))
+        .filter_map(|message| diagnostic_from_compiler_message(&message))
         .collect()
 }
 
@@ -411,19 +424,25 @@ fn kill_timed_out_child(child: &mut std::process::Child) {
     let _ = child.kill();
 }
 
-fn diagnostic_from_value(message: &Value) -> Option<CheckDiagnostic> {
-    let level = message.get("level")?.as_str()?.to_string();
-    let message_text = message.get("message")?.as_str()?.to_string();
-    let code = message
+fn diagnostic_from_compiler_message(message: &Value) -> Option<CheckDiagnostic> {
+    let diagnostic = message.get("message")?;
+    let level = diagnostic.get("level")?.as_str()?.to_string();
+    let message_text = diagnostic.get("message")?.as_str()?.to_string();
+    let code = diagnostic
         .get("code")
         .and_then(|code| code.get("code"))
         .and_then(Value::as_str)
         .map(str::to_string);
-    let rendered = message
+    let package_id = message
+        .get("package_id")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    let target = message.get("target").and_then(target_from_value);
+    let rendered = diagnostic
         .get("rendered")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let spans = message
+    let spans = diagnostic
         .get("spans")
         .and_then(Value::as_array)
         .map(|spans| spans.iter().filter_map(span_from_value).collect())
@@ -433,8 +452,31 @@ fn diagnostic_from_value(message: &Value) -> Option<CheckDiagnostic> {
         level,
         message: message_text,
         code,
+        package_id,
+        target,
         rendered,
         spans,
+    })
+}
+
+fn target_from_value(target: &Value) -> Option<CheckTarget> {
+    Some(CheckTarget {
+        name: target.get("name")?.as_str()?.to_string(),
+        kind: target
+            .get("kind")
+            .and_then(Value::as_array)
+            .map(|kinds| {
+                kinds
+                    .iter()
+                    .filter_map(Value::as_str)
+                    .map(str::to_string)
+                    .collect()
+            })
+            .unwrap_or_default(),
+        src_path: target
+            .get("src_path")
+            .and_then(Value::as_str)
+            .map(str::to_string),
     })
 }
 
@@ -444,6 +486,8 @@ fn timeout_failure_diagnostic(timeout: Option<Duration>) -> CheckDiagnostic {
         level: "error".to_string(),
         message: format!("cargo check exceeded feedback timeout of {seconds}s"),
         code: Some("cargo-timeout".to_string()),
+        package_id: None,
+        target: None,
         rendered: Some(format!(
             "cargo check was terminated after exceeding the feedback timeout of {seconds}s\n"
         )),
@@ -468,6 +512,8 @@ fn stderr_failure_diagnostic(stderr: &str) -> Option<CheckDiagnostic> {
         level: "error".to_string(),
         message,
         code: Some("cargo-stderr".to_string()),
+        package_id: None,
+        target: None,
         rendered: Some(stderr.to_string()),
         spans: Vec::new(),
     })
@@ -520,6 +566,17 @@ mod tests {
         assert_eq!(diagnostics.len(), 1);
         assert_eq!(diagnostics[0].level, "error");
         assert_eq!(diagnostics[0].code.as_deref(), Some("E0425"));
+        assert_eq!(
+            diagnostics[0].package_id.as_deref(),
+            Some("broken 0.1.0 (path+file:///tmp/broken)")
+        );
+        let target = diagnostics[0]
+            .target
+            .as_ref()
+            .expect("compiler-message target should be captured");
+        assert_eq!(target.name, "broken");
+        assert_eq!(target.kind, ["lib"]);
+        assert_eq!(target.src_path.as_deref(), Some("/tmp/broken/src/lib.rs"));
         assert_eq!(
             diagnostics[0].message,
             "cannot find value `missing` in this scope"
@@ -789,6 +846,8 @@ mod tests {
             level: level.to_string(),
             message: message.to_string(),
             code: Some(code.to_string()),
+            package_id: None,
+            target: None,
             rendered: None,
             spans: vec![CheckSpan {
                 file_name: file_name.to_string(),

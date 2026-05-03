@@ -1204,10 +1204,17 @@ fn diagnostic_error_keys(diagnostics: &[CheckDiagnostic]) -> BTreeSet<String> {
 }
 
 fn diagnostic_baseline_key(diagnostic: &CheckDiagnostic) -> String {
+    let target = diagnostic
+        .target
+        .as_ref()
+        .map(|target| format!("{}:{}", target.kind.join(","), target.name))
+        .unwrap_or_default();
     format!(
-        "{}|{}|{}",
+        "{}|{}|{}|{}|{}",
         diagnostic.level,
         diagnostic.code.as_deref().unwrap_or(""),
+        diagnostic.package_id.as_deref().unwrap_or(""),
+        target,
         diagnostic.message
     )
 }
@@ -1506,7 +1513,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use opensource_core::{CheckDiagnostic, CheckReport, FeedbackWideningReport};
+    use opensource_core::{CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport};
 
     use super::{
         baseline_limited_feedback_is_accepted, diagnostics_signature,
@@ -1639,6 +1646,35 @@ mod tests {
     }
 
     #[test]
+    fn baseline_matching_keeps_package_and_target_boundaries() {
+        let baseline = report(
+            false,
+            vec![diagnostic_for_target(
+                "E0425",
+                "cannot find value `x` in this scope",
+                "pkg_a 0.1.0",
+                "lib",
+                "pkg_a",
+            )],
+        );
+        let generated = report(
+            false,
+            vec![diagnostic_for_target(
+                "E0425",
+                "cannot find value `x` in this scope",
+                "pkg_b 0.1.0",
+                "bin",
+                "pkg_b",
+            )],
+        );
+
+        assert!(!feedback_errors_are_baseline_known(
+            &generated,
+            Some(&baseline)
+        ));
+    }
+
+    #[test]
     fn diagnostic_signatures_are_order_insensitive() {
         let left = vec![
             diagnostic("E0432", "unresolved import `crate::missing`"),
@@ -1757,6 +1793,8 @@ mod tests {
             level: "error".to_string(),
             message: message.to_string(),
             code: Some(code.to_string()),
+            package_id: None,
+            target: None,
             rendered: None,
             spans: Vec::new(),
         }
@@ -1771,6 +1809,30 @@ mod tests {
             level: "warning".to_string(),
             message: message.to_string(),
             code: Some(code.to_string()),
+            package_id: None,
+            target: None,
+            rendered: None,
+            spans: Vec::new(),
+        }
+    }
+
+    fn diagnostic_for_target(
+        code: &str,
+        message: &str,
+        package_id: &str,
+        target_kind: &str,
+        target_name: &str,
+    ) -> CheckDiagnostic {
+        CheckDiagnostic {
+            level: "error".to_string(),
+            message: message.to_string(),
+            code: Some(code.to_string()),
+            package_id: Some(package_id.to_string()),
+            target: Some(CheckTarget {
+                name: target_name.to_string(),
+                kind: vec![target_kind.to_string()],
+                src_path: None,
+            }),
             rendered: None,
             spans: Vec::new(),
         }

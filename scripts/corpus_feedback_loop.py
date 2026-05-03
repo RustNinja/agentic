@@ -1002,6 +1002,9 @@ def parse_cargo_diagnostics(stdout: str) -> list[dict[str, Any]]:
             continue
         diagnostic = message.get("message")
         if isinstance(diagnostic, dict):
+            diagnostic = dict(diagnostic)
+            diagnostic["package_id"] = message.get("package_id")
+            diagnostic["target"] = message.get("target")
             diagnostics.append(diagnostic)
     return diagnostics
 
@@ -1040,9 +1043,22 @@ def diagnostic_key(diagnostic: dict[str, Any]) -> str:
         [
             str(diagnostic.get("level") or ""),
             str(code or ""),
+            str(diagnostic.get("package_id") or ""),
+            diagnostic_target_key(diagnostic.get("target")),
             str(diagnostic.get("message") or ""),
         ]
     )
+
+
+def diagnostic_target_key(target: Any) -> str:
+    if not isinstance(target, dict):
+        return ""
+    kind = target.get("kind") or []
+    if isinstance(kind, list):
+        kind_text = ",".join(str(value) for value in kind)
+    else:
+        kind_text = str(kind)
+    return f"{kind_text}:{target.get('name') or ''}"
 
 
 def semantic_hazard_warning_count(

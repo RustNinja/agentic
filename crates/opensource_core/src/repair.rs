@@ -1051,6 +1051,8 @@ mod tests {
             level: "warning".to_string(),
             message: message.to_string(),
             code: Some(code.to_string()),
+            package_id: None,
+            target: None,
             rendered: None,
             spans: vec![CheckSpan {
                 file_name: file_name.to_string(),
