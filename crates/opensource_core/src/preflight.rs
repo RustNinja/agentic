@@ -138,38 +138,42 @@ impl Checker {
 
     fn check_package_targets(&mut self, package_root: &Path, manifest: &Value) {
         let mut entries = BTreeSet::new();
-        if let Some(path) = manifest
-            .get("lib")
-            .and_then(|lib| lib.get("path"))
-            .and_then(Value::as_str)
-        {
-            entries.insert(package_root.join(path));
-        } else {
-            let lib = package_root.join("src/lib.rs");
-            let main = package_root.join("src/main.rs");
-            if lib.exists() {
-                entries.insert(lib);
-            } else if main.exists() {
-                entries.insert(main);
+        let package_name = package_name(manifest);
+
+        if let Some(lib) = manifest.get("lib") {
+            if let Some(path) = lib.get("path").and_then(Value::as_str) {
+                entries.insert(package_root.join(path));
+            } else {
+                entries.insert(package_root.join("src/lib.rs"));
             }
+        } else if package_root.join("src/lib.rs").exists() {
+            entries.insert(package_root.join("src/lib.rs"));
         }
 
-        if let Some(bins) = manifest.get("bin").and_then(Value::as_array) {
-            for bin in bins {
-                if let Some(path) = bin.get("path").and_then(Value::as_str) {
-                    entries.insert(package_root.join(path));
-                } else if let Some(name) = bin.get("name").and_then(Value::as_str) {
-                    entries.extend(default_bin_entries(package_root, name));
-                }
+        for spec in TARGET_SPECS {
+            let explicit_names = self.check_explicit_targets(
+                package_root,
+                package_name,
+                manifest,
+                spec,
+                &mut entries,
+            );
+            if target_auto_discovery_enabled(manifest, spec.auto_key) {
+                self.check_auto_discovered_targets(
+                    package_root,
+                    package_name,
+                    spec,
+                    &explicit_names,
+                    &mut entries,
+                );
             }
         }
-        entries.extend(auto_discovered_bin_entries(package_root));
 
         if entries.is_empty() {
             self.error(
                 "missing-package-entry",
                 format!(
-                    "package has no src/lib.rs, src/main.rs, explicit target path, or auto-discovered bin under {}",
+                    "package has no lib, binary, example, test, or bench target source under {}",
                     package_root.display()
                 ),
                 Some(package_root.to_path_buf()),
@@ -188,6 +192,105 @@ impl Checker {
             }
             let module_dir = entry.parent().unwrap_or(package_root).to_path_buf();
             self.check_module_tree(&entry, &module_dir);
+        }
+    }
+
+    fn check_explicit_targets(
+        &mut self,
+        package_root: &Path,
+        package_name: Option<&str>,
+        manifest: &Value,
+        spec: &TargetSpec,
+        entries: &mut BTreeSet<PathBuf>,
+    ) -> BTreeSet<String> {
+        let mut names = BTreeSet::new();
+        let Some(targets) = manifest.get(spec.table).and_then(Value::as_array) else {
+            return names;
+        };
+
+        for target in targets {
+            let name = target.get("name").and_then(Value::as_str);
+            if let Some(name) = name {
+                if !names.insert(name.to_string()) {
+                    self.error(
+                        "duplicate-target-name",
+                        format!("duplicate {} target name {name:?}", spec.label),
+                        Some(package_root.to_path_buf()),
+                    );
+                }
+            } else {
+                self.error(
+                    "missing-target-name",
+                    format!("{} target is missing required name", spec.label),
+                    Some(package_root.to_path_buf()),
+                );
+            }
+
+            if let Some(path) = target.get("path").and_then(Value::as_str) {
+                entries.insert(package_root.join(path));
+                continue;
+            }
+
+            let Some(name) = name else {
+                continue;
+            };
+            match existing_default_target_path(package_root, package_name, spec, name) {
+                DefaultTargetPath::One(path) => {
+                    entries.insert(path);
+                }
+                DefaultTargetPath::Missing(candidates) => {
+                    self.error(
+                        "missing-target-source",
+                        format!(
+                            "{} target {name:?} has no default source at {}",
+                            spec.label,
+                            format_paths(&candidates)
+                        ),
+                        candidates.into_iter().next(),
+                    );
+                }
+                DefaultTargetPath::Ambiguous(candidates) => {
+                    self.error(
+                        "ambiguous-target-source",
+                        format!(
+                            "cannot infer source for {} target {name:?}; multiple default sources exist: {}",
+                            spec.label,
+                            format_paths(&candidates)
+                        ),
+                        Some(package_root.to_path_buf()),
+                    );
+                }
+            }
+        }
+
+        names
+    }
+
+    fn check_auto_discovered_targets(
+        &mut self,
+        package_root: &Path,
+        package_name: Option<&str>,
+        spec: &TargetSpec,
+        explicit_names: &BTreeSet<String>,
+        entries: &mut BTreeSet<PathBuf>,
+    ) {
+        let mut names = BTreeSet::new();
+        for (name, path) in auto_discovered_targets(package_root, package_name, spec) {
+            if explicit_names.contains(&name) {
+                continue;
+            }
+            if !names.insert(name.clone()) {
+                self.error(
+                    "duplicate-target-name",
+                    format!(
+                        "auto-discovered {} target name {name:?} is not unique",
+                        spec.label
+                    ),
+                    Some(path),
+                );
+                continue;
+            }
+            entries.insert(path);
         }
     }
 
@@ -471,38 +574,162 @@ fn resolve_external_module(
     mod_module.exists().then_some(mod_module)
 }
 
-fn auto_discovered_bin_entries(package_root: &Path) -> BTreeSet<PathBuf> {
-    let bin_root = package_root.join("src/bin");
-    let Ok(entries) = fs::read_dir(bin_root) else {
-        return BTreeSet::new();
-    };
-
-    entries
-        .filter_map(Result::ok)
-        .filter_map(|entry| {
-            let path = entry.path();
-            let file_type = entry.file_type().ok()?;
-            if file_type.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
-                return Some(path);
-            }
-            if file_type.is_dir() {
-                let main = path.join("main.rs");
-                return main.exists().then_some(main);
-            }
-            None
-        })
-        .collect()
+#[derive(Clone, Copy)]
+struct TargetSpec {
+    table: &'static str,
+    label: &'static str,
+    auto_key: &'static str,
+    source_dir: &'static str,
 }
 
-fn default_bin_entries(package_root: &Path, name: &str) -> Vec<PathBuf> {
-    [
-        package_root.join("src/main.rs"),
-        package_root.join("src/bin").join(format!("{name}.rs")),
-        package_root.join("src/bin").join(name).join("main.rs"),
-    ]
-    .into_iter()
-    .filter(|path| path.exists())
-    .collect()
+const TARGET_SPECS: &[TargetSpec] = &[
+    TargetSpec {
+        table: "bin",
+        label: "binary",
+        auto_key: "autobins",
+        source_dir: "src/bin",
+    },
+    TargetSpec {
+        table: "example",
+        label: "example",
+        auto_key: "autoexamples",
+        source_dir: "examples",
+    },
+    TargetSpec {
+        table: "test",
+        label: "test",
+        auto_key: "autotests",
+        source_dir: "tests",
+    },
+    TargetSpec {
+        table: "bench",
+        label: "bench",
+        auto_key: "autobenches",
+        source_dir: "benches",
+    },
+];
+
+enum DefaultTargetPath {
+    One(PathBuf),
+    Missing(Vec<PathBuf>),
+    Ambiguous(Vec<PathBuf>),
+}
+
+fn package_name(manifest: &Value) -> Option<&str> {
+    manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(Value::as_str)
+}
+
+fn target_auto_discovery_enabled(manifest: &Value, key: &str) -> bool {
+    manifest
+        .get("package")
+        .and_then(|package| package.get(key))
+        .and_then(Value::as_bool)
+        .unwrap_or(true)
+}
+
+fn existing_default_target_path(
+    package_root: &Path,
+    package_name: Option<&str>,
+    spec: &TargetSpec,
+    name: &str,
+) -> DefaultTargetPath {
+    let candidates = default_target_candidates(package_root, package_name, spec, name);
+    let existing = candidates
+        .iter()
+        .filter(|path| path.exists())
+        .cloned()
+        .collect::<Vec<_>>();
+    match existing.len() {
+        0 => DefaultTargetPath::Missing(candidates),
+        1 => DefaultTargetPath::One(existing.into_iter().next().unwrap()),
+        _ => DefaultTargetPath::Ambiguous(existing),
+    }
+}
+
+fn default_target_candidates(
+    package_root: &Path,
+    package_name: Option<&str>,
+    spec: &TargetSpec,
+    name: &str,
+) -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if spec.table == "bin" && package_name == Some(name) {
+        candidates.push(package_root.join("src/main.rs"));
+    }
+    candidates.push(
+        package_root
+            .join(spec.source_dir)
+            .join(format!("{name}.rs")),
+    );
+    candidates.push(
+        package_root
+            .join(spec.source_dir)
+            .join(name)
+            .join("main.rs"),
+    );
+    candidates
+}
+
+fn auto_discovered_targets(
+    package_root: &Path,
+    package_name: Option<&str>,
+    spec: &TargetSpec,
+) -> Vec<(String, PathBuf)> {
+    let mut targets = Vec::new();
+    if spec.table == "bin" {
+        if let Some(package_name) = package_name {
+            let main = package_root.join("src/main.rs");
+            if main.exists() {
+                targets.push((package_name.to_string(), main));
+            }
+        }
+    }
+
+    let source_dir = package_root.join(spec.source_dir);
+    let Ok(entries) = fs::read_dir(source_dir) else {
+        return targets;
+    };
+
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        if file_type.is_file() && is_rust_source(&path) {
+            if let Some(name) = path.file_stem().and_then(|name| name.to_str()) {
+                targets.push((name.to_string(), path));
+            }
+        } else if file_type.is_dir() {
+            let main = path.join("main.rs");
+            if main.exists() {
+                if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
+                    targets.push((name.to_string(), main));
+                }
+            }
+        }
+    }
+
+    targets.sort_by(|(left_name, left_path), (right_name, right_path)| {
+        left_name
+            .cmp(right_name)
+            .then_with(|| left_path.cmp(right_path))
+    });
+    targets
+}
+
+fn is_rust_source(path: &Path) -> bool {
+    path.extension().and_then(|extension| extension.to_str()) == Some("rs")
+}
+
+fn format_paths(paths: &[PathBuf]) -> String {
+    paths
+        .iter()
+        .map(|path| path.display().to_string())
+        .collect::<Vec<_>>()
+        .join(" or ")
 }
 
 #[cfg(test)]
@@ -563,8 +790,8 @@ mod tests {
     }
 
     #[test]
-    fn accepts_auto_discovered_bin_targets() {
-        let root = temp_output("preflight-auto-bin");
+    fn accepts_auto_discovered_cargo_targets() {
+        let root = temp_output("preflight-auto-targets");
         write(
             root.join("Cargo.toml"),
             "[workspace]\nmembers = [\"app\"]\n",
@@ -577,6 +804,18 @@ mod tests {
             root.join("app/src/bin/tool.rs"),
             "fn main() {\n    let _ = 1 + 1;\n}\n",
         );
+        write(
+            root.join("app/examples/demo.rs"),
+            "fn main() {\n    let _ = 2 + 2;\n}\n",
+        );
+        write(
+            root.join("app/tests/integration.rs"),
+            "#[test]\nfn integration_smoke() {\n    assert_eq!(2 + 2, 4);\n}\n",
+        );
+        write(
+            root.join("app/benches/throughput.rs"),
+            "fn main() {\n    let _ = 3 + 3;\n}\n",
+        );
 
         let report = preflight_workspace(PreflightOptions {
             manifest_path: root.join("Cargo.toml"),
@@ -586,6 +825,111 @@ mod tests {
         assert!(report.success, "{:?}", report.diagnostics);
         assert_eq!(report.error_count(), 0);
         assert!(report.rust_files > 0);
+    }
+
+    #[test]
+    fn reports_missing_named_bin_default_source() {
+        let root = temp_output("preflight-missing-named-bin");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"tool\"\n",
+        );
+        write(root.join("app/src/main.rs"), "fn main() {}\n");
+
+        let report = preflight_workspace(PreflightOptions {
+            manifest_path: root.join("Cargo.toml"),
+        })
+        .expect("preflight should run");
+
+        assert!(!report.success);
+        assert!(report.diagnostics.iter().any(|diagnostic| {
+            diagnostic.code == "missing-target-source"
+                && diagnostic.message.contains("binary target \"tool\"")
+        }));
+    }
+
+    #[test]
+    fn reports_explicit_target_missing_required_name() {
+        let root = temp_output("preflight-missing-target-name");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\npath = \"src/main.rs\"\n",
+        );
+        write(root.join("app/src/main.rs"), "fn main() {}\n");
+
+        let report = preflight_workspace(PreflightOptions {
+            manifest_path: root.join("Cargo.toml"),
+        })
+        .expect("preflight should run");
+
+        assert!(!report.success);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "missing-target-name"));
+    }
+
+    #[test]
+    fn reports_ambiguous_named_bin_default_source() {
+        let root = temp_output("preflight-ambiguous-named-bin");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[[bin]]\nname = \"app\"\n",
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            "pub fn keep_package_entry() {}\n",
+        );
+        write(root.join("app/src/main.rs"), "fn main() {}\n");
+        write(root.join("app/src/bin/app.rs"), "fn main() {}\n");
+
+        let report = preflight_workspace(PreflightOptions {
+            manifest_path: root.join("Cargo.toml"),
+        })
+        .expect("preflight should run");
+
+        assert!(!report.success);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "ambiguous-target-source"));
+    }
+
+    #[test]
+    fn respects_disabled_auto_bin_discovery() {
+        let root = temp_output("preflight-autobins-disabled");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\nautobins = false\n",
+        );
+        write(root.join("app/src/bin/tool.rs"), "fn main() {}\n");
+
+        let report = preflight_workspace(PreflightOptions {
+            manifest_path: root.join("Cargo.toml"),
+        })
+        .expect("preflight should run");
+
+        assert!(!report.success);
+        assert!(report
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "missing-package-entry"));
     }
 
     fn workspace_root() -> PathBuf {
