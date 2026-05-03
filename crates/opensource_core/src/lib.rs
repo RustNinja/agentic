@@ -17,6 +17,7 @@ use std::{
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{
     check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport, CheckSpan,
+    FeedbackHazard, FeedbackWideningCandidate, FeedbackWideningReport,
 };
 pub use model::{CallableId, ItemId, RootId, SourceSpan};
 pub use preflight::{

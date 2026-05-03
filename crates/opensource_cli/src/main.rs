@@ -803,12 +803,32 @@ fn print_feedback(report: &CheckReport, limit: usize, report_path: &Path) {
     }
 
     println!(
-        "feedback: cargo check failed with {} error(s), {} warning(s) in {}; report: {}",
+        "feedback: cargo check failed with {} error(s), {} warning(s), {} widening candidate(s), {} hazard(s) in {}; report: {}",
         report.error_count(),
         report.warning_count(),
+        report.widening.candidates.len(),
+        report.widening.hazards.len(),
         format_duration_ms(report.duration_ms),
         report_path.display()
     );
+
+    for candidate in report.widening.candidates.iter().take(limit.min(4)) {
+        let location = candidate
+            .file_name
+            .as_deref()
+            .zip(candidate.line_start)
+            .map(|(file, line)| format!(" at {file}:{line}"))
+            .unwrap_or_default();
+        let symbol = candidate
+            .symbol
+            .as_deref()
+            .map(|symbol| format!(" `{symbol}`"))
+            .unwrap_or_default();
+        println!(
+            "  widening {}{}{}: {}",
+            candidate.kind, symbol, location, candidate.action
+        );
+    }
 
     for diagnostic in prioritized_diagnostics(&report.diagnostics)
         .into_iter()
@@ -887,7 +907,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 mod tests {
     use std::path::PathBuf;
 
-    use opensource_core::{CheckDiagnostic, CheckReport};
+    use opensource_core::{CheckDiagnostic, CheckReport, FeedbackWideningReport};
 
     use super::{
         baseline_limited_feedback_is_accepted, feedback_errors_are_baseline_known,
@@ -1012,6 +1032,7 @@ mod tests {
             exit_code: if success { 0 } else { 101 },
             duration_ms: 25,
             diagnostics,
+            widening: FeedbackWideningReport::default(),
             stderr: String::new(),
         }
     }

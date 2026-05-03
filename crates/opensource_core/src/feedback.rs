@@ -28,6 +28,8 @@ pub struct CheckReport {
     pub exit_code: i32,
     pub duration_ms: u64,
     pub diagnostics: Vec<CheckDiagnostic>,
+    #[serde(default)]
+    pub widening: FeedbackWideningReport,
     pub stderr: String,
 }
 
@@ -49,6 +51,32 @@ pub struct CheckSpan {
     pub column_end: u64,
     pub is_primary: bool,
     pub text: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+pub struct FeedbackWideningReport {
+    pub candidates: Vec<FeedbackWideningCandidate>,
+    pub hazards: Vec<FeedbackHazard>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackWideningCandidate {
+    pub kind: String,
+    pub confidence: String,
+    pub code: Option<String>,
+    pub symbol: Option<String>,
+    pub file_name: Option<String>,
+    pub line_start: Option<u64>,
+    pub action: String,
+    pub message: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct FeedbackHazard {
+    pub kind: String,
+    pub severity: String,
+    pub code: Option<String>,
+    pub message: String,
 }
 
 impl CheckReport {
@@ -100,6 +128,8 @@ fn check_workspace_with_program(
         }
     }
 
+    let widening = classify_feedback(&diagnostics);
+
     Ok(CheckReport {
         manifest_path: options.manifest_path,
         success: output.status.success(),
@@ -107,6 +137,7 @@ fn check_workspace_with_program(
         exit_code: output.status.code().unwrap_or(-1),
         duration_ms: outcome.duration_ms,
         diagnostics,
+        widening,
         stderr,
     })
 }
@@ -126,6 +157,153 @@ fn parse_cargo_messages(stdout: &str) -> Vec<CheckDiagnostic> {
         .filter(|message| message.get("reason").and_then(Value::as_str) == Some("compiler-message"))
         .filter_map(|message| diagnostic_from_value(message.get("message")?))
         .collect()
+}
+
+fn classify_feedback(diagnostics: &[CheckDiagnostic]) -> FeedbackWideningReport {
+    let mut candidates = diagnostics
+        .iter()
+        .filter_map(classify_widening_candidate)
+        .collect::<Vec<_>>();
+    candidates.sort_by(|left, right| {
+        left.file_name
+            .cmp(&right.file_name)
+            .then_with(|| left.line_start.cmp(&right.line_start))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.symbol.cmp(&right.symbol))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    candidates.dedup_by(|left, right| {
+        left.kind == right.kind
+            && left.code == right.code
+            && left.symbol == right.symbol
+            && left.file_name == right.file_name
+            && left.line_start == right.line_start
+            && left.message == right.message
+    });
+
+    let mut hazards = diagnostics
+        .iter()
+        .filter_map(classify_feedback_hazard)
+        .collect::<Vec<_>>();
+    hazards.sort_by(|left, right| {
+        hazard_severity_rank(&left.severity)
+            .cmp(&hazard_severity_rank(&right.severity))
+            .then_with(|| left.kind.cmp(&right.kind))
+            .then_with(|| left.code.cmp(&right.code))
+            .then_with(|| left.message.cmp(&right.message))
+    });
+    hazards.dedup_by(|left, right| {
+        left.kind == right.kind && left.code == right.code && left.message == right.message
+    });
+
+    FeedbackWideningReport {
+        candidates,
+        hazards,
+    }
+}
+
+fn classify_widening_candidate(diagnostic: &CheckDiagnostic) -> Option<FeedbackWideningCandidate> {
+    if diagnostic.level != "error" {
+        return None;
+    }
+    let code = diagnostic.code.as_deref()?;
+    let (kind, confidence, action) = match code {
+        "E0405" => (
+            "missing-trait",
+            "high",
+            "widen the retained trait, trait import, or dependency feature that defines the missing trait",
+        ),
+        "E0412" | "E0422" => (
+            "missing-type",
+            "high",
+            "widen the retained type definition, type re-export, or dependency feature referenced by this path",
+        ),
+        "E0425" => (
+            "missing-value",
+            "high",
+            "widen the retained function, const, static, local module item, or import referenced by this expression",
+        ),
+        "E0432" | "E0433" => (
+            "unresolved-path",
+            "high",
+            "widen the retained import/module path or restore the dependency package providing this path",
+        ),
+        "E0463" => (
+            "missing-crate",
+            "high",
+            "restore the dependency package, manifest entry, feature, or target-specific dependency for this crate",
+        ),
+        "E0583" => (
+            "missing-module-file",
+            "high",
+            "restore the external module file or remove the module declaration if the module is truly unreachable",
+        ),
+        "E0599" => (
+            "missing-method-or-associated-item",
+            "medium",
+            "widen receiver type impls, extension trait imports, inherent impls, or trait bounds needed by this call",
+        ),
+        _ => return None,
+    };
+    let primary = diagnostic.spans.iter().find(|span| span.is_primary);
+    Some(FeedbackWideningCandidate {
+        kind: kind.to_string(),
+        confidence: confidence.to_string(),
+        code: diagnostic.code.clone(),
+        symbol: diagnostic_symbol(diagnostic),
+        file_name: primary.map(|span| span.file_name.clone()),
+        line_start: primary.map(|span| span.line_start),
+        action: action.to_string(),
+        message: diagnostic.message.clone(),
+    })
+}
+
+fn classify_feedback_hazard(diagnostic: &CheckDiagnostic) -> Option<FeedbackHazard> {
+    let code = diagnostic.code.as_deref()?;
+    let (kind, severity) = match code {
+        "cargo-timeout" => ("feedback-timeout", "blocker"),
+        "cargo-stderr" => ("cargo-shape-failure", "blocker"),
+        "E0463" => ("missing-crate", "blocker"),
+        "E0583" => ("missing-module-file", "blocker"),
+        "E0432" | "E0433" | "E0405" | "E0412" | "E0422" | "E0425" | "E0599" => {
+            ("needs-widening", "high")
+        }
+        _ if diagnostic.level == "error" => ("unclassified-compiler-error", "medium"),
+        _ => return None,
+    };
+
+    Some(FeedbackHazard {
+        kind: kind.to_string(),
+        severity: severity.to_string(),
+        code: diagnostic.code.clone(),
+        message: diagnostic.message.clone(),
+    })
+}
+
+fn hazard_severity_rank(severity: &str) -> usize {
+    match severity {
+        "blocker" => 0,
+        "high" => 1,
+        "medium" => 2,
+        "low" => 3,
+        _ => 4,
+    }
+}
+
+fn diagnostic_symbol(diagnostic: &CheckDiagnostic) -> Option<String> {
+    extract_backticked_symbol(&diagnostic.message).or_else(|| {
+        diagnostic
+            .rendered
+            .as_deref()
+            .and_then(extract_backticked_symbol)
+    })
+}
+
+fn extract_backticked_symbol(text: &str) -> Option<String> {
+    let start = text.find('`')?;
+    let tail = &text[start + 1..];
+    let end = tail.find('`')?;
+    Some(tail[..end].to_string()).filter(|symbol| !symbol.is_empty())
 }
 
 struct CommandOutcome {
@@ -291,8 +469,9 @@ mod tests {
     use std::{fs, time::Duration};
 
     use super::{
-        check_workspace_with_program, parse_cargo_messages, stderr_failure_diagnostic,
-        timeout_failure_diagnostic, CheckOptions,
+        check_workspace_with_program, classify_feedback, parse_cargo_messages,
+        stderr_failure_diagnostic, timeout_failure_diagnostic, CheckDiagnostic, CheckOptions,
+        CheckSpan,
     };
 
     #[test]
@@ -310,6 +489,60 @@ mod tests {
         );
         assert_eq!(diagnostics[0].spans[0].file_name, "src/lib.rs");
         assert!(diagnostics[0].spans[0].is_primary);
+    }
+
+    #[test]
+    fn classifies_unresolved_compiler_errors_as_widening_candidates() {
+        let diagnostics = vec![
+            diagnostic(
+                "E0432",
+                "unresolved import `crate::worker::Task`",
+                "src/lib.rs",
+                7,
+            ),
+            diagnostic(
+                "E0599",
+                "no method named `run` found for struct `Worker` in the current scope",
+                "src/lib.rs",
+                11,
+            ),
+        ];
+
+        let widening = classify_feedback(&diagnostics);
+
+        assert_eq!(widening.candidates.len(), 2);
+        assert!(widening.candidates.iter().any(|candidate| {
+            candidate.kind == "unresolved-path"
+                && candidate.symbol.as_deref() == Some("crate::worker::Task")
+                && candidate.file_name.as_deref() == Some("src/lib.rs")
+                && candidate.line_start == Some(7)
+        }));
+        assert!(widening.candidates.iter().any(|candidate| {
+            candidate.kind == "missing-method-or-associated-item"
+                && candidate.symbol.as_deref() == Some("run")
+                && candidate.confidence == "medium"
+        }));
+        assert!(widening
+            .hazards
+            .iter()
+            .any(|hazard| hazard.kind == "needs-widening"));
+    }
+
+    #[test]
+    fn classifies_timeout_and_cargo_stderr_as_blocking_hazards() {
+        let diagnostics = vec![
+            timeout_failure_diagnostic(Some(Duration::from_secs(5))),
+            stderr_failure_diagnostic("error: failed to load manifest").unwrap(),
+        ];
+
+        let widening = classify_feedback(&diagnostics);
+
+        assert!(widening.candidates.is_empty());
+        assert_eq!(widening.hazards.len(), 2);
+        assert!(widening
+            .hazards
+            .iter()
+            .all(|hazard| hazard.severity == "blocker"));
     }
 
     #[test]
@@ -391,5 +624,23 @@ mod tests {
         assert_eq!(report.diagnostics[0].code.as_deref(), Some("cargo-timeout"));
 
         let _ = fs::remove_dir_all(root);
+    }
+
+    fn diagnostic(code: &str, message: &str, file_name: &str, line_start: u64) -> CheckDiagnostic {
+        CheckDiagnostic {
+            level: "error".to_string(),
+            message: message.to_string(),
+            code: Some(code.to_string()),
+            rendered: None,
+            spans: vec![CheckSpan {
+                file_name: file_name.to_string(),
+                line_start,
+                line_end: line_start,
+                column_start: 1,
+                column_end: 1,
+                is_primary: true,
+                text: Vec::new(),
+            }],
+        }
     }
 }
