@@ -1753,6 +1753,34 @@ fn transformed_target_dependencies(
             }
         }
 
+        if package_target_uses_dev_dependencies(package) {
+            if let Some(source_dependencies) = source_targets
+                .and_then(|targets| targets.get(&target_name))
+                .and_then(Value::as_table)
+                .and_then(|target_table| target_table.get("dev-dependencies"))
+                .and_then(Value::as_table)
+            {
+                let dev_dependencies = transformed_dependency_table(
+                    project,
+                    reduced,
+                    package_name,
+                    source_dependencies,
+                    DependencyRetention::SourceMentioned,
+                    DependencyUsageScope::Any,
+                    package_usage,
+                    feature_required_aliases,
+                    retained_aliases,
+                    retain_for_copied_support_source,
+                );
+                if !dev_dependencies.is_empty() {
+                    rendered_target.insert(
+                        "dev-dependencies".to_string(),
+                        Value::Table(dev_dependencies),
+                    );
+                }
+            }
+        }
+
         if !rendered_target.is_empty() {
             rendered_targets.insert(target_name, Value::Table(rendered_target));
         }
@@ -2398,7 +2426,10 @@ fn is_marker_dependency(alias: &str, package: &str) -> bool {
 
 fn package_dependency_tables(package: &Package) -> Vec<(&str, &Table)> {
     let mut tables = Vec::new();
-    for table_name in ["dependencies", "build-dependencies"] {
+    for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        if table_name == "dev-dependencies" && !package_target_uses_dev_dependencies(package) {
+            continue;
+        }
         if let Some(table) = package.manifest.get(table_name).and_then(Value::as_table) {
             tables.push((table_name, table));
         }
@@ -2408,7 +2439,12 @@ fn package_dependency_tables(package: &Package) -> Vec<(&str, &Table)> {
             let Some(target) = target.as_table() else {
                 continue;
             };
-            for table_name in ["dependencies", "build-dependencies"] {
+            for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                if table_name == "dev-dependencies"
+                    && !package_target_uses_dev_dependencies(package)
+                {
+                    continue;
+                }
                 if let Some(table) = target.get(table_name).and_then(Value::as_table) {
                     tables.push((table_name, table));
                 }

@@ -195,20 +195,26 @@ fn slices_marked_integration_test_target_and_preserves_manifest_entry() {
     })
     .expect("reduction should succeed");
 
-    assert_eq!(report.packages, ["app", "lib_support", "support"]);
+    assert_eq!(
+        report.packages,
+        ["app", "lib_support", "platform_support", "support"]
+    );
     let manifest = read(output.join("app/Cargo.toml"));
     assert!(manifest.contains("[[test]]"));
     assert!(manifest.contains("name = \"behavior\""));
     assert!(manifest.contains("path = \"tests/behavior.rs\""));
     assert!(manifest.contains("[dependencies.lib_support]"));
     assert!(manifest.contains("[dev-dependencies.support]"));
+    assert!(manifest.contains("[target.\"cfg(unix)\".dev-dependencies.platform_support]"));
 
     let source = read(output.join("app/tests/behavior.rs"));
     let lib = read(output.join("app/src/lib.rs"));
     let lib_support = read(output.join("lib_support/src/lib.rs"));
+    let platform_support = read(output.join("platform_support/src/lib.rs"));
     let support = read(output.join("support/src/lib.rs"));
     assert!(lib.contains("pub fn library_label"));
     assert!(lib_support.contains("pub fn label"));
+    assert!(platform_support.contains("pub fn format_value"));
     assert!(source.contains("#[test]"));
     assert!(source.contains("fn selected_behavior"));
     assert!(support.contains("pub fn format_value"));
@@ -228,7 +234,7 @@ fn slices_marked_integration_test_target_and_preserves_manifest_entry() {
         .expect("cargo check should start");
     assert!(
         cargo_check.status.success(),
-        "generated test-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/tests/behavior.rs:\n{}\nlib_support/src/lib.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        "generated test-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/tests/behavior.rs:\n{}\nlib_support/src/lib.rs:\n{}\nplatform_support/src/lib.rs:\n{}\nsupport/src/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
@@ -236,6 +242,7 @@ fn slices_marked_integration_test_target_and_preserves_manifest_entry() {
         lib,
         source,
         lib_support,
+        platform_support,
         support,
     );
 }
@@ -2903,7 +2910,7 @@ fn write_test_target_fixture(root: &Path) {
     write(
         root.join("Cargo.toml"),
         r#"[workspace]
-members = ["app", "lib_support", "support"]
+members = ["app", "lib_support", "platform_support", "support"]
 resolver = "2"
 "#,
     );
@@ -2925,6 +2932,9 @@ lib_support = {{ path = "../lib_support" }}
 [dev-dependencies]
 opensourced = {{ path = "{}" }}
 support = {{ path = "../support" }}
+
+[target.'cfg(unix)'.dev-dependencies]
+platform_support = {{ path = "../platform_support" }}
 "#,
             manifest_path(&opensourced_path)
         ),
@@ -2949,6 +2959,8 @@ pub fn dead_lib() -> i32 {
 fn selected_behavior() {
     assert_eq!(app::library_label("runtime"), "lib:runtime");
     assert_eq!(support::format_value("runtime"), "test:runtime");
+    #[cfg(unix)]
+    assert_eq!(platform_support::format_value("runtime"), "platform:runtime");
 }
 
 fn dead_test() -> String {
@@ -2971,6 +2983,25 @@ edition = "2021"
 }
 
 pub fn dead_label() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("platform_support/Cargo.toml"),
+        r#"[package]
+name = "platform_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("platform_support/src/lib.rs"),
+        r#"pub fn format_value(value: &str) -> String {
+    format!("platform:{value}")
+}
+
+pub fn dead_platform_support() -> String {
     "dead".to_string()
 }
 "#,
