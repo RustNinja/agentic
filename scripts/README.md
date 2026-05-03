@@ -24,7 +24,10 @@ scripts/corpus_feedback_loop.py \
 By default it restores and cleans git-backed sources before and after each
 batch, keeps failed outputs for debugging, removes generated `target-feedback`,
 and prunes older successful outputs. Use `--baseline-check` to separate source
-environment failures from slicer failures, and `--continuous` for soak runs.
+environment failures from slicer failures; add `--allow-baseline-failures` when
+known-broken sources should still run and generated baseline-matching errors
+should be classified separately from slicer regressions. Use `--continuous` for
+soak runs.
 Use `--validation preflight` when build time is the bottleneck; it validates the
 predicted generated shape without compiling dependencies. Use
 `--validation feedback` for slower compiler-confirmed runs, or

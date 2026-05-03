@@ -197,6 +197,14 @@ def parse_args() -> argparse.Namespace:
         help="run cargo check --message-format=json on the source before mutation",
     )
     parser.add_argument(
+        "--allow-baseline-failures",
+        action="store_true",
+        help=(
+            "continue after a failing source baseline and classify generated "
+            "baseline-matching errors separately from slicer regressions"
+        ),
+    )
+    parser.add_argument(
         "--stop-on-warning",
         action="store_true",
         help="classify generated warnings as corpus failures",
@@ -275,6 +283,8 @@ def validate_args(args: argparse.Namespace) -> None:
         raise SystemExit("--feedback-timeout must be zero or greater")
     if args.case_timeout <= 0:
         raise SystemExit("--case-timeout must be greater than zero")
+    if args.allow_baseline_failures:
+        args.baseline_check = True
 
 
 def run_batch(
@@ -302,7 +312,7 @@ def run_batch(
             restore_source(source)
         if args.baseline_check:
             baseline = run_baseline_check(source, args.case_timeout)
-            if not baseline["success"]:
+            if not baseline["success"] and not args.allow_baseline_failures:
                 return build_row(
                     args,
                     source,
@@ -344,7 +354,7 @@ def run_batch(
         preflight = read_json(preflight_report_path)
         feedback = read_json(feedback_report_path)
         repair = read_json(repair_report_path)
-        classification = classify(command_result, preflight, feedback, args)
+        classification = classify(command_result, preflight, feedback, baseline, args)
         return build_row(
             args,
             source,
@@ -738,6 +748,7 @@ def run_baseline_check(source: Path, timeout_seconds: int) -> dict[str, Any]:
         "duration_ms": result.duration_ms,
         "errors": count_diagnostics(diagnostics, "error"),
         "warnings": count_diagnostics(diagnostics, "warning"),
+        "diagnostic_error_keys": diagnostic_error_keys(diagnostics),
         "first_diagnostics": summarize_diagnostics(diagnostics),
     }
 
@@ -781,6 +792,7 @@ def classify(
     command_result: CommandResult | None,
     preflight: dict[str, Any] | None,
     feedback: dict[str, Any] | None,
+    baseline: dict[str, Any] | None,
     args: argparse.Namespace,
 ) -> str:
     if command_result is None or command_result.timed_out:
@@ -796,6 +808,10 @@ def classify(
     errors = count_diagnostics(feedback.get("diagnostics", []), "error")
     warnings = count_diagnostics(feedback.get("diagnostics", []), "warning")
     if command_result.exit_code != 0 or not feedback.get("success") or errors:
+        if feedback_errors_are_baseline_known(feedback, baseline):
+            if warnings and (args.deny_warnings or args.stop_on_warning):
+                return "slice_feedback_failed"
+            return "slice_baseline_limited_passed"
         return "slice_feedback_failed"
     if args.stop_on_warning and warnings:
         return "slice_feedback_failed"
@@ -823,8 +839,12 @@ def build_row(
     warnings = count_diagnostics(diagnostics, "warning")
     errors = count_diagnostics(diagnostics, "error")
     preflight_diagnostics = (preflight or {}).get("diagnostics", [])
-    passed = classification in {"slice_check_passed", "slice_preflight_passed"}
-    if args.stop_on_warning and warnings:
+    passed = classification in {
+        "slice_check_passed",
+        "slice_preflight_passed",
+        "slice_baseline_limited_passed",
+    }
+    if (args.stop_on_warning or args.deny_warnings) and warnings:
         passed = False
 
     row: dict[str, Any] = {
@@ -837,6 +857,7 @@ def build_row(
             "tier": args.validation,
             "feedback_loop": args.feedback_loop,
             "feedback_timeout": args.feedback_timeout,
+            "allow_baseline_failures": args.allow_baseline_failures,
             "deny_warnings": args.deny_warnings,
             "stop_on_warning": args.stop_on_warning,
         },
@@ -926,6 +947,43 @@ def diagnostic_codes(diagnostics: list[dict[str, Any]]) -> list[str]:
         if code and code not in codes:
             codes.append(str(code))
     return codes
+
+
+def diagnostic_error_keys(diagnostics: list[dict[str, Any]]) -> list[str]:
+    keys: list[str] = []
+    for diagnostic in diagnostics:
+        if diagnostic.get("level") != "error":
+            continue
+        key = diagnostic_key(diagnostic)
+        if key not in keys:
+            keys.append(key)
+    return keys
+
+
+def diagnostic_key(diagnostic: dict[str, Any]) -> str:
+    code = diagnostic.get("code")
+    if isinstance(code, dict):
+        code = code.get("code")
+    return "|".join(
+        [
+            str(diagnostic.get("level") or ""),
+            str(code or ""),
+            str(diagnostic.get("message") or ""),
+        ]
+    )
+
+
+def feedback_errors_are_baseline_known(
+    feedback: dict[str, Any] | None,
+    baseline: dict[str, Any] | None,
+) -> bool:
+    if not baseline or baseline.get("success"):
+        return False
+    baseline_keys = set(baseline.get("diagnostic_error_keys") or [])
+    if not baseline_keys:
+        return False
+    feedback_keys = diagnostic_error_keys((feedback or {}).get("diagnostics", []))
+    return bool(feedback_keys) and all(key in baseline_keys for key in feedback_keys)
 
 
 def repair_total_changes(repair: dict[str, Any] | None) -> int | None:
