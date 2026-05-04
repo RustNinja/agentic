@@ -6,6 +6,7 @@ use crate::model::{Project, SemanticReductionHints};
 pub enum AnalyzerMode {
     Syn,
     RustAnalyzerHir,
+    RustAnalyzerHirProcMacros,
 }
 
 impl AnalyzerMode {
@@ -13,6 +14,7 @@ impl AnalyzerMode {
         match self {
             Self::Syn => "syn",
             Self::RustAnalyzerHir => "ra-hir",
+            Self::RustAnalyzerHirProcMacros => "ra-hir-proc-macros",
         }
     }
 
@@ -20,6 +22,17 @@ impl AnalyzerMode {
         #[cfg(feature = "ra-hir")]
         {
             Self::RustAnalyzerHir
+        }
+        #[cfg(not(feature = "ra-hir"))]
+        {
+            Self::Syn
+        }
+    }
+
+    pub fn production_default_for_build() -> Self {
+        #[cfg(feature = "ra-hir")]
+        {
+            Self::RustAnalyzerHirProcMacros
         }
         #[cfg(not(feature = "ra-hir"))]
         {
@@ -41,8 +54,12 @@ impl std::str::FromStr for AnalyzerMode {
         match value {
             "syn" => Ok(Self::Syn),
             "ra" | "ra-hir" | "rust-analyzer" | "rust-analyzer-hir" => Ok(Self::RustAnalyzerHir),
+            "ra-hir-proc-macros"
+            | "ra-proc-macros"
+            | "rust-analyzer-proc-macros"
+            | "rust-analyzer-hir-proc-macros" => Ok(Self::RustAnalyzerHirProcMacros),
             _ => Err(format!(
-                "unknown analyzer {value:?}; expected syn or ra-hir"
+                "unknown analyzer {value:?}; expected syn, ra-hir, or ra-hir-proc-macros"
             )),
         }
     }
@@ -142,7 +159,18 @@ fn load_report_with_project(
             let provider = SynSemanticProvider::new();
             Ok(provider.report().clone())
         }
-        AnalyzerMode::RustAnalyzerHir => rust_analyzer::load_report(workspace_root, project),
+        AnalyzerMode::RustAnalyzerHir => rust_analyzer::load_report(
+            workspace_root,
+            project,
+            AnalyzerMode::RustAnalyzerHir,
+            rust_analyzer::ProcMacroExpansionMode::Disabled,
+        ),
+        AnalyzerMode::RustAnalyzerHirProcMacros => rust_analyzer::load_report(
+            workspace_root,
+            project,
+            AnalyzerMode::RustAnalyzerHirProcMacros,
+            rust_analyzer::ProcMacroExpansionMode::Enabled,
+        ),
     }
 }
 
@@ -154,7 +182,10 @@ mod rust_analyzer {
         fs,
         panic::{self, AssertUnwindSafe},
         path::{Component, Path, PathBuf},
-        sync::atomic::{AtomicUsize, Ordering},
+        sync::{
+            atomic::{AtomicUsize, Ordering},
+            Arc, Mutex,
+        },
     };
 
     use ra_ap_hir::{Adt, HasSource, ModuleDef, PathResolution};
@@ -171,6 +202,13 @@ mod rust_analyzer {
     const DEFAULT_SEMANTIC_FILE_BUDGET: usize = 48;
     const DEFAULT_METHOD_CALL_BUDGET: usize = 1_000;
     const DEFAULT_PATH_BUDGET: usize = 2_000;
+    static RA_WORKSPACE_LOAD_PANIC_HOOK_LOCK: Mutex<()> = Mutex::new(());
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ProcMacroExpansionMode {
+        Disabled,
+        Enabled,
+    }
 
     pub struct RustAnalyzerSemanticProvider {
         report: AnalyzerReport,
@@ -181,6 +219,32 @@ mod rust_analyzer {
         fn load(
             workspace_root: &Path,
             project: Option<&Project>,
+            requested_mode: AnalyzerMode,
+            proc_macro_mode: ProcMacroExpansionMode,
+        ) -> Result<Self, Box<dyn std::error::Error>> {
+            match Self::load_once(workspace_root, project, requested_mode, proc_macro_mode) {
+                Ok(provider) => Ok(provider),
+                Err(error) if proc_macro_mode == ProcMacroExpansionMode::Enabled => {
+                    let mut provider = Self::load_once(
+                        workspace_root,
+                        project,
+                        requested_mode,
+                        ProcMacroExpansionMode::Disabled,
+                    )?;
+                    provider.report.notes.push(format!(
+                        "proc macro semantic load failed; fell back to bounded HIR without proc macro expansion: {error}"
+                    ));
+                    Ok(provider)
+                }
+                Err(error) => Err(error),
+            }
+        }
+
+        fn load_once(
+            workspace_root: &Path,
+            project: Option<&Project>,
+            requested_mode: AnalyzerMode,
+            proc_macro_mode: ProcMacroExpansionMode,
         ) -> Result<Self, Box<dyn std::error::Error>> {
             let cargo_config = CargoConfig {
                 set_test: true,
@@ -188,8 +252,11 @@ mod rust_analyzer {
                 ..CargoConfig::default()
             };
             let load_config = LoadCargoConfig {
-                load_out_dirs_from_check: false,
-                with_proc_macro_server: ProcMacroServerChoice::None,
+                load_out_dirs_from_check: proc_macro_mode == ProcMacroExpansionMode::Enabled,
+                with_proc_macro_server: match proc_macro_mode {
+                    ProcMacroExpansionMode::Disabled => ProcMacroServerChoice::None,
+                    ProcMacroExpansionMode::Enabled => ProcMacroServerChoice::Sysroot,
+                },
                 prefill_caches: false,
                 num_worker_threads: 1,
                 proc_macro_processes: 1,
@@ -199,16 +266,51 @@ mod rust_analyzer {
                 progress_events.fetch_add(1, Ordering::Relaxed);
             };
 
-            let (database, vfs, proc_macro_client) =
-                load_workspace_at(workspace_root, &cargo_config, &load_config, &progress)?;
+            let _panic_hook_guard = RA_WORKSPACE_LOAD_PANIC_HOOK_LOCK
+                .lock()
+                .expect("RA workspace load panic hook mutex should not be poisoned");
+            let previous_hook = panic::take_hook();
+            let previous_hook = Arc::new(Mutex::new(Some(previous_hook)));
+            let hook_previous = Arc::clone(&previous_hook);
+            let load_thread = std::thread::current().id();
+            panic::set_hook(Box::new(move |info| {
+                if std::thread::current().id() != load_thread {
+                    let guard = hook_previous
+                        .lock()
+                        .expect("RA workspace load panic hook should remain available");
+                    if let Some(hook) = guard.as_ref() {
+                        hook(info);
+                    }
+                }
+            }));
+            let loaded = panic::catch_unwind(AssertUnwindSafe(|| {
+                load_workspace_at(workspace_root, &cargo_config, &load_config, &progress)
+            }));
+            let previous_hook = previous_hook
+                .lock()
+                .expect("RA workspace load panic hook should be restorable")
+                .take()
+                .expect("RA workspace load panic hook should be present");
+            panic::set_hook(previous_hook);
+            let loaded = loaded.map_err(|_| "rust-analyzer workspace load panicked")?;
+            let (database, vfs, proc_macro_client) = loaded?;
 
             let semantic = collect_semantic_report(&database, &vfs, workspace_root, project);
             let mut notes = vec![
                 "rust-analyzer RootDatabase loaded".to_string(),
                 "HIR Semantics initialized".to_string(),
                 "dependency crates excluded from HIR load for bounded slicer analysis".to_string(),
-                "proc macro expansion disabled for first integration pass".to_string(),
             ];
+            match proc_macro_mode {
+                ProcMacroExpansionMode::Disabled => notes.push(
+                    "proc macro expansion disabled for fast bounded semantic inventory"
+                        .to_string(),
+                ),
+                ProcMacroExpansionMode::Enabled => notes.push(
+                    "proc macro expansion requested through rust-analyzer sysroot proc-macro server with build-script output discovery"
+                        .to_string(),
+                ),
+            }
             notes.push(format!(
                 "workspace load progress events: {}",
                 progress_events.load(Ordering::Relaxed)
@@ -255,7 +357,7 @@ mod rust_analyzer {
 
             Ok(Self {
                 report: AnalyzerReport {
-                    mode: AnalyzerMode::RustAnalyzerHir,
+                    mode: requested_mode,
                     loaded: true,
                     engine: "rust-analyzer HIR".to_string(),
                     notes,
@@ -276,8 +378,15 @@ mod rust_analyzer {
     pub fn load_report(
         workspace_root: &Path,
         project: Option<&Project>,
+        requested_mode: AnalyzerMode,
+        proc_macro_mode: ProcMacroExpansionMode,
     ) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
-        let provider = RustAnalyzerSemanticProvider::load(workspace_root, project)?;
+        let provider = RustAnalyzerSemanticProvider::load(
+            workspace_root,
+            project,
+            requested_mode,
+            proc_macro_mode,
+        )?;
         Ok(provider.report().clone())
     }
 
@@ -932,7 +1041,9 @@ mod rust_analyzer {
 mod tests {
     use std::path::{Path, PathBuf};
 
-    use super::{load_report, load_report_for_project, AnalyzerMode};
+    #[cfg(feature = "ra-hir")]
+    use super::load_report_for_project;
+    use super::{load_report, AnalyzerMode};
 
     #[test]
     fn parses_analyzer_modes() {
@@ -944,6 +1055,10 @@ mod tests {
         assert_eq!(
             "rust-analyzer".parse::<AnalyzerMode>().unwrap(),
             AnalyzerMode::RustAnalyzerHir
+        );
+        assert_eq!(
+            "ra-hir-proc-macros".parse::<AnalyzerMode>().unwrap(),
+            AnalyzerMode::RustAnalyzerHirProcMacros
         );
         assert!("bogus".parse::<AnalyzerMode>().is_err());
     }
@@ -1013,11 +1128,19 @@ mod rust_analyzer {
 
     use crate::model::Project;
 
-    use super::AnalyzerReport;
+    use super::{AnalyzerMode, AnalyzerReport};
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum ProcMacroExpansionMode {
+        Disabled,
+        Enabled,
+    }
 
     pub fn load_report(
         _workspace_root: &Path,
         _project: Option<&Project>,
+        _requested_mode: AnalyzerMode,
+        _proc_macro_mode: ProcMacroExpansionMode,
     ) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
         Err(
             "ra-hir analyzer requested, but opensource_core was built without the ra-hir feature"

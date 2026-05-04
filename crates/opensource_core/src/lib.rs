@@ -2513,8 +2513,10 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[cfg(feature = "ra-hir")]
+    use super::generate_with_analyzer;
     use super::{
-        add_semantic_inventory_hazard, default_feature_closure, generate, generate_with_analyzer,
+        add_semantic_inventory_hazard, default_feature_closure, generate,
         generate_with_analyzer_feedback, write_generate_report, AnalyzerMode, AnalyzerReport,
         CallableId, CheckDiagnostic, GenerateOptions, SemanticReductionHints, SemanticReport,
     };

@@ -430,6 +430,7 @@ where
     I: IntoIterator<Item = OsString>,
 {
     let mut analyzer_mode = AnalyzerMode::default_for_build();
+    let mut analyzer_mode_explicit = false;
     let mut run_check = false;
     let mut feedback_iterations = 0;
     let mut feedback_repair_iterations = 0;
@@ -469,6 +470,7 @@ where
                 .to_str()
                 .ok_or("--analyzer value must be valid UTF-8")?;
             analyzer_mode = value.parse::<AnalyzerMode>()?;
+            analyzer_mode_explicit = true;
         } else if arg == OsStr::new("--feedback") {
             feedback_iterations = feedback_iterations.max(1);
         } else if arg == OsStr::new("--preflight") {
@@ -552,6 +554,10 @@ where
         return Err(usage().into());
     };
     let workspace_root = normalize_workspace_root_arg(workspace_root);
+
+    if production_preset && !analyzer_mode_explicit {
+        analyzer_mode = AnalyzerMode::production_default_for_build();
+    }
 
     if production_should_add_locked_arg(production_preset, &workspace_root, &cargo_check_args) {
         cargo_check_args.push("--locked".to_string());
@@ -3254,7 +3260,7 @@ fn format_duration_ms(duration_ms: u64) -> String {
 
 fn usage() -> String {
     concat!(
-        "usage: slicers [--analyzer <syn|ra-hir>] [--production] [--check] [--preflight] [--feedback] ",
+        "usage: slicers [--analyzer <syn|ra-hir|ra-hir-proc-macros>] [--production] [--check] [--preflight] [--feedback] ",
         "[--feedback-loop <n>] [--feedback-repair-loop <n>] [--feedback-limit <n>] ",
         "[--feedback-timeout <seconds>] [--deny-warnings] [--feedback-report <path>] ",
         "[--feedback-target-dir <path>] [--cargo-check-arg <arg>] [--repair-report <path>] ",
@@ -3262,7 +3268,8 @@ fn usage() -> String {
         "[--baseline-target-dir <path>] [--slice-report <path>] [--validation-report <path>] ",
         "[--preflight-report <path>] ",
         "<workspace-root-or-Cargo.toml> <output-root>\n",
-        "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn"
+        "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn; ",
+        "--production defaults to ra-hir-proc-macros when available"
     )
     .to_string()
 }
@@ -3586,6 +3593,10 @@ mod tests {
         assert_eq!(options.feedback_repair_iterations, 3);
         assert_eq!(options.feedback_iterations, 0);
         assert_eq!(
+            options.analyzer_mode,
+            AnalyzerMode::production_default_for_build()
+        );
+        assert_eq!(
             slice_report_path(&options),
             Some(PathBuf::from("out/slice-report.json"))
         );
@@ -3613,6 +3624,14 @@ mod tests {
         let options = parse_options(["--analyzer", "syn", "workspace", "out"]);
 
         assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
+    }
+
+    #[test]
+    fn explicit_syn_analyzer_overrides_production_semantic_default() {
+        let options = parse_options(["--production", "--analyzer", "syn", "workspace", "out"]);
+
+        assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
+        assert!(options.production_preset);
     }
 
     #[test]

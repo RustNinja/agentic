@@ -71,10 +71,9 @@ cases passed preflight:
 | `preferences-add-hidden-thread` | 9 | `codex-mobile-client` | 10 | 16 |
 
 The same pinned cases also passed strict feedback repair with `--deny-warnings`
-through the default `ra-hir` analyzer path once RA was bounded to local
-workspace crates, RA semantic analysis prioritized files containing selected
-roots, and the feedback runner drained Cargo JSON while the child process was
-still running:
+through the RA analyzer path once RA was bounded to local workspace crates, RA
+semantic analysis prioritized files containing selected roots, and the feedback
+runner drained Cargo JSON while the child process was still running:
 
 | Corpus case | Feedback result | Repair changes | End warnings |
 | --- | --- | ---: | ---: |
@@ -248,14 +247,16 @@ The real slices did not include:
 
 ## Remaining Known Gaps
 
-These experiments now pass strict compiler feedback repair through the default
+These experiments now pass strict compiler feedback repair through the
 RA-enabled CLI path. The default CLI feature set loads bounded rust-analyzer HIR
 semantics for local workspace crates and applies exact project-local RA
-method/path resolutions as additive reduction hints; the latest pinned Litter
+method/path resolutions as additive reduction hints; the production preset now
+uses `ra-hir-proc-macros` to ask rust-analyzer for build-script output discovery
+and proc-macro expansion during semantic inventory. The latest pinned Litter
 repair run recorded `semantic_reduction_hints_applied` for all three roots. The
 reducer still keeps the syntactic closure as fallback and does not yet use RA as
-the authoritative oracle for trait impl lookup, macro expansion, generated
-source, dynamic dispatch, or every cfg-active reachability decision.
+the authoritative oracle for trait impl lookup, macro-expanded item retention,
+generated source, dynamic dispatch, or every cfg-active reachability decision.
 
 Known remaining risks:
 
@@ -271,7 +272,8 @@ Known remaining risks:
   retained non-root platform matrices remain conservative.
 - Feature tables are rewritten for pruned optional dependencies, but full
   feature-resolution semantics are still conservative.
-- Proc macro expansion is not executed.
+- Proc macro expansion can be requested by the production analyzer, but
+  macro-expanded items are not yet mapped into first-class retained source.
 - Glob imports/reexports are still conservative.
 - Full rustc-equivalent `cfg` matrix inventory is not implemented.
 

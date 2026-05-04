@@ -22,24 +22,28 @@ assets, output safety, or product diagnostics by itself.
 base reducer and rustc feedback/repair as the production gate. The default
 `opensource_cli` feature set enables `ra-hir`, and the CLI defaults to
 `--analyzer ra-hir`; users can still pass `--analyzer syn` or build with
-`--no-default-features` for the fast syntactic fallback. The rust-analyzer path
-loads local workspace crates with dependency crates excluded by default, maps
-exact project-local method/path resolutions into generic `CallableId` /
-`ItemId` reduction hints, and applies those hints as additive retained-graph
-edges. Files containing selected `#[opensourced]` roots are analyzed first so
-bounded semantic budgets prioritize the active slice. Production validation
-therefore relies on bounded RA semantics, fast static fallback reduction,
-explicit production hazards, and
+`--no-default-features` for the fast syntactic fallback. The `--production`
+preset now defaults to `--analyzer ra-hir-proc-macros`, which asks
+rust-analyzer to run build-script output discovery and use the sysroot
+proc-macro server before collecting HIR semantics. The fast `ra-hir` path still
+keeps proc macros disabled. Both rust-analyzer paths load local workspace
+crates with dependency crates excluded by default, map exact project-local
+method/path resolutions into generic `CallableId` / `ItemId` reduction hints,
+and apply those hints as additive retained-graph edges. Files containing
+selected `#[opensourced]` roots are analyzed first so bounded semantic budgets
+prioritize the active slice. Production validation therefore relies on bounded
+RA semantics, stronger production proc-macro/build-script discovery, fast static
+fallback reduction, explicit production hazards, and
 `cargo check --message-format=json` feedback.
 
 The latest hardening milestone validated the pinned Litter UniFFI cases in
 strict repair mode with `--deny-warnings`: all three pinned roots reached zero
-final warnings through the default `ra-hir` analyzer path, and production
-reports show `semantic_reduction_hints_applied` for each pinned root after RA
-root-file prioritization. The apply-snapshot case removed three unused imports
-through the compiler repair loop. The feedback runner now drains Cargo
-stdout/stderr while the child process runs, preventing large JSON output from
-dependency-heavy checks from blocking the feedback loop.
+final warnings through the RA analyzer path, and production reports show
+`semantic_reduction_hints_applied` for each pinned root after RA root-file
+prioritization. The apply-snapshot case removed three unused imports through
+the compiler repair loop. The feedback runner now drains Cargo stdout/stderr
+while the child process runs, preventing large JSON output from dependency-heavy
+checks from blocking the feedback loop.
 
 ## Inspirations
 
@@ -78,10 +82,12 @@ dependency-heavy checks from blocking the feedback loop.
 - Unknown macros should not be pruned silently. Either retain bounded source,
   query a semantic oracle, or fail with an unsupported-construct report.
 - Retained custom derives, custom attributes, and non-builtin macro invocations
-  must be preserved verbatim and require compiler feedback until macro
-  expansion feeds the reachability graph. These feedback-required macro hazards
-  now include structured package/module/file/line details for direct retained
-  macro surfaces.
+  must be preserved verbatim and require compiler feedback until
+  macro-expanded items are mapped into the retained reachability graph. The
+  production analyzer can now request rust-analyzer proc-macro expansion, but
+  macro-generated source is still not rendered as first-class slice source.
+  These feedback-required macro hazards include structured package/module/file
+  and line details for direct retained macro surfaces.
 - Build scripts can execute arbitrary project logic and generate source under
   `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle
@@ -170,7 +176,8 @@ dependency-heavy checks from blocking the feedback loop.
    - Treat selected warnings, especially unreachable patterns, as semantic hazards.
 
 4. Semantic oracle:
-   - Keep rust-analyzer HIR in the default CLI/corpus flow.
+   - Keep rust-analyzer HIR in the default CLI/corpus flow and
+     rust-analyzer proc-macro/build-script discovery in the production preset.
    - Continue applying exact project-local RA method/path edges as additive
      reduction hints.
    - Add narrow queries for path resolution, method resolution, trait impl lookup,
