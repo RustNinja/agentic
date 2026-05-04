@@ -45,7 +45,9 @@ assets, output safety, or product diagnostics by itself.
   failure showed that a slice can build while changing behavior.
 - Dynamic dispatch and function-pointer callback surfaces can compile while
   hiding concrete call edges; they must fail closed until semantic resolution
-  proves the retained implementation or callback set.
+  proves the retained implementation or callback set. These hazards now include
+  structured package/module/file/line details so users and corpus triage can
+  find the exact retained dynamic surface.
 - Unknown macros should not be pruned silently. Either retain bounded source,
   query a semantic oracle, or fail with an unsupported-construct report.
 - Retained custom derives, custom attributes, and non-builtin macro invocations

@@ -1317,23 +1317,25 @@ fn add_syntactic_production_hazards(
         ));
     }
     if counts.function_pointer_surfaces > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "function_pointer_surfaces",
             "error",
             format!(
                 "{} retained function pointer type surface(s) may hide callback edges outside the static call graph",
                 counts.function_pointer_surfaces
             ),
+            counts.function_pointer_details,
         ));
     }
     if counts.trait_object_surfaces > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "trait_object_surfaces",
             "error",
             format!(
                 "{} retained trait object surface(s) may hide dynamic dispatch edges outside the static call graph",
                 counts.trait_object_surfaces
             ),
+            counts.trait_object_details,
         ));
     }
     if counts.conditional_compilation_attrs > 0 {
@@ -1389,7 +1391,9 @@ struct SyntacticHazardCounts {
     custom_macro_invocations: usize,
     compile_env_macros: usize,
     function_pointer_surfaces: usize,
+    function_pointer_details: Vec<ProductionHazardDetail>,
     trait_object_surfaces: usize,
+    trait_object_details: Vec<ProductionHazardDetail>,
     conditional_compilation_attrs: usize,
     conditional_compilation_details: Vec<ProductionHazardDetail>,
 }
@@ -1407,7 +1411,10 @@ impl SyntacticHazardCounts {
         self.custom_macro_invocations += other.custom_macro_invocations;
         self.compile_env_macros += other.compile_env_macros;
         self.function_pointer_surfaces += other.function_pointer_surfaces;
+        self.function_pointer_details
+            .extend(other.function_pointer_details);
         self.trait_object_surfaces += other.trait_object_surfaces;
+        self.trait_object_details.extend(other.trait_object_details);
         self.conditional_compilation_attrs += other.conditional_compilation_attrs;
         self.conditional_compilation_details
             .extend(other.conditional_compilation_details);
@@ -1629,11 +1636,17 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
 
     fn visit_type_bare_fn(&mut self, bare_fn: &'ast syn::TypeBareFn) {
         self.counts.function_pointer_surfaces += 1;
+        self.counts
+            .function_pointer_details
+            .push(self.type_surface_detail(bare_fn));
         syn::visit::visit_type_bare_fn(self, bare_fn);
     }
 
     fn visit_type_trait_object(&mut self, trait_object: &'ast syn::TypeTraitObject) {
         self.counts.trait_object_surfaces += 1;
+        self.counts
+            .trait_object_details
+            .push(self.type_surface_detail(trait_object));
         syn::visit::visit_type_trait_object(self, trait_object);
     }
 }
@@ -1649,6 +1662,19 @@ impl SyntacticHazardVisitor {
             start_line: Some(attribute.span().start().line),
             cfg: Some(attribute.to_token_stream().to_string()),
             suggested_cargo_args: cfg_gate_suggested_cargo_args(attribute),
+        }
+    }
+
+    fn type_surface_detail<T: Spanned>(&self, node: &T) -> ProductionHazardDetail {
+        ProductionHazardDetail {
+            subject: self.location.subject(),
+            package: Some(self.location.package.clone()),
+            module_path: (!self.location.module_path.is_empty())
+                .then(|| self.location.module_path.join("::")),
+            file: self.location.file.clone(),
+            start_line: Some(node.span().start().line),
+            cfg: None,
+            suggested_cargo_args: Vec::new(),
         }
     }
 }
@@ -2702,11 +2728,35 @@ pub fn entry(callback: Callback) -> (Callback, Box<dyn Worker>) {
         })
         .expect("reduction should succeed");
 
-        assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "function_pointer_surfaces" && hazard.severity == "error"
+        let function_pointer = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "function_pointer_surfaces" && hazard.severity == "error")
+            .expect("function pointer hazard should be reported");
+        assert!(function_pointer.details.iter().any(|detail| {
+            detail.subject == "app"
+                && detail.package.as_deref() == Some("app")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.start_line == Some(3)
         }));
-        assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "trait_object_surfaces" && hazard.severity == "error"
+        let trait_object = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
+            .expect("trait object hazard should be reported");
+        assert!(trait_object.details.iter().any(|detail| {
+            detail.subject == "app"
+                && detail.package.as_deref() == Some("app")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.start_line == Some(18)
         }));
         assert_eq!(report.production.status, "hazards_detected");
     }

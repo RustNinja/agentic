@@ -63,6 +63,9 @@ production hazard codes and structured hazard details, compiler feedback
 widening candidate/hazard kinds, feedback-widened root counts, compiler
 suggestion counts, and conservative repair totals including applied
 machine-applicable suggestions.
+Dynamic dispatch blockers such as retained `fn(...)` pointer surfaces and
+`dyn Trait` objects include package/module/file/line details in the structured
+hazard payload.
 
 ## Litter Feedback Loop
 
