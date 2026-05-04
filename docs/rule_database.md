@@ -40,6 +40,7 @@ of planned generic combinations lives in
 | `trait.default_method_assoc_const.001` | covered | Receiver calls to trait default methods retain the trait item and the concrete impl associated const/type surface needed to compile |
 | `dyn.callback.inline_future_field.001` | covered | Inline `Arc<dyn Fn(...) -> Pin<Box<dyn Future...>>>` callback fields report hard dynamic-dispatch hazards without requiring a type alias |
 | `static.lazy_lock_closure.001` | covered | `LazyLock::new(|| helper())` static initializers retain helper calls made only inside initializer closures |
+| `static.once_lock_get_or_init.001` | covered | `OnceLock::get_or_init(|| Arc::new(T::new()))` singleton helpers retain init guards, constructor calls, and imports while pruning dead singleton builders |
 | `pattern.let_else_slice_enum.001` | covered | Let-else slice patterns retain the enum variant path and prune unrelated helpers without deleting public enum surface variants |
 | `const.chain_array_len.001` | covered | Const-to-const arithmetic and const array lengths retain every referenced const and prune dead sibling consts |
 | `macro.metavariable_variant_path.001` | covered | Macro metavariables used inside enum variant paths retain the macro definition, invocation variant token, and helper calls from the macro body |
@@ -68,6 +69,9 @@ of planned generic combinations lives in
 | `trait.rendered_impl_surface_dependencies.001` | covered | Trait impls rendered because both self type and public trait surface are reachable retain impl header, associated item, and method-body dependencies |
 | `serde.flatten_contract_field.001` | covered | Serde contract fields such as `#[serde(flatten)]` stay even when private and not read by live bodies, while unannotated dead private fields are pruned |
 | `serde.flatten_nested_payload.001` | covered | Nested serde-flatten payload structs stay when the retained DTO contract depends on them, while dead nested DTOs prune away |
+| `serde.deserialize_with_private_wire.001` | covered | Private wire DTOs using `#[serde(deserialize_with = "helper")]` retain helper functions, deserializer trait imports, and the private DTO surface used by `serde_json::from_str::<T>` |
+| `serde.skip_serializing_if_option_path.001` | covered | `#[serde(skip_serializing_if = "Option::is_none")]` fields stay as serialization contract fields without needing a local helper path |
+| `serde.untagged_enum_contract.001` | covered | `#[serde(untagged)]` public enum variants remain intact as data-contract variants while unrelated sibling enums prune away |
 | `manifest.support_path_bundle.001` | covered | External support path dependency bundles rewrite absolute paths to generated relative support paths, copy dependency closure assets, and drop dead bins/examples/tests/benches/fixtures/orphan modules |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |

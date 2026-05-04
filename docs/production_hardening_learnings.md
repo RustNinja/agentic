@@ -384,6 +384,14 @@ inline modules by running the full syntactic hazard visitor there, so plain
 `include!`, file includes, and compile-time env macros cannot bypass the
 production gate.
 
+The follow-up Litter-shaped fixture pass grew the executable set to 58 cases
+without needing repo-specific code. Existing generic rules already handled
+private serde `deserialize_with` wire DTOs, `skip_serializing_if =
+"Option::is_none"` contract fields, untagged serde enum variants, and
+`OnceLock::get_or_init` singleton initialization chains. Keeping these as
+executable fixtures matters because they are common UniFFI/Litter-adjacent
+shapes and now stay in the fast loop.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:

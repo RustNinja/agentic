@@ -161,6 +161,31 @@ fn retains_lazy_lock_static_initializer_closure_dependencies() {
 }
 
 #[test]
+fn retains_once_lock_get_or_init_closure_dependencies() {
+    let workspace = temp_path("rule-once-lock-workspace");
+    let output = temp_path("rule-once-lock-output");
+    let target_dir = temp_path("rule-once-lock-target");
+    write_once_lock_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("once lock rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("once_lock_rule/src/lib.rs"));
+    assert!(
+        lib.contains("static CLIENT: OnceLock<Arc<Client>>"),
+        "{lib}"
+    );
+    assert!(lib.contains("fn ensure_init"), "{lib}");
+    assert!(lib.contains("Client::new()"), "{lib}");
+    assert!(!lib.contains("dead_client"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_let_else_slice_pattern_enum_variants() {
     let workspace = temp_path("rule-let-else-slice-workspace");
     let output = temp_path("rule-let-else-slice-output");
@@ -793,6 +818,74 @@ fn retains_nested_serde_flatten_payload_types() {
     assert!(lib.contains("nested: Nested"), "{lib}");
     assert!(lib.contains("pub struct Nested"), "{lib}");
     assert!(!lib.contains("DeadNested"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_serde_deserialize_with_private_wire_helpers() {
+    let workspace = temp_path("rule-serde-deserialize-with-workspace");
+    let output = temp_path("rule-serde-deserialize-with-output");
+    let target_dir = temp_path("rule-serde-deserialize-with-target");
+    write_serde_deserialize_with_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde deserialize_with rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_deserialize_with_rule/src/lib.rs"));
+    assert!(lib.contains("struct RawDto"), "{lib}");
+    assert!(lib.contains("deserialize_with = \"parse_opt\""), "{lib}");
+    assert!(lib.contains("fn parse_opt"), "{lib}");
+    assert!(!lib.contains("struct DeadWire"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_serde_skip_serializing_if_contract_fields() {
+    let workspace = temp_path("rule-serde-skip-serializing-workspace");
+    let output = temp_path("rule-serde-skip-serializing-output");
+    let target_dir = temp_path("rule-serde-skip-serializing-target");
+    write_serde_skip_serializing_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde skip_serializing_if rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_skip_serializing_rule/src/lib.rs"));
+    assert!(
+        lib.contains("skip_serializing_if = \"Option::is_none\""),
+        "{lib}"
+    );
+    assert!(lib.contains("target: Option<String>"), "{lib}");
+    assert!(!lib.contains("dead: Option<String>"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_serde_untagged_enum_contract_variants() {
+    let workspace = temp_path("rule-serde-untagged-enum-workspace");
+    let output = temp_path("rule-serde-untagged-enum-output");
+    let target_dir = temp_path("rule-serde-untagged-enum-target");
+    write_serde_untagged_enum_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde untagged enum rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_untagged_enum_rule/src/lib.rs"));
+    assert!(lib.contains("#[serde(untagged)]"), "{lib}");
+    assert!(lib.contains("Index(usize)"), "{lib}");
+    assert!(lib.contains("Key(String)"), "{lib}");
+    assert!(!lib.contains("DeadSegment"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -1545,6 +1638,46 @@ fn dead_build() -> String {
 #[opensourced]
 pub fn selected() -> usize {
     LIVE.len()
+}
+"#,
+    );
+}
+
+fn write_once_lock_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "once_lock_rule",
+        r#"use opensourced::opensourced;
+use std::sync::{Arc, OnceLock};
+
+static CLIENT: OnceLock<Arc<Client>> = OnceLock::new();
+
+pub struct Client;
+
+impl Client {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn live(&self) -> u32 {
+        7
+    }
+}
+
+fn ensure_init() {}
+
+fn shared_client() -> Arc<Client> {
+    ensure_init();
+    CLIENT.get_or_init(|| Arc::new(Client::new())).clone()
+}
+
+fn dead_client() -> Client {
+    Client
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    shared_client().live()
 }
 "#,
     );
@@ -3132,6 +3265,108 @@ pub struct DeadNested {
 #[opensourced]
 pub fn selected(wire: Wire) -> String {
     wire.id
+}
+"#,
+    );
+}
+
+fn write_serde_deserialize_with_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_deserialize_with_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"
+use opensourced::opensourced;
+use serde::{Deserialize, Deserializer};
+
+#[derive(Deserialize)]
+struct RawDto {
+    #[serde(default, deserialize_with = "parse_opt")]
+    value: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeadWire {
+    value: String,
+}
+
+fn parse_opt<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    Option::<String>::deserialize(deserializer)
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> usize {
+    serde_json::from_str::<RawDto>(input)
+        .ok()
+        .and_then(|raw| raw.value)
+        .unwrap_or_default()
+        .len()
+}
+"#,
+    );
+}
+
+fn write_serde_skip_serializing_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_skip_serializing_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"
+use opensourced::opensourced;
+use serde::Serialize;
+
+#[derive(Serialize)]
+pub struct Request {
+    pub id: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target: Option<String>,
+    dead: Option<String>,
+}
+
+#[opensourced]
+pub fn selected(request: &Request) -> String {
+    serde_json::to_string(request).unwrap_or_default()
+}
+"#,
+    );
+}
+
+fn write_serde_untagged_enum_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_untagged_enum_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+"#,
+        r#"
+use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PathSegment {
+    Index(usize),
+    Key(String),
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum DeadSegment {
+    Dead,
+}
+
+pub struct Route {
+    pub segments: Vec<PathSegment>,
+}
+
+#[opensourced]
+pub fn selected(route: Route) -> usize {
+    route.segments.len()
 }
 "#,
     );
