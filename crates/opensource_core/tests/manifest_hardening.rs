@@ -110,6 +110,84 @@ pub fn selected() -> i32 {
 }
 
 #[test]
+fn preserves_cargo_lint_policy_for_generated_validation() {
+    let workspace = temp_path("lint-policy-workspace");
+    let output = temp_path("lint-policy-output");
+    let target_dir = temp_path("lint-policy-target");
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+
+[lints]
+workspace = true
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    unsafe { 7 }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let root_manifest = read(output.join("Cargo.toml"));
+    let package_manifest = read(output.join("app/Cargo.toml"));
+    assert!(root_manifest.contains("[workspace.lints.rust]"));
+    assert!(root_manifest.contains("unsafe_code = \"deny\""));
+    assert!(package_manifest.contains("[lints]"));
+    assert!(package_manifest.contains("workspace = true"));
+
+    let report = check_workspace(CheckOptions {
+        manifest_path: output.join("Cargo.toml"),
+        target_dir: Some(target_dir),
+        timeout: Some(Duration::from_secs(60)),
+        cargo_args: Vec::new(),
+    })
+    .expect("generated workspace cargo check should run");
+
+    let diagnostic_text = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !report.success && diagnostic_text.contains("unsafe"),
+        "generated cargo check should enforce preserved unsafe_code lint\ndiagnostics:\n{}\nstderr:\n{}",
+        diagnostic_text,
+        report.stderr
+    );
+}
+
+#[test]
 fn slices_single_package_binary_crate_with_stub_main() {
     let workspace = temp_path("single-workspace");
     let output = temp_path("single-output");

@@ -1202,6 +1202,14 @@ fn write_workspace_manifest(
         .cloned()
         .unwrap_or_else(default_workspace_package);
     workspace.insert("package".to_string(), workspace_package);
+    if let Some(lints) = project
+        .workspace
+        .manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("lints"))
+    {
+        workspace.insert("lints".to_string(), lints.clone());
+    }
 
     let workspace_dependencies = retained_workspace_dependencies(project, reduced, package_usages);
     if !workspace_dependencies.is_empty() {
@@ -1262,6 +1270,9 @@ fn write_package_manifest(
         manifest.insert("package".to_string(), Value::Table(package_table.clone()));
     } else {
         manifest.insert("package".to_string(), default_package(&package.name));
+    }
+    if let Some(lints) = package.manifest.get("lints") {
+        manifest.insert("lints".to_string(), lints.clone());
     }
 
     if let Some(value) = package.manifest.get("lib") {
