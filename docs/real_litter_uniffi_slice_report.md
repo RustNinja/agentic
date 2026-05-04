@@ -56,6 +56,36 @@ cargo build --manifest-path /tmp/slicers-litter-out-apply-fixed/Cargo.toml
 | `cloud_sync_apply_snapshot` | `/tmp/slicers-litter-out-apply-fixed` | `cargo check` passed, `cargo build` passed |
 | `preferences_add_hidden_thread` | `/tmp/slicers-litter-out-preferences` | `cargo check` passed |
 
+## Pinned Corpus Rerun
+
+On 2026-05-04, the same three roots were added to
+`scripts/corpus_cases/litter_uniffi.json` and rerun through the generic pinned
+corpus harness in preflight mode against the pinned Litter commit. All three
+cases passed preflight:
+
+| Corpus case | Files written | Packages | Reachable callables | Reachable items |
+| --- | ---: | --- | ---: | ---: |
+| `cloud-sync-export-snapshot` | 6 | `codex-mobile-client` | 15 | 15 |
+| `cloud-sync-apply-snapshot` | 13 | `codex-mobile-client` | 24 | 38 |
+| `preferences-add-hidden-thread` | 9 | `codex-mobile-client` | 10 | 16 |
+
+The same pinned cases also passed strict feedback repair with `--deny-warnings`
+once the feedback runner drained Cargo JSON while the child process was still
+running:
+
+| Corpus case | Feedback result | Repair changes | End warnings |
+| --- | --- | ---: | ---: |
+| `cloud-sync-export-snapshot` | accepted | 0 | 0 |
+| `cloud-sync-apply-snapshot` | repaired, then accepted | 3 unused imports removed | 0 |
+| `preferences-add-hidden-thread` | accepted | 0 | 0 |
+
+The apply and preferences cases previously retained roughly 2,360 generated
+files by following ambiguous name-only method fallbacks into unrelated mobile
+client and Codex IPC surfaces. The reducer now keeps only unambiguous
+receiver-less fallback matches and reports ambiguous matches as feedback
+hazards, which keeps these pinned UniFFI slices small without hardcoding Litter
+paths or symbols.
+
 ### `cloud_sync_export_snapshot`
 
 Retained package: `codex-mobile-client`
@@ -175,6 +205,26 @@ Manifest pruning result:
 Regression coverage added:
 
 - `crates/opensource_core/tests/pattern_constants.rs`
+
+4. Feedback cargo checks could appear hung on real dependency graphs.
+
+   `cargo check --message-format=json` can emit enough compiler artifact JSON
+   to fill a captured stdout pipe before the process exits. The first strict
+   pinned Litter repair run timed out after 600s while Cargo was blocked.
+
+   Fix: drain Cargo stdout/stderr on reader threads while polling the child
+   process for completion and timeout. The same pinned strict repair rerun then
+   completed all three cases in seconds with warmed dependencies.
+
+5. Warning repair was accepted too early.
+
+   The repair loop accepted successful Cargo checks before removing repairable
+   warnings when warning denial was disabled. This hid generated unused imports
+   until strict mode.
+
+   Fix: feedback repair now requires zero repairable warnings before accepting
+   a successful check, and consumes machine-applicable rustc help for whole-use
+   unused import removals.
 
 ## What Was Correctly Cut
 

@@ -2896,6 +2896,72 @@ impl Worker {
     }
 
     #[test]
+    fn caps_ambiguous_syntactic_method_fallbacks() {
+        let root = temp_output("method-fallback-cap-source");
+        let output = temp_output("method-fallback-cap-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+macro_rules! make_worker {
+    () => {
+        Worker
+    };
+}
+
+#[opensourced]
+pub fn entry() -> i32 {
+    make_worker!().run()
+}
+
+pub struct Worker;
+pub struct Other;
+
+impl Worker {
+    pub fn run(&self) -> i32 {
+        1
+    }
+}
+
+impl Other {
+    pub fn run(&self) -> i32 {
+        2
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "syntactic_method_fallback_cap"));
+        let rendered = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(
+            !rendered.contains("impl Other"),
+            "ambiguous name-only fallback should not retain unrelated same-name impls:\n{rendered}"
+        );
+    }
+
+    #[test]
     fn reports_function_pointer_and_trait_object_production_hazards() {
         let root = temp_output("dynamic-dispatch-hazard-source");
         let opensourced_path = workspace_root().join("crates/opensourced");

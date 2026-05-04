@@ -1,8 +1,9 @@
 use std::{
     ffi::OsStr,
     fs,
+    io::Read,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
+    process::{Command, Output, Stdio},
     thread,
     time::{Duration, Instant},
 };
@@ -423,36 +424,61 @@ fn run_command(
     command.stdout(Stdio::piped()).stderr(Stdio::piped());
     configure_timeout_process_group(&mut command);
     let mut child = command.spawn()?;
+    let stdout_reader = child.stdout.take().map(read_output_pipe);
+    let stderr_reader = child.stderr.take().map(read_output_pipe);
     let started = Instant::now();
-    let Some(timeout) = timeout else {
-        let output = child.wait_with_output()?;
-        return Ok(CommandOutcome {
-            output,
-            timed_out: false,
-            duration_ms: elapsed_ms(started),
-        });
-    };
-
+    let mut timed_out = false;
     loop {
-        if child.try_wait()?.is_some() {
-            let output = child.wait_with_output()?;
+        if let Some(status) = child.try_wait()? {
+            let output = Output {
+                status,
+                stdout: join_output_reader(stdout_reader)?,
+                stderr: join_output_reader(stderr_reader)?,
+            };
             return Ok(CommandOutcome {
                 output,
-                timed_out: false,
+                timed_out,
                 duration_ms: elapsed_ms(started),
             });
         }
-        if started.elapsed() >= timeout {
+        if timeout.is_some_and(|timeout| started.elapsed() >= timeout) {
             kill_timed_out_child(&mut child);
-            let output = child.wait_with_output()?;
+            let status = child.wait()?;
+            timed_out = true;
+            let output = Output {
+                status,
+                stdout: join_output_reader(stdout_reader)?,
+                stderr: join_output_reader(stderr_reader)?,
+            };
             return Ok(CommandOutcome {
                 output,
-                timed_out: true,
+                timed_out,
                 duration_ms: elapsed_ms(started),
             });
         }
         thread::sleep(Duration::from_millis(50));
     }
+}
+
+fn read_output_pipe<R: Read + Send + 'static>(
+    mut pipe: R,
+) -> thread::JoinHandle<std::io::Result<Vec<u8>>> {
+    thread::spawn(move || {
+        let mut output = Vec::new();
+        pipe.read_to_end(&mut output)?;
+        Ok(output)
+    })
+}
+
+fn join_output_reader(
+    reader: Option<thread::JoinHandle<std::io::Result<Vec<u8>>>>,
+) -> Result<Vec<u8>, Box<dyn std::error::Error>> {
+    let Some(reader) = reader else {
+        return Ok(Vec::new());
+    };
+    Ok(reader
+        .join()
+        .map_err(|_| "cargo output reader panicked".to_string())??)
 }
 
 fn elapsed_ms(started: Instant) -> u64 {
@@ -923,6 +949,53 @@ mod tests {
         assert!(report.stderr.contains("ARG:--all-features"));
         assert!(report.stderr.contains("ARG:--target"));
         assert!(report.stderr.contains("ARG:wasm32-unknown-unknown"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn drains_large_cargo_json_output_while_waiting() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let _guard = fake_cargo_test_lock();
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("opensourced-feedback-drain-{unique}"));
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&root).unwrap();
+        let fake_cargo = root.join("fake-cargo");
+        fs::write(
+            &fake_cargo,
+            "#!/bin/sh\n\
+             i=0\n\
+             while [ \"$i\" -lt 20000 ]; do\n\
+             echo '{\"reason\":\"compiler-artifact\",\"package_id\":\"pkg 0.1.0\"}'\n\
+             i=$((i + 1))\n\
+             done\n\
+             echo '{\"reason\":\"build-finished\",\"success\":true}'\n",
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_cargo).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_cargo, permissions).unwrap();
+
+        let report = check_workspace_with_program(
+            fake_cargo.as_os_str(),
+            CheckOptions {
+                manifest_path: root.join("Cargo.toml"),
+                target_dir: None,
+                timeout: Some(Duration::from_secs(5)),
+                cargo_args: Vec::new(),
+            },
+        )
+        .expect("fake cargo should run");
+
+        assert!(report.success);
+        assert!(!report.timed_out);
+        assert!(report.diagnostics.is_empty());
 
         let _ = fs::remove_dir_all(root);
     }

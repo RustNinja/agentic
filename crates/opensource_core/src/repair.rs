@@ -107,6 +107,29 @@ pub fn repair_workspace(
         }
 
         let mut repaired = false;
+        if code == Some("unused_imports") {
+            for suggestion in diagnostic
+                .suggestions
+                .iter()
+                .filter(|suggestion| unused_import_suggestion_removes_whole_use(suggestion))
+            {
+                let Some(path) = diagnostic_path(&options.output_root, &suggestion.file_name)
+                else {
+                    continue;
+                };
+                import_candidates_by_file
+                    .entry(path)
+                    .or_default()
+                    .push(ImportSpanCandidate {
+                        line_start: suggestion.line_start as usize,
+                        column_start: suggestion.column_start as usize,
+                        column_end: suggestion.column_end as usize,
+                        remove_line: true,
+                        message: diagnostic.message.clone(),
+                    });
+                repaired = true;
+            }
+        }
         for span in diagnostic.spans.iter().filter(|span| span.is_primary) {
             let Some(path) = diagnostic_path(&options.output_root, &span.file_name) else {
                 continue;
@@ -813,6 +836,12 @@ fn unused_import_span_removes_whole_use(span_text: &str, message: &str) -> bool 
     !unused_names.is_empty() && import_names.is_subset(&unused_names)
 }
 
+fn unused_import_suggestion_removes_whole_use(suggestion: &CheckSuggestion) -> bool {
+    suggestion.suggestion_applicability.as_deref() == Some("MachineApplicable")
+        && suggestion.suggested_replacement.is_empty()
+        && suggestion.message == "remove the whole `use` item"
+}
+
 fn remove_item_at_line(source: &mut String, candidate: &DeadItemCandidate) -> bool {
     let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
     let Some(mut start) = candidate.line_start.checked_sub(1) else {
@@ -1437,6 +1466,49 @@ mod tests {
         assert_eq!(report.changed_files[0].removed_imports, 1);
         let source = fs::read_to_string(file).unwrap();
         assert!(!source.contains("std::fmt"));
+        assert!(source.contains("pub fn keep"));
+    }
+
+    #[test]
+    fn removes_unused_import_from_machine_applicable_help() {
+        let root = temp_output("repair-unused-import-suggestion");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "use std::fmt;\nuse std::io;\n\npub fn keep() -> usize {\n    1\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![CheckDiagnostic {
+                level: "warning".to_string(),
+                message: "unused import: `std::fmt`".to_string(),
+                code: Some("unused_imports".to_string()),
+                package_id: None,
+                target: None,
+                rendered: None,
+                spans: Vec::new(),
+                suggestions: vec![CheckSuggestion {
+                    level: "help".to_string(),
+                    message: "remove the whole `use` item".to_string(),
+                    file_name: "src/lib.rs".to_string(),
+                    line_start: 1,
+                    line_end: 2,
+                    column_start: 1,
+                    column_end: 1,
+                    byte_start: Some(0),
+                    byte_end: Some(14),
+                    suggested_replacement: String::new(),
+                    suggestion_applicability: Some("MachineApplicable".to_string()),
+                }],
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(report.removed_imports, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(!source.contains("std::fmt"));
+        assert!(source.contains("use std::io;"));
         assert!(source.contains("pub fn keep"));
     }
 

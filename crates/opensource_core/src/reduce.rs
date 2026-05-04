@@ -18,7 +18,8 @@ use crate::model::{
     CallableId, ItemId, ItemKind, Project, ReducedProject, ReductionEvidence, RootId,
 };
 
-const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 24;
+const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 1;
+const MAX_UNRESOLVED_CONVERSION_CANDIDATES: usize = 24;
 
 pub fn reduce_with_extra_roots(
     project: &Project,
@@ -2425,31 +2426,96 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn add_conversion_impls_by_trait(&mut self, trait_name: &str, method_name: &str) {
-        for callable in self.resolver.project.methods.keys() {
-            let CallableId::Method {
-                package,
-                type_path,
-                trait_path: Some(trait_path),
-                trait_input_type_paths,
-                method,
-                ..
-            } = callable
-            else {
-                continue;
-            };
+        let matches = self
+            .resolver
+            .project
+            .methods
+            .keys()
+            .filter_map(|callable| {
+                let CallableId::Method {
+                    package,
+                    type_path,
+                    trait_path: Some(trait_path),
+                    trait_input_type_paths,
+                    method,
+                    ..
+                } = callable
+                else {
+                    return None;
+                };
 
-            if package == self.resolver.package
-                && method == method_name
-                && trait_path
-                    .last()
-                    .is_some_and(|candidate| candidate == trait_name)
-                && (self.resolver.resolve_local_type_item(type_path).is_some()
-                    || trait_input_type_paths.iter().any(|type_path| {
-                        self.resolver.resolve_local_type_item(type_path).is_some()
-                    }))
-            {
-                self.dependencies.callables.insert(callable.clone());
+                (package == self.resolver.package
+                    && method == method_name
+                    && trait_path
+                        .last()
+                        .is_some_and(|candidate| candidate == trait_name)
+                    && (self.resolver.resolve_local_type_item(type_path).is_some()
+                        || trait_input_type_paths.iter().any(|type_path| {
+                            self.resolver.resolve_local_type_item(type_path).is_some()
+                        })))
+                .then(|| callable.clone())
+            })
+            .collect::<Vec<_>>();
+
+        if matches.len() > MAX_UNRESOLVED_CONVERSION_CANDIDATES {
+            self.dependencies.evidence.unresolved_method_fallbacks += 1;
+            self.dependencies
+                .evidence
+                .capped_unresolved_method_fallbacks += 1;
+            return;
+        }
+
+        for callable in matches {
+            self.dependencies.callables.insert(callable);
+        }
+    }
+
+    fn add_conversion_impls_to_expected_type(
+        &mut self,
+        expression: &Expr,
+        target: &TypeRef,
+        trait_name: &str,
+        trait_method_name: &str,
+        expression_method_name: &str,
+    ) {
+        let receiver = match expression {
+            Expr::MethodCall(call) if call.method == expression_method_name => self
+                .receiver_type(&call.receiver)
+                .or_else(|| self.infer_expr_type(&call.receiver)),
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return;
+                };
+                let segments = path_segments(&path.path);
+                let Some(method) = segments.last() else {
+                    return;
+                };
+                if method != expression_method_name || call.args.is_empty() {
+                    return;
+                }
+                call.args.first().and_then(|argument| {
+                    self.receiver_type(argument)
+                        .or_else(|| self.infer_expr_type(argument))
+                })
             }
+            _ => None,
+        };
+
+        if let Some(receiver) = receiver {
+            for callable in
+                self.resolver
+                    .resolve_conversion_impls(&receiver, trait_name, trait_method_name)
+            {
+                self.dependencies.callables.insert(callable);
+            }
+            return;
+        }
+
+        for callable in
+            self.resolver
+                .resolve_conversion_impls_to_target(target, trait_name, trait_method_name)
+        {
+            self.dependencies.callables.insert(callable);
         }
     }
 
@@ -3084,6 +3150,19 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.insert_variable_trait_bounds(name, trait_items);
         }
         if let Some((name, type_ref, candidates)) = self.local_binding_type(local) {
+            if binding_name_and_type(&local.pat)
+                .and_then(|(_, ty)| ty)
+                .is_some()
+            {
+                if let Some(init) = &local.init {
+                    self.add_conversion_impls_to_expected_type(
+                        &init.expr, &type_ref, "From", "from", "into",
+                    );
+                    self.add_conversion_impls_to_expected_type(
+                        &init.expr, &type_ref, "TryFrom", "try_from", "try_into",
+                    );
+                }
+            }
             self.add_local_initializer_trait_dependencies(local, &type_ref);
             if local
                 .init

@@ -1423,7 +1423,7 @@ fn run_feedback_repair_loop(
         let warnings = report.warning_count();
         let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, baseline);
         let repairable_warnings = repairable_warning_count(&report.diagnostics);
-        if feedback_is_accepted(&report, baseline, options.deny_warnings) {
+        if feedback_repair_is_accepted(&report, baseline, options.deny_warnings) {
             record_feedback_attempt(
                 validation,
                 "feedback-repair",
@@ -1509,7 +1509,11 @@ fn run_feedback_repair_loop(
             break;
         }
         if options.allow_baseline_failures
-            && baseline_limited_feedback_is_accepted(&report, baseline, options.deny_warnings)
+            && baseline_limited_feedback_repair_is_accepted(
+                &report,
+                baseline,
+                options.deny_warnings,
+            )
         {
             println!(
                 "feedback: generated errors match the source baseline; treating as baseline-limited pass"
@@ -2833,6 +2837,15 @@ fn feedback_is_accepted(
         && (!deny_warnings || report.warning_count() == 0)
 }
 
+fn feedback_repair_is_accepted(
+    report: &CheckReport,
+    baseline: Option<&CheckReport>,
+    deny_warnings: bool,
+) -> bool {
+    feedback_is_accepted(report, baseline, deny_warnings)
+        && repairable_warning_count(&report.diagnostics) == 0
+}
+
 fn baseline_limited_feedback_is_accepted(
     report: &CheckReport,
     baseline: Option<&CheckReport>,
@@ -2841,6 +2854,15 @@ fn baseline_limited_feedback_is_accepted(
     feedback_errors_are_baseline_known(report, baseline)
         && semantic_hazard_warning_count(&report.diagnostics, baseline) == 0
         && (!deny_warnings || report.warning_count() == 0)
+}
+
+fn baseline_limited_feedback_repair_is_accepted(
+    report: &CheckReport,
+    baseline: Option<&CheckReport>,
+    deny_warnings: bool,
+) -> bool {
+    baseline_limited_feedback_is_accepted(report, baseline, deny_warnings)
+        && repairable_warning_count(&report.diagnostics) == 0
 }
 
 fn feedback_errors_are_baseline_known(
@@ -3264,13 +3286,13 @@ mod tests {
 
     use super::{
         baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
-        feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
-        production_readiness_blocks_validation, production_validation_matrix_entries,
-        record_final_production_readiness, record_production_readiness_gate,
-        refresh_generated_lockfile_for_locked_validation, run_plain_check_gate,
-        semantic_hazard_warning_count, slice_report_path, try_widen_from_feedback,
-        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
-        ValidationGateReport, ValidationReport,
+        feedback_errors_are_baseline_known, feedback_is_accepted, feedback_repair_is_accepted,
+        parse_args_from, production_readiness_blocks_validation,
+        production_validation_matrix_entries, record_final_production_readiness,
+        record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
+        run_plain_check_gate, semantic_hazard_warning_count, slice_report_path,
+        try_widen_from_feedback, uncovered_validation_targets, validation_report_path,
+        FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -3283,6 +3305,20 @@ mod tests {
         assert!(feedback_is_accepted(&clean, None, true));
         assert!(feedback_is_accepted(&successful_with_warning, None, false));
         assert!(!feedback_is_accepted(&successful_with_warning, None, true));
+    }
+
+    #[test]
+    fn repair_loop_does_not_accept_repairable_warnings_before_cleanup() {
+        let report = report(
+            true,
+            vec![warning_with_code(
+                "unused_imports",
+                "unused import: `std::fmt`",
+            )],
+        );
+
+        assert!(feedback_is_accepted(&report, None, false));
+        assert!(!feedback_repair_is_accepted(&report, None, false));
     }
 
     #[test]
