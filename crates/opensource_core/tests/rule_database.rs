@@ -226,6 +226,100 @@ fn retains_macro_metavariable_enum_variant_paths() {
 }
 
 #[test]
+fn retains_serde_serialize_and_deserialize_helper_paths_from_attrs() {
+    let workspace = temp_path("rule-serde-hook-workspace");
+    let output = temp_path("rule-serde-hook-output");
+    let target_dir = temp_path("rule-serde-hook-target");
+    write_serde_hook_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde hook rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_hook_rule/src/lib.rs"));
+    assert!(lib.contains("fn ser_live"), "{lib}");
+    assert!(lib.contains("fn de_live"), "{lib}");
+    assert!(lib.contains("serialize_with = \"ser_live\""), "{lib}");
+    assert!(lib.contains("deserialize_with = \"de_live\""), "{lib}");
+    assert!(!lib.contains("dead_hook"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_serde_default_function_paths_from_attrs() {
+    let workspace = temp_path("rule-serde-default-fn-workspace");
+    let output = temp_path("rule-serde-default-fn-output");
+    let target_dir = temp_path("rule-serde-default-fn-target");
+    write_serde_default_function_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde default function rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_default_fn_rule/src/lib.rs"));
+    assert!(lib.contains("fn default_mode() -> Mode"), "{lib}");
+    assert!(lib.contains("default = \"default_mode\""), "{lib}");
+    assert!(!lib.contains("dead_default"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn reports_async_trait_object_surfaces_with_macro_attr() {
+    let workspace = temp_path("rule-async-trait-workspace");
+    let output = temp_path("rule-async-trait-output");
+    let target_dir = temp_path("rule-async-trait-target");
+    write_async_trait_object_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("async trait object rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "trait_object_surfaces"
+            && hazard
+                .details
+                .iter()
+                .any(|detail| detail.subject.contains("dyn Transport"))
+    }));
+    let lib = read(output.join("async_trait_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Transport: Send + Sync"), "{lib}");
+    assert!(!lib.contains("#[async_trait::async_trait]"), "{lib}");
+    assert!(!lib.contains("async fn reconnect"), "{lib}");
+    assert!(!lib.contains("DeadTransport"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_foreign_extern_functions_called_by_selected_roots() {
+    let workspace = temp_path("rule-ffi-extern-workspace");
+    let output = temp_path("rule-ffi-extern-output");
+    let target_dir = temp_path("rule-ffi-extern-target");
+    write_ffi_extern_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("ffi extern rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("ffi_extern_rule/src/lib.rs"));
+    assert!(lib.contains("extern \"C\""), "{lib}");
+    assert!(lib.contains("fn live_c() -> i32"), "{lib}");
+    assert!(!lib.contains("dead_c"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_owned_dynamic_dispatch_surfaces_inside_retained_structs() {
     let workspace = temp_path("rule-owned-dyn-workspace");
     let output = temp_path("rule-owned-dyn-output");
@@ -953,6 +1047,133 @@ pub fn selected() -> Request {
     );
 }
 
+fn write_serde_hook_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_hook_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+"#,
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct Wire {
+    #[serde(serialize_with = "ser_live")]
+    #[serde(default, deserialize_with = "de_live")]
+    value: Option<u32>,
+}
+
+fn ser_live<S>(value: &Option<u32>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    value.serialize(serializer)
+}
+
+fn de_live<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<u32>::deserialize(deserializer)
+}
+
+fn dead_hook() -> Option<u32> {
+    Some(99)
+}
+
+#[opensourced]
+pub fn selected() -> Wire {
+    Wire { value: None }
+}
+"#,
+    );
+}
+
+fn write_serde_default_function_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_default_fn_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+"#,
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct Config {
+    #[serde(default = "default_mode")]
+    mode: Mode,
+}
+
+#[derive(Deserialize)]
+pub enum Mode {
+    Live,
+    Dead,
+}
+
+fn default_mode() -> Mode {
+    Mode::Live
+}
+
+fn dead_default() -> Mode {
+    Mode::Dead
+}
+
+#[opensourced]
+pub fn selected() -> Config {
+    Config { mode: Mode::Live }
+}
+"#,
+    );
+}
+
+fn write_async_trait_object_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "async_trait_rule",
+        r#"async-trait = "0.1"
+"#,
+        r#"use opensourced::opensourced;
+use std::sync::Arc;
+
+pub struct Live;
+
+pub struct Error;
+
+#[async_trait::async_trait]
+pub trait Transport: Send + Sync {
+    async fn reconnect(&self) -> Result<Live, Error>;
+}
+
+pub struct DeadTransport;
+
+#[opensourced]
+pub fn selected(handler: Arc<dyn Transport + Send + Sync>) -> Arc<dyn Transport + Send + Sync> {
+    handler
+}
+"#,
+    );
+}
+
+fn write_ffi_extern_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "ffi_extern_rule",
+        r#"use opensourced::opensourced;
+
+extern "C" {
+    fn live_c() -> i32;
+    fn dead_c() -> i32;
+}
+
+#[opensourced]
+#[no_mangle]
+pub extern "C" fn selected() -> i32 {
+    unsafe { live_c() }
+}
+"#,
+    );
+}
+
 fn write_owned_dynamic_dispatch_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -1565,6 +1786,10 @@ pub fn dead_api() -> &'static str {
 }
 
 fn write_workspace(root: &Path, package: &str, lib: &str) {
+    write_workspace_with_dependencies(root, package, "", lib);
+}
+
+fn write_workspace_with_dependencies(root: &Path, package: &str, dependencies: &str, lib: &str) {
     write(
         root.join("Cargo.toml"),
         &format!(
@@ -1584,6 +1809,7 @@ edition = "2021"
 
 [dependencies]
 opensourced = {{ path = "{}" }}
+{dependencies}
 "#,
             manifest_path(&repo_root().join("crates/opensourced"))
         ),

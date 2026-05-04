@@ -43,6 +43,10 @@ of planned generic combinations lives in
 | `pattern.let_else_slice_enum.001` | covered | Let-else slice patterns retain the enum variant path and prune unrelated helpers without deleting public enum surface variants |
 | `const.chain_array_len.001` | covered | Const-to-const arithmetic and const array lengths retain every referenced const and prune dead sibling consts |
 | `macro.metavariable_variant_path.001` | covered | Macro metavariables used inside enum variant paths retain the macro definition, invocation variant token, and helper calls from the macro body |
+| `macro.serde_hook_string_paths.001` | covered | Serde `serialize_with` and `deserialize_with` string helper paths retain the helper functions and prune dead hooks |
+| `macro.serde_default_fn_path.001` | covered | Serde `default = "path"` field helper strings retain the default function even when live constructors do not call it |
+| `dyn.async_trait_object.001` | covered | `async_trait` trait-object API surfaces report hard dynamic-dispatch hazards while method-only macro-expanded trait contents remain pruned until semantic dispatch is proven |
+| `ffi.extern_called_symbol.001` | covered | Retained calls to foreign `extern "C"` functions keep only the called foreign declarations and prune dead sibling declarations |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
 | `import.reexport.chain_hub.001` | covered | Reexport chains prune dead grouped names at each public hub |

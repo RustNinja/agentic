@@ -277,6 +277,16 @@ also confirmed an important minimality boundary: public enum variants remain par
 of the public API surface, while unrelated helper functions and dead sibling
 consts are still pruned.
 
+The sixth rule-database pass raised the executable fast rule set to 30 cases and
+added one renderer fix. Serde helper strings are now locked for both
+`serialize_with`/`deserialize_with` and `default = "path"` forms; these were
+already handled by generic attribute string-path scanning, and the rules keep
+that behavior from regressing. `async_trait` trait-object APIs remain a hard
+dynamic-dispatch hazard and intentionally keep only the object type surface until
+semantic dispatch proves concrete callees. Foreign `extern "C"` blocks now prune
+dead sibling declarations by retained symbol name instead of keeping the whole
+foreign block whenever one native call is used.
+
 Five real Litter `codex-ipc` probes now pass production validation with compiler
 feedback: `project_conversation_state`, `Method::from_wire`,
 `PendingRequests::resolve`, `read_frame`, and `IpcBridge::new`. The compact

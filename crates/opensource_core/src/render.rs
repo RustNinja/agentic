@@ -10,8 +10,8 @@ use quote::ToTokens;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    parse_quote, Expr, Field, GenericArgument, ImplItem, Item, ItemMod, Lit, Meta, PathArguments,
-    TraitItem, Type, UseTree, Variant,
+    parse_quote, Expr, Field, ForeignItem, GenericArgument, ImplItem, Item, ItemMod, Lit, Meta,
+    PathArguments, TraitItem, Type, UseTree, Variant,
 };
 use toml::{value::Table, Value};
 
@@ -4864,6 +4864,13 @@ fn transform_items(
                 }
                 Some(Item::Mod(item_mod))
             }
+            Item::ForeignMod(foreign_mod) => {
+                let mut foreign_mod = foreign_mod.clone();
+                foreign_mod.items.retain(|foreign_item| {
+                    foreign_item_should_render(render_plan, package, module_path, foreign_item)
+                });
+                (!foreign_mod.items.is_empty()).then(|| Item::ForeignMod(foreign_mod))
+            }
             _ => Some(item.clone()),
         };
 
@@ -4873,6 +4880,41 @@ fn transform_items(
     }
 
     transformed
+}
+
+fn foreign_item_should_render(
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    foreign_item: &ForeignItem,
+) -> bool {
+    if let Some(name) = foreign_item_name(foreign_item) {
+        return render_plan.module_mentions_ident(package, module_path, &name)
+            || render_plan.package_callable_mentions_ident(package, &name);
+    }
+
+    let mut idents = BTreeSet::new();
+    collect_token_idents(&foreign_item.to_token_stream(), &mut idents);
+    idents.into_iter().any(|ident| {
+        render_plan.module_mentions_ident(package, module_path, &ident)
+            || render_plan.package_callable_mentions_ident(package, &ident)
+    })
+}
+
+fn foreign_item_name(foreign_item: &ForeignItem) -> Option<String> {
+    match foreign_item {
+        ForeignItem::Fn(item) => Some(item.sig.ident.to_string()),
+        ForeignItem::Static(item) => Some(item.ident.to_string()),
+        ForeignItem::Type(item) => Some(item.ident.to_string()),
+        ForeignItem::Macro(item) => item
+            .mac
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string()),
+        ForeignItem::Verbatim(_) => None,
+        _ => None,
+    }
 }
 
 fn prune_trait_items_if_only_type_surface(
