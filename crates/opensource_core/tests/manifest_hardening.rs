@@ -2073,6 +2073,49 @@ fn prunes_unused_local_dependency_edges_to_retained_packages() {
 }
 
 #[test]
+fn prunes_local_dependency_alias_when_only_local_ident_matches() {
+    let workspace = temp_path("dependency-alias-ident-workspace");
+    let output = temp_path("dependency-alias-ident-output");
+    let target_dir = temp_path("dependency-alias-ident-target");
+    write_dependency_alias_ident_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app"]);
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    let lib = read(output.join("app/src/lib.rs"));
+    assert!(
+        !app_manifest.contains("payload"),
+        "app manifest should not retain dependency aliases mentioned only as local identifiers\n{app_manifest}"
+    );
+    assert!(
+        !output.join("payload").exists(),
+        "local dependency named like a retained local variable should not be copied"
+    );
+    assert!(lib.contains("let payload = 7"), "{lib}");
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated dependency-alias-ident slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+    );
+}
+
+#[test]
 fn retains_target_build_dependencies_for_retained_build_scripts() {
     let workspace = temp_path("target-build-dependency-workspace");
     let output = temp_path("target-build-dependency-output");
@@ -6316,6 +6359,59 @@ shared = { path = "../shared" }
         "shared",
         r#"pub fn message() -> &'static str {
     "shared"
+}
+"#,
+    );
+}
+
+fn write_dependency_alias_ident_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "payload"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+payload = { path = "../payload" }
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let payload = 7;
+    payload + 1
+}
+"#,
+    );
+    write_package(
+        root,
+        "payload",
+        r#"pub struct Payload;
+
+pub fn dead_payload() -> Payload {
+    Payload
 }
 "#,
     );

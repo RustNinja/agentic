@@ -1921,14 +1921,26 @@ fn add_source_mentioned_dependency_packages(
             };
             let idents =
                 reachable_package_idents(project, reachable, reachable_items, &package_name);
-            if idents.is_empty() {
+            let path_prefixes = reachable_package_dependency_path_prefixes(
+                project,
+                reachable,
+                reachable_items,
+                &package_name,
+            );
+            if idents.is_empty() && path_prefixes.is_empty() {
                 continue;
             }
 
             for dependency in &package.dependencies {
                 if dependency.package != "opensourced"
                     && project.workspace.packages.contains_key(&dependency.package)
-                    && source_mentions_dependency(project, &package_name, &idents, dependency)
+                    && source_mentions_dependency(
+                        project,
+                        &package_name,
+                        &idents,
+                        &path_prefixes,
+                        dependency,
+                    )
                 {
                     changed |= packages.insert(dependency.package.clone());
                 }
@@ -2183,6 +2195,7 @@ fn source_mentions_dependency(
     project: &Project,
     package: &str,
     idents: &BTreeSet<String>,
+    path_prefixes: &BTreeSet<String>,
     dependency: &crate::manifest::Dependency,
 ) -> bool {
     let alias_code_name = crate_code_name(&dependency.alias);
@@ -2193,7 +2206,7 @@ fn source_mentions_dependency(
         alias_code_name.as_str(),
         package_code_name.as_str(),
     ];
-    if names.iter().any(|name| idents.contains(*name)) {
+    if names.iter().any(|name| path_prefixes.contains(*name)) {
         return true;
     }
 
@@ -2203,11 +2216,77 @@ fn source_mentions_dependency(
         .filter(|((alias_package, _), _)| alias_package == package)
         .flat_map(|(_, aliases)| aliases.iter())
         .any(|(alias, target)| {
-            idents.contains(alias)
+            (path_prefixes.contains(alias) || idents.contains(alias))
                 && target
                     .first()
                     .is_some_and(|first| names.iter().any(|name| first == name))
         })
+}
+
+fn reachable_package_dependency_path_prefixes(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    package: &str,
+) -> BTreeSet<String> {
+    let mut prefixes = BTreeSet::new();
+    for callable in reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+    {
+        if let Some(record) = project.functions.get(callable) {
+            collect_dependency_path_prefixes(&record.item.to_token_stream(), &mut prefixes);
+        }
+        if let Some(record) = project.methods.get(callable) {
+            collect_dependency_path_prefixes(&record.item.to_token_stream(), &mut prefixes);
+        }
+    }
+    for item in reachable_items
+        .iter()
+        .filter(|item| item.package() == package)
+    {
+        if let Some(record) = project.items.get(item) {
+            collect_reachable_package_item_dependency_path_prefixes(
+                project,
+                reachable,
+                record,
+                &mut prefixes,
+            );
+        }
+    }
+    prefixes
+}
+
+fn collect_reachable_package_item_dependency_path_prefixes(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    record: &crate::model::ItemRecord,
+    prefixes: &mut BTreeSet<String>,
+) {
+    let Item::Struct(item_struct) = &record.item else {
+        collect_dependency_path_prefixes(&record.item.to_token_stream(), prefixes);
+        return;
+    };
+
+    collect_dependency_path_prefixes(&item_struct.vis.to_token_stream(), prefixes);
+    collect_dependency_path_prefixes(&item_struct.generics.to_token_stream(), prefixes);
+    for attr in &item_struct.attrs {
+        collect_dependency_path_prefixes(&attr.to_token_stream(), prefixes);
+    }
+
+    for field in &item_struct.fields {
+        if struct_field_source_mentions_should_remain(project, reachable, &record.package, field) {
+            collect_dependency_path_prefixes(&field.to_token_stream(), prefixes);
+        }
+    }
+}
+
+fn collect_dependency_path_prefixes(tokens: &TokenStream, prefixes: &mut BTreeSet<String>) {
+    for segments in token_path_candidates(tokens) {
+        if segments.len() >= 2 {
+            prefixes.insert(segments[0].clone());
+        }
+    }
 }
 
 fn reachable_package_idents(
@@ -4334,14 +4413,22 @@ impl<'a> DependencyVisitor<'a> {
             .filter_map(|callable| {
                 let CallableId::Method {
                     package,
+                    type_path,
                     trait_path: Some(trait_path),
+                    trait_input_type_paths,
                     method,
                     ..
                 } = callable
                 else {
                     return None;
                 };
-                Some((package.clone(), trait_path.clone(), method.clone()))
+                Some((
+                    package.clone(),
+                    type_path.clone(),
+                    trait_path.clone(),
+                    trait_input_type_paths.clone(),
+                    method.clone(),
+                ))
             })
             .collect::<BTreeSet<_>>();
 
@@ -4352,14 +4439,22 @@ impl<'a> DependencyVisitor<'a> {
         for callable in self.resolver.project.methods.keys() {
             let CallableId::Method {
                 package,
+                type_path,
                 trait_path: Some(trait_path),
+                trait_input_type_paths,
                 method,
                 ..
             } = callable
             else {
                 continue;
             };
-            if resolved_traits.contains(&(package.clone(), trait_path.clone(), method.clone())) {
+            if resolved_traits.contains(&(
+                package.clone(),
+                type_path.clone(),
+                trait_path.clone(),
+                trait_input_type_paths.clone(),
+                method.clone(),
+            )) {
                 self.add_method_dependency(callable);
             }
         }

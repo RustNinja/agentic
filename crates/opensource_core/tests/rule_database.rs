@@ -843,6 +843,30 @@ fn retains_dependencies_from_rendered_trait_impl_surfaces() {
 }
 
 #[test]
+fn prunes_trait_peer_impls_for_unrelated_receiver_types() {
+    let workspace = temp_path("rule-trait-peer-receiver-workspace");
+    let output = temp_path("rule-trait-peer-receiver-output");
+    let target_dir = temp_path("rule-trait-peer-receiver-target");
+    write_trait_peer_receiver_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("trait peer receiver rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("trait_peer_receiver_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Work"), "{lib}");
+    assert!(lib.contains("impl Work for Live"), "{lib}");
+    assert!(!lib.contains("impl Work for Decoy"), "{lib}");
+    assert!(!lib.contains("pub struct Decoy"), "{lib}");
+    assert!(!lib.contains("pub struct DeadWork"), "{lib}");
+    assert!(!lib.contains("dead_helper"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn preserves_serde_flatten_contract_fields_while_pruning_dead_private_fields() {
     let workspace = temp_path("rule-serde-flatten-workspace");
     let output = temp_path("rule-serde-flatten-output");
@@ -4111,6 +4135,50 @@ impl Marker for Api {
     fn dead(&self) -> Dead {
         Dead
     }
+}
+"#,
+    );
+}
+
+fn write_trait_peer_receiver_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "trait_peer_receiver_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Work {
+    fn work(&self) -> u32;
+}
+
+pub struct Live;
+
+pub struct Decoy;
+
+pub struct DeadWork;
+
+impl Work for Live {
+    fn work(&self) -> u32 {
+        live_helper()
+    }
+}
+
+impl Work for Decoy {
+    fn work(&self) -> u32 {
+        dead_helper().0
+    }
+}
+
+pub fn live_helper() -> u32 {
+    7
+}
+
+pub fn dead_helper() -> DeadWork {
+    DeadWork
+}
+
+#[opensourced]
+pub fn selected(live: &Live) -> u32 {
+    live.work()
 }
 "#,
     );

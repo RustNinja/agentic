@@ -73,6 +73,11 @@ not slicer failures.
   membership. The pinned five-root batch was rerun after that pass and still
   generated 116 files with zero preflight errors, zero feedback errors, zero
   warnings, and `production_ready=accepted` under `--deny-warnings`.
+- The peer/alias precision pass also did not regress the pinned five-root batch:
+  resolved trait peer methods are now receiver/input-type keyed, dependency
+  package retention requires path/import evidence instead of ordinary local
+  identifier matches, and the run still generated 116 files with zero preflight
+  errors, zero feedback errors, zero warnings, and `production_ready=accepted`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
@@ -95,6 +100,18 @@ not slicer failures.
   packages with build scripts, `OUT_DIR` source includes, compile-time env,
   nonliteral includes, absolute includes, and package-external support include
   paths.
+- `manifest.support_facade_export_pruning.001`: copied support facades should
+  keep only the DTO/constant/reexport used by retained source and prune sibling
+  schema/protocol/exporter modules.
+- `manifest.support_monolith_item_pruning.001`: support crates with large
+  protocol files should not retain unrelated request/notification siblings when
+  one symbol is referenced.
+- `manifest.support_transitive_reexport_pruning.001`: app-to-local-to-support
+  reexport chains should keep only the selected upstream symbol and prune dead
+  middle-layer reexports.
+- `manifest.support_inline_test_cfg_asset_pruning.001`: retained support files
+  should strip inline `#[cfg(test)]` modules and avoid copying target-gated
+  assets for inactive targets.
 - `protocol.enum_method.compact.001`: enum parser methods like `from_wire` should
   remain compact and keep only live variants/helpers.
 - `bridge.state_constructor.heavy.001`: constructor roots with broad private

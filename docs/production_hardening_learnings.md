@@ -453,6 +453,17 @@ into scope. This avoids both common failures: deleting `use helper::attr` while
 `#[attr]` remains, or retaining `use helper::Derive` only because
 `#[derive(helper::Derive)]` appears in a retained item.
 
+The next anti-over-retention pass tightened two high-noise generic paths.
+Resolved trait peers now include the receiver type and trait input type paths in
+their key, so `Trait::work` on a live type no longer retains same-trait
+implementations for unrelated receiver or input types. Source-mentioned local
+dependency package retention now distinguishes path/import prefixes from
+ordinary identifiers: `payload::Thing` or `use payload::Thing` can retain the
+local `payload` package, while `let payload = ...` cannot. Unqualified import
+aliases still participate when they resolve to a dependency, which keeps
+derive/attribute macro imports such as `use helper::Derive; #[derive(Derive)]`
+working without reintroducing local-variable false positives.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
@@ -478,11 +489,16 @@ precise:
    owner files.
 2. Map macro-expanded item inventory into retained graph edges when RA provides
    stable spans.
-3. Model `OUT_DIR` generated Rust includes through build-script output
+3. Slice copied support packages at item granularity after module/file copying:
+   retain support roots from actual dependency paths, prune dead support facade
+   exports, monolithic protocol siblings, inline tests, target-gated assets, and
+   legacy/websocket/remote-control modules, and fall back broad only when
+   parsing or generated-source modeling fails.
+4. Model `OUT_DIR` generated Rust includes through build-script output
    discovery and generated-file copying.
-4. Add a pinned real-repo CI matrix with Litter small, medium, and wide module
+5. Add a pinned real-repo CI matrix with Litter small, medium, and wide module
    targets plus RTK smoke targets.
-5. Promote recurring low-progress reports into preflight graph rules so common
+6. Promote recurring low-progress reports into preflight graph rules so common
    compiler failures are predicted before the first full build.
 
 The rule for future work: if a real-repo failure is fixed, add a generic

@@ -85,6 +85,7 @@ file.
 | `trait.rendered_impl_surface_dependencies.001` | covered | Trait impls rendered because both self type and public trait surface are reachable retain impl header, associated item, and method-body dependencies |
 | `trait.pruned_type_surface_method_hazard.001` | covered | Trait methods pruned from a type-only trait surface do not contribute false function-pointer production hazards |
 | `trait.required_surface_member_pruning.001` | covered | Type-surface trait retention keeps required/mentioned trait members needed by rendered impls while pruning optional default-method dependencies and dead impl overrides |
+| `trait.peer_receiver_precision.001` | covered | Resolved trait method peers are keyed by receiver type and trait input types so a live trait method does not retain same-named impl methods for unrelated receiver/input types |
 | `serde.flatten_contract_field.001` | covered | Serde contract fields such as `#[serde(flatten)]` stay even when private and not read by live bodies, while unannotated dead private fields are pruned |
 | `serde.flatten_nested_payload.001` | covered | Nested serde-flatten payload structs stay when the retained DTO contract depends on them, while dead nested DTOs prune away |
 | `serde.deserialize_with_private_wire.001` | covered | Private wire DTOs using `#[serde(deserialize_with = "helper")]` retain helper functions, deserializer trait imports, and the private DTO surface used by `serde_json::from_str::<T>` |
@@ -121,6 +122,7 @@ file.
 | `manifest.support_build_script_hazard_parity.001` | covered | Copied support path packages report build-script, `OUT_DIR` source include, compile-time env, nonliteral include, absolute include, and package-external include hazards with generated support file details |
 | `manifest.local_build_dependency.no_build_script.001` | covered | Local build-dependencies are rendered only when a retained package has a retained build script, so no-build packages do not keep build-only workspace crates |
 | `manifest.local_dependency_edge.pruned_retained_package.001` | covered | A globally retained local package does not force every source package to keep an unused dependency edge or feature entry pointing at it |
+| `manifest.local_dependency_alias.local_ident_false_positive.001` | covered | Local path dependencies are not retained just because a local variable/type identifier matches the dependency alias; direct dependency retention requires a path/import prefix |
 | `macro.path_qualified_derive.001` | covered | Path-qualified derive macros such as `macro_helpers::FixtureRecord` keep the proc-macro package but do not retain unused simple `use` imports |
 | `macro.proc_attr_import_retention.001` | covered | Unqualified retained custom attributes keep the proc-macro import that brings the attribute into scope while still pruning unused derive-only imports |
 | `macro.root_item_impl_surface.001` | covered | Selected item roots with macro-bearing inherent impls keep exported constructors/methods plus their signature/body dependencies |
@@ -194,6 +196,14 @@ Read-only Litter exploration found these high-value non-cfg patterns:
   associated error projections.
 - Root-level setup macros that appear after module declarations, exported
   functions, and facade `pub use` statements.
+- Support facade exports where one retained DTO or constant should not keep a
+  whole protocol/app-server support module fanout.
+- Transitive reexport chains through local and copied support crates where dead
+  middle-layer names must not pull sibling upstream modules.
+- Support crates with target-gated assets, inline test modules, legacy facade
+  reexports, websocket/remote-control siblings, or monolithic protocol files
+  where the next production gap is item-level support pruning after the current
+  module/file-level copy.
 
 Cfg/custom-cfg matrix expansion is not expanded blindly. Catalog rules track
 cfg gates as move-intact/fail-closed work, and executable rules should be added
