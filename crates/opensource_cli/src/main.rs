@@ -1,9 +1,10 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs,
     path::{Path, PathBuf},
     process::Command,
+    sync::OnceLock,
     time::Duration,
 };
 
@@ -2177,10 +2178,14 @@ fn cfg_gate_detail_is_covered_by_args(
     else {
         return !required_features.is_empty() && feature_covered;
     };
-    let Some(target) = cargo_check_target(&options.cargo_check_args) else {
+    if !feature_covered {
         return false;
-    };
-    feature_covered && target_requirements_match(&target_requirements, &target)
+    }
+    if let Some(cfg_set) = selected_rustc_cfg_set(&options.cargo_check_args) {
+        return rustc_cfg_requirements_match(&target_requirements, &cfg_set);
+    }
+    cargo_check_target(&options.cargo_check_args)
+        .is_some_and(|target| target_requirements_match(&target_requirements, &target))
 }
 
 #[derive(Default)]
@@ -2205,6 +2210,25 @@ impl TargetCfgRequirements {
             && self.pointer_width.is_empty()
             && self.endian.is_empty()
             && self.flags.is_empty()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct RustcCfgSet {
+    values: BTreeMap<String, BTreeSet<String>>,
+    flags: BTreeSet<String>,
+}
+
+impl RustcCfgSet {
+    fn insert_value(&mut self, key: &str, value: &str) {
+        self.values
+            .entry(key.to_string())
+            .or_default()
+            .insert(value.to_string());
+    }
+
+    fn values(&self, key: &str) -> Option<&BTreeSet<String>> {
+        self.values.get(key)
     }
 }
 
@@ -2278,6 +2302,98 @@ fn cargo_check_target(cargo_args: &[String]) -> Option<String> {
         }
     }
     None
+}
+
+fn selected_rustc_cfg_set(cargo_args: &[String]) -> Option<RustcCfgSet> {
+    if let Some(target) = cargo_check_target(cargo_args) {
+        return rustc_print_cfg(Some(&target));
+    }
+    host_rustc_cfg_set()
+}
+
+fn host_rustc_cfg_set() -> Option<RustcCfgSet> {
+    static HOST_CFG: OnceLock<Option<RustcCfgSet>> = OnceLock::new();
+    HOST_CFG
+        .get_or_init(|| rustc_print_cfg(None).or_else(host_const_cfg_set))
+        .clone()
+}
+
+fn rustc_print_cfg(target: Option<&str>) -> Option<RustcCfgSet> {
+    let mut command = Command::new("rustc");
+    command.arg("--print").arg("cfg");
+    if let Some(target) = target {
+        command.arg("--target").arg(target);
+    }
+    let output = command.output().ok()?;
+    if !output.status.success() {
+        return None;
+    }
+    Some(parse_rustc_cfg(&String::from_utf8_lossy(&output.stdout)))
+}
+
+fn parse_rustc_cfg(text: &str) -> RustcCfgSet {
+    let mut set = RustcCfgSet::default();
+    for line in text.lines().map(str::trim).filter(|line| !line.is_empty()) {
+        if let Some((key, value)) = line.split_once("=\"") {
+            if let Some(value) = value.strip_suffix('"') {
+                set.insert_value(key, value);
+            }
+        } else {
+            set.flags.insert(line.to_string());
+        }
+    }
+    set
+}
+
+fn host_const_cfg_set() -> Option<RustcCfgSet> {
+    let mut set = RustcCfgSet::default();
+    set.insert_value("target_arch", std::env::consts::ARCH);
+    set.insert_value("target_os", std::env::consts::OS);
+    set.insert_value("target_family", std::env::consts::FAMILY);
+    set.insert_value("target_pointer_width", &usize::BITS.to_string());
+    set.insert_value(
+        "target_endian",
+        if cfg!(target_endian = "big") {
+            "big"
+        } else {
+            "little"
+        },
+    );
+    if cfg!(unix) {
+        set.flags.insert("unix".to_string());
+    }
+    if cfg!(windows) {
+        set.flags.insert("windows".to_string());
+    }
+    Some(set)
+}
+
+fn rustc_cfg_requirements_match(
+    requirements: &TargetCfgRequirements,
+    cfg_set: &RustcCfgSet,
+) -> bool {
+    rustc_cfg_values_match(&requirements.arch, cfg_set.values("target_arch"))
+        && rustc_cfg_values_match(&requirements.os, cfg_set.values("target_os"))
+        && rustc_cfg_values_match(&requirements.family, cfg_set.values("target_family"))
+        && rustc_cfg_values_match(&requirements.env, cfg_set.values("target_env"))
+        && rustc_cfg_values_match(&requirements.vendor, cfg_set.values("target_vendor"))
+        && rustc_cfg_values_match(
+            &requirements.pointer_width,
+            cfg_set.values("target_pointer_width"),
+        )
+        && rustc_cfg_values_match(&requirements.endian, cfg_set.values("target_endian"))
+        && requirements
+            .flags
+            .iter()
+            .all(|flag| cfg_set.flags.contains(flag))
+}
+
+fn rustc_cfg_values_match(
+    requirements: &BTreeSet<String>,
+    values: Option<&BTreeSet<String>>,
+) -> bool {
+    requirements.is_empty()
+        || values.is_some_and(|values| requirements.iter().all(|value| values.contains(value)))
 }
 
 fn target_requirements_match(requirements: &TargetCfgRequirements, target: &str) -> bool {
@@ -3370,6 +3486,35 @@ mod tests {
     }
 
     #[test]
+    fn production_preset_discharges_host_cfg_root_hazards_without_explicit_target() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let cfg = if cfg!(unix) {
+            "#[cfg(unix)]"
+        } else {
+            "#[cfg(windows)]"
+        };
+        let report = production_report(vec![target_cfg_root_hazard("app", cfg)]);
+
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            &report
+        ));
+    }
+
+    #[test]
+    fn production_preset_keeps_non_host_cfg_root_hazards_fail_closed() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let cfg = if cfg!(unix) {
+            "#[cfg(windows)]"
+        } else {
+            "#[cfg(unix)]"
+        };
+        let report = production_report(vec![target_cfg_root_hazard("app", cfg)]);
+
+        assert!(production_readiness_blocks_validation(&production, &report));
+    }
+
+    #[test]
     fn production_preset_keeps_mismatched_target_cfg_root_hazards_fail_closed() {
         let production = parse_options([
             "--production",
@@ -3400,7 +3545,7 @@ mod tests {
                 module_path: None,
                 file: None,
                 start_line: None,
-                cfg: Some("#[cfg(unix)]".to_string()),
+                cfg: Some("#[cfg(custom_platform)]".to_string()),
                 suggested_cargo_args: Vec::new(),
             }],
         }]);
