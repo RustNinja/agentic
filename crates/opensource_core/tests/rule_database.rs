@@ -139,6 +139,93 @@ fn reports_inline_callback_future_fields_as_dynamic_hazards() {
 }
 
 #[test]
+fn retains_lazy_lock_static_initializer_closure_dependencies() {
+    let workspace = temp_path("rule-lazy-lock-workspace");
+    let output = temp_path("rule-lazy-lock-output");
+    let target_dir = temp_path("rule-lazy-lock-target");
+    write_lazy_lock_static_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("lazy lock static rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("lazy_lock_rule/src/lib.rs"));
+    assert!(lib.contains("static LIVE"), "{lib}");
+    assert!(lib.contains("LazyLock::new(|| build_live())"), "{lib}");
+    assert!(lib.contains("fn build_live() -> String"), "{lib}");
+    assert!(!lib.contains("dead_build"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_let_else_slice_pattern_enum_variants() {
+    let workspace = temp_path("rule-let-else-slice-workspace");
+    let output = temp_path("rule-let-else-slice-output");
+    let target_dir = temp_path("rule-let-else-slice-target");
+    write_let_else_slice_pattern_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("let-else slice pattern rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("let_else_slice_rule/src/lib.rs"));
+    assert!(lib.contains("Live(u32)"), "{lib}");
+    assert!(!lib.contains("dead_helper"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_const_to_const_dependencies_and_array_lengths() {
+    let workspace = temp_path("rule-const-chain-workspace");
+    let output = temp_path("rule-const-chain-output");
+    let target_dir = temp_path("rule-const-chain-target");
+    write_const_chain_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("const chain rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("const_chain_rule/src/lib.rs"));
+    assert!(lib.contains("pub const ROWS: u32 = 2"), "{lib}");
+    assert!(lib.contains("pub const WIDTH: u32 = 10"), "{lib}");
+    assert!(lib.contains("pub const AREA: u32 = ROWS * WIDTH"), "{lib}");
+    assert!(lib.contains("pub const NAMES"), "{lib}");
+    assert!(!lib.contains("DEAD_CONST"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_macro_metavariable_enum_variant_paths() {
+    let workspace = temp_path("rule-macro-variant-workspace");
+    let output = temp_path("rule-macro-variant-output");
+    let target_dir = temp_path("rule-macro-variant-target");
+    write_macro_variant_path_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("macro variant path rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("macro_variant_rule/src/lib.rs"));
+    assert!(lib.contains("macro_rules! req"), "{lib}");
+    assert!(lib.contains("Ping { id: u32 }"), "{lib}");
+    assert!(lib.contains("fn next_id() -> u32"), "{lib}");
+    assert!(!lib.contains("dead_id"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_owned_dynamic_dispatch_surfaces_inside_retained_structs() {
     let workspace = temp_path("rule-owned-dyn-workspace");
     let output = temp_path("rule-owned-dyn-output");
@@ -757,6 +844,110 @@ pub fn selected(
     callback: Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>,
 ) -> InlineRegistry {
     InlineRegistry::new(callback)
+}
+"#,
+    );
+}
+
+fn write_lazy_lock_static_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "lazy_lock_rule",
+        r#"use opensourced::opensourced;
+use std::sync::LazyLock;
+
+static LIVE: LazyLock<String> = LazyLock::new(|| build_live());
+
+fn build_live() -> String {
+    "live".to_string()
+}
+
+fn dead_build() -> String {
+    "dead".to_string()
+}
+
+#[opensourced]
+pub fn selected() -> usize {
+    LIVE.len()
+}
+"#,
+    );
+}
+
+fn write_let_else_slice_pattern_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "let_else_slice_rule",
+        r#"use opensourced::opensourced;
+
+pub enum Event {
+    Live(u32),
+    Dead,
+}
+
+fn dead_helper() -> Event {
+    Event::Dead
+}
+
+#[opensourced]
+pub fn selected(events: &[Event]) -> u32 {
+    let [Event::Live(value)] = events else {
+        return 0;
+    };
+    *value
+}
+"#,
+    );
+}
+
+fn write_const_chain_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "const_chain_rule",
+        r#"use opensourced::opensourced;
+
+pub const ROWS: u32 = 2;
+pub const WIDTH: u32 = 10;
+pub const AREA: u32 = ROWS * WIDTH;
+pub const NAMES: [&str; ROWS as usize] = ["a", "b"];
+pub const DEAD_CONST: u32 = 99;
+
+#[opensourced]
+pub fn selected() -> u32 {
+    AREA + NAMES.len() as u32
+}
+"#,
+    );
+}
+
+fn write_macro_variant_path_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "macro_variant_rule",
+        r#"use opensourced::opensourced;
+
+pub enum Request {
+    Ping { id: u32 },
+    Dead,
+}
+
+macro_rules! req {
+    ($variant:ident) => {
+        Request::$variant { id: next_id() }
+    };
+}
+
+fn next_id() -> u32 {
+    1
+}
+
+fn dead_id() -> u32 {
+    0
+}
+
+#[opensourced]
+pub fn selected() -> Request {
+    req!(Ping)
 }
 "#,
     );

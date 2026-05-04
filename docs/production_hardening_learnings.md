@@ -268,6 +268,15 @@ must retain the trait item even when the concrete impl only supplies associated
 consts or types. Inline callback/future trait-object fields now share the same
 hard dynamic-dispatch hazard path as aliased callback/future signatures.
 
+The fifth rule-database pass raised the executable fast rule set to 26 cases
+without adding project-specific behavior. Four Litter-shaped non-cfg surfaces are
+now locked as fast rules: `LazyLock` static initializer closures, let-else slice
+patterns over enum variants, const-to-const chains with const array lengths, and
+macro metavariables used inside enum variant paths. The let-else and macro rules
+also confirmed an important minimality boundary: public enum variants remain part
+of the public API surface, while unrelated helper functions and dead sibling
+consts are still pruned.
+
 Five real Litter `codex-ipc` probes now pass production validation with compiler
 feedback: `project_conversation_state`, `Method::from_wire`,
 `PendingRequests::resolve`, `read_frame`, and `IpcBridge::new`. The compact
