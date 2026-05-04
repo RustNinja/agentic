@@ -645,6 +645,72 @@ fn add_workspace_production_hazards(
             ),
         ));
     }
+    let retained_workspace_patch_paths =
+        retained_workspace_patch_replace_path_dependencies(project);
+    if !retained_workspace_patch_paths.is_empty() {
+        hazards.push(production_hazard(
+            "retained_workspace_patch_replace_path_dependencies",
+            "error",
+            format!(
+                "{} retained workspace patch/replace path entry/entries would keep the slice tied to the original checkout: {}",
+                retained_workspace_patch_paths.len(),
+                retained_workspace_patch_paths
+                    .into_iter()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ));
+    }
+}
+
+fn retained_workspace_patch_replace_path_dependencies(project: &Project) -> BTreeSet<String> {
+    let mut dependencies = BTreeSet::new();
+    if let Some(patches) = project
+        .workspace
+        .manifest
+        .get("patch")
+        .and_then(toml::Value::as_table)
+    {
+        for (source, value) in patches {
+            collect_manifest_path_dependencies(
+                &mut dependencies,
+                &format!("patch.{source}"),
+                value,
+            );
+        }
+    }
+    if let Some(replacements) = project
+        .workspace
+        .manifest
+        .get("replace")
+        .and_then(toml::Value::as_table)
+    {
+        for (name, value) in replacements {
+            collect_manifest_path_dependencies(
+                &mut dependencies,
+                &format!("replace.{name}"),
+                value,
+            );
+        }
+    }
+    dependencies
+}
+
+fn collect_manifest_path_dependencies(
+    dependencies: &mut BTreeSet<String>,
+    prefix: &str,
+    value: &toml::Value,
+) {
+    let Some(table) = value.as_table() else {
+        return;
+    };
+    if table.get("path").and_then(toml::Value::as_str).is_some() {
+        dependencies.insert(prefix.to_string());
+        return;
+    }
+    for (name, value) in table {
+        collect_manifest_path_dependencies(dependencies, &format!("{prefix}.{name}"), value);
+    }
 }
 
 fn retained_non_workspace_path_dependencies(
@@ -2514,6 +2580,58 @@ pub fn entry() -> usize {
             hazard.code == "retained_non_workspace_path_dependencies"
                 && hazard.severity == "error"
                 && hazard.message.contains("app:external-helper")
+        }));
+    }
+
+    #[test]
+    fn reports_retained_workspace_patch_path_dependency_hazards() {
+        let root = temp_output("patch-path-dependency-hazard-source");
+        let external = temp_output("patch-path-dependency-hazard-external");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            &format!(
+                "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n\n[patch.crates-io]\nexternal-helper = {{ path = {:?} }}\n",
+                external
+            ),
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            external.join("Cargo.toml"),
+            "[package]\nname = \"external-helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            external.join("src/lib.rs"),
+            "pub fn value() -> usize { 1 }\n",
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("patch-path-dependency-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert_eq!(report.production.status, "hazards_detected");
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "retained_workspace_patch_replace_path_dependencies"
+                && hazard.severity == "error"
+                && hazard.message.contains("patch.crates-io.external-helper")
         }));
     }
 

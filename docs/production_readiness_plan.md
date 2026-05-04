@@ -71,6 +71,9 @@ assets, output safety, or product diagnostics by itself.
 - Retained direct or target-specific path dependencies outside the workspace are
   not self-contained unless they are copied as bounded packages; production
   should fail closed until that copy policy exists.
+- Workspace `[patch]` and `[replace]` path entries are also production-blocking
+  until patches are pruned to retained dependencies or copied into the generated
+  workspace.
 - Whole-crate fallback must be explicit and reported with size impact.
 - Output deletion must be guarded. A production CLI must only replace empty or
   previously generated output directories and must reject paths inside or above
