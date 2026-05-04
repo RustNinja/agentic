@@ -2455,6 +2455,9 @@ impl<'a> DependencyVisitor<'a> {
                 continue;
             };
             self.bind_local_value_names(input.pat.as_ref());
+            for (name, type_ref, candidates) in self.pattern_type_bindings(&input.pat, &input.ty) {
+                self.insert_variable_candidates(name, type_ref, candidates);
+            }
             let Pat::Ident(ident) = input.pat.as_ref() else {
                 continue;
             };
@@ -2898,6 +2901,18 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn pattern_type_bindings(
+        &self,
+        pattern: &Pat,
+        ty: &Type,
+    ) -> Vec<(String, TypeRef, Vec<TypeRef>)> {
+        let mut bindings = Vec::new();
+        self.collect_pattern_type_bindings(pattern, ty, &self.resolver, &mut bindings);
+        bindings.sort();
+        bindings.dedup();
+        bindings
+    }
+
     fn collect_pattern_type_bindings(
         &self,
         pattern: &Pat,
@@ -2926,6 +2941,12 @@ impl<'a> DependencyVisitor<'a> {
                     self.collect_pattern_type_bindings(pattern, ty, resolver, bindings);
                 }
             }
+            (Pat::Struct(pattern), _) => {
+                let Some(type_ref) = resolver.resolve_receiver_type(ty) else {
+                    return;
+                };
+                self.collect_struct_pattern_type_bindings(pattern, &type_ref, bindings);
+            }
             (_, Type::Group(group)) => {
                 self.collect_pattern_type_bindings(pattern, &group.elem, resolver, bindings);
             }
@@ -2933,6 +2954,39 @@ impl<'a> DependencyVisitor<'a> {
                 self.collect_pattern_type_bindings(pattern, &paren.elem, resolver, bindings);
             }
             _ => {}
+        }
+    }
+
+    fn collect_struct_pattern_type_bindings(
+        &self,
+        pattern: &syn::PatStruct,
+        type_ref: &TypeRef,
+        bindings: &mut Vec<(String, TypeRef, Vec<TypeRef>)>,
+    ) {
+        let Some(item) =
+            self.resolver
+                .find_item(&type_ref.package, &type_ref.type_path, &[ItemKind::Struct])
+        else {
+            return;
+        };
+        let Some(record) = self.resolver.project.items.get(&item) else {
+            return;
+        };
+        let Item::Struct(item_struct) = &record.item else {
+            return;
+        };
+        let resolver = Resolver {
+            project: self.resolver.project,
+            package: &record.package,
+            module_path: &record.module_path,
+            aliases: &record.aliases,
+            self_type: None,
+        };
+        for field in &pattern.fields {
+            let Some(ty) = field_member_type(&item_struct.fields, &field.member) else {
+                continue;
+            };
+            self.collect_pattern_type_bindings(&field.pat, ty, &resolver, bindings);
         }
     }
 
@@ -3218,11 +3272,11 @@ impl<'a> DependencyVisitor<'a> {
                     return;
                 };
                 for field in &struct_pat.fields {
-                    if let Some(field_type) = self.resolver.enum_named_variant_field_type(
-                        type_ref,
-                        &variant_name,
-                        &field.member,
-                    ) {
+                    if let Some(field_type) = self
+                        .resolver
+                        .enum_named_variant_field_type(type_ref, &variant_name, &field.member)
+                        .or_else(|| self.resolver.field_type(type_ref, &field.member))
+                    {
                         self.add_pattern_bindings_for_type(&field.pat, &field_type);
                     }
                 }
@@ -3980,15 +4034,49 @@ impl<'a> DependencyVisitor<'a> {
                 continue;
             }
 
-            let variables = self.variables.clone();
-            let variable_candidates = self.variable_candidates.clone();
-            for (pattern, type_ref) in closure.inputs.iter().zip(input_types.iter()) {
-                self.bind_pattern_type(pattern, type_ref);
-            }
-            self.visit_expr(&closure.body);
-            self.variables = variables;
-            self.variable_candidates = variable_candidates;
+            self.visit_closure_with_input_types(closure, &input_types);
         }
+    }
+
+    fn add_call_closure_arg_dependencies(
+        &mut self,
+        call: &ExprCall,
+        resolved_callables: &[CallableId],
+    ) {
+        for (arg_index, argument) in call.args.iter().enumerate() {
+            let Expr::Closure(closure) = argument else {
+                continue;
+            };
+            let input_types = resolved_callables
+                .iter()
+                .flat_map(|callable| {
+                    self.resolver
+                        .closure_argument_input_types(callable, arg_index)
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            if input_types.is_empty() {
+                continue;
+            }
+
+            self.visit_closure_with_input_types(closure, &input_types);
+        }
+    }
+
+    fn visit_closure_with_input_types(
+        &mut self,
+        closure: &syn::ExprClosure,
+        input_types: &[TypeRef],
+    ) {
+        let variables = self.variables.clone();
+        let variable_candidates = self.variable_candidates.clone();
+        for (pattern, type_ref) in closure.inputs.iter().zip(input_types.iter()) {
+            self.bind_pattern_type(pattern, type_ref);
+        }
+        self.visit_expr(&closure.body);
+        self.variables = variables;
+        self.variable_candidates = variable_candidates;
     }
 
     fn visit_fold_method_call(&mut self, call: &ExprMethodCall) -> bool {
@@ -4029,14 +4117,10 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn visit_single_payload_closure_method_call(&mut self, call: &ExprMethodCall) -> bool {
-        if !matches!(
-            call.method.to_string().as_str(),
-            "is_some_and" | "is_ok_and" | "is_err_and"
-        ) || call.args.len() != 1
-        {
+        if call.args.len() != 1 {
             return false;
         }
-        let Some(payload_type) = self.receiver_type(&call.receiver) else {
+        let Some(payload_type) = self.single_payload_closure_method_type(call) else {
             return false;
         };
         let Some(Expr::Closure(closure)) = call.args.first() else {
@@ -4054,6 +4138,24 @@ impl<'a> DependencyVisitor<'a> {
         self.variables = variables;
         self.variable_candidates = variable_candidates;
         true
+    }
+
+    fn single_payload_closure_method_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
+        let method = call.method.to_string();
+        if matches!(method.as_str(), "is_some_and" | "is_ok_and" | "is_err_and") {
+            return self.receiver_type(&call.receiver).or_else(|| {
+                self.expression_type_arguments(&call.receiver)
+                    .into_iter()
+                    .next()
+            });
+        }
+
+        let type_arguments = self.expression_type_arguments(&call.receiver);
+        match method.as_str() {
+            "map" | "and_then" | "filter" | "inspect" => type_arguments.first().cloned(),
+            "map_err" | "or_else" | "inspect_err" => type_arguments.get(1).cloned(),
+            _ => None,
+        }
     }
 }
 
@@ -4176,6 +4278,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             for callable in &resolved_callables {
                 self.dependencies.callables.insert(callable.clone());
             }
+            self.add_call_closure_arg_dependencies(call, &resolved_callables);
             self.add_external_call_arg_trait_impls(call);
             if resolved_callables.is_empty() && path.path.segments.len() >= 2 {
                 if let Some(method) = path.path.segments.last() {
@@ -4238,6 +4341,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             if let [type_ref] = type_arguments.as_slice() {
                 self.bind_single_payload_pattern(&expr_let.pat, type_ref);
             }
+            if let Some(type_ref) = self
+                .receiver_type(&expr_let.expr)
+                .or_else(|| self.infer_expr_type(&expr_let.expr))
+            {
+                self.add_pattern_bindings_for_type(&expr_let.pat, &type_ref);
+            }
             self.visit_expr(&expr_let.expr);
             self.push_local_value_scope();
             self.bind_local_value_names(&expr_let.pat);
@@ -4265,6 +4374,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             if let [type_ref] = type_arguments.as_slice() {
                 self.bind_single_payload_pattern(&expr_let.pat, type_ref);
             }
+            if let Some(type_ref) = self
+                .receiver_type(&expr_let.expr)
+                .or_else(|| self.infer_expr_type(&expr_let.expr))
+            {
+                self.add_pattern_bindings_for_type(&expr_let.pat, &type_ref);
+            }
             self.visit_expr(&expr_let.expr);
             self.push_local_value_scope();
             self.bind_local_value_names(&expr_let.pat);
@@ -4280,6 +4395,10 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_expr_for_loop(&mut self, expr_for_loop: &'ast syn::ExprForLoop) {
         self.visit_expr(&expr_for_loop.expr);
         self.push_local_value_scope();
+        let item_types = self.expression_type_arguments(&expr_for_loop.expr);
+        if let [type_ref] = item_types.as_slice() {
+            self.add_pattern_bindings_for_type(&expr_for_loop.pat, type_ref);
+        }
         self.bind_local_value_names(&expr_for_loop.pat);
         self.visit_pat(&expr_for_loop.pat);
         self.visit_block(&expr_for_loop.body);

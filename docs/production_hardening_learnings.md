@@ -301,6 +301,16 @@ also verifies relative support manifest rewrites and dead support bins,
 examples, tests, benches, fixtures, and orphan modules stay pruned after the
 original external packages are moved away.
 
+The eighth rule-database pass raised the executable fast rule set to 44 cases.
+It hardened type propagation through places where Rust code naturally introduces
+new local names: typed destructured function parameters, tuple and struct local
+destructuring, struct patterns in match/if-let, for-loop item bindings,
+free-function closure parameters, and `Option`/`Result` closure combinators.
+These are generic receiver-inference fixes and do not rely on project-specific
+names. The same pass added serde flatten contract-field pruning coverage and a
+nonstandard support package `[lib] path` fixture, so support copying honors the
+actual library root instead of assuming `src/lib.rs`.
+
 Five real Litter `codex-ipc` probes now pass production validation with compiler
 feedback: `project_conversation_state`, `Method::from_wire`,
 `PendingRequests::resolve`, `read_frame`, and `IpcBridge::new`. The compact

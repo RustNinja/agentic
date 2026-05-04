@@ -52,7 +52,15 @@ of planned generic combinations lives in
 | `trait.derive_array_field_impl.001` | covered | Derive-driven trait impl retention descends into array, slice, pointer, and nested field types so generated derives keep required field impls |
 | `trait.associated_type_equality_method_chain.001` | covered | Generic bounds such as `T: Trait<Item = Payload>` propagate `Self::Item` return types into following method calls |
 | `pattern.tuple_destructure_receiver.001` | covered | Tuple destructuring locals inherit return-position element types so method calls on destructured bindings keep the correct impls |
+| `pattern.struct_destructure_receiver.001` | covered | Struct destructuring locals inherit field types from returned structs so method calls on destructured bindings keep the correct impls |
+| `pattern.typed_param_destructure_receiver.001` | covered | Typed destructured function parameters bind inner receiver types before body analysis |
+| `pattern.for_loop_item_receiver.001` | covered | For-loop item bindings inherit iterable output element types such as `Vec<T>` before loop body analysis |
+| `closure.free_function_input_payload.001` | covered | Closures passed to resolved free functions inherit callable input payload types so methods inside closure bodies keep the correct impls |
+| `pattern.struct_match_receiver.001` | covered | Struct patterns in `match`/`if let` bind real struct field receiver types instead of only enum variant payloads |
+| `closure.option_result_payload_map.001` | covered | Common `Option`/`Result` closure combinators such as `map`, `and_then`, `map_err`, and inspectors bind payload/error types from receiver type arguments |
+| `serde.flatten_contract_field.001` | covered | Serde contract fields such as `#[serde(flatten)]` stay even when private and not read by live bodies, while unannotated dead private fields are pruned |
 | `manifest.support_path_bundle.001` | covered | External support path dependency bundles rewrite absolute paths to generated relative support paths, copy dependency closure assets, and drop dead bins/examples/tests/benches/fixtures/orphan modules |
+| `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
 | `import.reexport.chain_hub.001` | covered | Reexport chains prune dead grouped names at each public hub |

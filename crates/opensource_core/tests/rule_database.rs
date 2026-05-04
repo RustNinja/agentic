@@ -432,6 +432,159 @@ fn infers_tuple_destructuring_local_receiver_types() {
 }
 
 #[test]
+fn infers_struct_destructuring_local_receiver_types() {
+    let workspace = temp_path("rule-struct-destructure-workspace");
+    let output = temp_path("rule-struct-destructure-output");
+    let target_dir = temp_path("rule-struct-destructure-target");
+    write_struct_destructure_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("struct destructuring rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("struct_destructure_rule/src/lib.rs"));
+    assert!(lib.contains("fn bundle() -> Bundle"), "{lib}");
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn infers_typed_function_parameter_destructuring_receiver_types() {
+    let workspace = temp_path("rule-param-destructure-workspace");
+    let output = temp_path("rule-param-destructure-output");
+    let target_dir = temp_path("rule-param-destructure-target");
+    write_param_destructure_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("parameter destructuring rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("param_destructure_rule/src/lib.rs"));
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(lib.contains("(payload, _): (Payload, u32)"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn infers_for_loop_item_receiver_types_from_iterable_outputs() {
+    let workspace = temp_path("rule-for-loop-item-workspace");
+    let output = temp_path("rule-for-loop-item-output");
+    let target_dir = temp_path("rule-for-loop-item-target");
+    write_for_loop_item_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("for-loop item rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("for_loop_item_rule/src/lib.rs"));
+    assert!(lib.contains("fn items() -> Vec<Payload>"), "{lib}");
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn types_free_function_closure_arguments_from_callable_inputs() {
+    let workspace = temp_path("rule-free-closure-workspace");
+    let output = temp_path("rule-free-closure-output");
+    let target_dir = temp_path("rule-free-closure-target");
+    write_free_function_closure_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("free function closure rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("free_closure_rule/src/lib.rs"));
+    assert!(lib.contains("fn with_payload"), "{lib}");
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn infers_struct_match_pattern_receiver_types() {
+    let workspace = temp_path("rule-struct-match-workspace");
+    let output = temp_path("rule-struct-match-output");
+    let target_dir = temp_path("rule-struct-match-target");
+    write_struct_match_pattern_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("struct match pattern rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("struct_match_rule/src/lib.rs"));
+    assert!(lib.contains("fn envelope() -> Envelope"), "{lib}");
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn types_option_map_payload_closures_from_receiver_arguments() {
+    let workspace = temp_path("rule-option-map-workspace");
+    let output = temp_path("rule-option-map-output");
+    let target_dir = temp_path("rule-option-map-target");
+    write_option_map_payload_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("option map payload rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("option_map_rule/src/lib.rs"));
+    assert!(
+        lib.contains("fn maybe_payload() -> Option<Payload>"),
+        "{lib}"
+    );
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn preserves_serde_flatten_contract_fields_while_pruning_dead_private_fields() {
+    let workspace = temp_path("rule-serde-flatten-workspace");
+    let output = temp_path("rule-serde-flatten-output");
+    let target_dir = temp_path("rule-serde-flatten-target");
+    write_serde_flatten_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde flatten rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_flatten_rule/src/lib.rs"));
+    assert!(lib.contains("#[serde(flatten)]"), "{lib}");
+    assert!(
+        lib.contains("extra: BTreeMap<String, serde_json::Value>"),
+        "{lib}"
+    );
+    assert!(!lib.contains("dead: Option<String>"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     let workspace = temp_path("rule-support-path-bundle-workspace");
     let output = temp_path("rule-support-path-bundle-output");
@@ -482,6 +635,34 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     fs::rename(&leaf, leaf.with_extension("moved"))
         .expect("original leaf package should move away");
     let lib = read(output.join("support_path_app/src/lib.rs"));
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn copies_support_path_packages_with_nonstandard_lib_roots() {
+    let workspace = temp_path("rule-support-nonstandard-lib-workspace");
+    let output = temp_path("rule-support-nonstandard-lib-output");
+    let target_dir = temp_path("rule-support-nonstandard-lib-target");
+    let helper = temp_path("rule-support-nonstandard-lib-helper");
+    write_support_nonstandard_lib_rule_fixture(&workspace, &helper);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("support nonstandard lib rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    assert!(output
+        .join("support/external-helper/src/dump/lib.rs")
+        .exists());
+    assert!(output
+        .join("support/external-helper/src/dump/client.rs")
+        .exists());
+    assert!(!output.join("support/external-helper/src/lib.rs").exists());
+    fs::rename(&helper, helper.with_extension("moved"))
+        .expect("original helper package should move away");
+    let lib = read(output.join("support_nonstandard_app/src/lib.rs"));
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -2143,6 +2324,260 @@ pub fn selected() -> u32 {
     );
 }
 
+fn write_struct_destructure_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "struct_destructure_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn score(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn score(&self) -> u32 {
+        2
+    }
+}
+
+struct Bundle {
+    payload: Payload,
+    count: u32,
+}
+
+fn bundle() -> Bundle {
+    Bundle {
+        payload: Payload,
+        count: 1,
+    }
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let Bundle { payload, .. } = bundle();
+    payload.score()
+}
+"#,
+    );
+}
+
+fn write_param_destructure_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "param_destructure_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn live(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn live(&self) -> u32 {
+        2
+    }
+}
+
+#[opensourced]
+pub fn selected((payload, _): (Payload, u32)) -> u32 {
+    payload.live()
+}
+"#,
+    );
+}
+
+fn write_for_loop_item_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "for_loop_item_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn live(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn live(&self) -> u32 {
+        2
+    }
+}
+
+fn items() -> Vec<Payload> {
+    vec![Payload]
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let mut sum = 0;
+    for item in items() {
+        sum += item.live();
+    }
+    sum
+}
+"#,
+    );
+}
+
+fn write_free_function_closure_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "free_closure_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn live(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn live(&self) -> u32 {
+        2
+    }
+}
+
+fn with_payload(f: impl FnOnce(Payload) -> u32) -> u32 {
+    f(Payload)
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    with_payload(|payload| payload.live())
+}
+"#,
+    );
+}
+
+fn write_struct_match_pattern_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "struct_match_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn live(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn live(&self) -> u32 {
+        2
+    }
+}
+
+pub struct Envelope {
+    payload: Payload,
+}
+
+fn envelope() -> Envelope {
+    Envelope { payload: Payload }
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    match envelope() {
+        Envelope { payload } => payload.live(),
+    }
+}
+"#,
+    );
+}
+
+fn write_option_map_payload_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "option_map_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn live(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn live(&self) -> u32 {
+        2
+    }
+}
+
+fn maybe_payload() -> Option<Payload> {
+    Some(Payload)
+}
+
+#[opensourced]
+pub fn selected() -> Option<u32> {
+    maybe_payload().map(|payload| payload.live())
+}
+"#,
+    );
+}
+
+fn write_serde_flatten_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_flatten_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"
+use std::collections::BTreeMap;
+
+use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct Wire {
+    pub id: String,
+    #[serde(flatten)]
+    extra: BTreeMap<String, serde_json::Value>,
+    dead: Option<String>,
+}
+
+#[opensourced]
+pub fn selected(wire: Wire) -> String {
+    wire.id
+}
+"#,
+    );
+}
+
 fn write_support_path_bundle_rule_fixture(root: &Path, helper: &Path, leaf: &Path) {
     write(
         root.join("Cargo.toml"),
@@ -2259,6 +2694,81 @@ pub fn suffix() -> &'static str {
 }
 "#,
     );
+}
+
+fn write_support_nonstandard_lib_rule_fixture(root: &Path, helper: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["support_nonstandard_app"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("support_nonstandard_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "support_nonstandard_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced")),
+            manifest_path(helper)
+        ),
+    );
+    write(
+        root.join("support_nonstandard_app/src/lib.rs"),
+        r#"
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    external_helper::decorate(value)
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+path = "src/dump/lib.rs"
+"#,
+    );
+    write(
+        helper.join("src/dump/lib.rs"),
+        r#"
+mod client;
+
+pub fn decorate(value: &str) -> String {
+    client::decorate(value)
+}
+"#,
+    );
+    write(
+        helper.join("src/dump/client.rs"),
+        r#"
+pub fn decorate(value: &str) -> String {
+    format!("{value}:client")
+}
+"#,
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"
+pub fn orphan() -> &'static str {
+    "orphan"
+}
+"#,
+    );
+    write(helper.join("examples/unused.rs"), "fn main() {}\n");
 }
 
 fn write_workspace(root: &Path, package: &str, lib: &str) {
