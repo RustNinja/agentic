@@ -53,7 +53,9 @@ assets, output safety, or product diagnostics by itself.
 - Build scripts can execute arbitrary project logic and generate source under
   `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle
-  models generated source.
+  models generated source. Retained build scripts are production-blocking
+  because they can also read external state or emit link/env metadata that
+  changes compiled behavior.
 - Retained `include!` Rust source files must fail closed even when their paths
   are static and copied, because the included Rust is outside the current
   reachability graph.

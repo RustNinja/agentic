@@ -626,9 +626,9 @@ fn add_workspace_production_hazards(
     if retained_build_scripts > 0 {
         hazards.push(production_hazard(
             "retained_build_scripts",
-            "warning",
+            "error",
             format!(
-                "{} retained package build script(s) may generate source, link metadata, or asset dependencies outside the static parse tree",
+                "{} retained package build script(s) may generate source, link metadata, env values, or asset dependencies outside the static parse tree",
                 retained_build_scripts
             ),
         ));
@@ -2341,7 +2341,59 @@ pub fn entry() -> i32 {
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "retained_build_scripts"));
+            .any(|hazard| hazard.code == "retained_build_scripts" && hazard.severity == "error"));
+        assert_eq!(report.production.status, "hazards_detected");
+    }
+
+    #[test]
+    fn reports_external_state_build_script_production_hazards() {
+        let root = temp_output("build-script-external-state-source");
+        let output = temp_output("build-script-external-state-output");
+        let policy_path = temp_output("build-script-external-policy").join("policy.txt");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(policy_path.clone(), "machine-local-policy");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/build.rs"),
+            &format!(
+                r#"fn main() {{
+    let policy = std::fs::read_to_string({policy_path:?}).unwrap();
+    println!("cargo:rustc-env=POLICY={{}}", policy.trim());
+}}
+"#
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> &'static str {
+    env!("POLICY")
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output,
+        })
+        .expect("reduction should succeed");
+
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "retained_build_scripts" && hazard.severity == "error"
+        }));
+        assert_eq!(report.production.status, "hazards_detected");
     }
 
     #[test]
