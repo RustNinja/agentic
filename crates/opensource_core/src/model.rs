@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap},
     fmt,
     path::PathBuf,
 };
@@ -75,10 +75,98 @@ pub struct ReducedProject {
 }
 
 #[derive(Clone, Debug, Default)]
+pub struct SemanticReductionHints {
+    pub callable_edges: BTreeMap<CallableId, SemanticDependencies>,
+    pub item_edges: BTreeMap<ItemId, SemanticDependencies>,
+    pub unresolved_queries: usize,
+    pub unqueried_queries: usize,
+    pub unmapped_targets: usize,
+}
+
+impl SemanticReductionHints {
+    pub fn is_empty(&self) -> bool {
+        self.callable_edges.is_empty() && self.item_edges.is_empty()
+    }
+
+    pub fn total_edges(&self) -> usize {
+        self.callable_edges
+            .values()
+            .map(SemanticDependencies::len)
+            .sum::<usize>()
+            + self
+                .item_edges
+                .values()
+                .map(SemanticDependencies::len)
+                .sum::<usize>()
+    }
+
+    pub fn add_callable_edge(&mut self, owner: SemanticOwnerId, dependency: CallableId) {
+        match owner {
+            SemanticOwnerId::Callable(callable) => {
+                self.callable_edges
+                    .entry(callable)
+                    .or_default()
+                    .callables
+                    .insert(dependency);
+            }
+            SemanticOwnerId::Item(item) => {
+                self.item_edges
+                    .entry(item)
+                    .or_default()
+                    .callables
+                    .insert(dependency);
+            }
+        }
+    }
+
+    pub fn add_item_edge(&mut self, owner: SemanticOwnerId, dependency: ItemId) {
+        match owner {
+            SemanticOwnerId::Callable(callable) => {
+                self.callable_edges
+                    .entry(callable)
+                    .or_default()
+                    .items
+                    .insert(dependency);
+            }
+            SemanticOwnerId::Item(item) => {
+                self.item_edges
+                    .entry(item)
+                    .or_default()
+                    .items
+                    .insert(dependency);
+            }
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SemanticDependencies {
+    pub callables: BTreeSet<CallableId>,
+    pub items: BTreeSet<ItemId>,
+}
+
+impl SemanticDependencies {
+    pub fn is_empty(&self) -> bool {
+        self.callables.is_empty() && self.items.is_empty()
+    }
+
+    pub fn len(&self) -> usize {
+        self.callables.len() + self.items.len()
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub enum SemanticOwnerId {
+    Callable(CallableId),
+    Item(ItemId),
+}
+
+#[derive(Clone, Debug, Default)]
 pub struct ReductionEvidence {
     pub unresolved_method_fallbacks: usize,
     pub unresolved_method_candidate_matches: usize,
     pub capped_unresolved_method_fallbacks: usize,
+    pub semantic_edges_applied: usize,
 }
 
 impl ReductionEvidence {
@@ -86,6 +174,7 @@ impl ReductionEvidence {
         self.unresolved_method_fallbacks += other.unresolved_method_fallbacks;
         self.unresolved_method_candidate_matches += other.unresolved_method_candidate_matches;
         self.capped_unresolved_method_fallbacks += other.capped_unresolved_method_fallbacks;
+        self.semantic_edges_applied += other.semantic_edges_applied;
     }
 }
 

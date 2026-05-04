@@ -16,6 +16,7 @@ use toml::Value;
 
 use crate::model::{
     CallableId, ItemId, ItemKind, Project, ReducedProject, ReductionEvidence, RootId,
+    SemanticDependencies, SemanticReductionHints,
 };
 
 const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 1;
@@ -24,6 +25,14 @@ const MAX_UNRESOLVED_CONVERSION_CANDIDATES: usize = 24;
 pub fn reduce_with_extra_roots(
     project: &Project,
     extra_roots: &[RootId],
+) -> Result<ReducedProject, Box<dyn std::error::Error>> {
+    reduce_with_extra_roots_and_semantics(project, extra_roots, &SemanticReductionHints::default())
+}
+
+pub fn reduce_with_extra_roots_and_semantics(
+    project: &Project,
+    extra_roots: &[RootId],
+    semantic_hints: &SemanticReductionHints,
 ) -> Result<ReducedProject, Box<dyn std::error::Error>> {
     let mut callable_roots = project
         .functions
@@ -118,7 +127,8 @@ pub fn reduce_with_extra_roots(
                 continue;
             }
 
-            let dependencies = callable_dependencies(project, &callable);
+            let mut dependencies = callable_dependencies(project, &callable);
+            dependencies.extend(semantic_callable_dependencies(semantic_hints, &callable));
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -140,7 +150,8 @@ pub fn reduce_with_extra_roots(
                 continue;
             }
 
-            let dependencies = item_dependencies(project, &item);
+            let mut dependencies = item_dependencies(project, &item);
+            dependencies.extend(semantic_item_dependencies(semantic_hints, &item));
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -1662,6 +1673,39 @@ impl DependencySet {
         self.callables.extend(other.callables);
         self.items.extend(other.items);
         self.evidence.add(&other.evidence);
+    }
+}
+
+fn semantic_callable_dependencies(
+    semantic_hints: &SemanticReductionHints,
+    callable: &CallableId,
+) -> DependencySet {
+    semantic_hints
+        .callable_edges
+        .get(callable)
+        .map(dependency_set_from_semantic_dependencies)
+        .unwrap_or_default()
+}
+
+fn semantic_item_dependencies(
+    semantic_hints: &SemanticReductionHints,
+    item: &ItemId,
+) -> DependencySet {
+    semantic_hints
+        .item_edges
+        .get(item)
+        .map(dependency_set_from_semantic_dependencies)
+        .unwrap_or_default()
+}
+
+fn dependency_set_from_semantic_dependencies(dependencies: &SemanticDependencies) -> DependencySet {
+    DependencySet {
+        callables: dependencies.callables.clone(),
+        items: dependencies.items.clone(),
+        evidence: ReductionEvidence {
+            semantic_edges_applied: dependencies.len(),
+            ..ReductionEvidence::default()
+        },
     }
 }
 

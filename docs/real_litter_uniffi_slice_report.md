@@ -72,8 +72,9 @@ cases passed preflight:
 
 The same pinned cases also passed strict feedback repair with `--deny-warnings`
 through the default `ra-hir` analyzer path once RA was bounded to local
-workspace crates and the feedback runner drained Cargo JSON while the child
-process was still running:
+workspace crates, RA semantic analysis prioritized files containing selected
+roots, and the feedback runner drained Cargo JSON while the child process was
+still running:
 
 | Corpus case | Feedback result | Repair changes | End warnings |
 | --- | --- | ---: | ---: |
@@ -249,9 +250,12 @@ The real slices did not include:
 
 These experiments now pass strict compiler feedback repair through the default
 RA-enabled CLI path. The default CLI feature set loads bounded rust-analyzer HIR
-semantic inventory for local workspace crates, but the reducer is still
-syntactic and this branch does not yet consume HIR edges as the authoritative
-reachability graph.
+semantics for local workspace crates and applies exact project-local RA
+method/path resolutions as additive reduction hints; the latest pinned Litter
+repair run recorded `semantic_reduction_hints_applied` for all three roots. The
+reducer still keeps the syntactic closure as fallback and does not yet use RA as
+the authoritative oracle for trait impl lookup, macro expansion, generated
+source, dynamic dispatch, or every cfg-active reachability decision.
 
 Known remaining risks:
 

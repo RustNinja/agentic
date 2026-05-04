@@ -18,24 +18,28 @@ assets, output safety, or product diagnostics by itself.
 
 ## Current Branch Status
 
-`codex/production-hardening` is currently a semantic-inventory-first CLI with a
-`syn` reducer and rustc feedback/repair as the production gate. The default
+`codex/production-hardening` is currently a semantic-assisted CLI with a `syn`
+base reducer and rustc feedback/repair as the production gate. The default
 `opensource_cli` feature set enables `ra-hir`, and the CLI defaults to
 `--analyzer ra-hir`; users can still pass `--analyzer syn` or build with
 `--no-default-features` for the fast syntactic fallback. The rust-analyzer path
-loads local workspace crates with dependency crates excluded by default, and is
-still report-only semantic inventory today; it does not yet drive the retained
-graph. Production validation therefore relies on bounded RA inventory, fast
-static reduction, explicit production hazards, and
+loads local workspace crates with dependency crates excluded by default, maps
+exact project-local method/path resolutions into generic `CallableId` /
+`ItemId` reduction hints, and applies those hints as additive retained-graph
+edges. Files containing selected `#[opensourced]` roots are analyzed first so
+bounded semantic budgets prioritize the active slice. Production validation
+therefore relies on bounded RA semantics, fast static fallback reduction,
+explicit production hazards, and
 `cargo check --message-format=json` feedback.
 
 The latest hardening milestone validated the pinned Litter UniFFI cases in
 strict repair mode with `--deny-warnings`: all three pinned roots reached zero
-final warnings through the default `ra-hir` analyzer path, and the
-apply-snapshot case removed three unused imports through the compiler repair
-loop. The feedback runner now drains Cargo stdout/stderr while the child process
-runs, preventing large JSON output from dependency-heavy checks from blocking
-the feedback loop.
+final warnings through the default `ra-hir` analyzer path, and production
+reports show `semantic_reduction_hints_applied` for each pinned root after RA
+root-file prioritization. The apply-snapshot case removed three unused imports
+through the compiler repair loop. The feedback runner now drains Cargo
+stdout/stderr while the child process runs, preventing large JSON output from
+dependency-heavy checks from blocking the feedback loop.
 
 ## Inspirations
 
@@ -167,6 +171,8 @@ the feedback loop.
 
 4. Semantic oracle:
    - Keep rust-analyzer HIR in the default CLI/corpus flow.
+   - Continue applying exact project-local RA method/path edges as additive
+     reduction hints.
    - Add narrow queries for path resolution, method resolution, trait impl lookup,
      macro-expanded item inventory, and active cfg file/module inventory.
    - Keep the syntactic reducer available for simple workspaces and offline runs.
@@ -182,8 +188,9 @@ the feedback loop.
 This branch has moved beyond the initial safety gate. It now has guarded output
 replacement, Cargo metadata-backed workspace/target/dependency discovery,
 preflight validation, compiler feedback widening, conservative repair,
-production validation gates, pinned corpus cases, and documented production
-hazard reporting for known unsupported surfaces. The main unfinished production
-step is consuming semantic oracle edges from rust-analyzer HIR or rustc for
-unresolved high-risk constructs instead of using the oracle as report-only
-inventory.
+production validation gates, pinned corpus cases, documented production hazard
+reporting for known unsupported surfaces, and additive rust-analyzer semantic
+edges in the retained graph. The main unfinished production step is expanding
+the semantic oracle from exact local method/path edges into trait impl lookup,
+macro-expanded item inventory, active cfg/module inventory, generated source,
+and dynamic dispatch surfaces.

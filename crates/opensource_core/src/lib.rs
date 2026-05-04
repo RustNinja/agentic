@@ -32,7 +32,10 @@ pub use feedback::{
     CheckSuggestion, CheckTarget, FeedbackHazard, FeedbackWideningCandidate,
     FeedbackWideningReport,
 };
-pub use model::{CallableId, ItemId, RootId, SourceSpan};
+pub use model::{
+    CallableId, ItemId, RootId, SemanticDependencies, SemanticOwnerId, SemanticReductionHints,
+    SourceSpan,
+};
 pub use preflight::{
     preflight_workspace, write_preflight_report, PreflightDiagnostic, PreflightOptions,
     PreflightReport,
@@ -151,10 +154,6 @@ pub fn generate_with_analyzer_feedback(
 ) -> Result<GenerateReport, Box<dyn std::error::Error>> {
     let total_started = Instant::now();
     let phase_started = Instant::now();
-    let analyzer = analyzer::load_report(&options.workspace_root, analyzer_mode)?;
-    let analyzer_ms = elapsed_ms(phase_started);
-
-    let phase_started = Instant::now();
     let workspace = manifest::load_workspace(&options.workspace_root)?;
     let manifest_ms = elapsed_ms(phase_started);
 
@@ -162,10 +161,23 @@ pub fn generate_with_analyzer_feedback(
     let project = parse::parse_workspace(workspace)?;
     let parse_ms = elapsed_ms(phase_started);
 
+    let phase_started = Instant::now();
+    let analyzer =
+        analyzer::load_report_for_project(&options.workspace_root, analyzer_mode, &project)?;
+    let analyzer_ms = elapsed_ms(phase_started);
+
     let feedback_widened_roots = feedback_extra_roots(&project, feedback_diagnostics);
 
     let phase_started = Instant::now();
-    let reduced = reduce::reduce_with_extra_roots(&project, &feedback_widened_roots)?;
+    let reduced = if analyzer.semantic_hints.is_empty() {
+        reduce::reduce_with_extra_roots(&project, &feedback_widened_roots)?
+    } else {
+        reduce::reduce_with_extra_roots_and_semantics(
+            &project,
+            &feedback_widened_roots,
+            &analyzer.semantic_hints,
+        )?
+    };
     let reduce_ms = elapsed_ms(phase_started);
 
     let phase_started = Instant::now();
@@ -546,7 +558,11 @@ fn production_readiness_report(
             "configured analyzer did not load; generated reachability used fallback evidence",
         ));
     }
-    add_semantic_inventory_hazard(analyzer, &mut hazards);
+    add_semantic_inventory_hazard(
+        analyzer,
+        reduced.evidence.semantic_edges_applied,
+        &mut hazards,
+    );
 
     let Some(semantic) = &analyzer.semantic else {
         hazards.push(production_hazard(
@@ -623,13 +639,33 @@ fn production_readiness_report(
 
 fn add_semantic_inventory_hazard(
     analyzer: &AnalyzerReport,
+    semantic_edges_applied: usize,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
-    if analyzer.semantic.is_some() {
+    if analyzer.semantic.is_some() && analyzer.semantic_hints.is_empty() {
         hazards.push(production_hazard(
             "semantic_inventory_not_applied",
             "warning",
             "semantic analyzer inventory is report-only in this build; compiler feedback is still required before trusting the slice",
+        ));
+    } else if analyzer.semantic.is_some() && semantic_edges_applied > 0 {
+        hazards.push(production_hazard(
+            "semantic_inventory_partially_applied",
+            "warning",
+            format!(
+                "semantic analyzer applied {} reachable project-local reduction edge(s) from {} available edge(s), but compiler feedback is still required for unresolved, unqueried, unmapped, macro-expanded, and generated-code cases",
+                semantic_edges_applied,
+                analyzer.semantic_hints.total_edges()
+            ),
+        ));
+    } else if analyzer.semantic.is_some() {
+        hazards.push(production_hazard(
+            "semantic_inventory_available",
+            "warning",
+            format!(
+                "semantic analyzer produced {} project-local reduction edge(s), but none were reached by the selected roots; compiler feedback is still required for unresolved, unqueried, unmapped, macro-expanded, and generated-code cases",
+                analyzer.semantic_hints.total_edges()
+            ),
         ));
     }
 }
@@ -1472,6 +1508,16 @@ fn add_reduction_evidence_production_hazards(
             format!(
                 "{} unresolved method fallback(s) exceeded the name-only candidate cap; compiler feedback is required to detect any omitted method dependencies",
                 evidence.capped_unresolved_method_fallbacks
+            ),
+        ));
+    }
+    if evidence.semantic_edges_applied > 0 {
+        hazards.push(production_hazard(
+            "semantic_reduction_hints_applied",
+            "warning",
+            format!(
+                "{} semantic analyzer edge(s) were applied to the retained graph; compiler feedback is still required for unresolved semantic surfaces",
+                evidence.semantic_edges_applied
             ),
         ));
     }
@@ -2365,6 +2411,7 @@ struct AnalyzerReportJson {
     engine: String,
     notes: Vec<String>,
     semantic: Option<SemanticReportJson>,
+    semantic_reduction_hints: SemanticReductionHintsJson,
 }
 
 impl AnalyzerReportJson {
@@ -2378,6 +2425,32 @@ impl AnalyzerReportJson {
                 .semantic
                 .as_ref()
                 .map(SemanticReportJson::from_report),
+            semantic_reduction_hints: SemanticReductionHintsJson::from_report(
+                &report.semantic_hints,
+            ),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SemanticReductionHintsJson {
+    callable_owners: usize,
+    item_owners: usize,
+    total_edges: usize,
+    unresolved_queries: usize,
+    unqueried_queries: usize,
+    unmapped_targets: usize,
+}
+
+impl SemanticReductionHintsJson {
+    fn from_report(report: &SemanticReductionHints) -> Self {
+        Self {
+            callable_owners: report.callable_edges.len(),
+            item_owners: report.item_edges.len(),
+            total_edges: report.total_edges(),
+            unresolved_queries: report.unresolved_queries,
+            unqueried_queries: report.unqueried_queries,
+            unmapped_targets: report.unmapped_targets,
         }
     }
 }
@@ -2441,9 +2514,9 @@ mod tests {
     };
 
     use super::{
-        add_semantic_inventory_hazard, default_feature_closure, generate,
+        add_semantic_inventory_hazard, default_feature_closure, generate, generate_with_analyzer,
         generate_with_analyzer_feedback, write_generate_report, AnalyzerMode, AnalyzerReport,
-        CallableId, CheckDiagnostic, GenerateOptions, SemanticReport,
+        CallableId, CheckDiagnostic, GenerateOptions, SemanticReductionHints, SemanticReport,
     };
 
     #[test]
@@ -2647,12 +2720,76 @@ theme = []
             engine: "rust-analyzer HIR".to_string(),
             notes: Vec::new(),
             semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
         };
         let mut hazards = Vec::new();
 
-        add_semantic_inventory_hazard(&analyzer, &mut hazards);
+        add_semantic_inventory_hazard(&analyzer, 0, &mut hazards);
 
         assert!(hazards
+            .iter()
+            .any(|hazard| hazard.code == "semantic_inventory_not_applied"));
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
+    fn applies_ra_semantic_hints_to_reduction() {
+        let root = temp_output("ra-semantic-source");
+        let output = temp_output("ra-semantic-reduction");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"
+use opensourced::opensourced;
+
+pub struct Service;
+
+impl Service {
+    pub fn selected(&self) -> u32 {
+        1
+    }
+
+    pub fn unused(&self) -> u32 {
+        2
+    }
+}
+
+#[opensourced]
+pub fn entry(service: Service) -> u32 {
+    service.selected()
+}
+"#,
+        );
+        let report = generate_with_analyzer(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output,
+            },
+            AnalyzerMode::RustAnalyzerHir,
+        )
+        .expect("RA-backed generation should succeed");
+
+        assert!(report.analyzer.semantic_hints.total_edges() > 0);
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "semantic_reduction_hints_applied" && hazard.severity == "warning"
+        }));
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "semantic_inventory_partially_applied" && hazard.severity == "warning"
+        }));
+        assert!(!report
+            .production
+            .hazards
             .iter()
             .any(|hazard| hazard.code == "semantic_inventory_not_applied"));
     }

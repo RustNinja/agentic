@@ -93,11 +93,16 @@ cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
 
 The default `slicers` binary now enables the `ra-hir` feature and uses
-rust-analyzer HIR semantic inventory by default. The `syn` reducer still owns
-the rendered slice closure today, so RA is part of the default flow but is not
-yet the authoritative reachability oracle. RA loads local workspace crates with
-dependency crates excluded by default; external correctness is still checked by
-Cargo/rustc feedback.
+rust-analyzer HIR semantics by default. RA-resolved project-local method and
+path targets are mapped into the slicer's generic `CallableId` / `ItemId`
+model and applied as additive reduction edges. The `syn` reducer still provides
+the base closure and fallback behavior, so RA is part of the production path but
+is not yet a full rustc-equivalent reachability oracle. RA loads local
+workspace crates with dependency crates excluded by default; external
+correctness is still checked by Cargo/rustc feedback.
+Files containing selected `#[opensourced]` roots are analyzed first so bounded
+semantic budgets are spent on the active slice before wider workspace
+inventory.
 
 ```sh
 cargo run -p opensource_cli --bin slicers -- \
@@ -215,11 +220,13 @@ closed on readiness error hazards before compiler feedback and records a final
 coverage, and compiler feedback have accepted the slice.
 
 This is the current production feedback layer: the normal CLI run loads
-bounded rust-analyzer HIR semantic inventory for local workspace crates, keeps
-the slicer fast with the existing syntactic reducer, then lets rustc give
+bounded rust-analyzer HIR semantics for local workspace crates, applies exact
+project-local semantic edges to the retained graph, keeps the slicer fast with
+the existing syntactic reducer for fallback coverage, then lets rustc give
 precise diagnostics for the generated slice. The production report marks the
-remaining boundary explicitly until RA edges are consumed by reduction. Using RA
-or a rustc-driver oracle for targeted method/path/trait edges before rendering
+remaining boundary explicitly until semantic edges cover trait impl lookup,
+macro-expanded inventory, cfg-active modules, generated source, and dynamic
+dispatch. Expanding the RA/rustc oracle for those cases before rendering
 remains the next precision step.
 Generation reports fail closed on known syntactic trust hazards as well,
 including retained `include!` source macros that read generated Rust from
