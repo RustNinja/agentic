@@ -23,7 +23,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Dynamic dispatch boundaries | core production-readiness tests | Retained `dyn Trait` and `fn(...)` function pointer surfaces are production-blocking until semantic analysis can prove concrete callback/dispatch edges |
 | Associated types/consts | `component_matrix.rs` | Associated type and associated const dependencies are followed from retained impls |
 | External trait imports | `manifest_hardening.rs` | Extension traits such as `tokio::io::AsyncReadExt`, private std traits such as `std::io::Write`, and trait-method imports without an `Ext` suffix such as `base64::Engine` are retained |
-| External modules | `module_reexports.rs`, `component_matrix.rs` | `mod file;`, `mod/name/mod.rs`, nested modules, and empty dead module pruning |
+| External modules | `module_reexports.rs`, `component_matrix.rs`, core output-safety tests | `mod file;`, `mod/name/mod.rs`, nested modules, empty dead module pruning, and rejection of path-attributed modules that would escape package output |
 | Inline modules | `module_reexports.rs`, `component_matrix.rs` | Inline modules with retained reexports are preserved |
 | Reexports | `module_reexports.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Reachable `pub use` targets are kept; dead grouped and external `pub use` reexports are pruned |
 | Dependency aliases | root fixture, `module_reexports.rs` | `package = "..."` dependency aliases and renamed imports |

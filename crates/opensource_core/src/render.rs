@@ -359,7 +359,7 @@ pub fn write_reduced_workspace(
                 prune_stub_binary_root_uses(&mut transformed);
                 ensure_main_function(&mut transformed);
             }
-            let relative_path = source.path.strip_prefix(&package.root)?;
+            let relative_path = package_relative_copy_path(package, &source.path)?;
             let output_path = package_output.join(relative_path);
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)?;
@@ -1235,7 +1235,13 @@ fn package_relative_copy_path(
     package: &Package,
     path: &Path,
 ) -> Result<PathBuf, Box<dyn std::error::Error>> {
-    let relative = path.strip_prefix(&package.root)?;
+    let relative = path.strip_prefix(&package.root).map_err(|_| {
+        format!(
+            "copy path {} is not relative to package root {}",
+            path.display(),
+            package.root.display()
+        )
+    })?;
     let mut normalized = PathBuf::new();
     for component in relative.components() {
         match component {

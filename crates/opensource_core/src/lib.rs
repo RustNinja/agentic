@@ -3181,6 +3181,53 @@ pub fn helper() -> usize {
         );
     }
 
+    #[test]
+    fn rejects_path_attributed_modules_that_escape_package_output() {
+        let root = temp_output("path-attr-escape-source");
+        let output = temp_output("path-attr-escape-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[path = "../../outside.rs"]
+mod escaped;
+
+#[opensourced]
+pub fn entry() -> usize {
+    escaped::value()
+}
+"#,
+        );
+        write(root.join("outside.rs"), "pub fn value() -> usize { 1 }\n");
+
+        let error = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect_err("escaped path-attributed module should be rejected");
+
+        assert!(
+            error.to_string().contains("not relative to package root"),
+            "unexpected error: {error}"
+        );
+        assert!(
+            !output.join("outside.rs").exists(),
+            "escaped source must not be written outside the package output"
+        );
+    }
+
     fn workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
             .ancestors()
