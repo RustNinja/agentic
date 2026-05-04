@@ -35,6 +35,14 @@ Current executable seed cases live in
 | `build.rustc_env.001` | covered | Retained `env!` fed by build script state is production-blocking |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
+| `import.reexport.chain_hub.001` | covered | Reexport chains prune dead grouped names at each public hub |
+| `include.str.static_concat.001` | covered | Literal and `concat!` `include_str!` assets are copied while dead siblings are pruned |
+| `build.out_dir_source_include.001` | covered | Retained `include!(concat!(env!("OUT_DIR"), ...))` is production-blocking |
+| `macro.item_invocation.generated_api.001` | covered | Live macro-generated item invocations survive while dead sibling invocations are pruned |
+| `macro.metavariable_method.001` | covered | Methods referenced through `$receiver.method()` in retained `macro_rules!` bodies are resolved from invocation argument types |
+| `trait.associated_projection.001` | covered | Associated type/const projections retain the live impl and prune dead projection impls |
+| `trait.conversion.try_from_chain.001` | covered | `.try_into()` retains only the matching `TryFrom<Input> for Target` impl, not unrelated conversions for the same target |
+| `dyn.callback.option_arc_trait.001` | covered | Stored `Option<Arc<dyn Trait + Send + Sync>>` callback slots are hard dynamic-dispatch hazards |
 
 ## Workflow
 
@@ -69,5 +77,7 @@ Read-only Litter exploration found these high-value non-cfg patterns:
 - Broad `pub use` hubs that need live-name pruning through reexport chains.
 - Serde/UniFFI helper attrs such as field defaults and skip helpers.
 - Conversion-heavy boundary impls such as `TryFrom<Request> for Params`.
+- Macro bodies that call methods on metavariables, where the invocation argument
+  type is the only generic way to retain the required method.
 
 Cfg/custom-cfg matrix expansion is intentionally not part of this batch.

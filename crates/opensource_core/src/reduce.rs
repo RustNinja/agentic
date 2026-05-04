@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeSet, HashMap, VecDeque},
+    collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     path::{Path as FsPath, PathBuf},
 };
 
@@ -2764,7 +2764,7 @@ impl<'a> DependencyVisitor<'a> {
                 .receiver_type(argument)
                 .or_else(|| self.infer_expr_type(argument))
             {
-                self.add_trait_impls_for_type(&type_ref);
+                self.add_non_conversion_trait_impls_for_type(&type_ref);
             }
         }
     }
@@ -2775,7 +2775,7 @@ impl<'a> DependencyVisitor<'a> {
                 .receiver_type(argument)
                 .or_else(|| self.infer_expr_type(argument))
             {
-                self.add_trait_impls_for_type(&type_ref);
+                self.add_non_conversion_trait_impls_for_type(&type_ref);
             }
         }
     }
@@ -3834,6 +3834,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_macro(&mut self, mac: &'ast Macro) {
         self.add_macro_path(&mac.path);
+        self.add_macro_definition_receiver_dependencies(mac);
         self.add_format_macro_trait_dependencies(mac);
         self.add_expression_macro_dependencies(mac);
         self.add_rusqlite_param_macro_trait_dependencies(mac);
@@ -3988,6 +3989,37 @@ impl DependencyVisitor<'_> {
         }
     }
 
+    fn add_macro_definition_receiver_dependencies(&mut self, mac: &Macro) {
+        let Some(item) = self.resolver.resolve_macro_path(&mac.path) else {
+            return;
+        };
+        let Some(record) = self.resolver.project.items.get(&item) else {
+            return;
+        };
+        let Item::Macro(item_macro) = &record.item else {
+            return;
+        };
+        let receiver_methods = macro_metavariable_method_names(&item_macro.mac.tokens);
+        if receiver_methods.is_empty() {
+            return;
+        }
+
+        let mut receiver_types = BTreeSet::new();
+        for segments in token_path_candidates(&mac.tokens) {
+            if segments.len() == 1 && self.local_value_binding_visible(&segments[0]) {
+                receiver_types.extend(self.local_value_type_candidates(&segments[0]));
+            }
+        }
+
+        for type_ref in receiver_types {
+            for method in receiver_methods.values().flatten() {
+                for callable in self.resolver.resolve_methods(&type_ref, method) {
+                    self.add_method_dependency(&callable);
+                }
+            }
+        }
+    }
+
     fn add_macro_token_dependencies(&mut self, tokens: &TokenStream) {
         let mut referenced_types = BTreeSet::new();
         let mut candidate_method_names = BTreeSet::new();
@@ -4062,6 +4094,38 @@ fn collect_macro_self_method_names(tokens: &TokenStream, names: &mut BTreeSet<St
         };
         if receiver == "self" && dot.as_char() == '.' {
             names.insert(method.to_string());
+        }
+    }
+}
+
+fn macro_metavariable_method_names(tokens: &TokenStream) -> BTreeMap<String, BTreeSet<String>> {
+    let mut names = BTreeMap::new();
+    collect_macro_metavariable_method_names(tokens, &mut names);
+    names
+}
+
+fn collect_macro_metavariable_method_names(
+    tokens: &TokenStream,
+    names: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &tokens {
+        if let TokenTree::Group(group) = token {
+            collect_macro_metavariable_method_names(&group.stream(), names);
+        }
+    }
+
+    for window in tokens.windows(4) {
+        let [TokenTree::Punct(dollar), TokenTree::Ident(receiver), TokenTree::Punct(dot), TokenTree::Ident(method)] =
+            window
+        else {
+            continue;
+        };
+        if dollar.as_char() == '$' && dot.as_char() == '.' {
+            names
+                .entry(receiver.to_string())
+                .or_default()
+                .insert(method.to_string());
         }
     }
 }

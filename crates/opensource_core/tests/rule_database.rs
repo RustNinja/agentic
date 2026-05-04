@@ -208,6 +208,204 @@ fn retains_pub_crate_macro_helper_reexports_used_by_live_modules() {
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
+#[test]
+fn prunes_reexport_chains_at_each_grouped_hub() {
+    let workspace = temp_path("rule-reexport-chain-workspace");
+    let output = temp_path("rule-reexport-chain-output");
+    let target_dir = temp_path("rule-reexport-chain-target");
+    write_reexport_chain_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reexport chain rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("reexport_chain_rule/src/lib.rs"));
+    assert!(lib.contains("pub use facade::{live, LiveType}"), "{lib}");
+    assert!(!lib.contains("dead,"), "{lib}");
+    assert!(!lib.contains("DeadType"), "{lib}");
+    assert!(!lib.contains("pub fn dead"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn copies_include_str_concat_assets_and_prunes_dead_siblings() {
+    let workspace = temp_path("rule-include-str-workspace");
+    let output = temp_path("rule-include-str-output");
+    let target_dir = temp_path("rule-include-str-target");
+    write_include_str_concat_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("include_str concat rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("include_str_rule/src/lib.rs"));
+    assert!(lib.contains("include_str!(\"guides/live.md\")"), "{lib}");
+    assert!(
+        lib.contains("include_str!(concat!(\"guides/\", \"concat.md\"))"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DEAD_GUIDE"), "{lib}");
+    assert!(output.join("include_str_rule/src/guides/live.md").exists());
+    assert!(output
+        .join("include_str_rule/src/guides/concat.md")
+        .exists());
+    assert!(!output.join("include_str_rule/src/guides/dead.md").exists());
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn flags_out_dir_source_includes_as_production_blockers() {
+    let workspace = temp_path("rule-out-dir-source-workspace");
+    let output = temp_path("rule-out-dir-source-output");
+    let target_dir = temp_path("rule-out-dir-source-target");
+    write_out_dir_source_include_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("OUT_DIR include rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "out_dir_source_include_macros" && hazard.severity == "error"
+    }));
+    assert!(report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "retained_build_scripts" && hazard.severity == "error"));
+
+    let lib = read(output.join("out_dir_source_rule/src/lib.rs"));
+    assert!(lib.contains("include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"))"));
+    assert!(output.join("out_dir_source_rule/build.rs").exists());
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_macro_generated_items_used_by_live_code() {
+    let workspace = temp_path("rule-macro-generated-item-workspace");
+    let output = temp_path("rule-macro-generated-item-output");
+    let target_dir = temp_path("rule-macro-generated-item-target");
+    write_macro_generated_item_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("macro generated item rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("macro_generated_item_rule/src/lib.rs"));
+    assert!(lib.contains("macro_rules! declare_value"), "{lib}");
+    assert!(lib.contains("declare_value!(live_generated, 41)"), "{lib}");
+    assert!(!lib.contains("dead_generated"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_methods_referenced_only_from_live_macro_bodies() {
+    let workspace = temp_path("rule-macro-method-body-workspace");
+    let output = temp_path("rule-macro-method-body-output");
+    let target_dir = temp_path("rule-macro-method-body-target");
+    write_macro_method_body_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("macro method body rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("macro_method_body_rule/src/lib.rs"));
+    assert!(lib.contains("macro_rules! call_step"), "{lib}");
+    assert!(lib.contains("fn step(&self) -> u32"), "{lib}");
+    assert!(!lib.contains("fn unused_step"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_associated_type_const_and_projection_impls() {
+    let workspace = temp_path("rule-associated-projection-workspace");
+    let output = temp_path("rule-associated-projection-output");
+    let target_dir = temp_path("rule-associated-projection-target");
+    write_associated_projection_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("associated projection rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("associated_projection_rule/src/lib.rs"));
+    assert!(lib.contains("type Output = LiveValue"), "{lib}");
+    assert!(lib.contains("const KIND: &'static str = \"live\""), "{lib}");
+    assert!(!lib.contains("DeadDecoder"), "{lib}");
+    assert!(!lib.contains("DeadValue"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_try_from_conversion_impls_for_boundary_types() {
+    let workspace = temp_path("rule-try-from-workspace");
+    let output = temp_path("rule-try-from-output");
+    let target_dir = temp_path("rule-try-from-target");
+    write_try_from_boundary_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("try_from boundary rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("try_from_rule/src/lib.rs"));
+    assert!(lib.contains("impl TryFrom<RawRequest> for Params"), "{lib}");
+    assert!(lib.contains("try_into()"), "{lib}");
+    assert!(!lib.contains("DeadRequest"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
+    let workspace = temp_path("rule-option-arc-callback-workspace");
+    let output = temp_path("rule-option-arc-callback-output");
+    write_option_arc_callback_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("Option<Arc<dyn callback>> rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    let trait_object = report
+        .production
+        .hazards
+        .iter()
+        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
+        .expect("callback trait object should be a hard production hazard");
+    assert!(trait_object.details.iter().any(|detail| {
+        detail.subject.contains("dyn Callback")
+            && detail.subject.contains("Send")
+            && detail.subject.contains("Sync")
+    }));
+
+    let lib = read(output.join("option_arc_callback_rule/src/lib.rs"));
+    assert!(
+        lib.contains("Option<Arc<dyn Callback + Send + Sync>>"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadCallback"), "{lib}");
+}
+
 fn write_public_reexport_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -427,6 +625,310 @@ pub fn selected(value: u32) -> u32 {
 
 pub fn dead_api() -> u32 {
     99
+}
+"#,
+    );
+}
+
+fn write_reexport_chain_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "reexport_chain_rule",
+        r#"use opensourced::opensourced;
+
+pub mod leaf {
+    pub struct LiveType;
+
+    pub struct DeadType;
+
+    pub fn live() -> LiveType {
+        LiveType
+    }
+
+    pub fn dead() -> DeadType {
+        DeadType
+    }
+}
+
+pub mod facade {
+    pub use crate::leaf::{dead, live, DeadType, LiveType};
+}
+
+pub use facade::{dead, live, DeadType, LiveType};
+
+#[opensourced]
+pub fn selected() -> LiveType {
+    live()
+}
+"#,
+    );
+}
+
+fn write_include_str_concat_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "include_str_rule",
+        r#"use opensourced::opensourced;
+
+const LIVE_GUIDE: &str = include_str!("guides/live.md");
+const CONCAT_GUIDE: &str = include_str!(concat!("guides/", "concat.md"));
+const DEAD_GUIDE: &str = include_str!("guides/dead.md");
+
+#[opensourced]
+pub fn selected() -> usize {
+    LIVE_GUIDE.len() + CONCAT_GUIDE.len()
+}
+
+pub fn dead_api() -> usize {
+    DEAD_GUIDE.len()
+}
+"#,
+    );
+    write(root.join("include_str_rule/src/guides/live.md"), "live");
+    write(root.join("include_str_rule/src/guides/concat.md"), "concat");
+    write(root.join("include_str_rule/src/guides/dead.md"), "dead");
+}
+
+fn write_out_dir_source_include_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "out_dir_source_rule",
+        r#"use opensourced::opensourced;
+
+mod generated {
+    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    generated::generated_value()
+}
+"#,
+    );
+    let manifest = root.join("out_dir_source_rule/Cargo.toml");
+    let manifest_text = read(&manifest);
+    fs::write(
+        &manifest,
+        manifest_text.replace(
+            "edition = \"2021\"\n\n[dependencies]",
+            "edition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]",
+        ),
+    )
+    .expect("manifest should be writable");
+    write(
+        root.join("out_dir_source_rule/build.rs"),
+        r#"use std::{env, fs, path::PathBuf};
+
+fn main() {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR should be set"));
+    fs::write(out_dir.join("generated.rs"), "pub fn generated_value() -> u32 { 42 }\n")
+        .expect("generated source should be writable");
+}
+"#,
+    );
+}
+
+fn write_macro_generated_item_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "macro_generated_item_rule",
+        r#"use opensourced::opensourced;
+
+macro_rules! declare_value {
+    ($name:ident, $value:expr) => {
+        pub fn $name() -> u32 {
+            $value
+        }
+    };
+}
+
+macro_rules! declare_dead_value {
+    ($name:ident) => {
+        pub fn $name() -> u32 {
+            99
+        }
+    };
+}
+
+declare_value!(live_generated, 41);
+declare_dead_value!(dead_generated);
+
+#[opensourced]
+pub fn selected() -> u32 {
+    live_generated() + 1
+}
+"#,
+    );
+}
+
+fn write_macro_method_body_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "macro_method_body_rule",
+        r#"use opensourced::opensourced;
+
+macro_rules! call_step {
+    ($runner:expr) => {
+        $runner.step()
+    };
+}
+
+pub struct Runner {
+    value: u32,
+}
+
+impl Runner {
+    pub fn new(value: u32) -> Self {
+        Self { value }
+    }
+
+    fn step(&self) -> u32 {
+        self.value + 1
+    }
+
+    fn unused_step(&self) -> u32 {
+        99
+    }
+}
+
+#[opensourced]
+pub fn selected(runner: &Runner) -> u32 {
+    call_step!(runner)
+}
+"#,
+    );
+}
+
+fn write_associated_projection_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "associated_projection_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Decoder {
+    type Output;
+
+    const KIND: &'static str;
+
+    fn decode(value: u32) -> Self::Output;
+}
+
+pub struct LiveValue(pub u32);
+
+pub struct DeadValue(pub u32);
+
+pub struct LiveDecoder;
+
+pub struct DeadDecoder;
+
+impl Decoder for LiveDecoder {
+    type Output = LiveValue;
+
+    const KIND: &'static str = "live";
+
+    fn decode(value: u32) -> Self::Output {
+        LiveValue(value)
+    }
+}
+
+impl Decoder for DeadDecoder {
+    type Output = DeadValue;
+
+    const KIND: &'static str = "dead";
+
+    fn decode(value: u32) -> Self::Output {
+        DeadValue(value)
+    }
+}
+
+#[opensourced]
+pub fn selected(value: u32) -> (<LiveDecoder as Decoder>::Output, &'static str) {
+    (
+        <LiveDecoder as Decoder>::decode(value),
+        <LiveDecoder as Decoder>::KIND,
+    )
+}
+"#,
+    );
+}
+
+fn write_try_from_boundary_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "try_from_rule",
+        r#"use opensourced::opensourced;
+use std::convert::{TryFrom, TryInto};
+
+pub struct RawRequest {
+    pub value: u32,
+}
+
+pub struct Params {
+    value: u32,
+}
+
+impl TryFrom<RawRequest> for Params {
+    type Error = &'static str;
+
+    fn try_from(request: RawRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            value: request.value,
+        })
+    }
+}
+
+pub struct DeadRequest;
+
+impl TryFrom<DeadRequest> for Params {
+    type Error = &'static str;
+
+    fn try_from(_: DeadRequest) -> Result<Self, Self::Error> {
+        Ok(Self { value: 99 })
+    }
+}
+
+#[opensourced]
+pub fn selected(request: RawRequest) -> Result<Params, &'static str> {
+    request.try_into()
+}
+"#,
+    );
+}
+
+fn write_option_arc_callback_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "option_arc_callback_rule",
+        r#"use opensourced::opensourced;
+use std::sync::Arc;
+
+pub trait Callback {
+    fn notify(&self, value: u32);
+}
+
+pub trait DeadCallback {
+    fn notify(&self);
+}
+
+pub struct Manager {
+    callback: Option<Arc<dyn Callback + Send + Sync>>,
+}
+
+impl Manager {
+    pub fn new(callback: Option<Arc<dyn Callback + Send + Sync>>) -> Self {
+        Self { callback }
+    }
+
+    pub fn notify(&self, value: u32) {
+        if let Some(callback) = &self.callback {
+            callback.notify(value);
+        }
+    }
+}
+
+#[opensourced]
+pub fn selected(callback: Option<Arc<dyn Callback + Send + Sync>>) -> Manager {
+    Manager::new(callback)
 }
 "#,
     );

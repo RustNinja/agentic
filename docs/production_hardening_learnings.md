@@ -226,6 +226,15 @@ build-script `rustc-env`/`env!` blockers, nested callback/future aliases, and
 `pub(crate)` macro helper reexports. Litter examples should be converted into
 these generic groups before any slicer behavior is changed.
 
+The second rule-database pass added eight more non-cfg shapes and exposed two
+generic reducer issues. Retained `macro_rules!` bodies can call methods on
+metavariables, so the reducer now links `$receiver.method()` patterns to the
+types of retained invocation arguments. External constructor-style calls still
+retain trait impl support for argument types, but that fallback must exclude
+conversion-like traits; `.into()` and `.try_into()` have precise conversion
+retention paths, and broad argument fallbacks otherwise pull unrelated
+`TryFrom<Other> for Target` impls into the slice.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
