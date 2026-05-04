@@ -162,7 +162,10 @@ to override it.
 
 `--production` is the strict validation preset for release-style runs. It
 enables baseline checking, preflight, `--feedback-repair-loop 3`, and
-`--deny-warnings`, and writes `slice-report.json` plus
+`--deny-warnings`, reconciles the generated `Cargo.lock`, adds `--locked` when
+the source workspace has a `Cargo.lock` and the caller did not already pass
+`--locked` or `--frozen`, and writes
+`slice-report.json` plus
 `slice-validation.json` by default, while still allowing explicit flags such as
 `--feedback-repair-loop 5`, `--feedback-timeout`, `--cargo-check-arg`, and
 target/report paths to override the preset where needed. Production mode fails

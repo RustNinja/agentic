@@ -225,6 +225,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         warning_count: None,
         semantic_warning_hazards: None,
     });
+    if let Err(error) = refresh_generated_lockfile_for_locked_validation(&options, &mut validation)
+    {
+        let reason = error.to_string();
+        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        return Err(reason.into());
+    }
     if let Some(report) = &baseline {
         write_baseline_report(&options, report)?;
         println!(
@@ -537,6 +543,10 @@ where
     };
     let workspace_root = normalize_workspace_root_arg(workspace_root);
 
+    if production_should_add_locked_arg(production_preset, &workspace_root, &cargo_check_args) {
+        cargo_check_args.push("--locked".to_string());
+    }
+
     Ok(CliOptions {
         analyzer_mode,
         run_check,
@@ -571,6 +581,18 @@ fn normalize_workspace_root_arg(path: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf()
+}
+
+fn production_should_add_locked_arg(
+    production_preset: bool,
+    workspace_root: &Path,
+    cargo_check_args: &[String],
+) -> bool {
+    production_preset
+        && workspace_root.join("Cargo.lock").exists()
+        && !cargo_check_args
+            .iter()
+            .any(|arg| matches!(arg.as_str(), "--locked" | "--frozen"))
 }
 
 fn parse_usize_arg(
@@ -789,6 +811,83 @@ fn target_kind_plural_flag(kind: &str) -> &'static str {
         "bench" => "--benches",
         _ => "--all-targets",
     }
+}
+
+fn refresh_generated_lockfile_for_locked_validation(
+    options: &CliOptions,
+    validation: &mut ValidationReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !locked_validation_requested(&options.cargo_check_args)
+        || !options.workspace_root.join("Cargo.lock").exists()
+    {
+        return Ok(());
+    }
+
+    let lockfile_path = options.output_root.join("Cargo.lock");
+    if !lockfile_path.exists() {
+        let reason = "generated Cargo.lock is missing before locked validation";
+        validation.gates.push(ValidationGateReport {
+            name: "lockfile".to_string(),
+            status: "failed".to_string(),
+            reason: reason.to_string(),
+            report_path: Some(lockfile_path),
+            error_count: None,
+            warning_count: None,
+            semantic_warning_hazards: None,
+        });
+        return Err(reason.into());
+    }
+
+    let manifest_path = absolute_path(&options.output_root.join("Cargo.toml"))?;
+    let working_dir = manifest_working_dir(&manifest_path);
+    let mut command = Command::new("cargo");
+    command
+        .arg("generate-lockfile")
+        .arg("--manifest-path")
+        .arg(&manifest_path)
+        .current_dir(&working_dir);
+    if options
+        .cargo_check_args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--offline" | "--frozen"))
+    {
+        command.arg("--offline");
+    }
+    let output = command.output()?;
+    if !output.status.success() {
+        let reason = format!(
+            "generated Cargo.lock could not be reconciled before locked validation\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        validation.gates.push(ValidationGateReport {
+            name: "lockfile".to_string(),
+            status: "failed".to_string(),
+            reason: reason.clone(),
+            report_path: Some(lockfile_path),
+            error_count: None,
+            warning_count: None,
+            semantic_warning_hazards: None,
+        });
+        return Err(reason.into());
+    }
+
+    println!("lockfile: generated Cargo.lock reconciled before locked validation");
+    validation.gates.push(ValidationGateReport {
+        name: "lockfile".to_string(),
+        status: "passed".to_string(),
+        reason: "generated Cargo.lock was reconciled before locked validation".to_string(),
+        report_path: Some(lockfile_path),
+        error_count: None,
+        warning_count: None,
+        semantic_warning_hazards: None,
+    });
+    Ok(())
+}
+
+fn locked_validation_requested(cargo_check_args: &[String]) -> bool {
+    cargo_check_args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--locked" | "--frozen"))
 }
 
 fn uncovered_target_required_features(
@@ -2043,9 +2142,10 @@ mod tests {
         baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
         production_readiness_blocks_validation, record_final_production_readiness,
-        run_plain_check_gate, semantic_hazard_warning_count, slice_report_path,
-        try_widen_from_feedback, uncovered_validation_targets, validation_report_path,
-        FeedbackWideningState, ValidationGateReport, ValidationReport,
+        refresh_generated_lockfile_for_locked_validation, run_plain_check_gate,
+        semantic_hazard_warning_count, slice_report_path, try_widen_from_feedback,
+        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
+        ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -2332,6 +2432,83 @@ mod tests {
         );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
+    }
+
+    #[test]
+    fn production_preset_locks_existing_source_lockfile() {
+        let workspace = temp_path("cli-production-locked-source");
+        let output = temp_path("cli-production-locked-output");
+        write(workspace.join("Cargo.toml"), "[workspace]\nmembers = []\n");
+        write(workspace.join("Cargo.lock"), "# lockfile\n");
+
+        let options = parse_args_from(vec![
+            std::ffi::OsString::from("--production"),
+            workspace.into_os_string(),
+            output.into_os_string(),
+        ])
+        .expect("arguments should parse");
+
+        assert!(options.cargo_check_args.iter().any(|arg| arg == "--locked"));
+    }
+
+    #[test]
+    fn production_preset_does_not_duplicate_locking_args() {
+        let workspace = temp_path("cli-production-frozen-source");
+        let output = temp_path("cli-production-frozen-output");
+        write(workspace.join("Cargo.toml"), "[workspace]\nmembers = []\n");
+        write(workspace.join("Cargo.lock"), "# lockfile\n");
+
+        let options = parse_args_from(vec![
+            std::ffi::OsString::from("--production"),
+            std::ffi::OsString::from("--cargo-check-arg"),
+            std::ffi::OsString::from("--frozen"),
+            workspace.into_os_string(),
+            output.into_os_string(),
+        ])
+        .expect("arguments should parse");
+
+        assert_eq!(options.cargo_check_args, ["--frozen"]);
+    }
+
+    #[test]
+    fn locked_validation_reconciles_generated_lockfile_before_check() {
+        let source = temp_path("cli-lockfile-source");
+        let output = temp_path("cli-lockfile-output");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        );
+        write(source.join("Cargo.lock"), stale_generated_lockfile());
+        write(
+            output.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\n",
+        );
+        write(
+            output.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(output.join("app/src/lib.rs"), "");
+        write(output.join("Cargo.lock"), stale_generated_lockfile());
+
+        let options = parse_args_from(vec![
+            std::ffi::OsString::from("--production"),
+            source.into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        let mut validation = ValidationReport::new(&options);
+
+        refresh_generated_lockfile_for_locked_validation(&options, &mut validation)
+            .expect("generated lockfile should reconcile");
+
+        let lockfile = fs::read_to_string(output.join("Cargo.lock")).unwrap();
+        assert!(!lockfile.contains("\"dead-helper\""));
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "lockfile")
+            .expect("lockfile gate should be recorded");
+        assert_eq!(gate.status, "passed");
     }
 
     #[test]
@@ -2758,6 +2935,24 @@ pub fn helper() -> usize {
             spans: Vec::new(),
             suggestions: Vec::new(),
         }
+    }
+
+    fn stale_generated_lockfile() -> &'static str {
+        r#"# This file is automatically @generated by Cargo.
+# It is not intended for manual editing.
+version = 4
+
+[[package]]
+name = "app"
+version = "0.1.0"
+dependencies = [
+ "dead-helper",
+]
+
+[[package]]
+name = "dead-helper"
+version = "0.1.0"
+"#
     }
 
     fn parse_options<const N: usize>(args: [&str; N]) -> super::CliOptions {
