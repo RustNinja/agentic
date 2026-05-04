@@ -564,7 +564,6 @@ impl SupportPackagePlan {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut builder = SupportPackagePlanBuilder::new(project, reduced);
         builder.collect_retained_dependency_paths(reduced, package_usages)?;
-        builder.collect_workspace_dependency_paths()?;
         builder
             .collect_patch_replace_paths(&project.workspace.root, &project.workspace.manifest)?;
         builder.finish()
@@ -811,27 +810,6 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         Ok(())
     }
 
-    fn collect_workspace_dependency_paths(&mut self) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(dependencies) = self
-            .project
-            .workspace
-            .manifest
-            .get("workspace")
-            .and_then(|workspace| workspace.get("dependencies"))
-            .and_then(Value::as_table)
-        else {
-            return Ok(());
-        };
-        for (alias, value) in dependencies {
-            let dependency_package = dependency_package_name(alias, value);
-            if is_marker_dependency(alias, &dependency_package) {
-                continue;
-            }
-            self.add_dependency_path(value, &self.project.workspace.root)?;
-        }
-        Ok(())
-    }
-
     #[allow(clippy::too_many_arguments)]
     fn collect_retained_dependency_path(
         &mut self,
@@ -848,15 +826,10 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         let (source, manifest_dir) =
             workspace_resolved_dependency_value_with_dir(self.project, alias, value, &package.root);
         let dependency_package = dependency_package_name(alias, source);
-        if is_marker_dependency(alias, &dependency_package)
-            || self
-                .project
-                .workspace
-                .packages
-                .contains_key(&dependency_package)
-        {
+        if is_marker_dependency(alias, &dependency_package) {
             return Ok(());
         }
+
         if !(dependency_should_render(
             self.project,
             reduced,
@@ -868,6 +841,21 @@ impl<'a> SupportPackagePlanBuilder<'a> {
             retain_for_copied_support_source,
         ) || is_feature_required)
         {
+            return Ok(());
+        }
+
+        if self
+            .project
+            .workspace
+            .packages
+            .contains_key(&dependency_package)
+        {
+            let Some(root) = dependency_path_root(source, manifest_dir)? else {
+                return Ok(());
+            };
+            if !self.generated_workspace_roots.contains_key(&root) {
+                self.pending.insert(root);
+            }
             return Ok(());
         }
 
