@@ -35,6 +35,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Required target features | `manifest_hardening.rs`, CLI unit tests | `required-features` on retained example/test/bench/bin targets are reported and validation rejects Cargo argument sets that would skip the selected target or leave required bin features inactive |
 | Feature pruning | `manifest_hardening.rs` | Optional dependency feature entries are removed when the dependency is pruned |
 | Local path dependency pruning | `uniffi_mobile.rs`, `component_matrix.rs` | Unused local crates are omitted from manifests and source imports |
+| Non-workspace path dependencies | core production-readiness tests | Retained source references to path dependencies outside the workspace are production-blocking so generated slices do not point back to the original checkout |
 | Macro definitions | `component_matrix.rs` | Used `macro_rules!` definitions are kept, unused macro definitions are pruned, and direct helper calls inside retained macro bodies are followed |
 | Item macro-generated items | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Item macro invocations such as `lazy_static!` are retained when generated identifiers are referenced by reachable code |
 | Build-script assets | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Non-Rust assets referenced by `build.rs` string literal paths are copied without copying unrelated package docs/config |
@@ -63,6 +64,7 @@ These are tracked limitations, not silently claimed support:
 | Build scripts | `build.rs` and referenced non-Rust assets are copied; generated Rust files under `OUT_DIR` are not semantically modeled, and retained `include!(concat!(env!("OUT_DIR"), ...))` roots are production-blocking hazards |
 | Feature/platform cfg matrices | Only `#[cfg(test)]` is pruned as test-only; broader feature/platform matrix evaluation is conservative and selected non-test cfg roots are production-blocking until validation proves the exact matrix |
 | External crate pruning | External dependencies are pruned when their crate alias is absent from retained source tokens; full rustc-level unused import analysis is not implemented |
+| Non-workspace path dependencies | Production mode fails closed on retained references instead of copying external path packages; bounded copying is future work |
 
 ## Verification Commands
 

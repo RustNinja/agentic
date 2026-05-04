@@ -633,6 +633,171 @@ fn add_workspace_production_hazards(
             ),
         ));
     }
+    let retained_path_dependencies = retained_non_workspace_path_dependencies(project, reduced);
+    if !retained_path_dependencies.is_empty() {
+        hazards.push(production_hazard(
+            "retained_non_workspace_path_dependencies",
+            "error",
+            format!(
+                "{} retained non-workspace path dependency reference(s) would keep the slice tied to the original checkout: {}",
+                retained_path_dependencies.len(),
+                retained_path_dependencies.into_iter().collect::<Vec<_>>().join(", ")
+            ),
+        ));
+    }
+}
+
+fn retained_non_workspace_path_dependencies(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> BTreeSet<String> {
+    let mut dependencies = BTreeSet::new();
+    for package_name in &reduced.packages {
+        let Some(package) = project.workspace.packages.get(package_name) else {
+            continue;
+        };
+        for (_table_name, table) in package_dependency_tables(package) {
+            for (alias, value) in table {
+                let source = workspace_resolved_dependency_value(project, alias, value);
+                if !dependency_has_path(source) {
+                    continue;
+                }
+                let dependency_package = dependency_package_name(alias, source);
+                if is_marker_dependency(alias, &dependency_package)
+                    || project.workspace.packages.contains_key(&dependency_package)
+                {
+                    continue;
+                }
+                if retained_source_mentions_dependency(
+                    project,
+                    reduced,
+                    package_name,
+                    alias,
+                    &dependency_package,
+                ) {
+                    dependencies.insert(format!("{package_name}:{alias}"));
+                }
+            }
+        }
+    }
+    dependencies
+}
+
+fn package_dependency_tables(
+    package: &crate::manifest::Package,
+) -> Vec<(&str, &toml::value::Table)> {
+    let mut tables = Vec::new();
+    for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        if let Some(table) = package
+            .manifest
+            .get(table_name)
+            .and_then(toml::Value::as_table)
+        {
+            tables.push((table_name, table));
+        }
+    }
+    tables
+}
+
+fn workspace_resolved_dependency_value<'a>(
+    project: &'a Project,
+    alias: &str,
+    value: &'a toml::Value,
+) -> &'a toml::Value {
+    if !dependency_uses_workspace(value) {
+        return value;
+    }
+    project
+        .workspace
+        .manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(toml::Value::as_table)
+        .and_then(|dependencies| dependencies.get(alias))
+        .unwrap_or(value)
+}
+
+fn dependency_uses_workspace(value: &toml::Value) -> bool {
+    value
+        .as_table()
+        .and_then(|table| table.get("workspace"))
+        .and_then(toml::Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn dependency_has_path(value: &toml::Value) -> bool {
+    value
+        .as_table()
+        .and_then(|table| table.get("path"))
+        .and_then(toml::Value::as_str)
+        .is_some()
+}
+
+fn dependency_package_name(alias: &str, value: &toml::Value) -> String {
+    value
+        .as_table()
+        .and_then(|table| table.get("package"))
+        .and_then(toml::Value::as_str)
+        .unwrap_or(alias)
+        .to_string()
+}
+
+fn is_marker_dependency(alias: &str, package: &str) -> bool {
+    alias == "opensourced" || package == "opensourced"
+}
+
+fn retained_source_mentions_dependency(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    alias: &str,
+    dependency_package: &str,
+) -> bool {
+    let names = dependency_mention_names(alias, dependency_package);
+    reduced.reachable.iter().any(|callable| {
+        callable.package() == package
+            && callable_tokens(project, callable).is_some_and(|tokens| {
+                names
+                    .iter()
+                    .any(|name| token_stream_mentions_ident(&tokens, name))
+            })
+    }) || reduced.reachable_items.iter().any(|item| {
+        item.package == package
+            && project.items.get(item).is_some_and(|record| {
+                let tokens = record.item.to_token_stream();
+                names
+                    .iter()
+                    .any(|name| token_stream_mentions_ident(&tokens, name))
+            })
+    })
+}
+
+fn callable_tokens(project: &Project, callable: &crate::model::CallableId) -> Option<TokenStream> {
+    project
+        .functions
+        .get(callable)
+        .map(|record| record.item.to_token_stream())
+        .or_else(|| {
+            project
+                .methods
+                .get(callable)
+                .map(|record| record.item.to_token_stream())
+        })
+}
+
+fn dependency_mention_names(alias: &str, package: &str) -> BTreeSet<String> {
+    [alias, package]
+        .into_iter()
+        .flat_map(|name| [name.to_string(), name.replace('-', "_")])
+        .collect()
+}
+
+fn token_stream_mentions_ident(tokens: &TokenStream, ident: &str) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Ident(candidate) => candidate == ident,
+        proc_macro2::TokenTree::Group(group) => token_stream_mentions_ident(&group.stream(), ident),
+        proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => false,
+    })
 }
 
 fn add_cfg_gated_root_production_hazards(
@@ -2021,6 +2186,55 @@ pub fn entry() -> i32 {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "retained_build_scripts"));
+    }
+
+    #[test]
+    fn reports_retained_non_workspace_path_dependency_hazards() {
+        let root = temp_output("path-dependency-hazard-source");
+        let external = temp_output("path-dependency-hazard-external");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nexternal-helper = {{ path = {:?} }}\n",
+                opensourced_path, external
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    external_helper::value()
+}
+"#,
+        );
+        write(
+            external.join("Cargo.toml"),
+            "[package]\nname = \"external-helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            external.join("src/lib.rs"),
+            "pub fn value() -> usize { 1 }\n",
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("path-dependency-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert_eq!(report.production.status, "hazards_detected");
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "retained_non_workspace_path_dependencies"
+                && hazard.severity == "error"
+                && hazard.message.contains("app:external-helper")
+        }));
     }
 
     #[test]

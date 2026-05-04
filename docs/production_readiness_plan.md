@@ -59,6 +59,9 @@ assets, output safety, or product diagnostics by itself.
   should be treated as test-only pruning.
 - Dependency aliases, workspace dependencies, optional dependency features, and
   target-specific dependencies need Cargo's resolver model.
+- Retained path dependencies outside the workspace are not self-contained unless
+  they are copied as bounded packages; production should fail closed until that
+  copy policy exists.
 - Whole-crate fallback must be explicit and reported with size impact.
 - Output deletion must be guarded. A production CLI must only replace empty or
   previously generated output directories and must reject paths inside or above

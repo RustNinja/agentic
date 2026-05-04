@@ -200,7 +200,10 @@ retained custom attribute and derive macros that may generate code outside the
 static parse tree, including macros hidden behind nested `cfg_attr`, and
 retained non-builtin macro invocations. Retained build scripts are also reported because
 they can generate source, link metadata, or asset requirements outside the
-static parse tree. Retained `cfg`/`cfg_attr` attributes are reported when a
+static parse tree. Retained source references to path dependencies that are not
+workspace members are production-blocking, because the generated manifest would
+otherwise point back to the original checkout instead of a self-contained slice.
+Retained `cfg`/`cfg_attr` attributes are reported when a
 slice needs feature or target matrix validation beyond the current host/default
 configuration; selected roots behind non-test `cfg` or `cfg_attr` gates are
 production-blocking until the exact feature/target matrix is proven by
