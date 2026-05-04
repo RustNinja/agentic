@@ -78,6 +78,14 @@ The fixture and tests cover:
 The reducer still keeps imports and associated const/type items conservatively
 inside retained impl blocks so the reduced source keeps compiling.
 
+## Production Notes
+
+The production architecture, current boundaries, and real-repo lessons are kept
+in `docs/production_readiness_plan.md`, `docs/slice_coverage_matrix.md`, and
+`docs/production_hardening_learnings.md`. Read the learnings document before
+adding project-specific fixes; real-repo failures should become generic rules,
+regression fixtures, or explicit fail-closed hazards.
+
 ## Run
 
 ```sh

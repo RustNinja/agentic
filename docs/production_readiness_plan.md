@@ -2,6 +2,12 @@
 
 Last updated: 2026-05-04
 
+See also `docs/production_hardening_learnings.md` for the durable lessons from
+the Litter, RTK, RA feedback, compiler-repair, manifest, and proc-macro
+hardening passes. That document is the project memory for why this plan favors
+a copy/prove/cut architecture over either a proc-macro-only tool or a full
+rust-analyzer rewrite.
+
 ## Direction
 
 The fastest credible route is a hybrid slicer:
