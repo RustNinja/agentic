@@ -1746,11 +1746,11 @@ fn run_production_validation_matrix(
 
     let mut baseline_limited = false;
     for (index, entry) in entries.iter().enumerate() {
-        let attempt = index + 1;
-        let baseline_report_path = production_matrix_baseline_report_path(options, attempt);
-        let feedback_report_path = production_matrix_feedback_report_path(options, attempt);
+        let matrix_index = index + 1;
+        let baseline_report_path = production_matrix_baseline_report_path(options, matrix_index);
+        let feedback_report_path = production_matrix_feedback_report_path(options, matrix_index);
         println!(
-            "production matrix {attempt}/{} ({}): cargo check --message-format=json {}",
+            "production matrix {matrix_index}/{} ({}): cargo check --message-format=json {}",
             entries.len(),
             entry.name,
             entry.cargo_args.join(" ")
@@ -1759,7 +1759,7 @@ fn run_production_validation_matrix(
         let baseline = run_baseline_check_with_args(
             options,
             entry.cargo_args.clone(),
-            production_matrix_baseline_target_dir(options, attempt),
+            production_matrix_baseline_target_dir(options, matrix_index),
         )?;
         write_report(&baseline, &baseline_report_path)?;
         validation.add_check_gate(
@@ -1791,92 +1791,178 @@ fn run_production_validation_matrix(
             .into());
         }
 
-        let report = check_workspace(CheckOptions {
-            manifest_path: options.output_root.join("Cargo.toml"),
-            target_dir: Some(feedback_target_dir(options)),
-            timeout: options.feedback_timeout,
-            cargo_args: entry.cargo_args.clone(),
-        })?;
-        write_report(&report, &feedback_report_path)?;
-        print_feedback(&report, options.feedback_limit, &feedback_report_path);
+        let mut seen_diagnostics = BTreeSet::new();
+        let mut widening_state = FeedbackWideningState::default();
+        let mut accepted = false;
+        let mut entry_baseline_limited = false;
+        for attempt in 1..=production_matrix_iterations(options) {
+            let report = check_workspace(CheckOptions {
+                manifest_path: options.output_root.join("Cargo.toml"),
+                target_dir: Some(feedback_target_dir(options)),
+                timeout: options.feedback_timeout,
+                cargo_args: entry.cargo_args.clone(),
+            })?;
+            write_report(&report, &feedback_report_path)?;
+            print_feedback(&report, options.feedback_limit, &feedback_report_path);
 
-        let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, Some(&baseline));
-        let repairable_warnings = repairable_warning_count(&report.diagnostics);
-        if feedback_is_accepted(&report, Some(&baseline), options.deny_warnings) {
+            let semantic_warnings =
+                semantic_hazard_warning_count(&report.diagnostics, Some(&baseline));
+            let repairable_warnings = repairable_warning_count(&report.diagnostics);
+            if feedback_is_accepted(&report, Some(&baseline), options.deny_warnings) {
+                record_feedback_attempt(
+                    validation,
+                    "production-matrix",
+                    attempt,
+                    "accepted",
+                    &entry.reason,
+                    &report,
+                    feedback_report_path.clone(),
+                    false,
+                    semantic_warnings,
+                    repairable_warnings,
+                    None,
+                    None,
+                );
+                accepted = true;
+                break;
+            }
+            if options.allow_baseline_failures
+                && baseline_limited_feedback_is_accepted(
+                    &report,
+                    Some(&baseline),
+                    options.deny_warnings,
+                )
+            {
+                record_feedback_attempt(
+                    validation,
+                    "production-matrix",
+                    attempt,
+                    "baseline_limited",
+                    "generated matrix errors match the source matrix baseline",
+                    &report,
+                    feedback_report_path.clone(),
+                    true,
+                    semantic_warnings,
+                    repairable_warnings,
+                    None,
+                    None,
+                );
+                accepted = true;
+                entry_baseline_limited = true;
+                break;
+            }
+            if report.timed_out {
+                record_feedback_attempt(
+                    validation,
+                    "production-matrix",
+                    attempt,
+                    "timed_out",
+                    "production matrix cargo check timed out",
+                    &report,
+                    feedback_report_path.clone(),
+                    false,
+                    semantic_warnings,
+                    repairable_warnings,
+                    None,
+                    None,
+                );
+                record_feedback_gate(
+                    validation,
+                    "production_matrix",
+                    "failed",
+                    "production matrix cargo check timed out",
+                    &report,
+                    feedback_report_path.clone(),
+                    semantic_warnings,
+                );
+                return Err(format!(
+                    "production matrix {} timed out; report written to {}",
+                    entry.name,
+                    feedback_report_path.display()
+                )
+                .into());
+            }
+            if try_widen_from_feedback(
+                options,
+                validation,
+                &mut widening_state,
+                "production-matrix",
+                attempt,
+                &report,
+                &feedback_report_path,
+                semantic_warnings,
+                repairable_warnings,
+            )? {
+                continue;
+            }
+
+            let signature = diagnostics_signature(&report.diagnostics);
+            if !seen_diagnostics.insert(signature) {
+                record_feedback_attempt(
+                    validation,
+                    "production-matrix",
+                    attempt,
+                    "no_progress",
+                    "production matrix made no diagnostic progress",
+                    &report,
+                    feedback_report_path.clone(),
+                    false,
+                    semantic_warnings,
+                    repairable_warnings,
+                    None,
+                    None,
+                );
+                record_feedback_gate(
+                    validation,
+                    "production_matrix",
+                    "failed",
+                    "production matrix made no diagnostic progress",
+                    &report,
+                    feedback_report_path.clone(),
+                    semantic_warnings,
+                );
+                return Err(format!(
+                    "production matrix {} made no diagnostic progress; report written to {}",
+                    entry.name,
+                    feedback_report_path.display()
+                )
+                .into());
+            }
+
             record_feedback_attempt(
                 validation,
                 "production-matrix",
                 attempt,
-                "accepted",
-                &entry.reason,
+                "retrying",
+                "generated workspace did not pass production matrix feedback",
                 &report,
-                feedback_report_path,
+                feedback_report_path.clone(),
                 false,
                 semantic_warnings,
                 repairable_warnings,
                 None,
                 None,
             );
-            continue;
-        }
-        if options.allow_baseline_failures
-            && baseline_limited_feedback_is_accepted(
-                &report,
-                Some(&baseline),
-                options.deny_warnings,
-            )
-        {
-            baseline_limited = true;
-            record_feedback_attempt(
-                validation,
-                "production-matrix",
-                attempt,
-                "baseline_limited",
-                "generated matrix errors match the source matrix baseline",
-                &report,
-                feedback_report_path,
-                true,
-                semantic_warnings,
-                repairable_warnings,
-                None,
-                None,
-            );
-            continue;
         }
 
-        record_feedback_attempt(
-            validation,
-            "production-matrix",
-            attempt,
-            if report.timed_out {
-                "timed_out"
-            } else {
-                "failed"
-            },
-            "generated workspace failed production matrix feedback",
-            &report,
-            feedback_report_path.clone(),
-            false,
-            semantic_warnings,
-            repairable_warnings,
-            None,
-            None,
-        );
-        record_feedback_gate(
-            validation,
-            "production_matrix",
-            "failed",
-            "generated workspace failed production matrix feedback",
-            &report,
-            feedback_report_path.clone(),
-            semantic_warnings,
-        );
-        return Err(format!(
-            "generated workspace failed production matrix {}; report written to {}",
-            entry.name,
-            feedback_report_path.display()
-        )
-        .into());
+        if !accepted {
+            validation.gates.push(ValidationGateReport {
+                name: "production_matrix".to_string(),
+                status: "failed".to_string(),
+                reason: "generated workspace failed production matrix feedback".to_string(),
+                report_path: Some(feedback_report_path.clone()),
+                error_count: None,
+                warning_count: None,
+                semantic_warning_hazards: None,
+            });
+            return Err(format!(
+                "generated workspace failed production matrix {}; report written to {}",
+                entry.name,
+                feedback_report_path.display()
+            )
+            .into());
+        }
+        baseline_limited |= entry_baseline_limited;
     }
 
     validation.gates.push(ValidationGateReport {
@@ -1984,6 +2070,13 @@ fn feature_is_enabled_for_matrix_detail(
         || package
             .map(|package| enabled.contains(&format!("{package}/{feature}")))
             .unwrap_or(false)
+}
+
+fn production_matrix_iterations(options: &CliOptions) -> usize {
+    options
+        .feedback_repair_iterations
+        .max(options.feedback_iterations)
+        .max(1)
 }
 
 fn production_matrix_feedback_report_path(options: &CliOptions, index: usize) -> PathBuf {
