@@ -264,7 +264,9 @@ pub fn write_reduced_workspace(
 
     write_workspace_manifest(project, reduced, output_root, &package_usages)?;
 
-    let mut files_written = 1 + copy_workspace_lockfile(project, output_root)?;
+    let mut files_written = 1
+        + copy_workspace_lockfile(project, output_root)?
+        + copy_workspace_cargo_config(project, output_root)?;
     for package_name in &reduced.packages {
         let package = project
             .workspace
@@ -466,6 +468,27 @@ fn copy_workspace_lockfile(
 
     fs::copy(lockfile, output_root.join("Cargo.lock"))?;
     Ok(1)
+}
+
+fn copy_workspace_cargo_config(
+    project: &Project,
+    output_root: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let source_dir = project.workspace.root.join(".cargo");
+    let mut copied = 0;
+    for file_name in ["config.toml", "config"] {
+        let source = source_dir.join(file_name);
+        if !source.is_file() {
+            continue;
+        }
+        let output = output_root.join(".cargo").join(file_name);
+        if let Some(parent) = output.parent() {
+            fs::create_dir_all(parent)?;
+        }
+        fs::copy(source, output)?;
+        copied += 1;
+    }
+    Ok(copied)
 }
 
 fn package_should_preserve_source_tree(

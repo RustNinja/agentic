@@ -600,16 +600,34 @@ fn parse_feedback_timeout(
 }
 
 fn run_plain_check(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest_path = absolute_path(&options.output_root.join("Cargo.toml"))?;
+    let working_dir = manifest_working_dir(&manifest_path);
     let status = Command::new("cargo")
         .arg("check")
         .arg("--manifest-path")
-        .arg(options.output_root.join("Cargo.toml"))
+        .arg(&manifest_path)
         .args(&options.cargo_check_args)
+        .current_dir(&working_dir)
         .status()?;
     if !status.success() {
         return Err(format!("generated workspace failed cargo check with {status}").into());
     }
     Ok(())
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(path))
+}
+
+fn manifest_working_dir(manifest_path: &Path) -> PathBuf {
+    manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 fn run_preflight(options: &CliOptions) -> Result<PreflightReport, Box<dyn std::error::Error>> {
@@ -2427,6 +2445,7 @@ pub fn helper() -> usize {
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {
         CheckReport {
             manifest_path: PathBuf::from("/tmp/Cargo.toml"),
+            working_dir: None,
             target_dir: None,
             timeout_ms: None,
             cargo_args: Vec::new(),

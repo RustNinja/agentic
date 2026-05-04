@@ -119,12 +119,15 @@ impl Checker {
     }
 
     fn check_cargo_metadata(&mut self, manifest_path: &Path) {
+        let manifest_path_for_cargo = absolute_path(manifest_path);
+        let working_dir = manifest_working_dir(&manifest_path_for_cargo);
         let output = Command::new("cargo")
             .arg("metadata")
             .arg("--format-version=1")
             .arg("--no-deps")
             .arg("--manifest-path")
-            .arg(manifest_path)
+            .arg(&manifest_path_for_cargo)
+            .current_dir(&working_dir)
             .output();
 
         match output {
@@ -503,6 +506,23 @@ impl Checker {
             path,
         });
     }
+}
+
+fn absolute_path(path: &Path) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    std::env::current_dir()
+        .map(|current| current.join(path))
+        .unwrap_or_else(|_| path.to_path_buf())
+}
+
+fn manifest_working_dir(manifest_path: &Path) -> PathBuf {
+    manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 fn read_manifest(path: &Path, diagnostics: &mut Vec<PreflightDiagnostic>) -> Value {

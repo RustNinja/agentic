@@ -99,12 +99,15 @@ fn read_manifest(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
 }
 
 fn load_cargo_metadata(manifest_path: &Path) -> Result<CargoMetadata, Box<dyn std::error::Error>> {
+    let manifest_path_for_cargo = absolute_path(manifest_path)?;
+    let working_dir = manifest_working_dir(&manifest_path_for_cargo);
     let output = Command::new("cargo")
         .arg("metadata")
         .arg("--format-version=1")
         .arg("--no-deps")
         .arg("--manifest-path")
-        .arg(manifest_path)
+        .arg(&manifest_path_for_cargo)
+        .current_dir(&working_dir)
         .output()?;
 
     if !output.status.success() {
@@ -117,6 +120,21 @@ fn load_cargo_metadata(manifest_path: &Path) -> Result<CargoMetadata, Box<dyn st
     }
 
     Ok(serde_json::from_slice(&output.stdout)?)
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(path))
+}
+
+fn manifest_working_dir(manifest_path: &Path) -> PathBuf {
+    manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 fn entry_target(

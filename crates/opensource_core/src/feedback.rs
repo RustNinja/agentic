@@ -24,6 +24,8 @@ pub struct CheckOptions {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CheckReport {
     pub manifest_path: PathBuf,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub working_dir: Option<PathBuf>,
     pub target_dir: Option<PathBuf>,
     pub timeout_ms: Option<u64>,
     #[serde(default)]
@@ -145,12 +147,15 @@ fn check_workspace_with_program(
     program: &OsStr,
     options: CheckOptions,
 ) -> Result<CheckReport, Box<dyn std::error::Error>> {
+    let manifest_path_for_cargo = absolute_path(&options.manifest_path)?;
+    let working_dir = manifest_working_dir(&manifest_path_for_cargo);
     let mut command = Command::new(program);
     command
         .arg("check")
         .arg("--manifest-path")
-        .arg(&options.manifest_path)
+        .arg(&manifest_path_for_cargo)
         .arg("--message-format=json");
+    command.current_dir(&working_dir);
     command.args(&options.cargo_args);
 
     if let Some(target_dir) = &options.target_dir {
@@ -175,6 +180,7 @@ fn check_workspace_with_program(
 
     Ok(CheckReport {
         manifest_path: options.manifest_path,
+        working_dir: Some(working_dir),
         target_dir: options.target_dir,
         timeout_ms: options
             .timeout
@@ -188,6 +194,21 @@ fn check_workspace_with_program(
         widening,
         stderr,
     })
+}
+
+fn absolute_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    if path.is_absolute() {
+        return Ok(path.to_path_buf());
+    }
+    Ok(std::env::current_dir()?.join(path))
+}
+
+fn manifest_working_dir(manifest_path: &Path) -> PathBuf {
+    manifest_path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+        .unwrap_or_else(|| Path::new("."))
+        .to_path_buf()
 }
 
 pub fn write_report(report: &CheckReport, path: &Path) -> Result<(), Box<dyn std::error::Error>> {
@@ -894,10 +915,58 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn runs_cargo_check_from_manifest_parent() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("opensourced-feedback-cwd-{unique}"));
+        let workspace = root.join("workspace");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let fake_cargo = root.join("fake-cargo");
+        let cwd_path = root.join("cwd.txt");
+        fs::write(
+            &fake_cargo,
+            format!(
+                "#!/bin/sh\npwd > '{}'\necho '{{\"reason\":\"build-finished\",\"success\":true}}'\n",
+                cwd_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_cargo).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_cargo, permissions).unwrap();
+
+        let report = check_workspace_with_program(
+            fake_cargo.as_os_str(),
+            CheckOptions {
+                manifest_path: workspace.join("Cargo.toml"),
+                target_dir: None,
+                timeout: Some(Duration::from_secs(1)),
+                cargo_args: Vec::new(),
+            },
+        )
+        .expect("fake cargo should run");
+
+        let actual = PathBuf::from(fs::read_to_string(&cwd_path).unwrap().trim()).canonicalize();
+        let expected = workspace.canonicalize();
+        assert_eq!(actual.unwrap(), expected.unwrap());
+        assert_eq!(report.working_dir.as_deref(), Some(workspace.as_path()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
     #[test]
     fn serializes_feedback_invocation_context() {
         let report = CheckReport {
             manifest_path: PathBuf::from("/tmp/slice/Cargo.toml"),
+            working_dir: Some(PathBuf::from("/tmp/slice")),
             target_dir: Some(PathBuf::from("/tmp/slice-target")),
             timeout_ms: Some(600_000),
             cargo_args: vec!["--all-targets".to_string()],
@@ -915,6 +984,7 @@ mod tests {
                 .expect("report should serialize");
 
         assert_eq!(value["target_dir"], "/tmp/slice-target");
+        assert_eq!(value["working_dir"], "/tmp/slice");
         assert_eq!(value["timeout_ms"], 600_000);
         assert_eq!(value["cargo_args"][0], "--all-targets");
     }

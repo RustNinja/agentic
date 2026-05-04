@@ -2,10 +2,10 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use opensource_core::{generate, GenerateOptions};
+use opensource_core::{check_workspace, generate, CheckOptions, GenerateOptions};
 
 #[test]
 fn cargo_metadata_workspace_excludes_define_loaded_members() {
@@ -41,6 +41,72 @@ fn cargo_metadata_workspace_excludes_define_loaded_members() {
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
     );
+}
+
+#[test]
+fn copies_workspace_cargo_config_and_feedback_uses_generated_cargo_context() {
+    let workspace = temp_path("cargo-config-workspace");
+    let output = temp_path("cargo-config-output");
+    let target_dir = temp_path("cargo-config-target");
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join(".cargo/config.toml"),
+        r#"[build]
+rustflags = ["--cfg", "slicers_config_probe", "--check-cfg=cfg(slicers_config_probe)"]
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[cfg(not(slicers_config_probe))]
+compile_error!("workspace cargo config was not applied");
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join(".cargo/config.toml").exists());
+    let report = check_workspace(CheckOptions {
+        manifest_path: output.join("Cargo.toml"),
+        target_dir: Some(target_dir),
+        timeout: Some(Duration::from_secs(60)),
+        cargo_args: Vec::new(),
+    })
+    .expect("generated workspace cargo check should run");
+
+    assert!(
+        report.success,
+        "generated cargo check should use copied .cargo/config.toml\nstderr:\n{}",
+        report.stderr
+    );
+    assert_eq!(report.working_dir.as_deref(), Some(output.as_path()));
 }
 
 #[test]
