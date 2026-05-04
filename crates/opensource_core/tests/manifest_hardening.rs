@@ -2400,14 +2400,18 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
     let app_manifest = read(output.join("app/Cargo.toml"));
     let lockfile = read(output.join("Cargo.lock"));
     let support_manifest = read(output.join("support/external-helper/Cargo.toml"));
+    let support_leaf_manifest = read(output.join("support/external-leaf/Cargo.toml"));
     let support_source = read(output.join("support/external-helper/src/lib.rs"));
     assert!(root_manifest.contains("external_helper"));
     assert!(root_manifest.contains("path = \"support/external-helper\""));
+    assert!(root_manifest.contains("path = \"support/external-leaf\""));
     assert!(!root_manifest.contains("path = \"/"));
     assert!(!root_manifest.contains("path = \"../"));
     assert!(root_manifest.contains("[patch.crates-io.external-helper]"));
+    assert!(root_manifest.contains("[patch.crates-io.external-leaf]"));
     assert!(app_manifest.contains("external_helper"));
     assert!(support_manifest.contains("name = \"external-helper\""));
+    assert!(support_leaf_manifest.contains("name = \"external-leaf\""));
     assert!(support_source.contains("pub fn decorate"));
     assert!(lockfile.contains("version = 3"));
 
@@ -2415,8 +2419,18 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
         "{}-external-helper",
         workspace.file_name().unwrap().to_string_lossy()
     );
+    let external_leaf_name = format!(
+        "{}-external-leaf",
+        workspace.file_name().unwrap().to_string_lossy()
+    );
     let external_root = workspace.parent().unwrap().join(external_name);
+    let external_leaf_root = workspace.parent().unwrap().join(external_leaf_name);
     fs::rename(&external_root, external_root.with_extension("moved")).unwrap();
+    fs::rename(
+        &external_leaf_root,
+        external_leaf_root.with_extension("moved"),
+    )
+    .unwrap();
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -2433,6 +2447,331 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
         String::from_utf8_lossy(&cargo_check.stderr),
         root_manifest,
         app_manifest,
+    );
+}
+
+#[test]
+fn copies_workspace_assets_referenced_by_copied_support_include_macros() {
+    let workspace = temp_path("support-include-asset-workspace");
+    let output = temp_path("support-include-asset-output");
+    let target_dir = temp_path("support-include-asset-target");
+    let support_ws_name = format!(
+        "{}-support-ws",
+        workspace.file_name().unwrap().to_string_lossy()
+    );
+    let support_ws = workspace.parent().unwrap().join(&support_ws_name);
+    if workspace.exists() {
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+    if support_ws.exists() {
+        fs::remove_dir_all(&support_ws).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+helper = {{ path = "../{support_ws_name}/helper" }}
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helper.workspace = true
+opensourced.workspace = true
+"#,
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    helper::decorate(value)
+}
+"#,
+    );
+    write(
+        support_ws.join("Cargo.toml"),
+        r#"[workspace]
+members = ["helper"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        support_ws.join("helper/Cargo.toml"),
+        r#"[package]
+name = "helper"
+version.workspace = true
+edition.workspace = true
+"#,
+    );
+    write(
+        support_ws.join("helper/src/lib.rs"),
+        r#"const SHARED: &str = include_str!("../../shared.txt");
+
+pub fn decorate(value: &str) -> String {
+    format!("{value}:{SHARED}")
+}
+"#,
+    );
+    write(support_ws.join("shared.txt"), "support-shared");
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join("support/helper/src/lib.rs").exists());
+    assert!(output.join("support/shared.txt").exists());
+
+    fs::rename(&support_ws, support_ws.with_extension("moved")).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated support include asset slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nCargo.toml:\n{}\nhelper lib:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        read(output.join("Cargo.toml")),
+        read(output.join("support/helper/src/lib.rs")),
+    );
+}
+
+#[test]
+fn retains_imports_used_only_by_format_string_captures() {
+    let workspace = temp_path("format-capture-import-workspace");
+    let output = temp_path("format-capture-import-output");
+    let target_dir = temp_path("format-capture-import-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"mod constants {
+    pub const PROFILE_INIT: &str = "init";
+}
+
+mod launcher {
+    use opensourced::opensourced;
+    use super::constants::PROFILE_INIT;
+
+    #[opensourced]
+    pub fn selected() -> String {
+        format!("{PROFILE_INIT} run")
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let generated = read(output.join("app/src/lib.rs"));
+    assert!(generated.contains("PROFILE_INIT"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated format-capture import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nlib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        generated,
+    );
+}
+
+#[test]
+fn retains_parent_trait_imports_used_by_child_super_glob() {
+    let workspace = temp_path("super-glob-trait-import-workspace");
+    let output = temp_path("super-glob-trait-import-output");
+    let target_dir = temp_path("super-glob-trait-import-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+mod child {
+    use opensourced::opensourced;
+    use super::*;
+
+    #[opensourced]
+    pub fn selected(value: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let generated = read(output.join("app/src/lib.rs"));
+    assert!(generated.contains("Hash"));
+    assert!(generated.contains("Hasher"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated super-glob trait import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nlib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        generated,
+    );
+}
+
+#[test]
+fn retains_from_str_trait_import_for_associated_function_calls() {
+    let workspace = temp_path("from-str-import-workspace");
+    let output = temp_path("from-str-import-output");
+    let target_dir = temp_path("from-str-import-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use std::str::FromStr;
+
+#[opensourced]
+pub fn selected(value: &str) -> Result<u16, std::num::ParseIntError> {
+    u16::from_str(value)
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let generated = read(output.join("app/src/lib.rs"));
+    assert!(generated.contains("FromStr"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated FromStr import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nlib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        generated,
     );
 }
 
@@ -5365,9 +5704,17 @@ fn write_external_workspace_path_fixture(root: &Path) {
         "{}-external-helper",
         root.file_name().unwrap().to_string_lossy()
     );
+    let external_leaf_name = format!(
+        "{}-external-leaf",
+        root.file_name().unwrap().to_string_lossy()
+    );
     let external_root = root.parent().unwrap().join(&external_name);
     if external_root.exists() {
         fs::remove_dir_all(&external_root).unwrap();
+    }
+    let external_leaf_root = root.parent().unwrap().join(&external_leaf_name);
+    if external_leaf_root.exists() {
+        fs::remove_dir_all(&external_leaf_root).unwrap();
     }
     let opensourced_path = repo_root().join("crates/opensourced");
 
@@ -5384,6 +5731,7 @@ opensourced = {{ path = "{}" }}
 
 [patch.crates-io]
 external-helper = {{ path = "../{external_name}" }}
+external-leaf = {{ path = "../{external_leaf_name}" }}
 "#,
             manifest_path(&opensourced_path)
         ),
@@ -5426,16 +5774,34 @@ pub fn dead() -> String {
 name = "external-helper"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+external_leaf = { package = "external-leaf", version = "0.1.0" }
 "#,
     );
     write(
         external_root.join("src/lib.rs"),
         r#"pub fn decorate(value: &str) -> String {
-    format!("external:{value}")
+    format!("external:{value}:{}", external_leaf::suffix())
 }
 
 pub fn unused() -> &'static str {
     "unused"
+}
+"#,
+    );
+    write(
+        external_leaf_root.join("Cargo.toml"),
+        r#"[package]
+name = "external-leaf"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        external_leaf_root.join("src/lib.rs"),
+        r#"pub fn suffix() -> &'static str {
+    "leaf"
 }
 "#,
     );

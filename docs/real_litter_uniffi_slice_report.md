@@ -219,6 +219,70 @@ Final retained target surface:
 
 Final validation status: `accepted` with `--deny-warnings`.
 
+## RA Feedback Second-Largest Module Smoke
+
+On 2026-05-04, the second-largest module in the same Litter checkout was
+marked:
+
+```rust
+#[opensourced]
+mod mobile_client;
+```
+
+Target module:
+`codex-mobile-client/src/mobile_client/mod.rs` (`3,147` original LOC).
+
+Command shape:
+
+```sh
+slicers \
+  --analyzer ra-feedback \
+  --preflight \
+  --check \
+  --feedback \
+  --feedback-repair-loop 6 \
+  --deny-warnings \
+  --cargo-check-arg -p \
+  --cargo-check-arg codex-mobile-client \
+  --cargo-check-arg --lib \
+  /tmp/litter-ra-feedback-second-module/shared/rust-bridge \
+  /tmp/litter-ra-feedback-second-module-slice
+```
+
+This smoke found and fixed three generic slicer issues before hitting
+source-checkout API drift:
+
+- Copied support-package manifests can depend on crates patched only by the
+  original workspace root. The generated root now retains patch entries needed
+  by copied support packages, not only selected workspace packages.
+- Copied support packages can contain `include_str!`/`include_bytes!` paths
+  that intentionally reach to their original workspace root. The support copy
+  now scans Rust files and copies those workspace-level include assets into the
+  equivalent generated relative location.
+- Imports used only through Rust 2021 format-string captures, `FromStr` trait
+  associated calls, or child modules with `use super::*` are now retained.
+
+After those fixes, the strict feedback loop progressed from 64 errors to 23
+errors and eliminated the slicer-owned missing import failures
+(`PROFILE_INIT`, `FromStr`, `Hash`, and `Hasher`). The remaining top failures
+match the original Litter checkout rather than the generated slice:
+
+- `RemoteAppServerClient::connect_websocket_stream` is referenced by
+  `codex-mobile-client/src/alleycat.rs`, but the pinned
+  `codex-app-server-client` source does not define it.
+- `RemoteAppServerClient::connect_json_line_stream` is referenced by
+  `alleycat.rs` and `ssh_bridge.rs`, but the pinned dependency does not define
+  it.
+- `codex_app_server_protocol` is missing protocol fields/variants used by the
+  mobile client, including `DynamicToolCallArgumentsDelta`,
+  `approval_policy`, and `sandbox`.
+
+Direct baseline check of the marked original package,
+`cargo check -p codex-mobile-client --lib`, also failed with those same
+dependency/API drift errors. This means the second-largest module is currently
+not a valid acceptance corpus until the Litter checkout and pinned Codex
+dependency versions are aligned.
+
 ### `cloud_sync_export_snapshot`
 
 Retained package: `codex-mobile-client`

@@ -570,10 +570,12 @@ impl SupportPackagePlan {
     }
 
     fn copy_to(&self, output_root: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+        let output_root = absolute_normalized_path(output_root)?;
         let mut copied = 0;
         for package in self.packages.values() {
             let package_output = output_root.join(&package.output_rel_dir);
             copied += copy_support_package_tree(&package.root, &package_output)?;
+            copied += copy_support_include_assets(package, &package_output, &output_root)?;
             let manifest = self.transformed_support_manifest(package)?;
             fs::write(
                 package_output.join("Cargo.toml"),
@@ -1441,6 +1443,150 @@ fn copy_support_package_tree_inner(
     Ok(1)
 }
 
+fn copy_support_include_assets(
+    package: &SupportPackage,
+    package_output: &Path,
+    output_root: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let package_root = package.root.canonicalize()?;
+    let allowed_source_root = package
+        .workspace
+        .as_ref()
+        .map(|workspace| workspace.root.as_path())
+        .unwrap_or(package_root.as_path())
+        .canonicalize()?;
+    let mut rust_files = Vec::new();
+    let mut visited = BTreeSet::new();
+    collect_support_rust_files(&package_root, &package_root, &mut visited, &mut rust_files)?;
+
+    let mut copied = 0;
+    for source in rust_files {
+        let Ok(text) = fs::read_to_string(&source) else {
+            continue;
+        };
+        let Ok(syntax) = syn::parse_file(&text) else {
+            continue;
+        };
+        copied += copy_include_assets_for_support_source(
+            &package_root,
+            &allowed_source_root,
+            &source,
+            &syntax,
+            package_output,
+            output_root,
+        )?;
+    }
+    Ok(copied)
+}
+
+fn collect_support_rust_files(
+    root: &Path,
+    path: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+
+    let resolved = path.canonicalize()?;
+    if !resolved.starts_with(root) {
+        return Ok(());
+    }
+
+    if metadata.is_dir() {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, ".git" | ".hg" | ".svn" | "target"))
+        {
+            return Ok(());
+        }
+        if !visited.insert(resolved) {
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            collect_support_rust_files(root, &entry.path(), visited, files)?;
+        }
+        return Ok(());
+    }
+
+    if metadata.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+        files.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn copy_include_assets_for_support_source(
+    package_root: &Path,
+    allowed_source_root: &Path,
+    source: &Path,
+    syntax: &syn::File,
+    package_output: &Path,
+    output_root: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let Some(source_dir) = source.parent() else {
+        return Ok(0);
+    };
+
+    let mut candidates = BTreeSet::new();
+    collect_include_macro_paths(&syntax.to_token_stream(), &mut candidates);
+
+    let mut copied = 0;
+    for candidate in candidates {
+        let path = match candidate {
+            StaticIncludePath::SourceRelative(path) => source_dir.join(path),
+            StaticIncludePath::PackageRelative(path) => package_root.join(path),
+            StaticIncludePath::Absolute(_) => continue,
+        };
+        copied += copy_support_include_asset(
+            package_root,
+            allowed_source_root,
+            &path,
+            package_output,
+            output_root,
+        )?;
+    }
+    Ok(copied)
+}
+
+fn copy_support_include_asset(
+    package_root: &Path,
+    allowed_source_root: &Path,
+    source_path: &Path,
+    package_output: &Path,
+    output_root: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let metadata = match fs::symlink_metadata(source_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
+    let Ok(resolved) = source_path.canonicalize() else {
+        return Ok(0);
+    };
+    if !resolved.starts_with(allowed_source_root) || !fs::metadata(&resolved)?.is_file() {
+        return Ok(0);
+    }
+
+    let relative = relative_path_between(package_root, &resolved);
+    let output_path = normalize_path(&package_output.join(relative));
+    if !output_path.starts_with(output_root) || output_path.exists() {
+        return Ok(0);
+    }
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(resolved, output_path)?;
+    Ok(1)
+}
+
 fn relative_path_between(from_dir: &Path, target: &Path) -> PathBuf {
     let from = normal_components(from_dir);
     let target = normal_components(target);
@@ -1708,7 +1854,8 @@ fn collect_token_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
                 idents.insert(ident.to_string());
             }
             TokenTree::Group(group) => collect_token_idents(&group.stream(), idents),
-            TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            TokenTree::Literal(literal) => collect_literal_format_captures(&literal, idents),
+            TokenTree::Punct(_) => {}
         }
     }
 }
@@ -2348,7 +2495,7 @@ fn write_workspace_manifest(
         package_usages,
         support_packages,
         &workspace_dependencies,
-    );
+    )?;
     if !workspace_dependencies.is_empty() {
         workspace.insert(
             "dependencies".to_string(),
@@ -2718,13 +2865,14 @@ fn retained_patch_dependency_names(
     project: &Project,
     reduced: &ReducedProject,
     package_usages: &HashMap<String, PackageSourceUsage>,
-    _support_packages: &SupportPackagePlan,
+    support_packages: &SupportPackagePlan,
     workspace_dependencies: &Table,
-) -> BTreeSet<String> {
+) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
     let mut names = BTreeSet::new();
     for (alias, value) in workspace_dependencies {
         names.insert(dependency_patch_name(alias, value));
     }
+    names.extend(support_package_patch_dependency_names(support_packages)?);
 
     for package_name in &reduced.packages {
         let Some(package) = project.workspace.packages.get(package_name) else {
@@ -2777,7 +2925,48 @@ fn retained_patch_dependency_names(
             }
         }
     }
-    names
+    Ok(names)
+}
+
+fn support_package_patch_dependency_names(
+    support_packages: &SupportPackagePlan,
+) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+    let mut names = BTreeSet::new();
+    for package in support_packages.packages.values() {
+        for table in support_manifest_dependency_tables(&package.manifest) {
+            for (alias, value) in table {
+                let (value, _) = materialized_support_dependency_value(package, alias, value)?;
+                let dependency_package = dependency_package_name(alias, &value);
+                if is_marker_dependency(alias, &dependency_package) {
+                    continue;
+                }
+                names.insert(dependency_patch_name(alias, &value));
+            }
+        }
+    }
+    Ok(names)
+}
+
+fn support_manifest_dependency_tables(manifest: &Value) -> Vec<&Table> {
+    let mut tables = Vec::new();
+    for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        if let Some(table) = manifest.get(table_name).and_then(Value::as_table) {
+            tables.push(table);
+        }
+    }
+    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                if let Some(table) = target.get(table_name).and_then(Value::as_table) {
+                    tables.push(table);
+                }
+            }
+        }
+    }
+    tables
 }
 
 fn dependency_patch_name(alias: &str, value: &Value) -> String {
@@ -3398,7 +3587,10 @@ fn collect_token_usage(tokens: &TokenStream, usage: &mut TokenUsage) {
                 usage.idents.insert(ident.to_string());
             }
             TokenTree::Group(group) => collect_token_usage(&group.stream(), usage),
-            TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+            TokenTree::Literal(literal) => {
+                collect_literal_format_captures(literal, &mut usage.idents)
+            }
+            TokenTree::Punct(_) => {}
         }
     }
 
@@ -3556,8 +3748,62 @@ fn token_stream_mentions_ident(tokens: &TokenStream, ident: &str) -> bool {
     tokens.clone().into_iter().any(|token| match token {
         TokenTree::Ident(candidate) => candidate == ident,
         TokenTree::Group(group) => token_stream_mentions_ident(&group.stream(), ident),
-        TokenTree::Punct(_) | TokenTree::Literal(_) => false,
+        TokenTree::Literal(literal) => literal_mentions_format_capture(&literal, ident),
+        TokenTree::Punct(_) => false,
     })
+}
+
+fn literal_mentions_format_capture(literal: &proc_macro2::Literal, ident: &str) -> bool {
+    let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) else {
+        return false;
+    };
+    format_string_mentions_capture(&literal.value(), ident)
+}
+
+fn collect_literal_format_captures(literal: &proc_macro2::Literal, idents: &mut BTreeSet<String>) {
+    let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) else {
+        return;
+    };
+    collect_format_string_captures(&literal.value(), idents);
+}
+
+fn format_string_mentions_capture(value: &str, ident: &str) -> bool {
+    let mut captures = BTreeSet::new();
+    collect_format_string_captures(value, &mut captures);
+    captures.contains(ident)
+}
+
+fn collect_format_string_captures(value: &str, idents: &mut BTreeSet<String>) {
+    let bytes = value.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() {
+        if bytes[index] != b'{' {
+            index += 1;
+            continue;
+        }
+        index += 1;
+        if index < bytes.len() && bytes[index] == b'{' {
+            index += 1;
+            continue;
+        }
+        let start = index;
+        if index >= bytes.len()
+            || !(bytes[index] == b'_' || (bytes[index] as char).is_ascii_alphabetic())
+        {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len()
+            && (bytes[index] == b'_' || (bytes[index] as char).is_ascii_alphanumeric())
+        {
+            index += 1;
+        }
+        if index >= bytes.len() || matches!(bytes[index], b'}' | b':' | b'?') {
+            if let Some(capture) = value.get(start..index) {
+                idents.insert(capture.to_string());
+            }
+        }
+    }
 }
 
 fn token_stream_mentions_dependency_public_name(
@@ -5093,6 +5339,31 @@ fn reachable_module_has_method_call(
             })
 }
 
+fn reachable_import_scope_has_method_call(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    method: &str,
+) -> bool {
+    if reachable_module_has_method_call(project, reduced, package, module_path, method) {
+        return true;
+    }
+    child_modules_with_super_glob_import(project, reduced, render_plan, package, module_path)
+        .into_iter()
+        .any(|child_path| {
+            reachable_import_scope_has_method_call(
+                project,
+                reduced,
+                render_plan,
+                package,
+                &child_path,
+                method,
+            )
+        })
+}
+
 fn reachable_module_has_associated_function_call(
     project: &Project,
     reduced: &ReducedProject,
@@ -5123,6 +5394,86 @@ fn reachable_module_has_associated_function_call(
                     .get(item)
                     .is_some_and(|record| item_has_associated_function_call(&record.item, function))
             })
+}
+
+fn reachable_import_scope_has_associated_function_call(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    function: &str,
+) -> bool {
+    if reachable_module_has_associated_function_call(
+        project,
+        reduced,
+        package,
+        module_path,
+        function,
+    ) {
+        return true;
+    }
+    child_modules_with_super_glob_import(project, reduced, render_plan, package, module_path)
+        .into_iter()
+        .any(|child_path| {
+            reachable_import_scope_has_associated_function_call(
+                project,
+                reduced,
+                render_plan,
+                package,
+                &child_path,
+                function,
+            )
+        })
+}
+
+fn child_modules_with_super_glob_import(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+) -> Vec<Vec<String>> {
+    let mut children = Vec::new();
+    if let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    {
+        for item in &source.syntax.items {
+            let Item::Mod(item_mod) = item else {
+                continue;
+            };
+            let Some((_, child_items)) = &item_mod.content else {
+                continue;
+            };
+            if !items_have_super_glob_import(child_items) {
+                continue;
+            }
+            let mut child_path = module_path.to_vec();
+            child_path.push(item_mod.ident.to_string());
+            if module_should_render(project, reduced, render_plan, package, &child_path) {
+                children.push(child_path);
+            }
+        }
+    }
+
+    children.extend(
+        project
+            .files
+            .values()
+            .filter(|source| source.package == package)
+            .filter(|source| source.module_path.len() == module_path.len() + 1)
+            .filter(|source| path_has_prefix(&source.module_path, module_path))
+            .filter(|source| {
+                module_should_render(project, reduced, render_plan, package, &source.module_path)
+                    && items_have_super_glob_import(&source.syntax.items)
+            })
+            .map(|source| source.module_path.clone()),
+    );
+    children.sort();
+    children.dedup();
+    children
 }
 
 fn item_fn_has_method_call(item: &syn::ItemFn, method: &str) -> bool {
@@ -6590,9 +6941,10 @@ fn external_trait_import_should_remain(
         }
         if known_trait_associated_function_idents(target, leaf).is_some_and(|functions| {
             functions.iter().any(|function| {
-                reachable_module_has_associated_function_call(
+                reachable_import_scope_has_associated_function_call(
                     project,
                     reduced,
+                    render_plan,
                     package,
                     module_path,
                     function,
@@ -6615,7 +6967,14 @@ fn external_trait_import_should_remain(
             method_candidates.iter().map(String::as_str).collect()
         };
         return methods.iter().any(|method| {
-            reachable_module_has_method_call(project, reduced, package, module_path, method)
+            reachable_import_scope_has_method_call(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                method,
+            )
         });
     }
     if !is_external_trait_import_candidate(target, leaf) {
@@ -6670,9 +7029,10 @@ fn external_trait_import_should_remain(
         }
         if known_trait_associated_function_idents(target, leaf).is_some_and(|functions| {
             functions.iter().any(|function| {
-                reachable_module_has_associated_function_call(
+                reachable_import_scope_has_associated_function_call(
                     project,
                     reduced,
+                    render_plan,
                     package,
                     module_path,
                     function,
@@ -6689,7 +7049,14 @@ fn external_trait_import_should_remain(
             method_candidates.iter().map(String::as_str).collect()
         };
         return methods.iter().any(|method| {
-            reachable_module_has_method_call(project, reduced, package, module_path, method)
+            reachable_import_scope_has_method_call(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                method,
+            )
         });
     }
     target
@@ -6821,6 +7188,7 @@ fn known_trait_associated_function_idents(
         (Some("serde"), "Serialize") => Some(&["serialize"]),
         (Some("sha1"), "Digest") => Some(&["digest", "new", "new_with_prefix"]),
         (Some("std" | "core" | "alloc"), "ExitStatusExt") => Some(&["from_raw"]),
+        (Some("std" | "core" | "alloc"), "FromStr") => Some(&["from_str"]),
         _ => None,
     }
 }
