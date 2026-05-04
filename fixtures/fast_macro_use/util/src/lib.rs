@@ -1,3 +1,5 @@
+use std::{fmt, ops::Deref, str::FromStr};
+
 pub trait Useful {
     type Output;
 
@@ -10,6 +12,14 @@ pub trait Transform<T> {
     type Output;
 
     fn transform(&self, input: T) -> Self::Output;
+}
+
+pub trait DescribeValue {
+    type Value;
+
+    const LABEL: &'static str;
+
+    fn describe_value(&self) -> Self::Value;
 }
 
 pub struct UtilValue(pub u32);
@@ -32,6 +42,38 @@ where
 
     fn transform(&self, input: T) -> Self::Output {
         self.0 + input.into() + helper()
+    }
+}
+
+impl DescribeValue for UtilValue {
+    type Value = String;
+
+    const LABEL: &'static str = "util";
+
+    fn describe_value(&self) -> Self::Value {
+        format!("{}:{}", Self::LABEL, self.0)
+    }
+}
+
+impl FromStr for UtilValue {
+    type Err = std::num::ParseIntError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        input.parse::<u32>().map(Self)
+    }
+}
+
+impl fmt::Display for UtilValue {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "util-{}", self.0)
+    }
+}
+
+impl Deref for UtilValue {
+    type Target = u32;
+
+    fn deref(&self) -> &Self::Target {
+        &self.0
     }
 }
 

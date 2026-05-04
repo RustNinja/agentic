@@ -3,12 +3,13 @@ use macro_helpers::{
     FixtureObject, FixtureRecord,
 };
 use opensourced::opensourced;
+use std::{fmt, str::FromStr};
 use shared::{
     fixture_value as selected_value,
     prelude::{exported_nested, SharedAlias, SharedMode, FEATURE_FLAG},
     SharedRecord, SHARED_STATIC,
 };
-use util::{make_util, Transform, Useful, UtilValue};
+use util::{make_util, DescribeValue, Transform, Useful, UtilValue};
 
 use crate::grouped::{dead_grouped as local_shadow, live_grouped};
 use crate::removed::dead_fn as selected_shadow;
@@ -71,6 +72,20 @@ mod platform_bridge {
     }
 }
 
+#[cfg(any(target_os = "macos", target_os = "linux", windows))]
+mod cfg_matrix {
+    pub fn cfg_value() -> u32 {
+        19
+    }
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+mod cfg_matrix {
+    pub fn cfg_value() -> u32 {
+        0
+    }
+}
+
 macro_rules! local_sum {
     ($left:expr, $right:expr) => {
         $left + $right
@@ -104,6 +119,50 @@ macro_rules! declare_wire_error {
 }
 
 declare_wire_error!(WireError);
+
+macro_rules! declare_macro_pair {
+    ($name:ident, $builder:ident) => {
+        #[derive(Clone, FixtureRecord)]
+        #[fixture_serde(rename_all = "snake_case")]
+        pub struct $name {
+            value: SharedAlias,
+        }
+
+        impl $name {
+            pub fn new(value: SharedAlias) -> Self {
+                Self { value }
+            }
+
+            pub fn value(&self) -> SharedAlias {
+                self.value
+            }
+        }
+
+        pub fn $builder(value: SharedAlias) -> $name {
+            $name::new(value)
+        }
+    };
+}
+
+declare_macro_pair!(MacroPair, macro_pair);
+
+const CORE_GUIDE: &str = include_str!("guidelines/core.md");
+const EXTRA_GUIDE: &str = include_str!("../assets/extra.txt");
+const CONCAT_GUIDE: &str = include_str!(concat!("guidelines/", "concat.md"));
+const DEAD_GUIDE: &str = include_str!("guidelines/dead.md");
+const LOCAL_PATTERN_TAG: SharedAlias = 29;
+
+fn asset_score() -> SharedAlias {
+    (CORE_GUIDE.len() + EXTRA_GUIDE.len() + CONCAT_GUIDE.len()) as SharedAlias
+}
+
+fn pattern_score(value: SharedAlias) -> SharedAlias {
+    match value {
+        FEATURE_FLAG => 5,
+        LOCAL_PATTERN_TAG => 7,
+        _ => 1,
+    }
+}
 
 #[derive(Default, FixtureDerive)]
 #[fixture_helper(path = "shared::helper_marker")]
@@ -173,6 +232,25 @@ impl WireEvent {
     }
 }
 
+#[opensourced]
+pub struct DisplayToken(SharedAlias);
+
+impl DisplayToken {
+    pub fn new(value: SharedAlias) -> Self {
+        Self(value)
+    }
+
+    pub fn score(&self) -> SharedAlias {
+        self.to_string().len() as SharedAlias
+    }
+}
+
+impl fmt::Display for DisplayToken {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(formatter, "display-{}", self.0)
+    }
+}
+
 pub struct WireSlot<const N: usize> {
     value: SharedAlias,
 }
@@ -184,6 +262,27 @@ impl<const N: usize> WireSlot<N> {
 
     pub fn folded(&self) -> SharedAlias {
         self.value + N as SharedAlias
+    }
+}
+
+#[opensourced]
+pub trait EdgeCodec<T> {
+    type Encoded;
+
+    const OFFSET: SharedAlias;
+
+    fn encode(value: T) -> Self::Encoded;
+}
+
+pub struct WireCodec;
+
+impl EdgeCodec<WireDto> for WireCodec {
+    type Encoded = SharedAlias;
+
+    const OFFSET: SharedAlias = 31;
+
+    fn encode(value: WireDto) -> Self::Encoded {
+        value.score() + Self::OFFSET
     }
 }
 
@@ -231,6 +330,22 @@ impl TryFrom<WireDto> for RootDto {
 async fn async_bridge_value(input: SharedAlias) -> SharedAlias {
     let dto = RootDto::from(SharedRecord::new(input));
     dto.value + platform_bridge::platform_value()
+}
+
+fn trait_edge_score(input: SharedAlias, wire: WireDto) -> SharedAlias {
+    let parsed = UtilValue::from_str("8").expect("static util value should parse");
+    let parsed_via_trait: UtilValue = "9".parse().expect("static util value should parse");
+    let encoded: <WireCodec as EdgeCodec<WireDto>>::Encoded = WireCodec::encode(wire);
+    let display = DisplayToken::new(input);
+
+    encoded
+        + <WireCodec as EdgeCodec<WireDto>>::OFFSET
+        + parsed.transform(input)
+        + <UtilValue as Transform<SharedAlias>>::transform(&parsed_via_trait, input)
+        + *parsed
+        + parsed_via_trait.describe_value().len() as SharedAlias
+        + <UtilValue as DescribeValue>::LABEL.len() as SharedAlias
+        + display.score()
 }
 
 #[allow(dead_code)]
@@ -302,6 +417,7 @@ pub fn open_macro_use_entry(input: u32) -> u32 {
         .unwrap_or_else(|error| error.code());
     let event = WireEvent::Record { dto: wire.clone() };
     let slot = WireSlot::<3>::new(converted);
+    let pair = macro_pair(alias_value);
     let bridge_object = BridgeObject::new(input);
 
     local_sum!(
@@ -324,8 +440,28 @@ pub fn open_macro_use_entry(input: u32) -> u32 {
             + const_mix
             + converted
             + slot.folded()
+            + pair.value()
+            + cfg_matrix::cfg_value()
+            + asset_score()
+            + pattern_score(alias_value)
             + bridge_object.value()
     )
+}
+
+#[opensourced]
+pub fn open_trait_edges(input: SharedAlias) -> SharedAlias {
+    trait_edge_score(
+        input,
+        WireDto {
+            label: Some(DisplayToken::new(input).to_string()),
+            mode: SharedMode::Fast(input),
+        },
+    )
+}
+
+#[opensourced]
+pub fn open_cfg_asset_bridge(input: SharedAlias) -> SharedAlias {
+    cfg_matrix::cfg_value() + asset_score() + pattern_score(input)
 }
 
 #[fixture_export(async_runtime = "fixture")]
@@ -350,5 +486,5 @@ pub fn open_callback_bridge(
 }
 
 pub fn dead_public_api() -> u32 {
-    selected_shadow() + local_shadow() + unused_macro!()
+    selected_shadow() + local_shadow() + unused_macro!() + DEAD_GUIDE.len() as u32
 }

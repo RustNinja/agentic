@@ -195,11 +195,15 @@ large Litter build.
 
 The fast fixture should keep growing as a matrix, not as one monolithic
 all-roots check. Current slice angles include macro-heavy root only, async root
-only, callback root only, data-item root only, trait-item root only, and
-combined macro+async roots. That caught an important API-surface issue: when a
-trait is selected as a root item, its method declarations and their imports are
-part of the public slice and must be preserved; when a trait is only retained
-as an object type surface, method-only dependencies can still be pruned.
+only, callback root only, data-item root only, trait-item root only, trait-edge
+root only, cfg/asset root only, associated-codec trait item root only, combined
+macro+async roots, and combined macro+trait+cfg roots. That caught two
+important issues: when a trait is selected as a root item, its method
+declarations and their imports are part of the public slice and must be
+preserved; and retained inline modules that contain `include!(concat!(env!(
+"OUT_DIR"), ...))` must still raise an OUT_DIR generated-source production
+hazard even when the inline module is retained only because reachable code
+mentions the module path.
 
 The dynamic-dispatch rule is now split by ownership. Direct callback inputs on
 the selected API boundary, such as `fn(...)` parameters and borrowed

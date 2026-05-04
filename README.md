@@ -20,8 +20,9 @@ workspace instead of the full source tree.
 - `fixtures/a` through `fixtures/e`: five crates used as the proof workspace.
 - `fixtures/fast_macro_use`: a standalone fast stress workspace for Litter-like
   macro-declared items, imports, derive/helper attributes, UniFFI-shaped export,
-  async, callback, cfg, include, conversion impl, generic trait, item-root, and
-  dead-pruning iteration.
+  async, callback, cfg, static include assets, conversion impl, associated
+  type/const trait impl, `FromStr`/`Display`/`Deref` trait edges, item-root,
+  OUT_DIR blocker, and dead-pruning iteration.
 
 The fixture dependency graph is:
 

@@ -1913,6 +1913,9 @@ impl SyntacticHazardCounts {
 fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
     let mut counts = SyntacticHazardCounts::default();
     counts.add(retained_module_boundary_hazard_counts(project, reduced));
+    counts.add(retained_inline_out_dir_macro_hazard_counts(
+        project, reduced,
+    ));
 
     for callable in &reduced.reachable {
         if let Some(record) = project.functions.get(callable) {
@@ -1947,6 +1950,185 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
     }
 
     counts
+}
+
+fn retained_inline_out_dir_macro_hazard_counts(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> SyntacticHazardCounts {
+    let mut counts = SyntacticHazardCounts::default();
+    for source in project
+        .files
+        .values()
+        .filter(|source| reduced.packages.contains(&source.package))
+    {
+        collect_inline_out_dir_macro_hazards(
+            project,
+            reduced,
+            &source.package,
+            &source.module_path,
+            &source.module_path,
+            &source.syntax.items,
+            &mut counts,
+        );
+    }
+    counts
+}
+
+fn collect_inline_out_dir_macro_hazards(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    source_module_path: &[String],
+    module_path: &[String],
+    items: &[Item],
+    counts: &mut SyntacticHazardCounts,
+) {
+    for item in items {
+        let Item::Mod(item_mod) = item else {
+            continue;
+        };
+        let mut child_path = module_path.to_vec();
+        child_path.push(item_mod.ident.to_string());
+        if !retained_inline_module_should_scan(
+            project,
+            reduced,
+            package,
+            module_path,
+            &item_mod.ident.to_string(),
+            &child_path,
+        ) {
+            continue;
+        }
+        let Some((_, child_items)) = &item_mod.content else {
+            continue;
+        };
+
+        let mut visitor = syntactic_hazard_visitor_for_inline_location(
+            project,
+            package,
+            source_module_path,
+            &child_path,
+        );
+        for child in child_items {
+            if let Item::Macro(item_macro) = child {
+                count_inline_out_dir_macro(&mut visitor, item_macro);
+            }
+        }
+        counts.add(visitor.counts);
+
+        collect_inline_out_dir_macro_hazards(
+            project,
+            reduced,
+            package,
+            source_module_path,
+            &child_path,
+            child_items,
+            counts,
+        );
+    }
+}
+
+fn retained_inline_module_should_scan(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    parent_module_path: &[String],
+    module_name: &str,
+    child_module_path: &[String],
+) -> bool {
+    reduced.reachable_items.contains(&ItemId {
+        package: package.to_string(),
+        module_path: parent_module_path.to_vec(),
+        name: module_name.to_string(),
+        kind: model::ItemKind::Mod,
+    }) || reduced_contains_module_path(project, reduced, package, child_module_path)
+        || reduced_package_mentions_ident(project, reduced, package, module_name)
+}
+
+fn reduced_contains_module_path(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    reduced.reachable.iter().any(|callable| match callable {
+        CallableId::Free {
+            package: callable_package,
+            module_path: callable_module_path,
+            ..
+        } => callable_package == package && path_has_prefix(callable_module_path, module_path),
+        CallableId::Method {
+            package: callable_package,
+            type_path,
+            ..
+        } => {
+            callable_package == package
+                && project
+                    .methods
+                    .get(callable)
+                    .map(|record| path_has_prefix(&record.module_path, module_path))
+                    .unwrap_or_else(|| path_has_prefix(type_path, module_path))
+        }
+    }) || reduced
+        .reachable_items
+        .iter()
+        .any(|item| item.package == package && path_has_prefix(&item.module_path, module_path))
+}
+
+fn reduced_package_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
+    reduced.reachable.iter().any(|callable| match callable {
+        CallableId::Free {
+            package: callable_package,
+            ..
+        } if callable_package == package => project.functions.get(callable).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+        }),
+        CallableId::Method {
+            package: callable_package,
+            ..
+        } if callable_package == package => project.methods.get(callable).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+        }),
+        _ => false,
+    }) || reduced.reachable_items.iter().any(|item| {
+        item.package == package
+            && project.items.get(item).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            })
+    })
+}
+
+fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
+    path.len() >= prefix.len() && path.iter().zip(prefix).all(|(left, right)| left == right)
+}
+
+fn count_inline_out_dir_macro(visitor: &mut SyntacticHazardVisitor, item_macro: &syn::ItemMacro) {
+    if item_macro.ident.is_some() {
+        return;
+    }
+    let mac = &item_macro.mac;
+    if macro_path_ends_with(mac, "include") && macro_tokens_reference_out_dir(&mac.tokens) {
+        visitor.counts.out_dir_source_include_macros += 1;
+        visitor
+            .counts
+            .out_dir_source_include_details
+            .push(visitor.span_detail(mac));
+    } else if (macro_path_ends_with(mac, "include_str")
+        || macro_path_ends_with(mac, "include_bytes"))
+        && macro_tokens_reference_out_dir(&mac.tokens)
+    {
+        visitor.counts.out_dir_file_include_macros += 1;
+        visitor
+            .counts
+            .out_dir_file_include_details
+            .push(visitor.span_detail(mac));
+    }
 }
 
 fn retained_module_boundary_hazard_counts(
@@ -2042,6 +2224,33 @@ fn syntactic_hazard_visitor_for_location(
         location: HazardLocation {
             package: package.to_string(),
             module_path: module_path.to_vec(),
+            file,
+        },
+    }
+}
+
+fn syntactic_hazard_visitor_for_inline_location(
+    project: &Project,
+    package: &str,
+    source_module_path: &[String],
+    rendered_module_path: &[String],
+) -> SyntacticHazardVisitor {
+    let file =
+        source_for_module(project, package, source_module_path).map(|source| source.path.clone());
+    let include_context = project.workspace.packages.get(package).and_then(|package| {
+        file.as_ref().and_then(|source_path| {
+            source_path.parent().map(|source_dir| IncludeContext {
+                package_root: package.root.clone(),
+                source_dir: source_dir.to_path_buf(),
+            })
+        })
+    });
+    SyntacticHazardVisitor {
+        counts: SyntacticHazardCounts::default(),
+        include_context,
+        location: HazardLocation {
+            package: package.to_string(),
+            module_path: rendered_module_path.to_vec(),
             file,
         },
     }
