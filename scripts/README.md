@@ -14,9 +14,13 @@ default rust-analyzer HIR feature and records semantic inventory. Pass
 `--analyzer ra-hir-proc-macros` when a corpus run should exercise
 rust-analyzer build-script output discovery and the sysroot proc-macro server.
 RA exact project-local method/path resolutions are part of the default corpus
-flow and are applied as additive reduction hints. The RA load is bounded to
-local workspace crates by default and files containing selected roots are
-analyzed first, so large dependency graphs do not dominate corpus feedback.
+flow and are applied as additive reduction hints. The fast RA load is bounded
+to local workspace crates by default. Proc-macro mode may load dependency
+metadata/build artifacts for discovery when
+`OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` is set, but that heavier pass timed out
+on the pinned Litter corpus. Without that opt-in, the semantic walk still visits
+only workspace Rust files, analyzes files containing selected roots first, and
+reports when proc-macro expansion is unavailable.
 
 ```sh
 scripts/corpus_feedback_loop.py \

@@ -26,14 +26,20 @@ base reducer and rustc feedback/repair as the production gate. The default
 preset now defaults to `--analyzer ra-hir-proc-macros`, which asks
 rust-analyzer to run build-script output discovery and use the sysroot
 proc-macro server before collecting HIR semantics. The fast `ra-hir` path still
-keeps proc macros disabled. Both rust-analyzer paths load local workspace
-crates with dependency crates excluded by default, map exact project-local
-method/path resolutions into generic `CallableId` / `ItemId` reduction hints,
-and apply those hints as additive retained-graph edges. Files containing
-selected `#[opensourced]` roots are analyzed first so bounded semantic budgets
-prioritize the active slice. Production validation therefore relies on bounded
-RA semantics, stronger production proc-macro/build-script discovery, fast static
-fallback reduction, explicit production hazards, and
+keeps proc macros disabled and excludes dependency crates from the HIR load.
+Production proc-macro mode stays bounded by default because full Cargo
+dependency build-artifact discovery timed out on the pinned Litter corpus; set
+`OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that
+heavier analyzer pass. If rust-analyzer proc-macro loading panics or the active
+toolchain does not provide a proc-macro server, the analyzer reports that
+expansion is not active and continues with bounded HIR. Both rust-analyzer paths
+map exact project-local method/path resolutions into generic `CallableId` /
+`ItemId` reduction hints and apply those hints as additive retained-graph
+edges. Files containing selected `#[opensourced]` roots are analyzed first so
+bounded semantic budgets prioritize the active slice. Production validation
+therefore relies on bounded RA semantics, guarded production
+proc-macro/build-script discovery, fast static fallback reduction, explicit
+production hazards, and
 `cargo check --message-format=json` feedback.
 
 The latest hardening milestone validated the pinned Litter UniFFI cases in

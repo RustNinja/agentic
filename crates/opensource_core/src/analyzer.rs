@@ -246,9 +246,12 @@ mod rust_analyzer {
             requested_mode: AnalyzerMode,
             proc_macro_mode: ProcMacroExpansionMode,
         ) -> Result<Self, Box<dyn std::error::Error>> {
+            let load_dependencies_for_proc_macros = proc_macro_mode
+                == ProcMacroExpansionMode::Enabled
+                && env_flag_is_enabled("OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS");
             let cargo_config = CargoConfig {
                 set_test: true,
-                no_deps: true,
+                no_deps: !load_dependencies_for_proc_macros,
                 ..CargoConfig::default()
             };
             let load_config = LoadCargoConfig {
@@ -299,17 +302,35 @@ mod rust_analyzer {
             let mut notes = vec![
                 "rust-analyzer RootDatabase loaded".to_string(),
                 "HIR Semantics initialized".to_string(),
-                "dependency crates excluded from HIR load for bounded slicer analysis".to_string(),
             ];
             match proc_macro_mode {
-                ProcMacroExpansionMode::Disabled => notes.push(
-                    "proc macro expansion disabled for fast bounded semantic inventory"
-                        .to_string(),
-                ),
-                ProcMacroExpansionMode::Enabled => notes.push(
-                    "proc macro expansion requested through rust-analyzer sysroot proc-macro server with build-script output discovery"
-                        .to_string(),
-                ),
+                ProcMacroExpansionMode::Disabled => {
+                    notes.push(
+                        "dependency crates excluded from HIR load for bounded slicer analysis"
+                            .to_string(),
+                    );
+                    notes.push(
+                        "proc macro expansion disabled for fast bounded semantic inventory"
+                            .to_string(),
+                    );
+                }
+                ProcMacroExpansionMode::Enabled => {
+                    if load_dependencies_for_proc_macros {
+                        notes.push(
+                            "Cargo dependency graph loaded for proc-macro/build-script discovery; semantic inventory remains workspace-file bounded"
+                                .to_string(),
+                        );
+                    } else {
+                        notes.push(
+                            "dependency crates excluded from HIR load for bounded production semantic inventory; set OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1 to allow full Cargo proc-macro discovery"
+                                .to_string(),
+                        );
+                    }
+                    notes.push(
+                        "proc macro expansion requested through rust-analyzer sysroot proc-macro server with build-script output discovery"
+                            .to_string(),
+                    );
+                }
             }
             notes.push(format!(
                 "workspace load progress events: {}",
@@ -319,6 +340,12 @@ mod rust_analyzer {
                 "proc macro client active: {}",
                 proc_macro_client.is_some()
             ));
+            if proc_macro_mode == ProcMacroExpansionMode::Enabled && proc_macro_client.is_none() {
+                notes.push(
+                    "proc macro server unavailable; HIR semantic inventory continued without active proc macro expansion"
+                        .to_string(),
+                );
+            }
             notes.push(format!(
                 "HIR semantic inventory: {}/{} files analyzed, {} skipped by budget, {}/{} queried method calls resolved to functions, {}/{} callable, {}/{} fallback, {} method calls unqueried, {}/{} queried paths resolved, {} paths unqueried",
                 semantic.report.analyzed_files,
@@ -1034,6 +1061,17 @@ mod rust_analyzer {
             .and_then(|value| value.parse::<usize>().ok())
             .filter(|value| *value > 0)
             .unwrap_or(default)
+    }
+
+    fn env_flag_is_enabled(name: &str) -> bool {
+        std::env::var(name)
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
     }
 }
 
