@@ -12,7 +12,7 @@ mod repair;
 use std::{
     collections::{BTreeMap, BTreeSet},
     fs,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::Instant,
 };
 
@@ -2809,9 +2809,15 @@ impl SyntacticHazardVisitor {
             StaticIncludePath::PackageRelative(path) => context.package_root.join(path),
         };
 
-        if candidate
-            .canonicalize()
-            .is_ok_and(|path| !path.starts_with(&context.package_root))
+        let package_root_lexical = normalize_path_lexically(&context.package_root);
+        let candidate_lexical = normalize_path_lexically(&candidate);
+        if !candidate_lexical.starts_with(&package_root_lexical)
+            || candidate.canonicalize().is_ok_and(|path| {
+                context
+                    .package_root
+                    .canonicalize()
+                    .is_ok_and(|package_root| !path.starts_with(package_root))
+            })
         {
             self.counts.external_file_include_macros += 1;
             self.counts
@@ -2880,6 +2886,22 @@ fn token_stream_mentions_string_literal(tokens: &TokenStream, value: &str) -> bo
         }
         proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => false,
     })
+}
+
+fn normalize_path_lexically(path: &Path) -> PathBuf {
+    let mut normalized = PathBuf::new();
+    for component in path.components() {
+        match component {
+            Component::Prefix(prefix) => normalized.push(prefix.as_os_str()),
+            Component::RootDir => normalized.push(component.as_os_str()),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                normalized.pop();
+            }
+            Component::Normal(segment) => normalized.push(segment),
+        }
+    }
+    normalized
 }
 
 fn macro_path_ends_with(mac: &Macro, name: &str) -> bool {
@@ -4717,6 +4739,98 @@ pub fn value() -> usize {
                     .as_ref()
                     .is_some_and(|file| file.ends_with("support/external-helper/src/lib.rs"))
         }));
+        assert_eq!(report.production.status, "hazards_detected");
+    }
+
+    #[test]
+    fn reports_copied_support_package_opaque_file_include_hazards() {
+        let root = temp_output("support-include-hazard-source");
+        let external = temp_output("support-include-hazard-external");
+        let helper = external.join("external-helper");
+        let output = temp_output("support-include-hazard-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(external.join("outside.txt"), "outside support state");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nexternal-helper = {{ path = {:?} }}\n",
+                opensourced_path, helper
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    external_helper::value()
+}
+"#,
+        );
+        write(
+            helper.join("Cargo.toml"),
+            r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            helper.join("src/lib.rs"),
+            r#"pub fn value() -> usize {
+    let dynamic = include_str!(support_path!());
+    let absolute = include_str!("/definitely/outside/generated/slice.txt");
+    let external = include_str!("../../outside.txt");
+    dynamic.len() + absolute.len() + external.len()
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output,
+        })
+        .expect("reduction should succeed");
+
+        let nonliteral = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "nonliteral_file_include_macros")
+            .expect("copied support nonliteral include should be reported");
+        assert!(nonliteral.details.iter().any(|detail| {
+            detail.package.as_deref() == Some("external-helper")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("support/external-helper/src/lib.rs"))
+        }));
+
+        let absolute = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "absolute_file_include_macros")
+            .expect("copied support absolute include should be reported");
+        assert!(absolute
+            .details
+            .iter()
+            .any(|detail| detail.package.as_deref() == Some("external-helper")));
+
+        let external = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "external_file_include_macros")
+            .expect("copied support external include should be reported");
+        assert!(external
+            .details
+            .iter()
+            .any(|detail| detail.package.as_deref() == Some("external-helper")));
         assert_eq!(report.production.status, "hazards_detected");
     }
 

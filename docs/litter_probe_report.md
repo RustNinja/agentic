@@ -61,9 +61,9 @@ not slicer failures.
   modules, and fall back to broader copying only when the module graph cannot be
   parsed safely.
 - `manifest.support_build_script_hazard_parity.001`: covered for copied support
-  packages with build scripts, `OUT_DIR` source includes, and compile-time env
-  usage; extend with opaque nonliteral/absolute/external support include paths
-  as the next small fixture.
+  packages with build scripts, `OUT_DIR` source includes, compile-time env,
+  nonliteral includes, absolute includes, and package-external support include
+  paths.
 - `protocol.enum_method.compact.001`: enum parser methods like `from_wire` should
   remain compact and keep only live variants/helpers.
 - `bridge.state_constructor.heavy.001`: constructor roots with broad private
