@@ -4548,8 +4548,13 @@ fn transform_items(
     retain_test_items: bool,
 ) -> Vec<Item> {
     let preserve_uniffi_surface = package_preserves_uniffi_surface(project, reduced, package);
-    let retained_macro_definitions =
-        retained_macro_definitions_for_generated_items(project, reduced, package, items);
+    let retained_macro_definitions = retained_macro_definitions_for_generated_items(
+        project,
+        reduced,
+        package,
+        module_path,
+        items,
+    );
 
     let mut transformed = Vec::new();
     for item in items {
@@ -4607,7 +4612,13 @@ fn transform_items(
                 Some(Item::Macro(item_macro.clone()))
             }
             Item::Macro(item_macro)
-                if should_retain_macro_invocation(project, reduced, package, item_macro) =>
+                if should_retain_macro_invocation(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    item_macro,
+                ) =>
             {
                 Some(Item::Macro(item_macro.clone()))
             }
@@ -5116,6 +5127,14 @@ fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
     path.len() >= prefix.len() && path.iter().zip(prefix).all(|(left, right)| left == right)
 }
 
+fn path_ends_with(path: &[String], suffix: &[String]) -> bool {
+    path.len() >= suffix.len()
+        && path[path.len() - suffix.len()..]
+            .iter()
+            .zip(suffix)
+            .all(|(left, right)| left == right)
+}
+
 fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId> {
     let (name, kind) = match item {
         Item::Struct(item) => (item.ident.to_string(), ItemKind::Struct),
@@ -5177,6 +5196,7 @@ fn should_retain_macro_invocation(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
+    module_path: &[String],
     item_macro: &syn::ItemMacro,
 ) -> bool {
     if item_macro.ident.is_some() {
@@ -5193,13 +5213,14 @@ fn should_retain_macro_invocation(
         return false;
     }
 
-    macro_invocation_feeds_reachable_code(project, reduced, package, item_macro)
+    macro_invocation_feeds_reachable_code(project, reduced, package, module_path, item_macro)
 }
 
 fn retained_macro_definitions_for_generated_items(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
+    module_path: &[String],
     items: &[Item],
 ) -> BTreeSet<String> {
     items
@@ -5208,7 +5229,7 @@ fn retained_macro_definitions_for_generated_items(
             let Item::Macro(item_macro) = item else {
                 return None;
             };
-            if !should_retain_macro_invocation(project, reduced, package, item_macro) {
+            if !should_retain_macro_invocation(project, reduced, package, module_path, item_macro) {
                 return None;
             }
             item_macro
@@ -5235,60 +5256,484 @@ fn macro_invocation_feeds_reachable_code(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
+    module_path: &[String],
     item_macro: &syn::ItemMacro,
 ) -> bool {
     let token_idents = macro_token_idents(&item_macro.mac.tokens);
-    if token_idents.iter().any(|ident| {
-        reachable_package_mentions_ident(project, reduced, package, ident)
-            || reachable_reduced_packages_mention_ident(project, reduced, ident)
-    }) {
+    if token_idents
+        .iter()
+        .any(|ident| reachable_macro_generated_ident(project, reduced, package, module_path, ident))
+    {
         return true;
     }
 
-    if !token_idents.is_empty() {
-        return false;
-    }
-
-    macro_definition_tokens_feed_reachable_code(project, reduced, package, item_macro)
+    macro_definition_tokens_feed_reachable_code(project, reduced, package, module_path, item_macro)
 }
 
 fn macro_definition_tokens_feed_reachable_code(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
+    module_path: &[String],
     item_macro: &syn::ItemMacro,
 ) -> bool {
-    let Some(name) = item_macro
-        .mac
-        .path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
+    let Some(item) =
+        resolve_macro_item_for_invocation(project, package, module_path, &item_macro.mac.path)
     else {
         return false;
     };
-    let macro_item = project.items.iter().find_map(|(item, record)| {
-        (item.package == package && item.kind == ItemKind::Macro && item.name == name)
-            .then_some(record)
-    });
-    let Some(record) = macro_item else {
+    let Some(record) = project.items.get(&item) else {
         return false;
     };
     let Item::Macro(definition) = &record.item else {
         return false;
     };
-    macro_token_idents(&definition.mac.tokens)
+    macro_definition_generated_item_idents(&definition.mac.tokens, &item_macro.mac.tokens)
         .iter()
-        .any(|ident| {
-            reachable_package_mentions_ident(project, reduced, package, ident)
-                || reachable_reduced_packages_mention_ident(project, reduced, ident)
+        .any(|ident| reachable_macro_generated_ident(project, reduced, package, module_path, ident))
+}
+
+fn reachable_macro_generated_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    if module_path.is_empty() {
+        return reachable_non_macro_package_mentions_ident(project, reduced, package, ident);
+    }
+
+    reduced.reachable.iter().any(|callable| {
+        if callable.package() != package {
+            return false;
+        }
+        project.functions.get(callable).is_some_and(|record| {
+            (record.module_path == module_path
+                && token_stream_mentions_ident(&record.item.to_token_stream(), ident))
+                || token_stream_mentions_module_path_ident(
+                    &record.item.to_token_stream(),
+                    module_path,
+                    ident,
+                )
+        }) || project.methods.get(callable).is_some_and(|record| {
+            (record.module_path == module_path
+                && token_stream_mentions_ident(&record.item.to_token_stream(), ident))
+                || token_stream_mentions_module_path_ident(
+                    &record.item.to_token_stream(),
+                    module_path,
+                    ident,
+                )
         })
+    }) || reduced.reachable_items.iter().any(|item| {
+        item.package == package
+            && project.items.get(item).is_some_and(|record| {
+                !matches!(record.item, Item::Macro(_))
+                    && ((record.module_path == module_path
+                        && token_stream_mentions_ident(&record.item.to_token_stream(), ident))
+                        || token_stream_mentions_module_path_ident(
+                            &record.item.to_token_stream(),
+                            module_path,
+                            ident,
+                        ))
+            })
+    })
+}
+
+fn reachable_non_macro_package_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
+    reduced.reachable.iter().any(|callable| {
+        if callable.package() != package {
+            return false;
+        }
+        callable_mentions_ident(callable, ident)
+            || project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            })
+            || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+            })
+    }) || reduced.reachable_items.iter().any(|item| {
+        item.package == package
+            && item.kind != ItemKind::Macro
+            && (item.name == ident
+                || item.module_path.iter().any(|segment| segment == ident)
+                || project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+                }))
+    })
+}
+
+fn token_stream_mentions_module_path_ident(
+    tokens: &TokenStream,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let mut expected = module_path.to_vec();
+    expected.push(ident.to_string());
+    token_path_candidates(tokens)
+        .into_iter()
+        .any(|candidate| path_ends_with(&candidate, &expected))
+}
+
+fn resolve_macro_item_for_invocation(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    path: &syn::Path,
+) -> Option<ItemId> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let (target_package, target_path) =
+        resolve_macro_invocation_segments(project, package, module_path, &segments)?;
+    if let Some(item) = find_macro_item(project, &target_package, &target_path) {
+        return Some(item);
+    }
+
+    let name = target_path.last()?;
+    let mut matches = project
+        .items
+        .keys()
+        .filter(|item| {
+            item.package == target_package && item.kind == ItemKind::Macro && item.name == *name
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    matches.sort();
+    (matches.len() == 1).then(|| matches.remove(0))
+}
+
+fn resolve_macro_invocation_segments(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    segments: &[String],
+) -> Option<(String, Vec<String>)> {
+    let first = segments.first()?;
+    match first.as_str() {
+        "crate" => Some((package.to_string(), segments[1..].to_vec())),
+        "self" => {
+            let mut path = module_path.to_vec();
+            path.extend_from_slice(&segments[1..]);
+            Some((package.to_string(), path))
+        }
+        "super" => {
+            let mut path = module_path.to_vec();
+            path.pop();
+            path.extend_from_slice(&segments[1..]);
+            Some((package.to_string(), path))
+        }
+        name if name == package => Some((package.to_string(), segments[1..].to_vec())),
+        dependency => {
+            if let Some(target_package) = resolve_dependency_package(project, package, dependency) {
+                return Some((target_package, segments[1..].to_vec()));
+            }
+            let mut path = module_path.to_vec();
+            path.extend_from_slice(segments);
+            Some((package.to_string(), path))
+        }
+    }
+}
+
+fn resolve_dependency_package(project: &Project, package: &str, name: &str) -> Option<String> {
+    project
+        .workspace
+        .packages
+        .get(package)?
+        .dependencies
+        .iter()
+        .find(|dependency| dependency_name_matches(dependency, name))
+        .and_then(|dependency| {
+            project
+                .workspace
+                .packages
+                .contains_key(&dependency.package)
+                .then(|| dependency.package.clone())
+        })
+}
+
+fn find_macro_item(project: &Project, package: &str, path: &[String]) -> Option<ItemId> {
+    let name = path.last()?.clone();
+    let module_path = path[..path.len() - 1].to_vec();
+    project
+        .items
+        .keys()
+        .find(|item| {
+            item.package == package
+                && item.kind == ItemKind::Macro
+                && item.module_path == module_path
+                && item.name == name
+        })
+        .cloned()
 }
 
 fn macro_token_idents(tokens: &TokenStream) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
     collect_macro_token_idents(tokens, &mut idents);
     idents
+}
+
+fn macro_definition_generated_item_idents(
+    definition_tokens: &TokenStream,
+    invocation_tokens: &TokenStream,
+) -> BTreeSet<String> {
+    let invocation_args = macro_invocation_arg_map(definition_tokens, invocation_tokens);
+    let mut idents = BTreeSet::new();
+    collect_macro_definition_generated_item_idents(
+        definition_tokens,
+        &invocation_args,
+        &mut idents,
+    );
+    idents
+}
+
+fn macro_invocation_arg_map(
+    definition_tokens: &TokenStream,
+    invocation_tokens: &TokenStream,
+) -> HashMap<String, String> {
+    macro_definition_metavariables(definition_tokens)
+        .into_iter()
+        .zip(macro_invocation_arg_idents(invocation_tokens))
+        .collect()
+}
+
+fn macro_definition_metavariables(tokens: &TokenStream) -> Vec<String> {
+    let mut names = Vec::new();
+    collect_macro_definition_metavariables(tokens, &mut names);
+    names
+}
+
+fn collect_macro_definition_metavariables(tokens: &TokenStream, names: &mut Vec<String>) {
+    let mut skip_metavariable = false;
+    for token in tokens.clone() {
+        match token {
+            TokenTree::Ident(ident) if skip_metavariable => {
+                let ident = ident.to_string();
+                if !names.contains(&ident) {
+                    names.push(ident);
+                }
+                skip_metavariable = false;
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '$' => {
+                skip_metavariable = true;
+            }
+            TokenTree::Group(group) => {
+                skip_metavariable = false;
+                collect_macro_definition_metavariables(&group.stream(), names);
+            }
+            TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => {
+                skip_metavariable = false;
+            }
+        }
+    }
+}
+
+fn macro_invocation_arg_idents(tokens: &TokenStream) -> Vec<String> {
+    tokens
+        .clone()
+        .into_iter()
+        .filter_map(|token| match token {
+            TokenTree::Ident(ident) => Some(ident.to_string()),
+            _ => None,
+        })
+        .collect()
+}
+
+fn collect_macro_definition_generated_item_idents(
+    tokens: &TokenStream,
+    invocation_args: &HashMap<String, String>,
+    idents: &mut BTreeSet<String>,
+) {
+    let mut item_name_expected = false;
+    let mut metavariable_item_name = false;
+    let mut impl_header = false;
+    for token in tokens.clone() {
+        match token {
+            TokenTree::Ident(ident) if metavariable_item_name => {
+                if let Some(arg) = invocation_args.get(&ident.to_string()) {
+                    idents.insert(arg.clone());
+                }
+                item_name_expected = false;
+                metavariable_item_name = false;
+            }
+            TokenTree::Ident(ident) => {
+                let ident = ident.to_string();
+                let starts_item_name = macro_generated_item_keyword(&ident);
+                let starts_impl_header = ident == "impl";
+                if item_name_expected && !macro_definition_noise_ident(&ident) {
+                    idents.insert(ident);
+                }
+                if starts_impl_header {
+                    impl_header = true;
+                }
+                item_name_expected = starts_item_name;
+                metavariable_item_name = false;
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '$' && item_name_expected => {
+                metavariable_item_name = true;
+            }
+            TokenTree::Punct(_) | TokenTree::Literal(_) => {
+                metavariable_item_name = false;
+            }
+            TokenTree::Group(group) => {
+                item_name_expected = false;
+                metavariable_item_name = false;
+                if impl_header {
+                    impl_header = false;
+                } else {
+                    collect_macro_definition_generated_item_idents(
+                        &group.stream(),
+                        invocation_args,
+                        idents,
+                    );
+                }
+            }
+        }
+    }
+}
+
+fn macro_generated_item_keyword(ident: &str) -> bool {
+    matches!(
+        ident,
+        "const" | "enum" | "fn" | "mod" | "static" | "struct" | "trait" | "type" | "union"
+    )
+}
+
+fn macro_definition_noise_ident(ident: &str) -> bool {
+    macro_pattern_keyword(&[ident.to_string()])
+        || matches!(
+            ident,
+            "block"
+                | "expr"
+                | "ident"
+                | "item"
+                | "lifetime"
+                | "literal"
+                | "meta"
+                | "pat"
+                | "pat_param"
+                | "path"
+                | "stmt"
+                | "tt"
+                | "ty"
+                | "vis"
+        )
+}
+
+fn macro_pattern_keyword(segments: &[String]) -> bool {
+    if segments.len() != 1 {
+        return false;
+    }
+
+    matches!(
+        segments[0].as_str(),
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+            | "bool"
+            | "char"
+            | "str"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "f32"
+            | "f64"
+    )
+}
+
+fn token_path_candidates(tokens: &TokenStream) -> Vec<Vec<String>> {
+    let mut candidates = Vec::new();
+    collect_token_path_candidates(tokens, &mut candidates);
+    candidates
+}
+
+fn collect_token_path_candidates(tokens: &TokenStream, candidates: &mut Vec<Vec<String>>) {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            collect_token_path_candidates(&group.stream(), candidates);
+        }
+    }
+
+    let mut index = 0;
+    while index < token_trees.len() {
+        let TokenTree::Ident(ident) = &token_trees[index] else {
+            index += 1;
+            continue;
+        };
+
+        let mut segments = vec![ident.to_string()];
+        let mut cursor = index + 1;
+        while has_path_separator(&token_trees, cursor) {
+            let Some(TokenTree::Ident(next)) = token_trees.get(cursor + 2) else {
+                break;
+            };
+            segments.push(next.to_string());
+            cursor += 3;
+        }
+
+        candidates.push(segments.clone());
+        if let Some(last) = segments.last() {
+            candidates.push(vec![last.clone()]);
+        }
+
+        index = cursor.max(index + 1);
+    }
+}
+
+fn has_path_separator(tokens: &[TokenTree], index: usize) -> bool {
+    matches!(tokens.get(index), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
+        && matches!(tokens.get(index + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == ':')
 }
 
 fn collect_macro_token_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
@@ -5363,13 +5808,6 @@ fn macro_generated_reference_candidate(ident: &str) -> bool {
             | "isize"
             | "f32"
             | "f64"
-            | "String"
-            | "Vec"
-            | "Result"
-            | "Option"
-            | "Box"
-            | "Ok"
-            | "Err"
     )
 }
 
@@ -5773,8 +6211,13 @@ fn collect_retained_module_surface_idents(
     items: &[Item],
     idents: &mut BTreeSet<String>,
 ) {
-    let retained_macro_definitions =
-        retained_macro_definitions_for_generated_items(project, reduced, package, items);
+    let retained_macro_definitions = retained_macro_definitions_for_generated_items(
+        project,
+        reduced,
+        package,
+        module_path,
+        items,
+    );
     let aliases = project
         .module_aliases
         .get(&(package.to_string(), module_path.to_vec()))
@@ -7508,7 +7951,17 @@ fn struct_field_should_remain(
     {
         return true;
     }
-    if field_mentions_struct_type_params(item_struct, field) {
+    if field_mentions_struct_type_params(item_struct, field)
+        && field_provides_required_struct_type_param_usage(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            item_struct,
+            field,
+        )
+    {
         return true;
     }
     if field_attrs_require_field(field) {
@@ -7521,16 +7974,235 @@ fn struct_field_should_remain(
     if let Some(render_plan) = render_plan {
         render_plan.package_callable_mentions_ident(package, &name)
             || render_plan.module_mentions_ident(package, module_path, &name)
+            || retained_impl_items_mention_struct_field(
+                project,
+                reduced,
+                package,
+                module_path,
+                item_struct,
+                &name,
+            )
     } else {
         reachable_callables_mention_ident(project, reduced, package, &name)
+            || retained_impl_items_mention_struct_field(
+                project,
+                reduced,
+                package,
+                module_path,
+                item_struct,
+                &name,
+            )
     }
+}
+
+fn field_provides_required_struct_type_param_usage(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
+    package: &str,
+    module_path: &[String],
+    item_struct: &syn::ItemStruct,
+    field: &Field,
+) -> bool {
+    item_struct.generics.type_params().any(|param| {
+        token_stream_mentions_ident(&field.to_token_stream(), &param.ident.to_string())
+            && !struct_type_param_is_used_by_other_retained_field(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                item_struct,
+                field,
+                &param.ident.to_string(),
+            )
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn struct_type_param_is_used_by_other_retained_field(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
+    package: &str,
+    module_path: &[String],
+    item_struct: &syn::ItemStruct,
+    field: &Field,
+    type_param: &str,
+) -> bool {
+    let syn::Fields::Named(fields) = &item_struct.fields else {
+        return false;
+    };
+    fields.named.iter().any(|candidate| {
+        candidate.ident != field.ident
+            && struct_field_should_remain_without_type_param_guard(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                item_struct,
+                candidate,
+            )
+            && token_stream_mentions_ident(&candidate.to_token_stream(), type_param)
+    })
+}
+
+fn struct_field_should_remain_without_type_param_guard(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
+    package: &str,
+    module_path: &[String],
+    item_struct: &syn::ItemStruct,
+    field: &Field,
+) -> bool {
+    if matches!(item_struct.vis, syn::Visibility::Public(_))
+        && matches!(field.vis, syn::Visibility::Public(_))
+    {
+        return true;
+    }
+    if field_attrs_require_field(field) {
+        return true;
+    }
+    let Some(name) = field.ident.as_ref() else {
+        return true;
+    };
+    let name = name.to_string();
+    if let Some(render_plan) = render_plan {
+        render_plan.package_callable_mentions_ident(package, &name)
+            || render_plan.module_mentions_ident(package, module_path, &name)
+            || retained_impl_items_mention_struct_field(
+                project,
+                reduced,
+                package,
+                module_path,
+                item_struct,
+                &name,
+            )
+    } else {
+        reachable_callables_mention_ident(project, reduced, package, &name)
+            || retained_impl_items_mention_struct_field(
+                project,
+                reduced,
+                package,
+                module_path,
+                item_struct,
+                &name,
+            )
+    }
+}
+
+fn retained_impl_items_mention_struct_field(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    item_struct: &syn::ItemStruct,
+    field_name: &str,
+) -> bool {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
+        return false;
+    };
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+    let struct_name = item_struct.ident.to_string();
+
+    items.iter().any(|item| {
+        let Item::Impl(item_impl) = item else {
+            return false;
+        };
+        let Some(type_path) =
+            resolved_local_type_path(project, package, module_path, &item_impl.self_ty, &aliases)
+        else {
+            return false;
+        };
+        if type_path.last() != Some(&struct_name) {
+            return false;
+        }
+        item_impl.items.iter().any(|impl_item| {
+            impl_item_should_render_for_field_scan(
+                project,
+                reduced,
+                package,
+                module_path,
+                item_impl,
+                impl_item,
+                &type_path,
+                &aliases,
+            ) && token_stream_mentions_ident(&impl_item.to_token_stream(), field_name)
+        })
+    })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn impl_item_should_render_for_field_scan(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    item_impl: &syn::ItemImpl,
+    impl_item: &ImplItem,
+    type_path: &[String],
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> bool {
+    if impl_item_is_test(impl_item) {
+        return false;
+    }
+    let trait_path = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| normalized_path(module_path, path, aliases));
+    if trait_path.is_some()
+        && impl_should_render(project, reduced, package, module_path, item_impl, aliases)
+    {
+        return true;
+    }
+    if root_macro_impl_surface_should_render_for_module(
+        project,
+        reduced,
+        package,
+        module_path,
+        item_impl,
+        aliases,
+    ) {
+        return root_macro_impl_item_should_render(item_impl, impl_item);
+    }
+    if let ImplItem::Fn(method) = impl_item {
+        let trait_input_type_paths = item_impl
+            .trait_
+            .as_ref()
+            .map(|(_, path, _)| trait_input_type_paths(module_path, path, aliases))
+            .unwrap_or_default();
+        let id = CallableId::Method {
+            package: package.to_string(),
+            type_path: type_path.to_vec(),
+            trait_path,
+            trait_input_type_paths,
+            method: method.sig.ident.to_string(),
+        };
+        return reduced.reachable.contains(&id)
+            || retained_impl_surfaces_call_inherent_associated_function(
+                project,
+                reduced,
+                package,
+                type_path,
+                &method.sig.ident.to_string(),
+            );
+    }
+    impl_has_reachable_method(project, reduced, package, module_path, item_impl, aliases)
 }
 
 fn field_attrs_require_field(field: &Field) -> bool {
     field.attrs.iter().any(|attr| {
         let path = attr.path();
-        !(path.is_ident("cfg")
-            || path.is_ident("allow")
+        if path.is_ident("cfg") {
+            return !is_cfg_test_attr(attr);
+        }
+        !(path.is_ident("allow")
             || path.is_ident("deny")
             || path.is_ident("doc")
             || path.is_ident("deprecated"))

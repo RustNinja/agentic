@@ -13,6 +13,8 @@ Use stable group prefixes when adding cases:
 | --- | --- |
 | `import.*` | `use`, `pub use`, glob, rename, shadowing, and reexport cleanup |
 | `macro.*` | `macro_rules!`, item macros, proc macro derives/attrs, helper attrs |
+| `struct.*` | struct fields, generic field usage, rendered data surfaces |
+| `type.*` | type aliases, prelude-name shadowing, surface alias dependencies |
 | `trait.*` | trait impls, associated types/consts, UFCS, blanket impls, projections |
 | `dyn.*` | function pointers, `dyn Trait`, callback registries, async callback aliases |
 | `include.*` | `include!`, `include_str!`, `include_bytes!`, copied/dead assets |
@@ -43,6 +45,7 @@ file.
 | `import.module_scoped.dead_item_only.001` | covered | Module-local imports used only by pruned dead items are removed even when the same symbol is live in another module |
 | `dyn.owned.registry.001` | covered | Stored `Box<dyn Trait>` and callback aliases are hard production hazards |
 | `dyn.pruned_private_field.001` | covered | Dynamic hazards on private struct fields that are pruned from the rendered slice do not block production readiness |
+| `struct.private_generic_field_usage.001` | covered | Private generic fields are pruned when other retained fields already keep the struct type parameter used |
 | `include.bytes.static.001` | covered | Retained `include_bytes!` assets are copied and dead sibling assets are not |
 | `build.rustc_env.001` | covered | Retained `env!` fed by build script state is production-blocking |
 | `trait.default_method_assoc_const.001` | covered | Receiver calls to trait default methods retain the trait item and the concrete impl associated const/type surface needed to compile |
@@ -61,6 +64,9 @@ file.
 | `ffi.extern_called_symbol.001` | covered | Retained calls to foreign `extern "C"` functions keep only the called foreign declarations and prune dead sibling declarations |
 | `ffi.extern_static_symbol.001` | covered | Retained reads of foreign `extern "C"` statics keep only the referenced static declaration and the imports used by that foreign item |
 | `macro.zero_arg_generated_item.001` | covered | Zero-argument item macro invocations survive when their macro definition body generates a function called by retained code, while dead sibling invocations stay pruned |
+| `macro.fixed_name_generated_item.001` | covered | Item macros that generate a fixed public function remain live even when invocation arguments do not mention the generated name |
+| `macro.inline_module_item_invocation.001` | covered | Item macro invocations inside inline modules retain their lexical macro definition and body dependencies |
+| `macro.shadowed_definition_scope.001` | covered | Same-named `macro_rules!` definitions in sibling modules resolve by lexical scope instead of package/name fallback |
 | `import.external_source_trait_method.001` | covered | Path dependency trait imports are retained by reading the source trait method names when the trait name does not imply the called method |
 | `trait.derive_array_field_impl.001` | covered | Derive-driven trait impl retention descends into array, slice, pointer, and nested field types so generated derives keep required field impls |
 | `trait.associated_type_equality_method_chain.001` | covered | Generic bounds such as `T: Trait<Item = Payload>` propagate `Self::Item` return types into following method calls |
@@ -72,6 +78,7 @@ file.
 | `pattern.struct_match_receiver.001` | covered | Struct patterns in `match`/`if let` bind real struct field receiver types instead of only enum variant payloads |
 | `closure.option_result_payload_map.001` | covered | Common `Option`/`Result` closure combinators such as `map`, `and_then`, `map_err`, and inspectors bind payload/error types from receiver type arguments |
 | `closure.result_error_payload_primitive_ok.001` | covered | `Result::map_err` and error inspectors bind the real error payload even when the `Ok` type is primitive and absent from the local item graph |
+| `type.local_prelude_shadow_alias.001` | covered | Local aliases named like prelude/std types, such as `Result<T>`, stay live when retained signatures mention them |
 | `closure.local_generic_method_payload.001` | covered | Project-local generic methods that accept closures substitute impl generics from concrete receiver type arguments before walking closure bodies |
 | `closure.local_option_is_some_and.001` | covered | Local `Option<T>` bindings feed `is_some_and` closure payload typing without pretending the binding itself is `T` |
 | `ffi.callback_direct_input.001` | covered | Retained `extern "C" fn(...)` callback inputs are reported as direct API boundary warnings while preserving their signature imports |

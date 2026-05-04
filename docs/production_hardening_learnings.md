@@ -408,6 +408,32 @@ added Litter-shaped fast coverage for `option_env!` blockers, implicit
 `OnceLock<Arc<_>>`, serde transparent records, tagged/default enum contracts,
 and bidirectional `From` conversion roundtrips.
 
+The following macro/struct pass grew the executable set to 76 cases and fixed
+three reducer/render over-retention paths. Item macros are now tested by their
+lexical definition and fixed generated identifiers, while metavariables and
+macro fragment specifiers such as `ident`/`expr` do not count as live names.
+Inline-module item macro invocations are scanned recursively, same-named
+`macro_rules!` definitions in sibling modules resolve by scope, and private
+generic fields are pruned when another retained field already keeps the type
+parameter used.
+
+The next alias-shadowing pass grew the executable set to 77 cases and fixed a
+render-plan under-retention bug. Generic mention collection must not discard
+ordinary identifiers such as `Result`, `Option`, `Vec`, or `Box`, because real
+projects often define local aliases with those names. Macro fragment/noise
+filtering now stays scoped to macro-definition item-name extraction, while
+normal Rust signatures and bodies keep every identifier available to the local
+item resolver.
+
+Validation also exposed the opposite pressure on struct surfaces: full-item
+token scans can revive private dead-field dependencies through dead sibling impl
+methods. The reducer now walks only rendered struct fields for item dependency
+closure, then adds a separate reachable-field dependency pass for fields
+actually mentioned by retained callables. The renderer mirrors this by checking
+field mentions only inside impl items that will render. Non-test `#[cfg(...)]`
+fields remain retained and reported as feedback hazards instead of being
+silently pruned, while `#[cfg(test)]` fields stay test-only.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:

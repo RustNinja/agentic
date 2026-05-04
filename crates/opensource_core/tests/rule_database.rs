@@ -755,6 +755,27 @@ fn types_result_map_err_payload_closures_from_receiver_arguments() {
 }
 
 #[test]
+fn retains_local_result_alias_named_like_prelude_type() {
+    let workspace = temp_path("rule-local-result-alias-workspace");
+    let output = temp_path("rule-local-result-alias-output");
+    let target_dir = temp_path("rule-local-result-alias-target");
+    write_local_result_alias_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("local result alias rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("local_result_alias_rule/src/lib.rs"));
+    assert!(lib.contains("type Result<T>"), "{lib}");
+    assert!(lib.contains("pub struct LocalError"), "{lib}");
+    assert!(!lib.contains("DeadResult"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn lets_local_map_methods_drive_closure_payload_types() {
     let workspace = temp_path("rule-local-map-workspace");
     let output = temp_path("rule-local-map-output");
@@ -1171,6 +1192,27 @@ fn ignores_dynamic_hazards_on_pruned_private_fields() {
 }
 
 #[test]
+fn prunes_dead_private_generic_fields_when_type_params_remain_used() {
+    let workspace = temp_path("rule-private-generic-field-workspace");
+    let output = temp_path("rule-private-generic-field-output");
+    let target_dir = temp_path("rule-private-generic-field-target");
+    write_private_generic_field_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("private generic field rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("private_generic_field_rule/src/lib.rs"));
+    assert!(lib.contains("pub value: T"), "{lib}");
+    assert!(!lib.contains("Heavy<T>"), "{lib}");
+    assert!(!lib.contains("dead: Heavy"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn copies_retained_include_bytes_assets_and_prunes_dead_siblings() {
     let workspace = temp_path("rule-include-bytes-workspace");
     let output = temp_path("rule-include-bytes-output");
@@ -1405,6 +1447,71 @@ fn retains_macro_generated_items_used_by_live_code() {
     assert!(lib.contains("macro_rules! declare_value"), "{lib}");
     assert!(lib.contains("declare_value!(live_generated, 41)"), "{lib}");
     assert!(!lib.contains("dead_generated"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_fixed_name_item_macro_generated_dependencies() {
+    let workspace = temp_path("rule-fixed-name-item-macro-workspace");
+    let output = temp_path("rule-fixed-name-item-macro-output");
+    let target_dir = temp_path("rule-fixed-name-item-macro-target");
+    write_fixed_name_item_macro_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("fixed-name item macro rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("fixed_name_item_macro_rule/src/lib.rs"));
+    assert!(lib.contains("macro_rules! declare_runtime"), "{lib}");
+    assert!(lib.contains("declare_runtime!(build_live)"), "{lib}");
+    assert!(lib.contains("fn build_live() -> u32"), "{lib}");
+    assert!(!lib.contains("build_dead"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_item_macro_invocations_inside_inline_modules() {
+    let workspace = temp_path("rule-inline-item-macro-workspace");
+    let output = temp_path("rule-inline-item-macro-output");
+    let target_dir = temp_path("rule-inline-item-macro-target");
+    write_inline_item_macro_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("inline item macro rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("inline_item_macro_rule/src/lib.rs"));
+    assert!(lib.contains("mod generated"), "{lib}");
+    assert!(lib.contains("make_api!()"), "{lib}");
+    assert!(lib.contains("fn live_helper() -> u32"), "{lib}");
+    assert!(!lib.contains("dead_helper"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn resolves_shadowed_macro_rules_by_live_module_scope() {
+    let workspace = temp_path("rule-shadowed-macro-scope-workspace");
+    let output = temp_path("rule-shadowed-macro-scope-output");
+    let target_dir = temp_path("rule-shadowed-macro-scope-target");
+    write_shadowed_macro_scope_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("shadowed macro scope rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("shadowed_macro_scope_rule/src/lib.rs"));
+    assert!(lib.contains("live_helper"), "{lib}");
+    assert!(!lib.contains("dead_helper"), "{lib}");
+    assert!(!lib.contains("mod dead"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -2467,6 +2574,38 @@ pub(crate) fn selected(api: &Api) -> u32 {
     );
 }
 
+fn write_private_generic_field_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "private_generic_field_rule",
+        r#"use opensourced::opensourced;
+
+pub struct Heavy<T> {
+    value: T,
+}
+
+pub struct Api<T> {
+    pub value: T,
+    dead: Heavy<T>,
+}
+
+impl<T> Api<T> {
+    pub fn new(value: T, dead: T) -> Self {
+        Self {
+            value,
+            dead: Heavy { value: dead },
+        }
+    }
+}
+
+#[opensourced]
+pub fn selected(api: Api<u32>) -> u32 {
+    api.value
+}
+"#,
+    );
+}
+
 fn write_include_bytes_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -2735,6 +2874,120 @@ declare_dead_value!(dead_generated);
 #[opensourced]
 pub fn selected() -> u32 {
     live_generated() + 1
+}
+"#,
+    );
+}
+
+fn write_fixed_name_item_macro_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "fixed_name_item_macro_rule",
+        r#"use opensourced::opensourced;
+
+macro_rules! declare_runtime {
+    ($builder:ident) => {
+        pub fn generated() -> u32 {
+            $builder()
+        }
+    };
+}
+
+fn build_live() -> u32 {
+    7
+}
+
+fn build_dead() -> u32 {
+    99
+}
+
+declare_runtime!(build_live);
+
+#[opensourced]
+pub fn selected() -> u32 {
+    generated()
+}
+"#,
+    );
+}
+
+fn write_inline_item_macro_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "inline_item_macro_rule",
+        r#"use opensourced::opensourced;
+
+mod helpers {
+    pub fn live_helper() -> u32 {
+        7
+    }
+
+    pub fn dead_helper() -> u32 {
+        99
+    }
+}
+
+mod generated {
+    macro_rules! make_api {
+        () => {
+            pub fn generated() -> u32 {
+                crate::helpers::live_helper()
+            }
+        };
+    }
+
+    make_api!();
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    generated::generated()
+}
+"#,
+    );
+}
+
+fn write_shadowed_macro_scope_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "shadowed_macro_scope_rule",
+        r#"use opensourced::opensourced;
+
+mod live {
+    macro_rules! declare {
+        () => {
+            pub fn generated() -> u32 {
+                live_helper()
+            }
+        };
+    }
+
+    fn live_helper() -> u32 {
+        7
+    }
+
+    declare!();
+}
+
+mod dead {
+    macro_rules! declare {
+        () => {
+            pub fn generated() -> u32 {
+                dead_helper()
+            }
+        };
+    }
+
+    fn dead_helper() -> u32 {
+        99
+    }
+
+    declare!();
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    live::generated()
 }
 "#,
     );
@@ -3717,6 +3970,31 @@ fn maybe_payload() -> Result<u32, Payload> {
 #[opensourced]
 pub fn selected() -> Result<u32, u32> {
     maybe_payload().map_err(|payload| payload.live())
+}
+"#,
+    );
+}
+
+fn write_local_result_alias_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "local_result_alias_rule",
+        r#"
+use opensourced::opensourced;
+
+#[derive(Debug)]
+pub struct LocalError;
+
+type Result<T> = std::result::Result<T, LocalError>;
+type DeadResult<T> = std::result::Result<T, String>;
+
+fn value() -> u32 {
+    7
+}
+
+#[opensourced]
+pub fn selected() -> Result<u32> {
+    Ok(value())
 }
 "#,
     );
