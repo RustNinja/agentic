@@ -1294,33 +1294,36 @@ fn add_syntactic_production_hazards(
         ));
     }
     if counts.custom_attribute_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "custom_attribute_macros",
             "warning",
             format!(
                 "{} retained custom attribute macro/helper attribute(s) require compiler feedback because they may rewrite source outside the static parse tree",
                 counts.custom_attribute_macros
             ),
+            counts.custom_attribute_details,
         ));
     }
     if counts.custom_derive_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "custom_derive_macros",
             "warning",
             format!(
                 "{} retained custom derive macro(s) require compiler feedback because they may generate impls or bounds outside the static parse tree",
                 counts.custom_derive_macros
             ),
+            counts.custom_derive_details,
         ));
     }
     if counts.custom_macro_invocations > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "custom_macro_invocations",
             "warning",
             format!(
                 "{} retained non-builtin macro invocation(s) require compiler feedback because they may expand code outside the static parse tree",
                 counts.custom_macro_invocations
             ),
+            counts.custom_macro_invocation_details,
         ));
     }
     if counts.function_pointer_surfaces > 0 {
@@ -1400,8 +1403,11 @@ struct SyntacticHazardCounts {
     external_file_include_macros: usize,
     external_file_include_details: Vec<ProductionHazardDetail>,
     custom_attribute_macros: usize,
+    custom_attribute_details: Vec<ProductionHazardDetail>,
     custom_derive_macros: usize,
+    custom_derive_details: Vec<ProductionHazardDetail>,
     custom_macro_invocations: usize,
+    custom_macro_invocation_details: Vec<ProductionHazardDetail>,
     compile_env_macros: usize,
     compile_env_details: Vec<ProductionHazardDetail>,
     function_pointer_surfaces: usize,
@@ -1433,8 +1439,14 @@ impl SyntacticHazardCounts {
         self.external_file_include_details
             .extend(other.external_file_include_details);
         self.custom_attribute_macros += other.custom_attribute_macros;
+        self.custom_attribute_details
+            .extend(other.custom_attribute_details);
         self.custom_derive_macros += other.custom_derive_macros;
+        self.custom_derive_details
+            .extend(other.custom_derive_details);
         self.custom_macro_invocations += other.custom_macro_invocations;
+        self.custom_macro_invocation_details
+            .extend(other.custom_macro_invocation_details);
         self.compile_env_macros += other.compile_env_macros;
         self.compile_env_details.extend(other.compile_env_details);
         self.function_pointer_surfaces += other.function_pointer_surfaces;
@@ -1631,11 +1643,31 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
                 .conditional_compilation_details
                 .push(self.cfg_attr_detail(attribute));
         }
-        self.counts.custom_derive_macros += custom_derive_macro_count(attribute);
+        let custom_derives = custom_derive_macro_count(attribute);
+        self.counts.custom_derive_macros += custom_derives;
+        if custom_derives > 0 {
+            self.counts
+                .custom_derive_details
+                .push(self.span_detail(attribute));
+        }
         if attribute_requires_macro_expansion(attribute) {
             self.counts.custom_attribute_macros += 1;
+            self.counts
+                .custom_attribute_details
+                .push(self.span_detail(attribute));
         }
-        self.counts.add(cfg_attr_nested_macro_counts(attribute));
+        let nested_macro_counts = cfg_attr_nested_macro_counts(attribute);
+        if nested_macro_counts.custom_attribute_macros > 0 {
+            self.counts
+                .custom_attribute_details
+                .push(self.span_detail(attribute));
+        }
+        if nested_macro_counts.custom_derive_macros > 0 {
+            self.counts
+                .custom_derive_details
+                .push(self.span_detail(attribute));
+        }
+        self.counts.add(nested_macro_counts);
 
         syn::visit::visit_attribute(self, attribute);
     }
@@ -1662,6 +1694,9 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
         }
         if macro_invocation_requires_expansion_boundary(mac) {
             self.counts.custom_macro_invocations += 1;
+            self.counts
+                .custom_macro_invocation_details
+                .push(self.span_detail(mac));
         }
 
         syn::visit::visit_macro(self, mac);
@@ -2697,9 +2732,22 @@ pub fn entry() -> Vec<i32> {
         })
         .expect("reduction should succeed");
 
-        assert!(report.production.hazards.iter().any(|hazard| hazard.code
-            == "custom_macro_invocations"
-            && hazard.severity == "warning"));
+        let hazard = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| {
+                hazard.code == "custom_macro_invocations" && hazard.severity == "warning"
+            })
+            .expect("custom macro invocation hazard should be reported");
+        assert!(hazard.details.iter().any(|detail| {
+            detail.subject == "app"
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.start_line == Some(5)
+        }));
         assert_eq!(report.production.status, "requires_feedback");
     }
 
@@ -3118,19 +3166,30 @@ pub struct Payload {
         })
         .expect("reduction should succeed");
 
-        assert!(
-            report
-                .production
-                .hazards
-                .iter()
-                .any(|hazard| hazard.code == "custom_attribute_macros"
-                    && hazard.severity == "warning")
-        );
-        assert!(report
+        let attribute_hazard = report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "warning"));
+            .find(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "warning")
+            .expect("custom attribute hazard should be reported");
+        assert!(attribute_hazard.details.iter().any(|detail| {
+            detail.subject == "app"
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.start_line == Some(8)
+        }));
+        let derive_hazard = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "warning")
+            .expect("custom derive hazard should be reported");
+        assert!(derive_hazard
+            .details
+            .iter()
+            .any(|detail| detail.start_line == Some(9)));
         assert_eq!(report.production.status, "requires_feedback");
     }
 

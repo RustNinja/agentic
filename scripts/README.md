@@ -69,6 +69,8 @@ hazard payload.
 Retained Rust `include!`, unresolved/external/absolute include assets, OUT_DIR
 include assets, and unmodeled `env!`/`option_env!` calls also include the same
 location details.
+Feedback-required macro hazards for retained custom attributes, custom derives,
+and non-builtin macro invocations include source locations as well.
 
 ## Litter Feedback Loop
 

@@ -52,7 +52,9 @@ assets, output safety, or product diagnostics by itself.
   query a semantic oracle, or fail with an unsupported-construct report.
 - Retained custom derives, custom attributes, and non-builtin macro invocations
   must be preserved verbatim and require compiler feedback until macro
-  expansion feeds the reachability graph.
+  expansion feeds the reachability graph. These feedback-required macro hazards
+  now include structured package/module/file/line details for direct retained
+  macro surfaces.
 - Build scripts can execute arbitrary project logic and generate source under
   `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle
