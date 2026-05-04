@@ -1822,8 +1822,10 @@ impl SyntacticHazardVisitor {
         }
     }
 
-    fn type_surface_detail<T: Spanned>(&self, node: &T) -> ProductionHazardDetail {
-        self.span_detail(node)
+    fn type_surface_detail<T: Spanned + ToTokens>(&self, node: &T) -> ProductionHazardDetail {
+        let mut detail = self.span_detail(node);
+        detail.subject = format!("{}: {}", detail.subject, node.to_token_stream());
+        detail
     }
 
     fn span_detail<T: Spanned>(&self, node: &T) -> ProductionHazardDetail {
@@ -2946,7 +2948,7 @@ pub fn entry(callback: Callback) -> (Callback, Box<dyn Worker>) {
             .find(|hazard| hazard.code == "function_pointer_surfaces" && hazard.severity == "error")
             .expect("function pointer hazard should be reported");
         assert!(function_pointer.details.iter().any(|detail| {
-            detail.subject == "app"
+            detail.subject == "app: fn () -> usize"
                 && detail.package.as_deref() == Some("app")
                 && detail
                     .file
@@ -2961,7 +2963,7 @@ pub fn entry(callback: Callback) -> (Callback, Box<dyn Worker>) {
             .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
             .expect("trait object hazard should be reported");
         assert!(trait_object.details.iter().any(|detail| {
-            detail.subject == "app"
+            detail.subject == "app: dyn Worker"
                 && detail.package.as_deref() == Some("app")
                 && detail
                     .file
