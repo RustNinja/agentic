@@ -193,6 +193,14 @@ Those patterns now have a lightweight replica in `fixtures/fast_macro_use` and
 should be exercised with `scripts/fast_fixture_loop.sh` before waiting on a
 large Litter build.
 
+The fast fixture should keep growing as a matrix, not as one monolithic
+all-roots check. Current slice angles include macro-heavy root only, async root
+only, callback root only, data-item root only, trait-item root only, and
+combined macro+async roots. That caught an important API-surface issue: when a
+trait is selected as a root item, its method declarations and their imports are
+part of the public slice and must be preserved; when a trait is only retained
+as an object type surface, method-only dependencies can still be pruned.
+
 The dynamic-dispatch rule is now split by ownership. Direct callback inputs on
 the selected API boundary, such as `fn(...)` parameters and borrowed
 `&dyn Trait` parameters, do not hide project-local implementation code and are

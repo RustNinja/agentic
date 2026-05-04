@@ -6,6 +6,12 @@ pub trait Useful {
     fn useful(&self) -> Self::Output;
 }
 
+pub trait Transform<T> {
+    type Output;
+
+    fn transform(&self, input: T) -> Self::Output;
+}
+
 pub struct UtilValue(pub u32);
 
 impl Useful for UtilValue {
@@ -15,6 +21,17 @@ impl Useful for UtilValue {
 
     fn useful(&self) -> Self::Output {
         self.0 + helper() + Self::BONUS
+    }
+}
+
+impl<T> Transform<T> for UtilValue
+where
+    T: Copy + Into<u32>,
+{
+    type Output = u32;
+
+    fn transform(&self, input: T) -> Self::Output {
+        self.0 + input.into() + helper()
     }
 }
 

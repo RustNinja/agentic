@@ -1,6 +1,6 @@
 use macro_helpers::{
-    fixture_attr, fixture_constructor, fixture_export, FixtureDerive, FixtureEnum, FixtureObject,
-    FixtureRecord,
+    fixture_attr, fixture_constructor, fixture_export, FixtureDerive, FixtureEnum, FixtureError,
+    FixtureObject, FixtureRecord,
 };
 use opensourced::opensourced;
 use shared::{
@@ -8,7 +8,7 @@ use shared::{
     prelude::{exported_nested, SharedAlias, SharedMode, FEATURE_FLAG},
     SharedRecord, SHARED_STATIC,
 };
-use util::{make_util, Useful, UtilValue};
+use util::{make_util, Transform, Useful, UtilValue};
 
 use crate::grouped::{dead_grouped as local_shadow, live_grouped};
 use crate::removed::dead_fn as selected_shadow;
@@ -56,7 +56,10 @@ mod inline_child {
     }
 }
 
-#[cfg_attr(any(unix, windows), fixture_attr(shared::helper_marker))]
+#[cfg_attr(
+    any(unix, windows),
+    macro_helpers::fixture_attr(shared::helper_marker)
+)]
 mod platform_bridge {
     pub fn platform_value() -> u32 {
         17
@@ -80,6 +83,28 @@ macro_rules! unused_macro {
     };
 }
 
+macro_rules! declare_wire_error {
+    ($name:ident) => {
+        #[derive(Clone, FixtureError)]
+        #[fixture_error(display = "wire error")]
+        pub struct $name {
+            code: SharedAlias,
+        }
+
+        impl $name {
+            pub fn new(code: SharedAlias) -> Self {
+                Self { code }
+            }
+
+            pub fn code(&self) -> SharedAlias {
+                self.code
+            }
+        }
+    };
+}
+
+declare_wire_error!(WireError);
+
 #[derive(Default, FixtureDerive)]
 #[fixture_helper(path = "shared::helper_marker")]
 pub struct RootDto {
@@ -100,6 +125,7 @@ impl From<SharedRecord> for RootDto {
 
 #[derive(Clone, FixtureRecord)]
 #[fixture_serde(rename_all = "camelCase")]
+#[opensourced]
 pub struct WireDto {
     #[fixture_serde(default, skip_serializing_if = "Option::is_none")]
     pub label: Option<String>,
@@ -129,6 +155,38 @@ impl WireKind {
     }
 }
 
+#[derive(Clone, FixtureEnum)]
+#[fixture_serde(tag = "type", rename_all = "snake_case")]
+pub enum WireEvent {
+    Record { dto: WireDto },
+    Failed(WireError),
+    Empty,
+}
+
+impl WireEvent {
+    pub fn score(&self) -> SharedAlias {
+        match self {
+            WireEvent::Record { dto } => dto.score(),
+            WireEvent::Failed(error) => error.code(),
+            WireEvent::Empty => 0,
+        }
+    }
+}
+
+pub struct WireSlot<const N: usize> {
+    value: SharedAlias,
+}
+
+impl<const N: usize> WireSlot<N> {
+    pub fn new(value: SharedAlias) -> Self {
+        Self { value }
+    }
+
+    pub fn folded(&self) -> SharedAlias {
+        self.value + N as SharedAlias
+    }
+}
+
 #[derive(FixtureObject)]
 pub struct BridgeObject {
     dto: RootDto,
@@ -149,6 +207,7 @@ impl BridgeObject {
 }
 
 #[fixture_export(callback_interface)]
+#[opensourced]
 pub trait BridgeCallback {
     fn adjust(&self, value: SharedAlias) -> SharedAlias;
 }
@@ -158,9 +217,55 @@ pub fn exported_bridge(dto: WireDto, kind: WireKind) -> SharedAlias {
     dto.score() + kind.weight()
 }
 
+impl TryFrom<WireDto> for RootDto {
+    type Error = WireError;
+
+    fn try_from(dto: WireDto) -> Result<Self, Self::Error> {
+        match dto.mode {
+            SharedMode::Fast(value) => Ok(Self::new(value)),
+            SharedMode::Slow => Err(WireError::new(1)),
+        }
+    }
+}
+
 async fn async_bridge_value(input: SharedAlias) -> SharedAlias {
     let dto = RootDto::from(SharedRecord::new(input));
     dto.value + platform_bridge::platform_value()
+}
+
+#[allow(dead_code)]
+mod dynamic_registry {
+    pub trait InternalWorker {
+        fn work(&self) -> u32;
+    }
+
+    pub struct LocalWorker;
+
+    impl InternalWorker for LocalWorker {
+        fn work(&self) -> u32 {
+            91
+        }
+    }
+
+    pub struct Registry {
+        worker: Box<dyn InternalWorker>,
+    }
+
+    impl Registry {
+        pub fn new() -> Self {
+            Self {
+                worker: Box::new(LocalWorker),
+            }
+        }
+
+        pub fn run(&self) -> u32 {
+            self.worker.work()
+        }
+    }
+
+    pub fn dead_registry() -> Registry {
+        Registry::new()
+    }
 }
 
 #[fixture_attr(shared::helper_marker)]
@@ -192,16 +297,23 @@ pub fn open_macro_use_entry(input: u32) -> u32 {
         label: Some(format!("feature-{FEATURE_FLAG}")),
         mode,
     };
+    let converted = RootDto::try_from(wire.clone())
+        .map(|dto| dto.value)
+        .unwrap_or_else(|error| error.code());
+    let event = WireEvent::Record { dto: wire.clone() };
+    let slot = WireSlot::<3>::new(converted);
     let bridge_object = BridgeObject::new(input);
 
     local_sum!(
         shared::shared_macro!(dto.value)
             + live_grouped()
             + util.useful()
+            + util.transform(alias_value)
             + UtilValue::BONUS
             + mode.score()
             + inline_child::child_score(&dto)
-            + exported_bridge(wire, WireKind::Created),
+            + exported_bridge(wire, WireKind::Created)
+            + event.score(),
         generated.value()
             + selected_shadow
             + local_shadow
@@ -210,6 +322,8 @@ pub fn open_macro_use_entry(input: u32) -> u32 {
             + via_loop
             + alias_value
             + const_mix
+            + converted
+            + slot.folded()
             + bridge_object.value()
     )
 }

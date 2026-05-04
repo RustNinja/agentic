@@ -20,6 +20,11 @@ pub fn fixture_object(_input: TokenStream) -> TokenStream {
     TokenStream::new()
 }
 
+#[proc_macro_derive(FixtureError, attributes(fixture_error))]
+pub fn fixture_error(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
+}
+
 #[proc_macro_attribute]
 pub fn fixture_attr(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item

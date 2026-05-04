@@ -1771,6 +1771,10 @@ fn collect_trait_surface_idents(
     item_trait: &syn::ItemTrait,
     idents: &mut BTreeSet<String>,
 ) {
+    if root_item_should_render(reduced, item_id) {
+        collect_token_idents(&item_trait.to_token_stream(), idents);
+        return;
+    }
     if trait_has_reachable_impl_methods(
         reduced,
         &item_id.package,
@@ -4239,13 +4243,15 @@ fn transform_items(
                     if !preserve_uniffi_surface {
                         strip_uniffi_attrs(&mut item_trait.attrs);
                     }
-                    prune_trait_items_if_only_type_surface(
-                        project,
-                        reduced,
-                        package,
-                        module_path,
-                        &mut item_trait,
-                    );
+                    if !root_item_should_render(reduced, &id) {
+                        prune_trait_items_if_only_type_surface(
+                            project,
+                            reduced,
+                            package,
+                            module_path,
+                            &mut item_trait,
+                        );
+                    }
                     allow_dead_code_if_not_public(&item_trait.vis, &mut item_trait.attrs);
                     Item::Trait(item_trait)
                 })
@@ -5636,6 +5642,9 @@ fn reachable_item_mentions_ident(
     ident: &str,
 ) -> bool {
     if let Item::Trait(item_trait) = &record.item {
+        if root_item_should_render(reduced, item_id) {
+            return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
+        }
         if trait_has_reachable_impl_methods(reduced, package, &item_id.module_path, &item_id.name) {
             return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
         }

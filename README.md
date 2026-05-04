@@ -19,8 +19,9 @@ workspace instead of the full source tree.
   The primary binary is `slicers`.
 - `fixtures/a` through `fixtures/e`: five crates used as the proof workspace.
 - `fixtures/fast_macro_use`: a standalone fast stress workspace for Litter-like
-  macro, import, derive/helper-attribute, UniFFI-shaped export, async,
-  callback, cfg, include, trait-import, and dead-pruning iteration.
+  macro-declared items, imports, derive/helper attributes, UniFFI-shaped export,
+  async, callback, cfg, include, conversion impl, generic trait, item-root, and
+  dead-pruning iteration.
 
 The fixture dependency graph is:
 
