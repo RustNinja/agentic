@@ -639,20 +639,21 @@ fn add_workspace_production_hazards(
     reduced: &ReducedProject,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
-    let retained_build_scripts = reduced
+    let retained_build_script_details = reduced
         .packages
         .iter()
         .filter_map(|package| project.workspace.packages.get(package))
-        .filter(|package| package_build_script_path(package).is_some())
-        .count();
-    if retained_build_scripts > 0 {
-        hazards.push(production_hazard(
+        .filter_map(retained_build_script_detail)
+        .collect::<Vec<_>>();
+    if !retained_build_script_details.is_empty() {
+        hazards.push(production_hazard_with_details(
             "retained_build_scripts",
             "error",
             format!(
                 "{} retained package build script(s) may generate source, link metadata, env values, or asset dependencies outside the static parse tree",
-                retained_build_scripts
+                retained_build_script_details.len()
             ),
+            retained_build_script_details,
         ));
     }
     let retained_path_dependencies = retained_non_workspace_path_dependencies(project, reduced);
@@ -683,6 +684,21 @@ fn add_workspace_production_hazards(
             ),
         ));
     }
+}
+
+fn retained_build_script_detail(
+    package: &crate::manifest::Package,
+) -> Option<ProductionHazardDetail> {
+    let path = package_build_script_path(package)?;
+    Some(ProductionHazardDetail {
+        subject: package.name.clone(),
+        package: Some(package.name.clone()),
+        module_path: None,
+        file: Some(path),
+        start_line: Some(1),
+        cfg: None,
+        suggested_cargo_args: Vec::new(),
+    })
 }
 
 fn retained_workspace_patch_replace_path_dependencies(project: &Project) -> BTreeSet<String> {
@@ -2922,11 +2938,20 @@ pub fn entry() -> i32 {
         })
         .expect("reduction should succeed");
 
-        assert!(report
+        let hazard = report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "retained_build_scripts" && hazard.severity == "error"));
+            .find(|hazard| hazard.code == "retained_build_scripts" && hazard.severity == "error")
+            .expect("retained build script hazard should be reported");
+        assert!(hazard.details.iter().any(|detail| {
+            detail.subject == "app"
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/build.rs"))
+                && detail.start_line == Some(1)
+        }));
         assert_eq!(report.production.status, "hazards_detected");
     }
 

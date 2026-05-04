@@ -60,7 +60,8 @@ assets, output safety, or product diagnostics by itself.
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle
   models generated source. Retained build scripts are production-blocking
   because they can also read external state or emit link/env metadata that
-  changes compiled behavior.
+  changes compiled behavior. Retained build-script hazards report package and
+  build-script path details.
 - Retained `include!` Rust source files must fail closed even when their paths
   are static and copied, because the included Rust is outside the current
   reachability graph. Include and compile-time environment hazards report

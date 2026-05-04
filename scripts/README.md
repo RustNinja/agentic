@@ -71,6 +71,7 @@ include assets, and unmodeled `env!`/`option_env!` calls also include the same
 location details.
 Feedback-required macro hazards for retained custom attributes, custom derives,
 and non-builtin macro invocations include source locations as well.
+Retained build-script blockers include the package and build script path.
 
 ## Litter Feedback Loop
 
