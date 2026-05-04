@@ -47,7 +47,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Workspace patches and locks | `manifest_hardening.rs`, CLI unit tests, core production-readiness tests | Root `[patch.*]` tables and `Cargo.lock` are preserved; production validation adds `--locked` for source workspaces with lockfiles so sliced workspaces keep the source repository's dependency resolution, and uncopyable patch/replace path entries are production-blocking with manifest and subject details until copied or pruned |
 | Workspace profiles | `manifest_hardening.rs` | Root `[profile.*]` tables are preserved so generated validation does not fall back to Cargo profile defaults |
 | Toolchain context | `manifest_hardening.rs` | Root `rust-toolchain.toml` / `rust-toolchain` files are copied so generated validation uses the source workspace's pinned Rust toolchain |
-| Analyzer modes | analyzer unit tests, CLI option parsing | `syn` is the default reduction engine; optional `ra-hir` loads rust-analyzer HIR behind the `ra-hir` feature and records semantic inventory, but those edges are report-only until wired into reduction |
+| Analyzer modes | analyzer unit tests, CLI option parsing, Litter pinned corpus | The default CLI feature set enables `ra-hir` and defaults to bounded rust-analyzer HIR semantic inventory for local workspace crates; `syn` remains an explicit fallback, and RA edges are report-only until wired into reduction |
 | Feedback runner scale | core feedback tests, Litter pinned corpus | Cargo stdout/stderr are drained while `cargo check --message-format=json` runs, so large dependency graphs cannot deadlock the feedback loop by filling captured output pipes; repair mode removes repairable unused imports before accepting warning-bearing checks |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
@@ -62,7 +62,7 @@ These are tracked limitations, not silently claimed support:
 
 | Area | Boundary |
 | --- | --- |
-| Full rustc name resolution | The default reducer is syntactic and does not replace rustc or rust-analyzer name resolution; optional `ra-hir` currently reports semantic inventory but does not yet own reachability decisions |
+| Full rustc name resolution | The default CLI flow loads rust-analyzer HIR inventory, but the reducer is still syntactic and does not yet replace rustc or rust-analyzer name resolution for reachability decisions |
 | Macro-expanded dependencies | The slicer does not run macro expansion; retained custom derives, custom attributes, module-boundary custom attributes, and non-builtin macro invocations are preserved verbatim, report structured package/module/file/line details, and require compiler feedback until an expansion-aware analyzer is available |
 | Generic trait receiver inference | Local trait-bound receiver calls such as `value.trait_method()` are followed for named type parameters, `where` bounds, `impl Trait` parameters, explicit local bindings, and simple transparent wrappers; full rustc-equivalent inference for associated types, substitutions through arbitrary containers, and complex projection bounds still requires the semantic oracle |
 | Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed; retained `fn(...)` and `dyn Trait` surfaces remain production-blocking and report structured package/module/file/line details |

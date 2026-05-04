@@ -18,19 +18,24 @@ assets, output safety, or product diagnostics by itself.
 
 ## Current Branch Status
 
-`codex/production-hardening` is currently a `syn`-first slicer with rustc
-feedback/repair as the production gate. The CLI accepts `--analyzer ra-hir`
-when built with `--features ra-hir`, but that rust-analyzer path is report-only
-semantic inventory today; it does not yet drive the retained graph. Production
-validation therefore relies on fast static reduction, explicit production
-hazards, and `cargo check --message-format=json` feedback.
+`codex/production-hardening` is currently a semantic-inventory-first CLI with a
+`syn` reducer and rustc feedback/repair as the production gate. The default
+`opensource_cli` feature set enables `ra-hir`, and the CLI defaults to
+`--analyzer ra-hir`; users can still pass `--analyzer syn` or build with
+`--no-default-features` for the fast syntactic fallback. The rust-analyzer path
+loads local workspace crates with dependency crates excluded by default, and is
+still report-only semantic inventory today; it does not yet drive the retained
+graph. Production validation therefore relies on bounded RA inventory, fast
+static reduction, explicit production hazards, and
+`cargo check --message-format=json` feedback.
 
 The latest hardening milestone validated the pinned Litter UniFFI cases in
 strict repair mode with `--deny-warnings`: all three pinned roots reached zero
-final warnings, and the apply-snapshot case removed three unused imports through
-the compiler repair loop. The feedback runner now drains Cargo stdout/stderr
-while the child process runs, preventing large JSON output from dependency-heavy
-checks from blocking the feedback loop.
+final warnings through the default `ra-hir` analyzer path, and the
+apply-snapshot case removed three unused imports through the compiler repair
+loop. The feedback runner now drains Cargo stdout/stderr while the child process
+runs, preventing large JSON output from dependency-heavy checks from blocking
+the feedback loop.
 
 ## Inspirations
 
@@ -161,6 +166,7 @@ checks from blocking the feedback loop.
    - Treat selected warnings, especially unreachable patterns, as semantic hazards.
 
 4. Semantic oracle:
+   - Keep rust-analyzer HIR in the default CLI/corpus flow.
    - Add narrow queries for path resolution, method resolution, trait impl lookup,
      macro-expanded item inventory, and active cfg file/module inventory.
    - Keep the syntactic reducer available for simple workspaces and offline runs.

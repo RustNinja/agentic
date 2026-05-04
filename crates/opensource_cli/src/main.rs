@@ -429,7 +429,7 @@ fn parse_args_from<I>(args: I) -> Result<CliOptions, Box<dyn std::error::Error>>
 where
     I: IntoIterator<Item = OsString>,
 {
-    let mut analyzer_mode = AnalyzerMode::Syn;
+    let mut analyzer_mode = AnalyzerMode::default_for_build();
     let mut run_check = false;
     let mut feedback_iterations = 0;
     let mut feedback_repair_iterations = 0;
@@ -3261,7 +3261,8 @@ fn usage() -> String {
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
         "[--baseline-target-dir <path>] [--slice-report <path>] [--validation-report <path>] ",
         "[--preflight-report <path>] ",
-        "<workspace-root-or-Cargo.toml> <output-root>"
+        "<workspace-root-or-Cargo.toml> <output-root>\n",
+        "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn"
     )
     .to_string()
 }
@@ -3281,7 +3282,8 @@ mod tests {
     use std::{fs, path::PathBuf};
 
     use opensource_core::{
-        CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport, GeneratedTargetReport,
+        AnalyzerMode, CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport,
+        GeneratedTargetReport,
     };
 
     use super::{
@@ -3593,6 +3595,24 @@ mod tests {
         );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
+    }
+
+    #[test]
+    fn default_analyzer_matches_build_features() {
+        let options = parse_options(["workspace", "out"]);
+
+        assert_eq!(options.analyzer_mode, AnalyzerMode::default_for_build());
+        #[cfg(feature = "ra-hir")]
+        assert_eq!(options.analyzer_mode, AnalyzerMode::RustAnalyzerHir);
+        #[cfg(not(feature = "ra-hir"))]
+        assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
+    }
+
+    #[test]
+    fn explicit_syn_analyzer_overrides_semantic_default() {
+        let options = parse_options(["--analyzer", "syn", "workspace", "out"]);
+
+        assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
     }
 
     #[test]

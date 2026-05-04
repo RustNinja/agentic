@@ -13,7 +13,8 @@ workspace instead of the full source tree.
 - `crates/opensourced`: proc-macro crate that validates and preserves a marked
   free function.
 - `crates/opensource_core`: `syn`-first parser, call-graph reducer, source
-  renderer, compiler-feedback repair, and optional rust-analyzer HIR inventory.
+  renderer, compiler-feedback repair, and rust-analyzer HIR inventory when the
+  `ra-hir` feature is enabled.
 - `crates/opensource_cli`: command-line wrapper around `opensource_core`.
   The primary binary is `slicers`.
 - `fixtures/a` through `fixtures/e`: five crates used as the proof workspace.
@@ -91,14 +92,20 @@ cargo run -p opensource_cli --bin slicers -- --slice-report /tmp/slicers-report.
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
 
-The default analyzer is `syn`. The optional rust-analyzer path is available for
-semantic inventory/reporting, not yet as the authoritative reachability oracle:
+The default `slicers` binary now enables the `ra-hir` feature and uses
+rust-analyzer HIR semantic inventory by default. The `syn` reducer still owns
+the rendered slice closure today, so RA is part of the default flow but is not
+yet the authoritative reachability oracle. RA loads local workspace crates with
+dependency crates excluded by default; external correctness is still checked by
+Cargo/rustc feedback.
 
 ```sh
-cargo run -p opensource_cli --bin slicers --features ra-hir -- \
-  --analyzer ra-hir \
+cargo run -p opensource_cli --bin slicers -- \
   . /tmp/slicers-ra-report
 ```
+
+Use `--analyzer syn` for the fast syntactic fallback, or build with
+`--no-default-features` when the RA dependency stack is not desired.
 
 `--preflight` is the fast prediction tier. It writes `slice-preflight.json` and
 validates the generated workspace without compiling dependencies: manifests,
@@ -207,12 +214,13 @@ closed on readiness error hazards before compiler feedback and records a final
 `production_ready` gate only after baseline, generation, preflight, target
 coverage, and compiler feedback have accepted the slice.
 
-This is the current production feedback layer: the slicer stays fast and
-syntactic, then rustc gives precise diagnostics for the generated slice. A
-rust-analyzer HIR run currently contributes report-only semantic inventory; the
-production report marks that boundary explicitly until those edges are consumed
-by reduction. A rust-analyzer HIR or rustc-driver backend remains the next
-precision step for resolving hard name-resolution cases before rendering.
+This is the current production feedback layer: the normal CLI run loads
+bounded rust-analyzer HIR semantic inventory for local workspace crates, keeps
+the slicer fast with the existing syntactic reducer, then lets rustc give
+precise diagnostics for the generated slice. The production report marks the
+remaining boundary explicitly until RA edges are consumed by reduction. Using RA
+or a rustc-driver oracle for targeted method/path/trait edges before rendering
+remains the next precision step.
 Generation reports fail closed on known syntactic trust hazards as well,
 including retained `include!` source macros that read generated Rust from
 `OUT_DIR`; other retained `include!` source macros are reported as validation

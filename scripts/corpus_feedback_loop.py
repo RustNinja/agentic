@@ -172,9 +172,9 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--analyzer",
-        default="syn",
+        default="ra-hir",
         choices=("syn", "ra-hir"),
-        help="slicers analyzer backend",
+        help="slicers analyzer backend; default uses rust-analyzer HIR inventory",
     )
     parser.add_argument(
         "--features",

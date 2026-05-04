@@ -9,7 +9,7 @@ name = "slicers"
 path = "src/main.rs"
 
 [features]
-default = []
+default = ["ra-hir"]
 ra-hir = ["opensource_core/ra-hir"]
 
 [dependencies]

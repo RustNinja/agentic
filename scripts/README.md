@@ -8,10 +8,12 @@ random candidate roots, injects `#[opensourced::opensourced]`, runs `slicers`
 with `--slice-report` plus either fast preflight or compiler feedback, then
 appends one JSONL metrics row per batch.
 
-The runner defaults to the `syn` analyzer. Pass `--analyzer ra-hir` to build the
-CLI with the optional `ra-hir` feature and collect rust-analyzer HIR semantic
-inventory, but treat that output as report-only until semantic edges are wired
-into reduction.
+The runner defaults to `--analyzer ra-hir`, which builds the CLI with the
+default rust-analyzer HIR feature and records semantic inventory. Pass
+`--analyzer syn` for the fast syntactic fallback. RA inventory is part of the
+default corpus flow, but it remains report-only until semantic edges are wired
+into reduction. The RA load is bounded to local workspace crates by default so
+large dependency graphs do not dominate corpus feedback.
 
 ```sh
 scripts/corpus_feedback_loop.py \

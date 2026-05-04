@@ -13,6 +13,23 @@ impl AnalyzerMode {
             Self::RustAnalyzerHir => "ra-hir",
         }
     }
+
+    pub fn default_for_build() -> Self {
+        #[cfg(feature = "ra-hir")]
+        {
+            Self::RustAnalyzerHir
+        }
+        #[cfg(not(feature = "ra-hir"))]
+        {
+            Self::Syn
+        }
+    }
+}
+
+impl Default for AnalyzerMode {
+    fn default() -> Self {
+        Self::default_for_build()
+    }
 }
 
 impl std::str::FromStr for AnalyzerMode {
@@ -136,6 +153,7 @@ mod rust_analyzer {
         fn load(workspace_root: &Path) -> Result<Self, Box<dyn std::error::Error>> {
             let cargo_config = CargoConfig {
                 set_test: true,
+                no_deps: true,
                 ..CargoConfig::default()
             };
             let load_config = LoadCargoConfig {
@@ -157,6 +175,7 @@ mod rust_analyzer {
             let mut notes = vec![
                 "rust-analyzer RootDatabase loaded".to_string(),
                 "HIR Semantics initialized".to_string(),
+                "dependency crates excluded from HIR load for bounded slicer analysis".to_string(),
                 "proc macro expansion disabled for first integration pass".to_string(),
             ];
             notes.push(format!(

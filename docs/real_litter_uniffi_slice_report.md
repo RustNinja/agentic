@@ -71,8 +71,9 @@ cases passed preflight:
 | `preferences-add-hidden-thread` | 9 | `codex-mobile-client` | 10 | 16 |
 
 The same pinned cases also passed strict feedback repair with `--deny-warnings`
-once the feedback runner drained Cargo JSON while the child process was still
-running:
+through the default `ra-hir` analyzer path once RA was bounded to local
+workspace crates and the feedback runner drained Cargo JSON while the child
+process was still running:
 
 | Corpus case | Feedback result | Repair changes | End warnings |
 | --- | --- | ---: | ---: |
@@ -246,10 +247,11 @@ The real slices did not include:
 
 ## Remaining Known Gaps
 
-These experiments now pass strict compiler feedback repair, but the default
-reducer is still syntactic. The optional `ra-hir` analyzer can load
-rust-analyzer HIR and report semantic inventory, but this branch does not yet
-consume those HIR edges as the authoritative reachability graph.
+These experiments now pass strict compiler feedback repair through the default
+RA-enabled CLI path. The default CLI feature set loads bounded rust-analyzer HIR
+semantic inventory for local workspace crates, but the reducer is still
+syntactic and this branch does not yet consume HIR edges as the authoritative
+reachability graph.
 
 Known remaining risks:
 
