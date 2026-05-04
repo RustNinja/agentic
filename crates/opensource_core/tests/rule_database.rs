@@ -406,6 +406,116 @@ fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
     assert!(!lib.contains("DeadCallback"), "{lib}");
 }
 
+#[test]
+fn reports_direct_callback_boundaries_as_feedback_warnings() {
+    let workspace = temp_path("rule-direct-callback-boundary-workspace");
+    let output = temp_path("rule-direct-callback-boundary-output");
+    let target_dir = temp_path("rule-direct-callback-boundary-target");
+    write_direct_callback_boundary_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("direct callback boundary rule should reduce");
+
+    assert_eq!(report.production.status, "requires_feedback");
+    assert_no_error_hazards(&report.production.hazards);
+    let boundary = report
+        .production
+        .hazards
+        .iter()
+        .find(|hazard| hazard.code == "dynamic_callback_boundaries")
+        .expect("direct callback boundaries should be reported");
+    assert!(boundary
+        .details
+        .iter()
+        .any(|detail| detail.subject.contains("& dyn Callback")));
+    assert!(boundary
+        .details
+        .iter()
+        .any(|detail| detail.subject.contains("fn (u32) -> u32")));
+
+    let lib = read(output.join("direct_callback_boundary_rule/src/lib.rs"));
+    assert!(lib.contains("handler: &dyn Callback"), "{lib}");
+    assert!(lib.contains("callback: fn(u32) -> u32"), "{lib}");
+    assert!(!lib.contains("DeadCallback"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn flags_retained_source_include_macros_as_production_blockers() {
+    let workspace = temp_path("rule-source-include-workspace");
+    let output = temp_path("rule-source-include-output");
+    write_source_include_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("source include rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| { hazard.code == "source_include_macros" && hazard.severity == "error" }));
+    let lib = read(output.join("source_include_rule/src/lib.rs"));
+    assert!(lib.contains("include!(\"generated_expr.rs\")"), "{lib}");
+    assert!(!lib.contains("dead_generated"), "{lib}");
+}
+
+#[test]
+fn retains_dependency_aliases_used_only_inside_macro_bodies() {
+    let workspace = temp_path("rule-macro-alias-body-workspace");
+    let output = temp_path("rule-macro-alias-body-output");
+    let target_dir = temp_path("rule-macro-alias-body-target");
+    write_macro_alias_body_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("macro alias body rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("macro_alias_app/src/lib.rs"));
+    let support = read(output.join("macro_alias_support/src/lib.rs"));
+    assert!(app.contains("use macro_alias_support as upstream"), "{app}");
+    assert!(app.contains("macro_rules! build_value"), "{app}");
+    assert!(app.contains("upstream::make_value()"), "{app}");
+    assert!(support.contains("pub fn make_value"), "{support}");
+    assert!(!support.contains("dead_value"), "{support}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
+fn prunes_inline_include_str_module_bundles_by_live_branch() {
+    let workspace = temp_path("rule-inline-include-tree-workspace");
+    let output = temp_path("rule-inline-include-tree-output");
+    let target_dir = temp_path("rule-inline-include-tree-target");
+    write_inline_include_tree_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("inline include tree rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("inline_include_tree_rule/src/lib.rs"));
+    assert!(lib.contains("include_str!(\"scripts/live.sh\")"), "{lib}");
+    assert!(!lib.contains("include_str!(\"scripts/dead.ps1\")"), "{lib}");
+    assert!(output
+        .join("inline_include_tree_rule/src/scripts/live.sh")
+        .exists());
+    assert!(!output
+        .join("inline_include_tree_rule/src/scripts/dead.ps1")
+        .exists());
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
 fn write_public_reexport_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -931,6 +1041,143 @@ pub fn selected(callback: Option<Arc<dyn Callback + Send + Sync>>) -> Manager {
     Manager::new(callback)
 }
 "#,
+    );
+}
+
+fn write_direct_callback_boundary_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "direct_callback_boundary_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Callback {
+    fn handle(&self, value: u32) -> u32;
+}
+
+pub trait DeadCallback {
+    fn handle(&self) -> u32;
+}
+
+#[opensourced]
+pub fn selected(handler: &dyn Callback, callback: fn(u32) -> u32) -> u32 {
+    handler.handle(callback(7))
+}
+"#,
+    );
+}
+
+fn write_source_include_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "source_include_rule",
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> u32 {
+    include!("generated_expr.rs")
+}
+
+pub fn dead_api() -> u32 {
+    include!("dead_generated.rs")
+}
+"#,
+    );
+    write(root.join("source_include_rule/src/generated_expr.rs"), "41");
+    write(root.join("source_include_rule/src/dead_generated.rs"), "99");
+}
+
+fn write_macro_alias_body_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["macro_alias_app", "macro_alias_support"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("macro_alias_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "macro_alias_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macro_alias_support = {{ path = "../macro_alias_support" }}
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("macro_alias_app/src/lib.rs"),
+        r#"use macro_alias_support as upstream;
+use opensourced::opensourced;
+
+macro_rules! build_value {
+    () => {
+        upstream::make_value()
+    };
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    build_value!()
+}
+"#,
+    );
+    write(
+        root.join("macro_alias_support/Cargo.toml"),
+        r#"[package]
+name = "macro_alias_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("macro_alias_support/src/lib.rs"),
+        r#"pub fn make_value() -> u32 {
+    44
+}
+
+pub fn dead_value() -> u32 {
+    99
+}
+"#,
+    );
+}
+
+fn write_inline_include_tree_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "inline_include_tree_rule",
+        r#"use opensourced::opensourced;
+
+mod posix {
+    pub const SCRIPT: &str = include_str!("scripts/live.sh");
+}
+
+mod powershell {
+    pub const SCRIPT: &str = include_str!("scripts/dead.ps1");
+}
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    posix::SCRIPT
+}
+
+pub fn dead_api() -> &'static str {
+    powershell::SCRIPT
+}
+"#,
+    );
+    write(
+        root.join("inline_include_tree_rule/src/scripts/live.sh"),
+        "echo live",
+    );
+    write(
+        root.join("inline_include_tree_rule/src/scripts/dead.ps1"),
+        "Write-Output dead",
     );
 }
 

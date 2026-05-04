@@ -43,6 +43,10 @@ Current executable seed cases live in
 | `trait.associated_projection.001` | covered | Associated type/const projections retain the live impl and prune dead projection impls |
 | `trait.conversion.try_from_chain.001` | covered | `.try_into()` retains only the matching `TryFrom<Input> for Target` impl, not unrelated conversions for the same target |
 | `dyn.callback.option_arc_trait.001` | covered | Stored `Option<Arc<dyn Trait + Send + Sync>>` callback slots are hard dynamic-dispatch hazards |
+| `dyn.boundary.direct_inputs.001` | covered | Selected `&dyn Trait` and `fn(...)` callback inputs stay as feedback-dischargeable API boundary warnings |
+| `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
+| `macro.external_crate_alias_body.001` | covered | Dependency aliases used only inside retained macro bodies keep the aliased dependency edge |
+| `include.str.inline_module_tree.001` | covered | Inline module script bundles copy only live `include_str!` assets and prune dead sibling assets |
 
 ## Workflow
 
@@ -79,5 +83,7 @@ Read-only Litter exploration found these high-value non-cfg patterns:
 - Conversion-heavy boundary impls such as `TryFrom<Request> for Params`.
 - Macro bodies that call methods on metavariables, where the invocation argument
   type is the only generic way to retain the required method.
+- Direct callback API boundaries, source `include!` blockers, dependency aliases
+  inside macro bodies, and inline script-bundle modules.
 
 Cfg/custom-cfg matrix expansion is intentionally not part of this batch.

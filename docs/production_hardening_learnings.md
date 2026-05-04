@@ -235,6 +235,13 @@ conversion-like traits; `.into()` and `.try_into()` have precise conversion
 retention paths, and broad argument fallbacks otherwise pull unrelated
 `TryFrom<Other> for Target` impls into the slice.
 
+The third rule-database pass raised the fast rule set to 19 cases and confirmed
+existing generic behavior for four more Litter-shaped surfaces: direct borrowed
+`dyn Trait`/`fn(...)` API boundaries stay warning-only, retained source
+`include!` macros stay production-blocking, dependency aliases mentioned only in
+macro bodies are retained, and inline script-bundle modules copy only live
+`include_str!` assets.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
