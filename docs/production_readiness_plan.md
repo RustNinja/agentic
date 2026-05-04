@@ -51,12 +51,16 @@ assets, output safety, or product diagnostics by itself.
   `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle
   models generated source.
+- Retained `include!` Rust source files must fail closed even when their paths
+  are static and copied, because the included Rust is outside the current
+  reachability graph.
 - File include assets must be copied only for statically resolved package-local
   paths; unknown env paths, absolute paths, external paths, and `OUT_DIR`
   generated assets are production-blocking.
 - Feature and platform cfgs form a matrix, not a boolean. A slice should report
   the feature/platform configuration it was generated for, and only `cfg(test)`
-  should be treated as test-only pruning.
+  should be treated as test-only pruning. Retained non-test `cfg`/`cfg_attr`
+  surfaces must fail closed until validation explicitly covers that matrix.
 - Dependency aliases, workspace dependencies, optional dependency features, and
   target-specific dependencies need Cargo's resolver model.
 - Retained path dependencies outside the workspace are not self-contained unless

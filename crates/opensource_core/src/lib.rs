@@ -888,21 +888,7 @@ fn item_attrs(item: &Item) -> &[Attribute] {
 
 fn module_path_has_cfg_gate(project: &Project, package: &str, module_path: &[String]) -> bool {
     for depth in 1..=module_path.len() {
-        let parent_path = &module_path[..depth - 1];
-        let module_name = &module_path[depth - 1];
-        let Some(source) = project
-            .files
-            .values()
-            .find(|source| source.package == package && source.module_path == parent_path)
-        else {
-            continue;
-        };
-        let Some(item_mod) = source.syntax.items.iter().find_map(|item| {
-            let Item::Mod(item_mod) = item else {
-                return None;
-            };
-            (item_mod.ident == module_name.as_str()).then_some(item_mod)
-        }) else {
+        let Some(item_mod) = module_item_for_path(project, package, &module_path[..depth]) else {
             continue;
         };
         if attrs_have_non_test_cfg_gate(&item_mod.attrs) {
@@ -910,6 +896,24 @@ fn module_path_has_cfg_gate(project: &Project, package: &str, module_path: &[Str
         }
     }
     false
+}
+
+fn module_item_for_path<'a>(
+    project: &'a Project,
+    package: &str,
+    module_path: &[String],
+) -> Option<&'a syn::ItemMod> {
+    let (module_name, parent_path) = module_path.split_last()?;
+    let source = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == parent_path)?;
+    source.syntax.items.iter().find_map(|item| {
+        let Item::Mod(item_mod) = item else {
+            return None;
+        };
+        (item_mod.ident == module_name.as_str()).then_some(item_mod)
+    })
 }
 
 fn attrs_have_non_test_cfg_gate(attrs: &[Attribute]) -> bool {
@@ -946,9 +950,9 @@ fn add_syntactic_production_hazards(
     if counts.source_include_macros > 0 {
         hazards.push(production_hazard(
             "source_include_macros",
-            "warning",
+            "error",
             format!(
-                "{} retained include! macro(s) may inject Rust source outside the static parse tree",
+                "{} retained include! macro(s) inject Rust source outside the static reachability graph",
                 counts.source_include_macros
             ),
         ));
@@ -1036,9 +1040,9 @@ fn add_syntactic_production_hazards(
     if counts.conditional_compilation_attrs > 0 {
         hazards.push(production_hazard(
             "conditional_compilation_attrs",
-            "warning",
+            "error",
             format!(
-                "{} retained cfg/cfg_attr attribute(s) require feature or target matrix validation for full production confidence",
+                "{} retained cfg/cfg_attr attribute(s) require explicit feature or target matrix validation before production acceptance",
                 counts.conditional_compilation_attrs
             ),
         ));
@@ -1103,6 +1107,7 @@ impl SyntacticHazardCounts {
 
 fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
     let mut counts = SyntacticHazardCounts::default();
+    counts.add(retained_module_boundary_hazard_counts(project, reduced));
 
     for callable in &reduced.reachable {
         if let Some(record) = project.functions.get(callable) {
@@ -1137,6 +1142,68 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
     }
 
     counts
+}
+
+fn retained_module_boundary_hazard_counts(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> SyntacticHazardCounts {
+    let mut module_boundaries = BTreeSet::<(String, Vec<String>)>::new();
+
+    for callable in &reduced.reachable {
+        if let Some(record) = project.functions.get(callable) {
+            insert_module_boundary_paths(
+                &mut module_boundaries,
+                &record.package,
+                &record.module_path,
+            );
+        } else if let Some(record) = project.methods.get(callable) {
+            insert_module_boundary_paths(
+                &mut module_boundaries,
+                callable.package(),
+                &record.module_path,
+            );
+        }
+    }
+
+    for item in &reduced.reachable_items {
+        if let Some(record) = project.items.get(item) {
+            insert_module_boundary_paths(
+                &mut module_boundaries,
+                &record.package,
+                &record.module_path,
+            );
+        }
+    }
+
+    let mut counts = SyntacticHazardCounts::default();
+    for (package, module_path) in module_boundaries {
+        let Some(item_mod) = module_item_for_path(project, &package, &module_path) else {
+            continue;
+        };
+        let mut visitor = SyntacticHazardVisitor {
+            counts: SyntacticHazardCounts::default(),
+            include_context: None,
+        };
+        for attribute in &item_mod.attrs {
+            visitor.visit_attribute(attribute);
+        }
+        counts.add(visitor.counts);
+    }
+
+    counts
+}
+
+fn insert_module_boundary_paths(
+    module_boundaries: &mut BTreeSet<(String, Vec<String>)>,
+    package: &str,
+    module_path: &[String],
+) {
+    let mut prefix = Vec::new();
+    for segment in module_path {
+        prefix.push(segment.clone());
+        module_boundaries.insert((package.to_string(), prefix.clone()));
+    }
 }
 
 fn syntactic_hazard_visitor_for_location(
@@ -2022,7 +2089,7 @@ pub fn entry() -> &'static str {
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "source_include_macros"));
+            .any(|hazard| hazard.code == "source_include_macros" && hazard.severity == "error"));
         assert!(report.production.hazards.iter().any(|hazard| {
             hazard.code == "out_dir_source_include_macros" && hazard.severity == "error"
         }));
@@ -2285,6 +2352,105 @@ pub struct Payload {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "error"));
+        assert_eq!(report.production.status, "hazards_detected");
+    }
+
+    #[test]
+    fn reports_retained_module_boundary_attribute_macro_hazards() {
+        let root = temp_output("module-boundary-attribute-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nffi = []\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"#[custom_attr::decorate]
+#[cfg_attr(feature = "ffi", custom_attr::ffi_module)]
+mod api;
+"#,
+        );
+        write(
+            root.join("app/src/api.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("module-boundary-attribute-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "error"));
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "conditional_compilation_attrs"));
+        assert_eq!(report.production.status, "hazards_detected");
+    }
+
+    #[test]
+    fn reports_retained_non_root_cfg_surfaces_as_error_hazards() {
+        let root = temp_output("cfg-surface-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nextra = []\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> Payload {
+    Payload { value: 1 }
+}
+
+pub struct Payload {
+    value: usize,
+    #[cfg(feature = "extra")]
+    extra: Extra,
+}
+
+#[cfg(feature = "extra")]
+pub struct Extra;
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("cfg-surface-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "conditional_compilation_attrs" && hazard.severity == "error"
+        }));
         assert_eq!(report.production.status, "hazards_detected");
     }
 
