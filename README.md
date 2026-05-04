@@ -110,7 +110,10 @@ validation sees the same Cargo cfg, target, registry, source-replacement, and
 rustflag context as the source workspace. Generated slices also preserve root
 `rust-toolchain.toml` or `rust-toolchain` files so Cargo validation uses the
 same pinned toolchain, plus root `[profile.*]` policy so profile-sensitive
-checks do not fall back to Cargo defaults. `--feedback-loop <n>` repeats that
+checks do not fall back to Cargo defaults. Rendered source and asset copies
+resolve symlinks through the package root: internal package links are copied at
+the path the generated source expects, while links that resolve outside the
+package are not copied into the slice. `--feedback-loop <n>` repeats that
 compiler feedback pass up to `n` times, widens the generated slice from bounded
 compiler diagnostics when they map back to known project symbols, stops early
 when diagnostics repeat without progress, and fails with the JSON report path

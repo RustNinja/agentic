@@ -290,14 +290,31 @@ pub fn write_reduced_workspace(
         files_written += 1;
 
         if let Some(build_script) = build_script_to_render(package, package_usage) {
-            let relative_path = build_script.strip_prefix(&package.root)?;
+            let Some(resolved_build_script) = resolve_package_copy_source(package, &build_script)?
+            else {
+                return Err(format!(
+                    "build script {} resolves outside package root {}",
+                    build_script.display(),
+                    package.root.display()
+                )
+                .into());
+            };
+            if !fs::metadata(&resolved_build_script)?.is_file() {
+                return Err(format!(
+                    "build script {} is not a regular file",
+                    build_script.display()
+                )
+                .into());
+            }
+            let relative_path = package_relative_copy_path(package, &build_script)?;
             let output_path = package_output.join(relative_path);
             if let Some(parent) = output_path.parent() {
                 fs::create_dir_all(parent)?;
             }
-            fs::copy(&build_script, output_path)?;
+            fs::copy(&resolved_build_script, output_path)?;
             files_written += 1;
-            files_written += copy_build_script_assets(package, &build_script, &package_output)?;
+            files_written +=
+                copy_build_script_assets(package, &resolved_build_script, &package_output)?;
         }
 
         let copied_support_source_tree = if package_should_copy_library_support_source(package) {
@@ -778,7 +795,11 @@ fn source_tree_rs_files(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error:
     for entry in fs::read_dir(path)? {
         let entry = entry?;
         let path = entry.path();
-        if entry.file_type()?.is_dir() {
+        let file_type = entry.file_type()?;
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             files.extend(source_tree_rs_files(&path)?);
         } else if path.extension().is_some_and(|extension| extension == "rs") {
             files.push(path.canonicalize()?);
@@ -814,23 +835,40 @@ fn copy_source_tree_path(
     path: &Path,
     package_output: &Path,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    if !path.exists() {
+    let mut visited_dirs = BTreeSet::new();
+    copy_source_tree_path_inner(package, path, package_output, &mut visited_dirs)
+}
+
+fn copy_source_tree_path_inner(
+    package: &Package,
+    path: &Path,
+    package_output: &Path,
+    visited_dirs: &mut BTreeSet<PathBuf>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let Some(resolved) = resolve_package_copy_source(package, path)? else {
+        return Ok(0);
+    };
+    let metadata = fs::metadata(&resolved)?;
+    if metadata.is_file() {
+        copy_package_file(package, &resolved, path, package_output)?;
+        return Ok(1);
+    }
+    if !metadata.is_dir() {
         return Ok(0);
     }
-    if path.is_file() {
-        let relative_path = path.strip_prefix(&package.root)?;
-        let output_path = package_output.join(relative_path);
-        if let Some(parent) = output_path.parent() {
-            fs::create_dir_all(parent)?;
-        }
-        fs::copy(path, output_path)?;
-        return Ok(1);
+    if !visited_dirs.insert(resolved.clone()) {
+        return Ok(0);
     }
 
     let mut copied = 0;
-    for entry in fs::read_dir(path)? {
+    for entry in fs::read_dir(&resolved)? {
         let entry = entry?;
-        copied += copy_source_tree_path(package, &entry.path(), package_output)?;
+        copied += copy_source_tree_path_inner(
+            package,
+            &path.join(entry.file_name()),
+            package_output,
+            visited_dirs,
+        )?;
     }
     Ok(copied)
 }
@@ -1036,33 +1074,51 @@ fn copy_non_rust_path_assets(
     path: &Path,
     package_output: &Path,
 ) -> Result<usize, Box<dyn std::error::Error>> {
-    if path.is_file() {
+    let mut visited_dirs = BTreeSet::new();
+    copy_non_rust_path_assets_inner(package, path, package_output, &mut visited_dirs)
+}
+
+fn copy_non_rust_path_assets_inner(
+    package: &Package,
+    path: &Path,
+    package_output: &Path,
+    visited_dirs: &mut BTreeSet<PathBuf>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "target" | ".git"))
+    {
+        return Ok(0);
+    }
+
+    let Some(resolved) = resolve_package_copy_source(package, path)? else {
+        return Ok(0);
+    };
+    let metadata = fs::metadata(&resolved)?;
+    if metadata.is_file() {
         if should_copy_asset(path) {
-            copy_asset(package, path, package_output)?;
+            copy_asset(package, &resolved, path, package_output)?;
             return Ok(1);
         }
         return Ok(0);
     }
+    if !metadata.is_dir() {
+        return Ok(0);
+    }
+    if !visited_dirs.insert(resolved.clone()) {
+        return Ok(0);
+    }
 
     let mut copied = 0;
-    for entry in fs::read_dir(path)? {
+    for entry in fs::read_dir(&resolved)? {
         let entry = entry?;
-        let path = entry.path();
-        let file_name = entry.file_name();
-        let file_name = file_name.to_string_lossy();
-        if file_name == "target" || file_name == ".git" {
-            continue;
-        }
-
-        if entry.file_type()?.is_dir() {
-            copied += copy_non_rust_path_assets(package, &path, package_output)?;
-            continue;
-        }
-
-        if should_copy_asset(&path) {
-            copy_asset(package, &path, package_output)?;
-            copied += 1;
-        }
+        copied += copy_non_rust_path_assets_inner(
+            package,
+            &path.join(entry.file_name()),
+            package_output,
+            visited_dirs,
+        )?;
     }
 
     Ok(copied)
@@ -1088,13 +1144,13 @@ fn copy_source_include_assets(
         } else {
             source_dir.join(candidate)
         };
-        let Ok(path) = path.canonicalize() else {
+        let Some(resolved) = resolve_package_copy_source(package, &path)? else {
             continue;
         };
-        if !path.starts_with(&package.root) || !path.is_file() {
+        if !fs::metadata(&resolved)?.is_file() {
             continue;
         }
-        copy_asset(package, &path, package_output)?;
+        copy_asset(package, &resolved, &path, package_output)?;
         copied += 1;
     }
 
@@ -1155,10 +1211,20 @@ fn include_macro_literal_path(tokens: &TokenStream) -> Option<PathBuf> {
 
 fn copy_asset(
     package: &Package,
-    path: &Path,
+    source_path: &Path,
+    package_path: &Path,
     package_output: &Path,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    let relative_path = path.strip_prefix(&package.root)?;
+    copy_package_file(package, source_path, package_path, package_output)
+}
+
+fn copy_package_file(
+    package: &Package,
+    source_path: &Path,
+    package_path: &Path,
+    package_output: &Path,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let relative_path = package_relative_copy_path(package, package_path)?;
     let output_path = package_output.join(relative_path);
     if output_path.exists() {
         return Ok(());
@@ -1166,8 +1232,67 @@ fn copy_asset(
     if let Some(parent) = output_path.parent() {
         fs::create_dir_all(parent)?;
     }
-    fs::copy(path, output_path)?;
+    fs::copy(source_path, output_path)?;
     Ok(())
+}
+
+fn resolve_package_copy_source(
+    package: &Package,
+    path: &Path,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    match fs::symlink_metadata(path) {
+        Ok(_) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+    let Ok(resolved) = path.canonicalize() else {
+        return Ok(None);
+    };
+    if !resolved.starts_with(&package.root) {
+        return Ok(None);
+    }
+    Ok(Some(resolved))
+}
+
+fn package_relative_copy_path(
+    package: &Package,
+    path: &Path,
+) -> Result<PathBuf, Box<dyn std::error::Error>> {
+    let relative = path.strip_prefix(&package.root)?;
+    let mut normalized = PathBuf::new();
+    for component in relative.components() {
+        match component {
+            Component::Normal(component) => normalized.push(component),
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(format!(
+                        "copy path {} escapes package root {}",
+                        path.display(),
+                        package.root.display()
+                    )
+                    .into());
+                }
+            }
+            Component::RootDir | Component::Prefix(_) => {
+                return Err(format!(
+                    "copy path {} is not relative to package root {}",
+                    path.display(),
+                    package.root.display()
+                )
+                .into());
+            }
+        }
+    }
+    if normalized.as_os_str().is_empty() {
+        return Err(format!(
+            "copy path {} resolves to package root {}",
+            path.display(),
+            package.root.display()
+        )
+        .into());
+    }
+    Ok(normalized)
 }
 
 fn should_copy_asset(path: &Path) -> bool {

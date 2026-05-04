@@ -77,6 +77,8 @@ assets, output safety, or product diagnostics by itself.
      validation does not drift to the user's default Rust toolchain.
    - Preserve root `[profile.*]` policy so generated validation keeps the
      source workspace's Cargo profile semantics.
+   - Copy source/include/build assets only after resolving symlinks inside the
+     package root; never copy a symlink target that escapes the package.
    - Validate production slices with Cargo `--locked` whenever the source
      workspace provides a lockfile.
 

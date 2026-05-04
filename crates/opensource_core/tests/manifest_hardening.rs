@@ -288,6 +288,118 @@ pub fn selected() -> i32 {
     assert!(manifest.contains("overflow-checks = false"));
 }
 
+#[cfg(unix)]
+#[test]
+fn source_include_symlink_inside_package_is_copied_at_link_path() {
+    let workspace = temp_path("source-include-internal-link-workspace");
+    let output = temp_path("source-include-internal-link-output");
+    write_basic_workspace(&workspace);
+    write_basic_app_manifest(&workspace);
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    include_str!("data-link.txt").len()
+}
+"#,
+    );
+    write(
+        workspace.join("app/data/message.txt"),
+        "internal package data",
+    );
+    symlink_file(
+        &workspace.join("app/data/message.txt"),
+        &workspace.join("app/src/data-link.txt"),
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(
+        read(output.join("app/src/data-link.txt")),
+        "internal package data"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn source_include_symlink_outside_package_is_not_copied() {
+    let workspace = temp_path("source-include-external-link-workspace");
+    let output = temp_path("source-include-external-link-output");
+    let external = temp_path("source-include-external-link-secret");
+    write_basic_workspace(&workspace);
+    write_basic_app_manifest(&workspace);
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    include_str!("secret-link.txt").len()
+}
+"#,
+    );
+    write(external.join("secret.txt"), "external secret");
+    symlink_file(
+        &external.join("secret.txt"),
+        &workspace.join("app/src/secret-link.txt"),
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(!output.join("app/src/secret-link.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn build_script_asset_symlink_outside_package_is_not_copied() {
+    let workspace = temp_path("build-asset-external-link-workspace");
+    let output = temp_path("build-asset-external-link-output");
+    let external = temp_path("build-asset-external-link-secret");
+    write_basic_workspace(&workspace);
+    write_basic_app_manifest(&workspace);
+    write(
+        workspace.join("app/build.rs"),
+        r#"fn main() {
+    let _ = std::fs::read_to_string("asset-link.txt");
+}
+"#,
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+    write(external.join("secret.txt"), "external build secret");
+    symlink_file(
+        &external.join("secret.txt"),
+        &workspace.join("app/asset-link.txt"),
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join("app/build.rs").exists());
+    assert!(!output.join("app/asset-link.txt").exists());
+}
+
 #[test]
 fn slices_single_package_binary_crate_with_stub_main() {
     let workspace = temp_path("single-workspace");
@@ -7689,6 +7801,30 @@ edition = "2021"
     write(root.join(name).join("src/lib.rs"), source);
 }
 
+fn write_basic_workspace(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+}
+
+fn write_basic_app_manifest(root: &Path) {
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+}
+
 fn write_metadata_exclude_fixture(root: &Path) {
     if root.exists() {
         fs::remove_dir_all(root).unwrap();
@@ -7742,6 +7878,14 @@ fn write(path: PathBuf, contents: &str) {
 
 fn read(path: PathBuf) -> String {
     fs::read_to_string(path).unwrap()
+}
+
+#[cfg(unix)]
+fn symlink_file(original: &Path, link: &Path) {
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    std::os::unix::fs::symlink(original, link).unwrap();
 }
 
 fn temp_path(label: &str) -> PathBuf {

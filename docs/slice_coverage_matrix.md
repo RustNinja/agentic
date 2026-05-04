@@ -39,6 +39,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Item macro-generated items | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Item macro invocations such as `lazy_static!` are retained when generated identifiers are referenced by reachable code |
 | Build-script assets | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Non-Rust assets referenced by `build.rs` string literal paths are copied without copying unrelated package docs/config |
 | Source include assets | `manifest_hardening.rs` | Files referenced by retained `include!`, `include_str!`, and `include_bytes!` literal paths are copied next to the sliced source; unused include assets are not copied |
+| Symlink copy boundaries | `manifest_hardening.rs` | Internal package symlinked include assets are copied at the source-visible link path, while symlinked source or build assets resolving outside the package root are not copied |
 | Workspace patches and locks | `manifest_hardening.rs`, CLI unit tests | Root `[patch.*]` tables and `Cargo.lock` are preserved; production validation adds `--locked` for source workspaces with lockfiles so sliced workspaces keep the source repository's dependency resolution |
 | Workspace profiles | `manifest_hardening.rs` | Root `[profile.*]` tables are preserved so generated validation does not fall back to Cargo profile defaults |
 | Toolchain context | `manifest_hardening.rs` | Root `rust-toolchain.toml` / `rust-toolchain` files are copied so generated validation uses the source workspace's pinned Rust toolchain |

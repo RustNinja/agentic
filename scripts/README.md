@@ -42,7 +42,8 @@ values to validate feature or target matrix cases such as `--all-features` or
 non-default targets whose `required-features` are not activated by those
 arguments, preserves pinned Rust toolchain files, and adds Cargo `--locked` when
 the source checkout has a lockfile. Generated slices also preserve root
-`[profile.*]` policy. Use `--deny-warnings` for production gates that require
+`[profile.*]` policy and refuse to copy symlinked assets that resolve outside
+their package root. Use `--deny-warnings` for production gates that require
 warning-free generated feedback. Each corpus row includes
 the slicer's authoritative validation verdict, production-readiness status,
 production hazard codes, compiler feedback widening candidate/hazard kinds,
