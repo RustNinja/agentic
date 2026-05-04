@@ -275,7 +275,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(reason.into());
         }
     } else if options.run_check {
-        run_plain_check(&options)?;
+        run_plain_check_gate(&options, &mut validation)?;
     }
 
     record_final_production_readiness(&options, &mut validation);
@@ -613,6 +613,40 @@ fn run_plain_check(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
         return Err(format!("generated workspace failed cargo check with {status}").into());
     }
     Ok(())
+}
+
+fn run_plain_check_gate(
+    options: &CliOptions,
+    validation: &mut ValidationReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    match run_plain_check(options) {
+        Ok(()) => {
+            validation.gates.push(ValidationGateReport {
+                name: "check".to_string(),
+                status: "passed".to_string(),
+                reason: "generated workspace cargo check passed".to_string(),
+                report_path: None,
+                error_count: None,
+                warning_count: None,
+                semantic_warning_hazards: None,
+            });
+            Ok(())
+        }
+        Err(error) => {
+            let reason = error.to_string();
+            validation.gates.push(ValidationGateReport {
+                name: "check".to_string(),
+                status: "failed".to_string(),
+                reason: reason.clone(),
+                report_path: None,
+                error_count: None,
+                warning_count: None,
+                semantic_warning_hazards: None,
+            });
+            finish_validation(options, validation, "rejected", Some(&reason))?;
+            Err(reason.into())
+        }
+    }
 }
 
 fn absolute_path(path: &Path) -> Result<PathBuf, Box<dyn std::error::Error>> {
@@ -1931,9 +1965,9 @@ mod tests {
         baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
         production_readiness_blocks_validation, record_final_production_readiness,
-        semantic_hazard_warning_count, slice_report_path, try_widen_from_feedback,
-        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
-        ValidationGateReport, ValidationReport,
+        run_plain_check_gate, semantic_hazard_warning_count, slice_report_path,
+        try_widen_from_feedback, uncovered_validation_targets, validation_report_path,
+        FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -2440,6 +2474,33 @@ pub fn helper() -> usize {
         let report_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(slice_report).unwrap()).unwrap();
         assert_eq!(report_json["feedback_widened_roots"][0], "app::helper");
+    }
+
+    #[test]
+    fn plain_check_failure_writes_rejected_validation_report() {
+        let source = temp_path("cli-plain-check-source");
+        let output = temp_path("cli-plain-check-output");
+        let validation_path = temp_path("cli-plain-check-report").join("validation.json");
+        write(output.join("Cargo.toml"), "not valid toml");
+        let options = parse_args_from(vec![
+            std::ffi::OsString::from("--check"),
+            std::ffi::OsString::from("--validation-report"),
+            validation_path.clone().into_os_string(),
+            source.into_os_string(),
+            output.into_os_string(),
+        ])
+        .expect("arguments should parse");
+        let mut validation = ValidationReport::new(&options);
+
+        let error = run_plain_check_gate(&options, &mut validation)
+            .expect_err("plain check should fail for invalid Cargo.toml");
+
+        assert!(error.to_string().contains("generated workspace failed"));
+        let value: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(validation_path).unwrap()).unwrap();
+        assert_eq!(value["status"], "rejected");
+        assert_eq!(value["gates"][0]["name"], "check");
+        assert_eq!(value["gates"][0]["status"], "failed");
     }
 
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {

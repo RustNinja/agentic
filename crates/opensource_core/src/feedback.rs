@@ -654,6 +654,7 @@ mod tests {
     use std::{
         fs,
         path::PathBuf,
+        sync::{Mutex, MutexGuard},
         time::{Duration, SystemTime, UNIX_EPOCH},
     };
 
@@ -662,6 +663,14 @@ mod tests {
         stderr_failure_diagnostic, timeout_failure_diagnostic, CheckDiagnostic, CheckOptions,
         CheckReport, CheckSpan, FeedbackWideningReport,
     };
+
+    static FAKE_CARGO_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    fn fake_cargo_test_lock() -> MutexGuard<'static, ()> {
+        FAKE_CARGO_TEST_LOCK
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner())
+    }
 
     #[test]
     fn parses_compiler_message_diagnostics() {
@@ -832,6 +841,7 @@ mod tests {
     fn terminates_feedback_command_after_timeout() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = fake_cargo_test_lock();
         let root = std::env::temp_dir().join(format!(
             "opensourced-feedback-timeout-{}",
             std::process::id()
@@ -871,6 +881,7 @@ mod tests {
     fn passes_extra_cargo_check_arguments_to_command() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = fake_cargo_test_lock();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -921,6 +932,7 @@ mod tests {
     fn runs_cargo_check_from_manifest_parent() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = fake_cargo_test_lock();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
@@ -964,6 +976,7 @@ mod tests {
     fn absolutizes_relative_target_dir_before_changing_working_dir() {
         use std::os::unix::fs::PermissionsExt;
 
+        let _guard = fake_cargo_test_lock();
         let unique = SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .unwrap()
