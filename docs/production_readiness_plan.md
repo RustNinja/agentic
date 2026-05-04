@@ -97,7 +97,7 @@ assets, output safety, or product diagnostics by itself.
   local path dependency closures and workspace-inherited manifest fields.
 - Workspace `[patch]` and `[replace]` path entries are copied and rewritten when
   they point at local package roots; uncopyable path entries remain
-  production-blocking.
+  production-blocking and report the manifest path plus patch/replace subject.
 - Whole-crate fallback must be explicit and reported with size impact.
 - Output deletion must be guarded. A production CLI must only replace empty or
   previously generated output directories and must reject paths inside or above

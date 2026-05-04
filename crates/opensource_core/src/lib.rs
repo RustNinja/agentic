@@ -10,7 +10,7 @@ mod render;
 mod repair;
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     time::Instant,
@@ -656,32 +656,40 @@ fn add_workspace_production_hazards(
             retained_build_script_details,
         ));
     }
-    let retained_path_dependencies = retained_non_workspace_path_dependencies(project, reduced);
-    if !retained_path_dependencies.is_empty() {
-        hazards.push(production_hazard(
+    let retained_path_dependency_details =
+        retained_non_workspace_path_dependency_details(project, reduced);
+    if !retained_path_dependency_details.is_empty() {
+        hazards.push(production_hazard_with_details(
             "retained_non_workspace_path_dependencies",
             "error",
             format!(
                 "{} retained non-workspace path dependency reference(s) would keep the slice tied to the original checkout: {}",
-                retained_path_dependencies.len(),
-                retained_path_dependencies.into_iter().collect::<Vec<_>>().join(", ")
+                retained_path_dependency_details.len(),
+                retained_path_dependency_details
+                    .iter()
+                    .map(|detail| detail.subject.as_str())
+                    .collect::<Vec<_>>()
+                    .join(", ")
             ),
+            retained_path_dependency_details,
         ));
     }
-    let retained_workspace_patch_paths =
-        retained_workspace_patch_replace_path_dependencies(project);
-    if !retained_workspace_patch_paths.is_empty() {
-        hazards.push(production_hazard(
+    let retained_workspace_patch_path_details =
+        retained_workspace_patch_replace_path_dependency_details(project);
+    if !retained_workspace_patch_path_details.is_empty() {
+        hazards.push(production_hazard_with_details(
             "retained_workspace_patch_replace_path_dependencies",
             "error",
             format!(
                 "{} retained workspace patch/replace path entry/entries would keep the slice tied to the original checkout: {}",
-                retained_workspace_patch_paths.len(),
-                retained_workspace_patch_paths
-                    .into_iter()
+                retained_workspace_patch_path_details.len(),
+                retained_workspace_patch_path_details
+                    .iter()
+                    .map(|detail| detail.subject.as_str())
                     .collect::<Vec<_>>()
                     .join(", ")
             ),
+            retained_workspace_patch_path_details,
         ));
     }
 }
@@ -701,8 +709,11 @@ fn retained_build_script_detail(
     })
 }
 
-fn retained_workspace_patch_replace_path_dependencies(project: &Project) -> BTreeSet<String> {
-    let mut dependencies = BTreeSet::new();
+fn retained_workspace_patch_replace_path_dependency_details(
+    project: &Project,
+) -> Vec<ProductionHazardDetail> {
+    let mut dependencies = BTreeMap::new();
+    let manifest_path = project.workspace.root.join("Cargo.toml");
     if let Some(patches) = project
         .workspace
         .manifest
@@ -715,6 +726,9 @@ fn retained_workspace_patch_replace_path_dependencies(project: &Project) -> BTre
                 &format!("patch.{source}"),
                 value,
                 &project.workspace.root,
+                &manifest_path,
+                None,
+                None,
             );
         }
     }
@@ -730,24 +744,32 @@ fn retained_workspace_patch_replace_path_dependencies(project: &Project) -> BTre
                 &format!("replace.{name}"),
                 value,
                 &project.workspace.root,
+                &manifest_path,
+                None,
+                Some(name),
             );
         }
     }
-    dependencies
+    dependencies.into_values().collect()
 }
 
 fn collect_uncopyable_manifest_path_dependencies(
-    dependencies: &mut BTreeSet<String>,
+    dependencies: &mut BTreeMap<String, ProductionHazardDetail>,
     prefix: &str,
     value: &toml::Value,
     manifest_dir: &Path,
+    manifest_path: &Path,
+    package: Option<&str>,
+    line_key: Option<&str>,
 ) {
     let Some(table) = value.as_table() else {
         return;
     };
     if table.get("path").and_then(toml::Value::as_str).is_some() {
         if !path_dependency_is_copyable(value, manifest_dir) {
-            dependencies.insert(prefix.to_string());
+            dependencies.entry(prefix.to_string()).or_insert_with(|| {
+                manifest_path_dependency_detail(prefix, package, manifest_path, line_key)
+            });
         }
         return;
     }
@@ -757,27 +779,26 @@ fn collect_uncopyable_manifest_path_dependencies(
             &format!("{prefix}.{name}"),
             value,
             manifest_dir,
+            manifest_path,
+            package,
+            Some(name),
         );
     }
 }
 
-fn retained_non_workspace_path_dependencies(
+fn retained_non_workspace_path_dependency_details(
     project: &Project,
     reduced: &ReducedProject,
-) -> BTreeSet<String> {
-    let mut dependencies = BTreeSet::new();
+) -> Vec<ProductionHazardDetail> {
+    let mut dependencies = BTreeMap::new();
     for package_name in &reduced.packages {
         let Some(package) = project.workspace.packages.get(package_name) else {
             continue;
         };
-        for (_table_name, table) in package_dependency_tables(package) {
+        for (table_name, table) in package_dependency_tables(package) {
             for (alias, value) in table {
-                let (source, manifest_dir) = workspace_resolved_dependency_value_with_dir(
-                    project,
-                    alias,
-                    value,
-                    &package.root,
-                );
+                let (source, manifest_dir, manifest_path) =
+                    workspace_resolved_dependency_value(project, alias, value, &package.root);
                 if !dependency_has_path(source) {
                     continue;
                 }
@@ -795,12 +816,57 @@ fn retained_non_workspace_path_dependencies(
                     &dependency_package,
                 ) && !path_dependency_is_copyable(source, manifest_dir)
                 {
-                    dependencies.insert(format!("{package_name}:{alias}"));
+                    let subject = format!("{package_name}.{table_name}.{alias}");
+                    dependencies.entry(subject.clone()).or_insert_with(|| {
+                        manifest_path_dependency_detail(
+                            &subject,
+                            Some(package_name),
+                            &manifest_path,
+                            Some(alias),
+                        )
+                    });
                 }
             }
         }
     }
-    dependencies
+    dependencies.into_values().collect()
+}
+
+fn manifest_path_dependency_detail(
+    subject: &str,
+    package: Option<&str>,
+    manifest_path: &Path,
+    line_key: Option<&str>,
+) -> ProductionHazardDetail {
+    ProductionHazardDetail {
+        subject: subject.to_string(),
+        package: package.map(str::to_string),
+        module_path: None,
+        file: Some(manifest_path.to_path_buf()),
+        start_line: line_key.and_then(|key| manifest_key_line(manifest_path, key)),
+        cfg: None,
+        suggested_cargo_args: Vec::new(),
+    }
+}
+
+fn manifest_key_line(manifest_path: &Path, key: &str) -> Option<usize> {
+    let text = fs::read_to_string(manifest_path).ok()?;
+    text.lines()
+        .position(|line| manifest_line_starts_with_key(line, key))
+        .map(|line| line + 1)
+}
+
+fn manifest_line_starts_with_key(line: &str, key: &str) -> bool {
+    let trimmed = line.trim_start();
+    let rest = trimmed
+        .strip_prefix(key)
+        .or_else(|| trimmed.strip_prefix(&format!("{key:?}")));
+    rest.is_some_and(|rest| {
+        rest.trim_start()
+            .chars()
+            .next()
+            .is_some_and(|ch| matches!(ch, '=' | '.' | '{' | '['))
+    })
 }
 
 fn package_dependency_tables(
@@ -842,14 +908,15 @@ fn package_dependency_tables(
     tables
 }
 
-fn workspace_resolved_dependency_value_with_dir<'a>(
+fn workspace_resolved_dependency_value<'a>(
     project: &'a Project,
     alias: &str,
     value: &'a toml::Value,
     package_root: &'a Path,
-) -> (&'a toml::Value, &'a Path) {
+) -> (&'a toml::Value, &'a Path, PathBuf) {
+    let package_manifest = package_root.join("Cargo.toml");
     if !dependency_uses_workspace(value) {
-        return (value, package_root);
+        return (value, package_root, package_manifest);
     }
     project
         .workspace
@@ -858,8 +925,14 @@ fn workspace_resolved_dependency_value_with_dir<'a>(
         .and_then(|workspace| workspace.get("dependencies"))
         .and_then(toml::Value::as_table)
         .and_then(|dependencies| dependencies.get(alias))
-        .map(|value| (value, project.workspace.root.as_path()))
-        .unwrap_or((value, package_root))
+        .map(|value| {
+            (
+                value,
+                project.workspace.root.as_path(),
+                project.workspace.root.join("Cargo.toml"),
+            )
+        })
+        .unwrap_or((value, package_root, package_manifest))
 }
 
 fn path_dependency_is_copyable(value: &toml::Value, manifest_dir: &Path) -> bool {
@@ -3151,6 +3224,124 @@ pub fn entry() -> usize {
             .hazards
             .iter()
             .any(|hazard| { hazard.code == "retained_workspace_patch_replace_path_dependencies" }));
+    }
+
+    #[test]
+    fn reports_uncopyable_workspace_patch_replace_path_dependency_details() {
+        let root = temp_output("uncopyable-patch-path-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[patch.crates-io]
+missing-helper = { path = "missing-helper" }
+"#,
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("uncopyable-patch-path-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        let hazard = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| {
+                hazard.code == "retained_workspace_patch_replace_path_dependencies"
+                    && hazard.severity == "error"
+            })
+            .expect("uncopyable workspace patch/replace path hazard should be reported");
+        assert!(hazard.details.iter().any(|detail| {
+            detail.subject == "patch.crates-io.missing-helper"
+                && detail.package.is_none()
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("Cargo.toml"))
+                && detail.start_line.is_some()
+        }));
+        assert_eq!(report.production.status, "hazards_detected");
+    }
+
+    #[test]
+    fn reports_uncopyable_workspace_replace_path_dependency_details() {
+        let root = temp_output("uncopyable-replace-path-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[replace]
+"missing-replace:0.1.0" = { path = "missing-replace" }
+"#,
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("uncopyable-replace-path-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        let hazard = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| {
+                hazard.code == "retained_workspace_patch_replace_path_dependencies"
+                    && hazard.severity == "error"
+            })
+            .expect("uncopyable workspace replace path hazard should be reported");
+        assert!(hazard.details.iter().any(|detail| {
+            detail.subject == "replace.missing-replace:0.1.0"
+                && detail.package.is_none()
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("Cargo.toml"))
+                && detail.start_line.is_some()
+        }));
+        assert_eq!(report.production.status, "hazards_detected");
     }
 
     #[test]

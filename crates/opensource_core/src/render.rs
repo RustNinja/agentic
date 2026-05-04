@@ -1339,13 +1339,11 @@ fn dependency_path_root(
     } else {
         manifest_dir.join(path)
     };
-    let root = path.canonicalize()?;
+    let Ok(root) = path.canonicalize() else {
+        return Ok(None);
+    };
     if !root.join("Cargo.toml").is_file() {
-        return Err(format!(
-            "path dependency {} does not contain a Cargo.toml",
-            root.display()
-        )
-        .into());
+        return Ok(None);
     }
     Ok(Some(root))
 }

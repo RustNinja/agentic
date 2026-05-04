@@ -72,6 +72,8 @@ location details.
 Feedback-required macro hazards for retained custom attributes, custom derives,
 and non-builtin macro invocations include source locations as well.
 Retained build-script blockers include the package and build script path.
+Uncopyable retained path-dependency and workspace patch/replace blockers include
+manifest paths, owning packages when applicable, and dependency subjects.
 
 ## Litter Feedback Loop
 
