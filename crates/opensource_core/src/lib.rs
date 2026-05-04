@@ -3173,6 +3173,158 @@ pub fn entry() -> u32 {
     }
 
     #[test]
+    #[cfg(feature = "ra-hir")]
+    fn ra_feedback_repeatedly_prunes_selected_same_module_item_sets() {
+        struct SliceCase<'a> {
+            name: &'a str,
+            marked_roots: &'a [&'a str],
+            expected_present: &'a [&'a str],
+            expected_absent: &'a [&'a str],
+        }
+
+        let cases = [
+            SliceCase {
+                name: "one-function",
+                marked_roots: &["alpha_entry"],
+                expected_present: &[
+                    "pub fn alpha_entry",
+                    "fn alpha_helper",
+                    "pub struct AlphaConfig",
+                    "pub fn value(&self)",
+                ],
+                expected_absent: &[
+                    "pub fn beta_entry",
+                    "fn beta_helper",
+                    "pub struct BetaConfig",
+                    "pub struct GammaConfig",
+                    "pub const GAMMA_LIMIT",
+                    "pub fn unrelated_entry",
+                    "fn unrelated_leaf",
+                    "alpha_unused_method",
+                ],
+            },
+            SliceCase {
+                name: "two-functions",
+                marked_roots: &["alpha_entry", "beta_entry"],
+                expected_present: &[
+                    "pub fn alpha_entry",
+                    "fn alpha_helper",
+                    "pub struct AlphaConfig",
+                    "pub fn beta_entry",
+                    "fn beta_helper",
+                    "pub struct BetaConfig",
+                ],
+                expected_absent: &[
+                    "pub struct GammaConfig",
+                    "pub const GAMMA_LIMIT",
+                    "pub fn unrelated_entry",
+                    "fn unrelated_leaf",
+                    "alpha_unused_method",
+                ],
+            },
+            SliceCase {
+                name: "three-mixed-items",
+                marked_roots: &["alpha_entry", "beta_entry", "GammaConfig"],
+                expected_present: &[
+                    "pub fn alpha_entry",
+                    "pub fn beta_entry",
+                    "pub struct AlphaConfig",
+                    "pub struct BetaConfig",
+                    "pub struct GammaConfig",
+                ],
+                expected_absent: &[
+                    "pub const GAMMA_LIMIT",
+                    "pub fn gamma_entry",
+                    "fn gamma_helper",
+                    "pub fn unrelated_entry",
+                    "fn unrelated_leaf",
+                    "pub struct DeltaUnused",
+                    "alpha_unused_method",
+                ],
+            },
+        ];
+
+        for case in cases {
+            for pass in 0..3 {
+                let root = temp_output(&format!("ra-feedback-{}-pass-{pass}-source", case.name));
+                let output =
+                    temp_output(&format!("ra-feedback-{}-pass-{pass}-reduction", case.name));
+                let opensourced_path = workspace_root().join("crates/opensourced");
+                write(
+                    root.join("Cargo.toml"),
+                    "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+                );
+                write(
+                    root.join("app/Cargo.toml"),
+                    &format!(
+                        "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                        opensourced_path
+                    ),
+                );
+                write(
+                    root.join("app/src/lib.rs"),
+                    &same_module_item_set_fixture(case.marked_roots),
+                );
+
+                let report = generate_with_analyzer(
+                    GenerateOptions {
+                        workspace_root: root,
+                        output_root: output.clone(),
+                    },
+                    AnalyzerMode::RustAnalyzerFeedback,
+                )
+                .unwrap_or_else(|error| {
+                    panic!(
+                        "RA feedback generation failed for case {} pass {pass}: {error}",
+                        case.name
+                    )
+                });
+
+                assert!(
+                    report
+                        .analyzer
+                        .notes
+                        .iter()
+                        .any(|note| note.contains("RA feedback closure:")),
+                    "case {} pass {pass} did not record RA feedback closure notes",
+                    case.name,
+                );
+
+                let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+                for expected in case.expected_present {
+                    assert!(
+                        generated.contains(expected),
+                        "case {} pass {pass} missing expected snippet {expected:?}\n{generated}",
+                        case.name,
+                    );
+                }
+                for unexpected in case.expected_absent {
+                    assert!(
+                        !generated.contains(unexpected),
+                        "case {} pass {pass} retained unrelated snippet {unexpected:?}\n{generated}",
+                        case.name,
+                    );
+                }
+
+                let target_dir =
+                    temp_output(&format!("ra-feedback-{}-pass-{pass}-target", case.name));
+                let status = Command::new("cargo")
+                    .arg("check")
+                    .arg("--all-targets")
+                    .current_dir(&output)
+                    .env("CARGO_TARGET_DIR", target_dir)
+                    .status()
+                    .expect("cargo check should start");
+                assert!(
+                    status.success(),
+                    "case {} pass {pass} generated workspace did not compile\n{generated}",
+                    case.name,
+                );
+            }
+        }
+    }
+
+    #[test]
     fn reports_reachable_include_macro_production_hazards() {
         let root = temp_output("include-hazard-source");
         let opensourced_path = workspace_root().join("crates/opensourced");
@@ -4541,5 +4693,97 @@ pub fn entry() -> usize {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
+    }
+
+    #[cfg(feature = "ra-hir")]
+    fn same_module_item_set_fixture(marked_roots: &[&str]) -> String {
+        let marked_roots = marked_roots.iter().copied().collect::<BTreeSet<_>>();
+        let marker = |name: &str| {
+            if marked_roots.contains(name) {
+                "#[opensourced]\n"
+            } else {
+                ""
+            }
+        };
+
+        format!(
+            r#"use opensourced::opensourced;
+
+pub struct AlphaConfig {{
+    pub value: u32,
+}}
+
+impl AlphaConfig {{
+    pub fn value(&self) -> u32 {{
+        self.value + alpha_helper()
+    }}
+
+    pub fn alpha_unused_method(&self) -> u32 {{
+        unrelated_leaf()
+    }}
+}}
+
+pub struct BetaConfig {{
+    pub value: u32,
+}}
+
+impl BetaConfig {{
+    pub fn value(&self) -> u32 {{
+        self.value + beta_helper()
+    }}
+}}
+
+{}pub struct GammaConfig {{
+    pub value: u32,
+}}
+
+pub struct DeltaUnused {{
+    pub value: u32,
+}}
+
+pub const GAMMA_LIMIT: u32 = 9;
+
+{}pub fn alpha_entry(seed: u32) -> u32 {{
+    let config = AlphaConfig {{
+        value: seed + alpha_helper(),
+    }};
+    config.value()
+}}
+
+fn alpha_helper() -> u32 {{
+    1
+}}
+
+{}pub fn beta_entry(seed: u32) -> u32 {{
+    let config = BetaConfig {{
+        value: seed + beta_helper(),
+    }};
+    config.value()
+}}
+
+fn beta_helper() -> u32 {{
+    2
+}}
+
+pub fn gamma_entry(seed: u32) -> u32 {{
+    seed + gamma_helper() + GAMMA_LIMIT
+}}
+
+fn gamma_helper() -> u32 {{
+    3
+}}
+
+pub fn unrelated_entry() -> u32 {{
+    unrelated_leaf()
+}}
+
+fn unrelated_leaf() -> u32 {{
+    99
+}}
+"#,
+            marker("GammaConfig"),
+            marker("alpha_entry"),
+            marker("beta_entry")
+        )
     }
 }
