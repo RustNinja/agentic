@@ -2320,31 +2320,32 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
                 .conditional_compilation_details
                 .push(self.cfg_attr_detail(attribute));
         }
-        let custom_derives = custom_derive_macro_count(attribute);
-        self.counts.custom_derive_macros += custom_derives;
-        if custom_derives > 0 {
+        let custom_derives = custom_derive_macro_paths(attribute);
+        self.counts.custom_derive_macros += custom_derives.len();
+        for derive_path in custom_derives {
             self.counts
                 .custom_derive_details
-                .push(self.span_detail(attribute));
+                .push(self.macro_surface_detail(attribute, format!("derive {derive_path}")));
         }
         if attribute_requires_macro_expansion(attribute) {
             self.counts.custom_attribute_macros += 1;
             self.counts
                 .custom_attribute_details
-                .push(self.span_detail(attribute));
+                .push(self.attribute_macro_detail(attribute));
         }
-        let nested_macro_counts = cfg_attr_nested_macro_counts(attribute);
-        if nested_macro_counts.custom_attribute_macros > 0 {
-            self.counts
-                .custom_attribute_details
-                .push(self.span_detail(attribute));
+        let nested_macro_paths = cfg_attr_nested_macro_paths(attribute);
+        self.counts.custom_attribute_macros += nested_macro_paths.custom_attributes.len();
+        self.counts.custom_derive_macros += nested_macro_paths.custom_derives.len();
+        for attribute_path in nested_macro_paths.custom_attributes {
+            self.counts.custom_attribute_details.push(
+                self.macro_surface_detail(attribute, format!("nested attr {attribute_path}")),
+            );
         }
-        if nested_macro_counts.custom_derive_macros > 0 {
+        for derive_path in nested_macro_paths.custom_derives {
             self.counts
                 .custom_derive_details
-                .push(self.span_detail(attribute));
+                .push(self.macro_surface_detail(attribute, format!("nested derive {derive_path}")));
         }
-        self.counts.add(nested_macro_counts);
 
         syn::visit::visit_attribute(self, attribute);
     }
@@ -2373,7 +2374,7 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
             self.counts.custom_macro_invocations += 1;
             self.counts
                 .custom_macro_invocation_details
-                .push(self.span_detail(mac));
+                .push(self.macro_invocation_detail(mac));
         }
 
         syn::visit::visit_macro(self, mac);
@@ -2413,6 +2414,30 @@ impl SyntacticHazardVisitor {
     fn type_surface_detail<T: Spanned + ToTokens>(&self, node: &T) -> ProductionHazardDetail {
         let mut detail = self.span_detail(node);
         detail.subject = format!("{}: {}", detail.subject, node.to_token_stream());
+        detail
+    }
+
+    fn attribute_macro_detail(&self, attribute: &Attribute) -> ProductionHazardDetail {
+        self.macro_surface_detail(
+            attribute,
+            format!(
+                "#[{}]",
+                format_token_stream(&attribute.path().to_token_stream())
+            ),
+        )
+    }
+
+    fn macro_invocation_detail(&self, mac: &Macro) -> ProductionHazardDetail {
+        self.macro_surface_detail(mac, format!("{}!", format_path(&mac.path)))
+    }
+
+    fn macro_surface_detail<T: Spanned>(
+        &self,
+        node: &T,
+        surface: impl AsRef<str>,
+    ) -> ProductionHazardDetail {
+        let mut detail = self.span_detail(node);
+        detail.subject = format!("{}: {}", detail.subject, surface.as_ref());
         detail
     }
 
@@ -2618,50 +2643,58 @@ fn builtin_macro_name(name: &str) -> bool {
     )
 }
 
-fn cfg_attr_nested_macro_counts(attribute: &Attribute) -> SyntacticHazardCounts {
+#[derive(Default)]
+struct CfgAttrNestedMacroPaths {
+    custom_attributes: Vec<String>,
+    custom_derives: Vec<String>,
+}
+
+fn cfg_attr_nested_macro_paths(attribute: &Attribute) -> CfgAttrNestedMacroPaths {
     if !attribute.path().is_ident("cfg_attr") {
-        return SyntacticHazardCounts::default();
+        return CfgAttrNestedMacroPaths::default();
     }
 
     let Ok(arguments) =
         attribute.parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated)
     else {
-        return SyntacticHazardCounts::default();
+        return CfgAttrNestedMacroPaths::default();
     };
 
-    cfg_attr_argument_macro_counts(&arguments)
+    cfg_attr_argument_macro_paths(&arguments)
 }
 
-fn cfg_attr_meta_nested_macro_counts(meta: &Meta) -> SyntacticHazardCounts {
+fn cfg_attr_meta_nested_macro_paths(meta: &Meta) -> CfgAttrNestedMacroPaths {
     let Meta::List(list) = meta else {
-        return SyntacticHazardCounts::default();
+        return CfgAttrNestedMacroPaths::default();
     };
     let Ok(arguments) =
         Punctuated::<Meta, syn::Token![,]>::parse_terminated.parse2(list.tokens.clone())
     else {
-        return SyntacticHazardCounts::default();
+        return CfgAttrNestedMacroPaths::default();
     };
 
-    cfg_attr_argument_macro_counts(&arguments)
+    cfg_attr_argument_macro_paths(&arguments)
 }
 
-fn cfg_attr_argument_macro_counts(
+fn cfg_attr_argument_macro_paths(
     arguments: &Punctuated<Meta, syn::Token![,]>,
-) -> SyntacticHazardCounts {
-    let mut counts = SyntacticHazardCounts::default();
+) -> CfgAttrNestedMacroPaths {
+    let mut paths = CfgAttrNestedMacroPaths::default();
     for nested_attr in arguments.iter().skip(1) {
-        add_meta_macro_counts(nested_attr, &mut counts);
+        add_meta_macro_paths(nested_attr, &mut paths);
     }
-    counts
+    paths
 }
 
-fn add_meta_macro_counts(meta: &Meta, counts: &mut SyntacticHazardCounts) {
+fn add_meta_macro_paths(meta: &Meta, paths: &mut CfgAttrNestedMacroPaths) {
     if meta.path().is_ident("cfg_attr") {
-        counts.add(cfg_attr_meta_nested_macro_counts(meta));
+        let nested = cfg_attr_meta_nested_macro_paths(meta);
+        paths.custom_attributes.extend(nested.custom_attributes);
+        paths.custom_derives.extend(nested.custom_derives);
         return;
     }
     if meta.path().is_ident("derive") {
-        counts.custom_derive_macros += custom_derive_meta_count(meta);
+        paths.custom_derives.extend(custom_derive_meta_paths(meta));
         return;
     }
 
@@ -2669,13 +2702,13 @@ fn add_meta_macro_counts(meta: &Meta, counts: &mut SyntacticHazardCounts) {
         return;
     };
     if !attribute_path_is_builtin_or_inert(&first.ident.to_string()) {
-        counts.custom_attribute_macros += 1;
+        paths.custom_attributes.push(format_path(meta.path()));
     }
 }
 
-fn custom_derive_macro_count(attribute: &Attribute) -> usize {
+fn custom_derive_macro_paths(attribute: &Attribute) -> Vec<String> {
     if !attribute.path().is_ident("derive") {
-        return 0;
+        return Vec::new();
     }
 
     attribute
@@ -2684,14 +2717,15 @@ fn custom_derive_macro_count(attribute: &Attribute) -> usize {
             paths
                 .iter()
                 .filter(|path| !derive_path_is_builtin(path))
-                .count()
+                .map(format_path)
+                .collect()
         })
         .unwrap_or_default()
 }
 
-fn custom_derive_meta_count(meta: &Meta) -> usize {
+fn custom_derive_meta_paths(meta: &Meta) -> Vec<String> {
     let Meta::List(list) = meta else {
-        return 0;
+        return Vec::new();
     };
 
     Punctuated::<syn::Path, syn::Token![,]>::parse_terminated
@@ -2700,9 +2734,18 @@ fn custom_derive_meta_count(meta: &Meta) -> usize {
             paths
                 .iter()
                 .filter(|path| !derive_path_is_builtin(path))
-                .count()
+                .map(format_path)
+                .collect()
         })
         .unwrap_or_default()
+}
+
+fn format_path(path: &syn::Path) -> String {
+    format_token_stream(&path.to_token_stream())
+}
+
+fn format_token_stream(tokens: &TokenStream) -> String {
+    tokens.to_string().replace(" :: ", "::")
 }
 
 fn derive_path_is_builtin(path: &syn::Path) -> bool {
@@ -3915,7 +3958,7 @@ pub fn entry() -> Vec<i32> {
             })
             .expect("custom macro invocation hazard should be reported");
         assert!(hazard.details.iter().any(|detail| {
-            detail.subject == "app"
+            detail.subject == "app: project_macro!"
                 && detail
                     .file
                     .as_ref()
@@ -4569,7 +4612,7 @@ pub struct Payload {
             .find(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "warning")
             .expect("custom attribute hazard should be reported");
         assert!(attribute_hazard.details.iter().any(|detail| {
-            detail.subject == "app"
+            detail.subject == "app: #[custom_attr::decorate]"
                 && detail
                     .file
                     .as_ref()
@@ -4585,7 +4628,8 @@ pub struct Payload {
         assert!(derive_hazard
             .details
             .iter()
-            .any(|detail| detail.start_line == Some(9)));
+            .any(|detail| detail.subject == "app: derive serde::Serialize"
+                && detail.start_line == Some(9)));
         assert_eq!(report.production.status, "requires_feedback");
     }
 

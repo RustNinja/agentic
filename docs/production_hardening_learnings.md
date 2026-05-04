@@ -212,6 +212,12 @@ allowed to proceed to compiler feedback. Owned, returned, stored, or aliased
 dynamic surfaces remain hard production hazards because they can hide concrete
 project-local behavior that the static call graph has not proven.
 
+Macro expansion warnings should identify the exact retained macro surface, not
+only the module that contains it. Custom attribute, custom derive, nested helper
+attribute, and non-builtin macro invocation hazards now put the macro path in
+the hazard subject, so a macro-heavy Litter/UniFFI slice can be triaged without
+manually opening every retained source line.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
