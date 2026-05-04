@@ -266,7 +266,8 @@ pub fn write_reduced_workspace(
 
     let mut files_written = 1
         + copy_workspace_lockfile(project, output_root)?
-        + copy_workspace_cargo_config(project, output_root)?;
+        + copy_workspace_cargo_config(project, output_root)?
+        + copy_workspace_toolchain_files(project, output_root)?;
     for package_name in &reduced.packages {
         let package = project
             .workspace
@@ -486,6 +487,22 @@ fn copy_workspace_cargo_config(
             fs::create_dir_all(parent)?;
         }
         fs::copy(source, output)?;
+        copied += 1;
+    }
+    Ok(copied)
+}
+
+fn copy_workspace_toolchain_files(
+    project: &Project,
+    output_root: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let mut copied = 0;
+    for file_name in ["rust-toolchain.toml", "rust-toolchain"] {
+        let source = project.workspace.root.join(file_name);
+        if !source.is_file() {
+            continue;
+        }
+        fs::copy(source, output_root.join(file_name))?;
         copied += 1;
     }
     Ok(copied)

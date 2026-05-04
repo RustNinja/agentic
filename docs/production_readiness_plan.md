@@ -71,6 +71,8 @@ assets, output safety, or product diagnostics by itself.
      kind, cfg target, and package ID.
    - Run Cargo from each checked manifest's parent directory and preserve
      workspace `.cargo/config.toml` or `.cargo/config` in generated slices.
+   - Preserve root `rust-toolchain.toml` or `rust-toolchain` files so generated
+     validation does not drift to the user's default Rust toolchain.
    - Validate production slices with Cargo `--locked` whenever the source
      workspace provides a lockfile.
 

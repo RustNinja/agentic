@@ -40,6 +40,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Build-script assets | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Non-Rust assets referenced by `build.rs` string literal paths are copied without copying unrelated package docs/config |
 | Source include assets | `manifest_hardening.rs` | Files referenced by retained `include!`, `include_str!`, and `include_bytes!` literal paths are copied next to the sliced source; unused include assets are not copied |
 | Workspace patches and locks | `manifest_hardening.rs`, CLI unit tests | Root `[patch.*]` tables and `Cargo.lock` are preserved; production validation adds `--locked` for source workspaces with lockfiles so sliced workspaces keep the source repository's dependency resolution |
+| Toolchain context | `manifest_hardening.rs` | Root `rust-toolchain.toml` / `rust-toolchain` files are copied so generated validation uses the source workspace's pinned Rust toolchain |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
 | UniFFI-shaped API | `uniffi_mobile.rs`, `uniffi_setup.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, retained `uniffi::setup_scaffolding!()`, serde DTOs, and mobile bridge shape |

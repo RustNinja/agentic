@@ -110,6 +110,55 @@ pub fn selected() -> i32 {
 }
 
 #[test]
+fn copies_workspace_rust_toolchain_file() {
+    let workspace = temp_path("toolchain-workspace");
+    let output = temp_path("toolchain-output");
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("rust-toolchain.toml"),
+        &format!("[toolchain]\nchannel = {:?}\n", current_rustup_toolchain()),
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace.clone(),
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(
+        read(output.join("rust-toolchain.toml")),
+        read(workspace.join("rust-toolchain.toml"))
+    );
+}
+
+#[test]
 fn preserves_cargo_lint_policy_for_generated_validation() {
     let workspace = temp_path("lint-policy-workspace");
     let output = temp_path("lint-policy-output");
@@ -7658,6 +7707,10 @@ fn repo_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
+}
+
+fn current_rustup_toolchain() -> String {
+    std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "stable".to_string())
 }
 
 fn manifest_path(path: &Path) -> String {
