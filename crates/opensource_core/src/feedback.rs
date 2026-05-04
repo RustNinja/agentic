@@ -149,6 +149,11 @@ fn check_workspace_with_program(
 ) -> Result<CheckReport, Box<dyn std::error::Error>> {
     let manifest_path_for_cargo = absolute_path(&options.manifest_path)?;
     let working_dir = manifest_working_dir(&manifest_path_for_cargo);
+    let target_dir_for_cargo = options
+        .target_dir
+        .as_ref()
+        .map(|target_dir| absolute_path(target_dir))
+        .transpose()?;
     let mut command = Command::new(program);
     command
         .arg("check")
@@ -158,7 +163,7 @@ fn check_workspace_with_program(
     command.current_dir(&working_dir);
     command.args(&options.cargo_args);
 
-    if let Some(target_dir) = &options.target_dir {
+    if let Some(target_dir) = &target_dir_for_cargo {
         command.env("CARGO_TARGET_DIR", target_dir);
     }
 
@@ -181,7 +186,7 @@ fn check_workspace_with_program(
     Ok(CheckReport {
         manifest_path: options.manifest_path,
         working_dir: Some(working_dir),
-        target_dir: options.target_dir,
+        target_dir: target_dir_for_cargo,
         timeout_ms: options
             .timeout
             .map(|timeout| timeout.as_millis().try_into().unwrap_or(u64::MAX)),
@@ -958,6 +963,59 @@ mod tests {
         let expected = workspace.canonicalize();
         assert_eq!(actual.unwrap(), expected.unwrap());
         assert_eq!(report.working_dir.as_deref(), Some(workspace.as_path()));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn absolutizes_relative_target_dir_before_changing_working_dir() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let unique = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!("opensourced-feedback-target-{unique}"));
+        let workspace = root.join("workspace");
+        let _ = fs::remove_dir_all(&root);
+        fs::create_dir_all(&workspace).unwrap();
+        fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
+        let fake_cargo = root.join("fake-cargo");
+        let target_path = root.join("target-dir.txt");
+        fs::write(
+            &fake_cargo,
+            format!(
+                "#!/bin/sh\nprintf '%s' \"$CARGO_TARGET_DIR\" > '{}'\necho '{{\"reason\":\"build-finished\",\"success\":true}}'\n",
+                target_path.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&fake_cargo).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&fake_cargo, permissions).unwrap();
+
+        let relative_target = PathBuf::from("relative-feedback-target");
+        let expected_target = std::env::current_dir().unwrap().join(&relative_target);
+        let report = check_workspace_with_program(
+            fake_cargo.as_os_str(),
+            CheckOptions {
+                manifest_path: workspace.join("Cargo.toml"),
+                target_dir: Some(relative_target),
+                timeout: Some(Duration::from_secs(1)),
+                cargo_args: Vec::new(),
+            },
+        )
+        .expect("fake cargo should run");
+
+        assert_eq!(
+            fs::read_to_string(&target_path).unwrap(),
+            expected_target.display().to_string()
+        );
+        assert_eq!(
+            report.target_dir.as_deref(),
+            Some(expected_target.as_path())
+        );
 
         let _ = fs::remove_dir_all(root);
     }
