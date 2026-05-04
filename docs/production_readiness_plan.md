@@ -46,7 +46,9 @@ assets, output safety, or product diagnostics by itself.
 - Unknown macros should not be pruned silently. Either retain bounded source,
   query a semantic oracle, or fail with an unsupported-construct report.
 - Build scripts can execute arbitrary project logic and generate source under
-  `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling.
+  `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
+  retained `OUT_DIR` Rust includes must fail closed until a semantic oracle
+  models generated source.
 - Feature and platform cfgs form a matrix, not a boolean. A slice should report
   the feature/platform configuration it was generated for.
 - Dependency aliases, workspace dependencies, optional dependency features, and

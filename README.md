@@ -182,8 +182,10 @@ production report marks that boundary explicitly until those edges are consumed
 by reduction. A rust-analyzer HIR or rustc-driver backend remains the next
 precision step for resolving hard name-resolution cases before rendering.
 Generation reports fail closed on known syntactic trust hazards as well,
-including retained `include!` source macros and non-literal file include macros
-that cannot be fully validated by static path copying alone, plus retained
+including retained `include!` source macros that read generated Rust from
+`OUT_DIR`; other retained `include!` source macros and non-literal file include
+macros are reported as validation hazards because they cannot be fully validated
+by static path copying alone. The report also flags retained
 custom attribute and derive macros that may generate code outside the static
 parse tree, including macros hidden behind nested `cfg_attr`, and retained
 non-builtin macro invocations. Retained build scripts are also reported because

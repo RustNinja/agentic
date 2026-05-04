@@ -16,6 +16,8 @@ use std::{
 };
 
 use model::{Project, ReducedProject};
+use proc_macro2::TokenStream;
+use quote::ToTokens;
 use serde::Serialize;
 use syn::{parse::Parser, punctuated::Punctuated, visit::Visit, Attribute, Item, Macro, Meta};
 
@@ -784,6 +786,16 @@ fn add_syntactic_production_hazards(
             ),
         ));
     }
+    if counts.out_dir_source_include_macros > 0 {
+        hazards.push(production_hazard(
+            "out_dir_source_include_macros",
+            "error",
+            format!(
+                "{} retained include! macro(s) read generated Rust from OUT_DIR; production slicing cannot semantically model build-generated source",
+                counts.out_dir_source_include_macros
+            ),
+        ));
+    }
     if counts.nonliteral_file_include_macros > 0 {
         hazards.push(production_hazard(
             "nonliteral_file_include_macros",
@@ -866,6 +878,7 @@ fn add_reduction_evidence_production_hazards(
 #[derive(Default)]
 struct SyntacticHazardCounts {
     source_include_macros: usize,
+    out_dir_source_include_macros: usize,
     nonliteral_file_include_macros: usize,
     custom_attribute_macros: usize,
     custom_derive_macros: usize,
@@ -876,6 +889,7 @@ struct SyntacticHazardCounts {
 impl SyntacticHazardCounts {
     fn add(&mut self, other: Self) {
         self.source_include_macros += other.source_include_macros;
+        self.out_dir_source_include_macros += other.out_dir_source_include_macros;
         self.nonliteral_file_include_macros += other.nonliteral_file_include_macros;
         self.custom_attribute_macros += other.custom_attribute_macros;
         self.custom_derive_macros += other.custom_derive_macros;
@@ -925,7 +939,11 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
 
     fn visit_macro(&mut self, mac: &'ast Macro) {
         if macro_path_ends_with(mac, "include") {
-            self.counts.source_include_macros += 1;
+            if macro_tokens_reference_out_dir(&mac.tokens) {
+                self.counts.out_dir_source_include_macros += 1;
+            } else {
+                self.counts.source_include_macros += 1;
+            }
         } else if (macro_path_ends_with(mac, "include_str")
             || macro_path_ends_with(mac, "include_bytes"))
             && !macro_has_literal_path(mac)
@@ -938,6 +956,23 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
 
         syn::visit::visit_macro(self, mac);
     }
+}
+
+fn macro_tokens_reference_out_dir(tokens: &TokenStream) -> bool {
+    token_stream_mentions_string_literal(tokens, "OUT_DIR")
+}
+
+fn token_stream_mentions_string_literal(tokens: &TokenStream, value: &str) -> bool {
+    tokens.clone().into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Literal(literal) => {
+            syn::parse2::<syn::LitStr>(literal.to_token_stream())
+                .is_ok_and(|literal| literal.value() == value)
+        }
+        proc_macro2::TokenTree::Group(group) => {
+            token_stream_mentions_string_literal(&group.stream(), value)
+        }
+        proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => false,
+    })
 }
 
 fn macro_path_ends_with(mac: &Macro, name: &str) -> bool {
@@ -1678,6 +1713,7 @@ theme = []
 #[opensourced]
 pub fn entry() -> &'static str {
     let _generated = include!("generated_expr.rs");
+    let _out_dir_generated = include!(concat!(env!("OUT_DIR"), "/generated.rs"));
     include_str!(concat!("data", ".txt"))
 }
 "#,
@@ -1694,11 +1730,15 @@ pub fn entry() -> &'static str {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "source_include_macros"));
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "out_dir_source_include_macros" && hazard.severity == "error"
+        }));
         assert!(report
             .production
             .hazards
             .iter()
             .any(|hazard| hazard.code == "nonliteral_file_include_macros"));
+        assert_eq!(report.production.status, "hazards_detected");
     }
 
     #[test]
