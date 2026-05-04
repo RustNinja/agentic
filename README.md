@@ -18,6 +18,8 @@ workspace instead of the full source tree.
 - `crates/opensource_cli`: command-line wrapper around `opensource_core`.
   The primary binary is `slicers`.
 - `fixtures/a` through `fixtures/e`: five crates used as the proof workspace.
+- `fixtures/fast_macro_use`: a standalone fast stress workspace for macro,
+  import, derive, include, trait-import, and dead-pruning iteration.
 
 The fixture dependency graph is:
 
@@ -339,6 +341,10 @@ with different source shapes and then run the reducer against them:
   uniffi::...)` annotations, serde workspace dependencies, object-like impl
   methods, trait calls, and an unused local diagnostics crate that must be
   removed from the slice.
+- `fast_macro_use.rs`: a checked-in tiny multi-package corpus that exercises
+  renamed imports with local shadows, custom derive and attribute proc macros,
+  macro_rules definitions, retained include-generated source, trait imports,
+  and dead item/package pruning without waiting on a large repository.
 
 See `docs/uniffi_slicer_experiment.md` for the UniFFI fixture rationale and
 verified result.

@@ -1030,6 +1030,14 @@ impl<'a> ImportVisibleNameUseVisitor<'a> {
     }
 
     fn macro_tokens_use_visible_name(&self, tokens: &TokenStream) -> bool {
+        if self.local_binding_visible() {
+            return token_path_candidates(tokens).iter().any(|segments| {
+                segments.len() > 1
+                    && segments
+                        .first()
+                        .is_some_and(|segment| segment == self.visible_name)
+            });
+        }
         token_stream_mentions_ident(tokens, self.visible_name)
     }
 }
@@ -2208,6 +2216,20 @@ impl<'a> DependencyVisitor<'a> {
                 .segments
                 .first()
                 .is_some_and(|segment| self.local_value_binding_visible(&segment.ident.to_string()))
+    }
+
+    fn local_value_type_candidates(&self, name: &str) -> Vec<TypeRef> {
+        let mut candidates = self
+            .variable_candidates
+            .get(name)
+            .cloned()
+            .unwrap_or_default();
+        if let Some(type_ref) = self.variables.get(name) {
+            candidates.push(type_ref.clone());
+        }
+        candidates.sort();
+        candidates.dedup();
+        candidates
     }
 
     fn insert_variable_candidates(
@@ -3971,6 +3993,12 @@ impl DependencyVisitor<'_> {
         let mut candidate_method_names = BTreeSet::new();
         let self_method_names = macro_self_method_names(tokens);
         for segments in token_path_candidates(tokens) {
+            let single_segment_local =
+                segments.len() == 1 && self.local_value_binding_visible(&segments[0]);
+            if single_segment_local {
+                referenced_types.extend(self.local_value_type_candidates(&segments[0]));
+                continue;
+            }
             if segments.len() == 1 {
                 candidate_method_names.insert(segments[0].clone());
             }
