@@ -1,4 +1,4 @@
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use crate::model::{Project, SemanticReductionHints};
 
@@ -84,6 +84,44 @@ pub struct SemanticReport {
     pub file_budget: usize,
     pub method_call_budget: usize,
     pub path_budget: usize,
+    pub method_calls: usize,
+    pub queried_method_calls: usize,
+    pub resolved_method_calls: usize,
+    pub callable_method_calls: usize,
+    pub fallback_method_calls: usize,
+    pub unresolved_method_calls: usize,
+    pub unqueried_method_calls: usize,
+    pub paths: usize,
+    pub queried_paths: usize,
+    pub resolved_paths: usize,
+    pub unresolved_paths: usize,
+    pub unqueried_paths: usize,
+    pub selected_root_source_files: usize,
+    pub selected_root_analyzed_files: usize,
+    pub selected_root_failed_files: usize,
+    pub selected_root_skipped_files: usize,
+    pub selected_root_method_calls: usize,
+    pub selected_root_queried_method_calls: usize,
+    pub selected_root_resolved_method_calls: usize,
+    pub selected_root_callable_method_calls: usize,
+    pub selected_root_fallback_method_calls: usize,
+    pub selected_root_unresolved_method_calls: usize,
+    pub selected_root_unqueried_method_calls: usize,
+    pub selected_root_paths: usize,
+    pub selected_root_queried_paths: usize,
+    pub selected_root_resolved_paths: usize,
+    pub selected_root_unresolved_paths: usize,
+    pub selected_root_unqueried_paths: usize,
+    pub file_reports: Vec<SemanticFileReport>,
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct SemanticFileReport {
+    pub path: PathBuf,
+    pub selected_root_file: bool,
+    pub analyzed: bool,
+    pub failed: bool,
+    pub skipped_by_file_budget: bool,
     pub method_calls: usize,
     pub queried_method_calls: usize,
     pub resolved_method_calls: usize,
@@ -193,11 +231,17 @@ mod rust_analyzer {
     use ra_ap_project_model::CargoConfig;
     use ra_ap_syntax::{ast, AstNode, TextSize};
 
-    use crate::model::{
-        CallableId, ItemId, ItemKind, Project, SemanticOwnerId, SemanticReductionHints, SourceSpan,
+    use crate::{
+        model::{
+            CallableId, ItemId, ItemKind, Project, ReducedProject, RootId, SemanticOwnerId,
+            SemanticReductionHints, SourceSpan,
+        },
+        reduce,
     };
 
-    use super::{AnalyzerMode, AnalyzerReport, SemanticProvider, SemanticReport};
+    use super::{
+        AnalyzerMode, AnalyzerReport, SemanticFileReport, SemanticProvider, SemanticReport,
+    };
 
     const DEFAULT_SEMANTIC_FILE_BUDGET: usize = 48;
     const DEFAULT_METHOD_CALL_BUDGET: usize = 1_000;
@@ -362,6 +406,19 @@ mod rust_analyzer {
                 semantic.report.queried_paths,
                 semantic.report.unqueried_paths
             ));
+            if semantic.report.selected_root_source_files > 0 {
+                notes.push(format!(
+                    "HIR selected-root semantic inventory: {}/{} root file(s) analyzed, {} failed, {} skipped by budget, {} unresolved method call(s), {} unqueried method call(s), {} unresolved path(s), {} unqueried path(s)",
+                    semantic.report.selected_root_analyzed_files,
+                    semantic.report.selected_root_source_files,
+                    semantic.report.selected_root_failed_files,
+                    semantic.report.selected_root_skipped_files,
+                    semantic.report.selected_root_unresolved_method_calls,
+                    semantic.report.selected_root_unqueried_method_calls,
+                    semantic.report.selected_root_unresolved_paths,
+                    semantic.report.selected_root_unqueried_paths
+                ));
+            }
             notes.push(format!(
                 "HIR reduction hints: {} project-local semantic edge(s), {} unresolved query/queries, {} unqueried query/queries, {} unmapped target(s)",
                 semantic.hints.total_edges(),
@@ -486,9 +543,28 @@ mod rust_analyzer {
                 continue;
             }
 
+            let Some(path) = normalize_vfs_path(vfs_path) else {
+                continue;
+            };
+            let selected_root_file = semantic_index
+                .as_ref()
+                .is_some_and(|index| index.is_root_file(vfs_path));
+            let mut file_summary = SemanticFileReport {
+                path,
+                selected_root_file,
+                ..SemanticFileReport::default()
+            };
             report.source_files += 1;
+            if selected_root_file {
+                report.selected_root_source_files += 1;
+            }
             if report.analyzed_files + report.failed_files >= report.file_budget {
                 report.skipped_files += 1;
+                file_summary.skipped_by_file_budget = true;
+                if selected_root_file {
+                    report.selected_root_skipped_files += 1;
+                }
+                report.file_reports.push(file_summary);
                 continue;
             }
 
@@ -515,9 +591,53 @@ mod rust_analyzer {
                     report.queried_paths += file_report.queried_paths;
                     report.resolved_paths += file_report.resolved_paths;
                     report.unqueried_paths += file_report.unqueried_paths;
+                    file_summary.analyzed = true;
+                    file_summary.method_calls = file_report.method_calls;
+                    file_summary.queried_method_calls = file_report.queried_method_calls;
+                    file_summary.resolved_method_calls = file_report.resolved_method_calls;
+                    file_summary.callable_method_calls = file_report.callable_method_calls;
+                    file_summary.fallback_method_calls = file_report.fallback_method_calls;
+                    file_summary.unresolved_method_calls = file_report
+                        .queried_method_calls
+                        .saturating_sub(file_report.resolved_method_calls);
+                    file_summary.unqueried_method_calls = file_report.unqueried_method_calls;
+                    file_summary.paths = file_report.paths;
+                    file_summary.queried_paths = file_report.queried_paths;
+                    file_summary.resolved_paths = file_report.resolved_paths;
+                    file_summary.unresolved_paths = file_report
+                        .queried_paths
+                        .saturating_sub(file_report.resolved_paths);
+                    file_summary.unqueried_paths = file_report.unqueried_paths;
+                    if selected_root_file {
+                        report.selected_root_analyzed_files += 1;
+                        report.selected_root_method_calls += file_summary.method_calls;
+                        report.selected_root_queried_method_calls +=
+                            file_summary.queried_method_calls;
+                        report.selected_root_resolved_method_calls +=
+                            file_summary.resolved_method_calls;
+                        report.selected_root_callable_method_calls +=
+                            file_summary.callable_method_calls;
+                        report.selected_root_fallback_method_calls +=
+                            file_summary.fallback_method_calls;
+                        report.selected_root_unresolved_method_calls +=
+                            file_summary.unresolved_method_calls;
+                        report.selected_root_unqueried_method_calls +=
+                            file_summary.unqueried_method_calls;
+                        report.selected_root_paths += file_summary.paths;
+                        report.selected_root_queried_paths += file_summary.queried_paths;
+                        report.selected_root_resolved_paths += file_summary.resolved_paths;
+                        report.selected_root_unresolved_paths += file_summary.unresolved_paths;
+                        report.selected_root_unqueried_paths += file_summary.unqueried_paths;
+                    }
+                    report.file_reports.push(file_summary);
                 }
                 Err(_) => {
                     report.failed_files += 1;
+                    file_summary.failed = true;
+                    if selected_root_file {
+                        report.selected_root_failed_files += 1;
+                    }
+                    report.file_reports.push(file_summary);
                 }
             }
         }
@@ -798,12 +918,14 @@ mod rust_analyzer {
     struct ProjectSemanticIndex {
         files: HashMap<PathBuf, IndexedSourceFile>,
         root_files: BTreeSet<PathBuf>,
+        retained_files: BTreeSet<PathBuf>,
     }
 
     impl ProjectSemanticIndex {
         fn build(project: &Project) -> Self {
             let mut files = HashMap::new();
             let mut root_files = BTreeSet::new();
+            let retained_files = syntactic_retained_file_paths(project);
             for source in project.files.values() {
                 let path = normalize_fs_path(&source.path);
                 files.entry(path).or_insert_with(|| IndexedSourceFile {
@@ -853,7 +975,11 @@ mod rust_analyzer {
                 file.items.sort_by_key(|item| span_extent(&item.span));
             }
 
-            Self { files, root_files }
+            Self {
+                files,
+                root_files,
+                retained_files,
+            }
         }
 
         fn contains_vfs_path(&self, vfs_path: &ra_ap_vfs::VfsPath) -> bool {
@@ -862,9 +988,19 @@ mod rust_analyzer {
 
         fn file_priority(&self, vfs_path: &ra_ap_vfs::VfsPath) -> usize {
             let Some(path) = normalize_vfs_path(vfs_path) else {
-                return 1;
+                return 2;
             };
-            usize::from(!self.root_files.contains(&path))
+            if self.root_files.contains(&path) {
+                0
+            } else if self.retained_files.contains(&path) {
+                1
+            } else {
+                2
+            }
+        }
+
+        fn is_root_file(&self, vfs_path: &ra_ap_vfs::VfsPath) -> bool {
+            normalize_vfs_path(vfs_path).is_some_and(|path| self.root_files.contains(&path))
         }
 
         fn owner_at_vfs_offset(
@@ -919,6 +1055,52 @@ mod rust_analyzer {
         fn indexed_file(&self, vfs_path: &ra_ap_vfs::VfsPath) -> Option<&IndexedSourceFile> {
             let path = normalize_vfs_path(vfs_path)?;
             self.files.get(&path)
+        }
+    }
+
+    fn syntactic_retained_file_paths(project: &Project) -> BTreeSet<PathBuf> {
+        reduce::reduce_with_extra_roots(project, &[])
+            .map(|reduced| retained_file_paths(project, &reduced))
+            .unwrap_or_default()
+    }
+
+    fn retained_file_paths(project: &Project, reduced: &ReducedProject) -> BTreeSet<PathBuf> {
+        let mut paths = BTreeSet::new();
+        for root in &reduced.roots {
+            match root {
+                RootId::Callable(callable) => {
+                    add_callable_source_path(project, callable, &mut paths);
+                }
+                RootId::Item(item) => {
+                    add_item_source_path(project, item, &mut paths);
+                }
+            }
+        }
+        for callable in &reduced.reachable {
+            add_callable_source_path(project, callable, &mut paths);
+        }
+        for item in &reduced.reachable_items {
+            add_item_source_path(project, item, &mut paths);
+        }
+        paths
+    }
+
+    fn add_callable_source_path(
+        project: &Project,
+        callable: &CallableId,
+        paths: &mut BTreeSet<PathBuf>,
+    ) {
+        if let Some(record) = project.functions.get(callable) {
+            paths.insert(normalize_fs_path(&record.span.file));
+        }
+        if let Some(record) = project.methods.get(callable) {
+            paths.insert(normalize_fs_path(&record.span.file));
+        }
+    }
+
+    fn add_item_source_path(project: &Project, item: &ItemId, paths: &mut BTreeSet<PathBuf>) {
+        if let Some(record) = project.items.get(item) {
+            paths.insert(normalize_fs_path(&record.span.file));
         }
     }
 

@@ -105,6 +105,15 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "  analyzer budgets: files={}, method_calls={}, paths={}",
             semantic.file_budget, semantic.method_call_budget, semantic.path_budget
         );
+        if semantic.selected_root_source_files > 0 {
+            println!(
+                "  analyzer selected-root files: {}/{} analyzed ({} failed, {} skipped by budget)",
+                semantic.selected_root_analyzed_files,
+                semantic.selected_root_source_files,
+                semantic.selected_root_failed_files,
+                semantic.selected_root_skipped_files
+            );
+        }
         println!(
             "  analyzer method calls: {}/{} queried function-resolved, {}/{} callable, {}/{} fallback ({} unresolved, {} unqueried)",
             semantic.resolved_method_calls,
@@ -179,6 +188,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         error_count: None,
         warning_count: None,
         semantic_warning_hazards: None,
+        review_warning_hazards: None,
     });
     record_production_readiness_gate(
         &options,
@@ -207,6 +217,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             error_count: None,
             warning_count: None,
             semantic_warning_hazards: None,
+            review_warning_hazards: None,
         });
         finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
         return Err(reason.into());
@@ -219,6 +230,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         error_count: None,
         warning_count: None,
         semantic_warning_hazards: None,
+        review_warning_hazards: None,
     });
     if let Err(error) = refresh_generated_lockfile_for_locked_validation(&options, &mut validation)
     {
@@ -251,6 +263,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             error_count: Some(report.error_count()),
             warning_count: Some(report.warning_count()),
             semantic_warning_hazards: None,
+            review_warning_hazards: None,
         });
         if !report.success {
             finish_validation(
@@ -345,6 +358,8 @@ struct ValidationGateReport {
     warning_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     semantic_warning_hazards: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    review_warning_hazards: Option<usize>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -417,6 +432,7 @@ impl ValidationReport {
             error_count: Some(report.error_count()),
             warning_count: Some(report.warning_count()),
             semantic_warning_hazards: Some(semantic_warning_hazards),
+            review_warning_hazards: None,
         });
     }
 }
@@ -667,6 +683,7 @@ fn run_plain_check_gate(
                 error_count: None,
                 warning_count: None,
                 semantic_warning_hazards: None,
+                review_warning_hazards: None,
             });
             Ok(())
         }
@@ -680,6 +697,7 @@ fn run_plain_check_gate(
                 error_count: None,
                 warning_count: None,
                 semantic_warning_hazards: None,
+                review_warning_hazards: None,
             });
             finish_validation(options, validation, "rejected", Some(&reason))?;
             Err(reason.into())
@@ -873,6 +891,7 @@ fn refresh_generated_lockfile_for_locked_validation(
             error_count: None,
             warning_count: None,
             semantic_warning_hazards: None,
+            review_warning_hazards: None,
         });
         return Err(reason.into());
     }
@@ -906,6 +925,7 @@ fn refresh_generated_lockfile_for_locked_validation(
             error_count: None,
             warning_count: None,
             semantic_warning_hazards: None,
+            review_warning_hazards: None,
         });
         return Err(reason.into());
     }
@@ -919,6 +939,7 @@ fn refresh_generated_lockfile_for_locked_validation(
         error_count: None,
         warning_count: None,
         semantic_warning_hazards: None,
+        review_warning_hazards: None,
     });
     Ok(())
 }
@@ -1118,6 +1139,7 @@ fn record_production_readiness_gate(
         error_count: Some(error_count),
         warning_count: Some(warning_count),
         semantic_warning_hazards: None,
+        review_warning_hazards: Some(review_warning_hazard_count(production)),
     });
 }
 
@@ -1386,6 +1408,7 @@ fn run_feedback_loop(
         error_count: None,
         warning_count: None,
         semantic_warning_hazards: None,
+        review_warning_hazards: None,
     });
     Err(format!(
         "generated workspace failed compiler feedback loop; report written to {}",
@@ -1722,6 +1745,7 @@ fn run_feedback_repair_loop(
             error_count: None,
             warning_count: None,
             semantic_warning_hazards: None,
+            review_warning_hazards: None,
         });
     }
     Err(format!(
@@ -1751,6 +1775,7 @@ fn run_production_validation_matrix(
             error_count: None,
             warning_count: None,
             semantic_warning_hazards: None,
+            review_warning_hazards: None,
         });
         return Ok(());
     }
@@ -1965,6 +1990,7 @@ fn run_production_validation_matrix(
                 error_count: None,
                 warning_count: None,
                 semantic_warning_hazards: None,
+                review_warning_hazards: None,
             });
             return Err(format!(
                 "generated workspace failed production matrix {}; report written to {}",
@@ -1995,6 +2021,7 @@ fn run_production_validation_matrix(
         error_count: Some(0),
         warning_count: Some(0),
         semantic_warning_hazards: Some(0),
+        review_warning_hazards: Some(0),
     });
     Ok(())
 }
@@ -2136,6 +2163,41 @@ fn production_has_error_hazards(production: &opensource_core::ProductionReadines
         .hazards
         .iter()
         .any(|hazard| hazard.severity == "error")
+}
+
+fn review_warning_hazard_count(production: &opensource_core::ProductionReadinessReport) -> usize {
+    production
+        .hazards
+        .iter()
+        .filter(|hazard| {
+            hazard.severity == "warning" && !production_warning_hazard_is_discharged(hazard)
+        })
+        .count()
+}
+
+fn production_warning_hazard_is_discharged(
+    hazard: &opensource_core::ProductionHazardReport,
+) -> bool {
+    matches!(
+        hazard.code.as_str(),
+        "conditional_compilation_attrs"
+            | "custom_attribute_macros"
+            | "custom_derive_macros"
+            | "custom_macro_invocations"
+            | "semantic_analyzer_unavailable"
+            | "semantic_file_budget_exhausted"
+            | "semantic_file_failures"
+            | "semantic_inventory_available"
+            | "semantic_inventory_not_applied"
+            | "semantic_inventory_partially_applied"
+            | "semantic_method_call_budget_exhausted"
+            | "semantic_path_budget_exhausted"
+            | "semantic_reduction_hints_applied"
+            | "semantic_unresolved_method_calls"
+            | "semantic_unresolved_paths"
+            | "syntactic_method_fallback_cap"
+            | "syntactic_method_fallbacks"
+    )
 }
 
 fn production_readiness_blocks_validation(
@@ -2779,6 +2841,13 @@ fn record_final_production_readiness(options: &CliOptions, validation: &mut Vali
         .find(|gate| gate.name == "production_readiness")
         .map(|gate| gate.status.as_str())
         .unwrap_or("missing_production_readiness");
+    let review_warning_hazards = validation
+        .gates
+        .iter()
+        .rev()
+        .find(|gate| gate.name == "production_readiness")
+        .and_then(|gate| gate.review_warning_hazards)
+        .unwrap_or(usize::MAX);
     let production_matrix_status = validation
         .gates
         .iter()
@@ -2808,6 +2877,15 @@ fn record_final_production_readiness(options: &CliOptions, validation: &mut Vali
             "production preset passed baseline, generation, preflight, target coverage, compiler feedback, and production hazard checks",
             )
         }
+        "accepted"
+            if review_warning_hazards == 0
+                && matches!(production_matrix_status, "accepted" | "not_required") =>
+        {
+            (
+                "accepted",
+                "production preset passed compiler feedback and all remaining production warnings were discharged by feedback or matrix validation",
+            )
+        }
         "accepted" if matches!(production_matrix_status, "accepted" | "not_required") => (
             "review_required",
             "production preset passed compiler feedback, but remaining warning hazards require semantic review before production-ready acceptance",
@@ -2825,6 +2903,7 @@ fn record_final_production_readiness(options: &CliOptions, validation: &mut Vali
         error_count: None,
         warning_count: None,
         semantic_warning_hazards: None,
+        review_warning_hazards: None,
     });
 }
 
@@ -4046,6 +4125,25 @@ mod tests {
     }
 
     #[test]
+    fn production_preset_accepts_feedback_discharged_warning_hazards() {
+        let options = parse_options(["--production", "workspace", "out"]);
+        let mut validation = ValidationReport::new(&options);
+        let mut readiness = gate("production_readiness", "requires_feedback");
+        readiness.review_warning_hazards = Some(0);
+        validation.gates.push(readiness);
+        validation.gates.push(gate("feedback-repair", "accepted"));
+
+        record_final_production_readiness(&options, &mut validation);
+
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "production_ready")
+            .expect("production_ready gate should be recorded");
+        assert_eq!(gate.status, "accepted");
+    }
+
+    #[test]
     fn production_preset_accepts_final_readiness_only_without_remaining_hazards() {
         let options = parse_options(["--production", "workspace", "out"]);
         let mut validation = ValidationReport::new(&options);
@@ -4819,6 +4917,7 @@ version = "0.1.0"
             error_count: None,
             warning_count: None,
             semantic_warning_hazards: None,
+            review_warning_hazards: None,
         }
     }
 

@@ -253,7 +253,11 @@ semantics for local workspace crates and applies exact project-local RA
 method/path resolutions as additive reduction hints; the production preset now
 uses `ra-hir-proc-macros` to ask rust-analyzer for build-script output discovery
 and proc-macro expansion during semantic inventory. The latest pinned Litter
-repair run recorded `semantic_reduction_hints_applied` for all three roots. The
+repair run recorded `semantic_reduction_hints_applied` for all three roots. RA
+semantic inventory now includes per-file reports, so production readiness
+semantic warnings are scoped to retained slice files when reduction can map the
+slice back to source files, before falling back to selected-root and workspace
+counts. The
 reducer still keeps the syntactic closure as fallback and does not yet use RA as
 the authoritative oracle for trait impl lookup, macro-expanded item retention,
 generated source, dynamic dispatch, or every cfg-active reachability decision.

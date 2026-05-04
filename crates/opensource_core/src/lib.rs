@@ -26,7 +26,7 @@ use syn::{
     Meta,
 };
 
-pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
+pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticFileReport, SemanticReport};
 pub use feedback::{
     check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport, CheckSpan,
     CheckSuggestion, CheckTarget, FeedbackHazard, FeedbackWideningCandidate,
@@ -572,69 +572,223 @@ fn production_readiness_report(
         ));
         return production_readiness_status(hazards);
     };
+    add_semantic_query_hazards(semantic, project, reduced, &mut hazards);
 
-    if semantic.failed_files > 0 {
+    production_readiness_status(hazards)
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+enum SemanticHazardScope {
+    RetainedSlice,
+    SelectedRoots,
+    Workspace,
+}
+
+impl SemanticHazardScope {
+    fn source_prefix(self) -> &'static str {
+        match self {
+            Self::RetainedSlice => "retained slice ",
+            Self::SelectedRoots => "selected-root ",
+            Self::Workspace => "",
+        }
+    }
+
+    fn query_prefix(self) -> &'static str {
+        match self {
+            Self::RetainedSlice => "retained-slice ",
+            Self::SelectedRoots => "selected-root ",
+            Self::Workspace => "",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+struct SemanticHazardMetrics {
+    source_files: usize,
+    failed_files: usize,
+    skipped_files: usize,
+    unresolved_method_calls: usize,
+    unqueried_method_calls: usize,
+    unresolved_paths: usize,
+    unqueried_paths: usize,
+}
+
+fn add_semantic_query_hazards(
+    semantic: &SemanticReport,
+    project: &Project,
+    reduced: &ReducedProject,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    let retained_paths = retained_semantic_file_paths(project, reduced);
+    let (scope, metrics) = semantic_hazard_metrics(semantic, &retained_paths);
+
+    if metrics.failed_files > 0 {
         hazards.push(production_hazard(
             "semantic_file_failures",
             "warning",
             format!(
-                "{} source file(s) failed semantic analysis",
-                semantic.failed_files
+                "{} {}source file(s) failed semantic analysis",
+                metrics.failed_files,
+                scope.source_prefix()
             ),
         ));
     }
-    if semantic.skipped_files > 0 {
+    if metrics.skipped_files > 0 {
         hazards.push(production_hazard(
             "semantic_file_budget_exhausted",
             "warning",
             format!(
-                "{} source file(s) were skipped by semantic analysis budget",
-                semantic.skipped_files
+                "{} {}source file(s) were skipped by semantic analysis budget",
+                metrics.skipped_files,
+                scope.source_prefix()
             ),
         ));
     }
-    if semantic.unresolved_method_calls > 0 {
+    if metrics.unresolved_method_calls > 0 {
         hazards.push(production_hazard(
             "semantic_unresolved_method_calls",
             "warning",
             format!(
-                "{} queried method call(s) did not resolve semantically",
-                semantic.unresolved_method_calls
+                "{} queried {}method call(s) did not resolve semantically",
+                metrics.unresolved_method_calls,
+                scope.query_prefix()
             ),
         ));
     }
-    if semantic.unqueried_method_calls > 0 {
+    if metrics.unqueried_method_calls > 0 {
         hazards.push(production_hazard(
             "semantic_method_call_budget_exhausted",
             "warning",
             format!(
-                "{} method call(s) were not queried because the semantic budget was exhausted",
-                semantic.unqueried_method_calls
+                "{} {}method call(s) were not queried because the semantic budget was exhausted",
+                metrics.unqueried_method_calls,
+                scope.query_prefix()
             ),
         ));
     }
-    if semantic.unresolved_paths > 0 {
+    if metrics.unresolved_paths > 0 {
         hazards.push(production_hazard(
             "semantic_unresolved_paths",
             "warning",
             format!(
-                "{} queried path(s) did not resolve semantically",
-                semantic.unresolved_paths
+                "{} queried {}path(s) did not resolve semantically",
+                metrics.unresolved_paths,
+                scope.query_prefix()
             ),
         ));
     }
-    if semantic.unqueried_paths > 0 {
+    if metrics.unqueried_paths > 0 {
         hazards.push(production_hazard(
             "semantic_path_budget_exhausted",
             "warning",
             format!(
-                "{} path(s) were not queried because the semantic budget was exhausted",
-                semantic.unqueried_paths
+                "{} {}path(s) were not queried because the semantic budget was exhausted",
+                metrics.unqueried_paths,
+                scope.query_prefix()
             ),
         ));
     }
+}
 
-    production_readiness_status(hazards)
+fn semantic_hazard_metrics(
+    semantic: &SemanticReport,
+    retained_paths: &BTreeSet<PathBuf>,
+) -> (SemanticHazardScope, SemanticHazardMetrics) {
+    if !semantic.file_reports.is_empty() && !retained_paths.is_empty() {
+        let metrics = semantic_file_metrics_for_paths(semantic, retained_paths);
+        if metrics.source_files > 0 {
+            return (SemanticHazardScope::RetainedSlice, metrics);
+        }
+    }
+
+    if semantic.selected_root_source_files > 0 {
+        return (
+            SemanticHazardScope::SelectedRoots,
+            SemanticHazardMetrics {
+                source_files: semantic.selected_root_source_files,
+                failed_files: semantic.selected_root_failed_files,
+                skipped_files: semantic.selected_root_skipped_files,
+                unresolved_method_calls: semantic.selected_root_unresolved_method_calls,
+                unqueried_method_calls: semantic.selected_root_unqueried_method_calls,
+                unresolved_paths: semantic.selected_root_unresolved_paths,
+                unqueried_paths: semantic.selected_root_unqueried_paths,
+            },
+        );
+    }
+
+    (
+        SemanticHazardScope::Workspace,
+        SemanticHazardMetrics {
+            source_files: semantic.source_files,
+            failed_files: semantic.failed_files,
+            skipped_files: semantic.skipped_files,
+            unresolved_method_calls: semantic.unresolved_method_calls,
+            unqueried_method_calls: semantic.unqueried_method_calls,
+            unresolved_paths: semantic.unresolved_paths,
+            unqueried_paths: semantic.unqueried_paths,
+        },
+    )
+}
+
+fn semantic_file_metrics_for_paths(
+    semantic: &SemanticReport,
+    retained_paths: &BTreeSet<PathBuf>,
+) -> SemanticHazardMetrics {
+    let mut metrics = SemanticHazardMetrics::default();
+    for file_report in &semantic.file_reports {
+        let path = normalize_report_path(&file_report.path);
+        if !retained_paths.contains(&path) {
+            continue;
+        }
+        metrics.source_files += 1;
+        metrics.failed_files += usize::from(file_report.failed);
+        metrics.skipped_files += usize::from(file_report.skipped_by_file_budget);
+        metrics.unresolved_method_calls += file_report.unresolved_method_calls;
+        metrics.unqueried_method_calls += file_report.unqueried_method_calls;
+        metrics.unresolved_paths += file_report.unresolved_paths;
+        metrics.unqueried_paths += file_report.unqueried_paths;
+    }
+    metrics
+}
+
+fn retained_semantic_file_paths(project: &Project, reduced: &ReducedProject) -> BTreeSet<PathBuf> {
+    let mut paths = BTreeSet::new();
+    for root in &reduced.roots {
+        match root {
+            RootId::Callable(callable) => add_callable_source_path(project, callable, &mut paths),
+            RootId::Item(item) => add_item_source_path(project, item, &mut paths),
+        }
+    }
+    for callable in &reduced.reachable {
+        add_callable_source_path(project, callable, &mut paths);
+    }
+    for item in &reduced.reachable_items {
+        add_item_source_path(project, item, &mut paths);
+    }
+    paths
+}
+
+fn add_callable_source_path(
+    project: &Project,
+    callable: &CallableId,
+    paths: &mut BTreeSet<PathBuf>,
+) {
+    if let Some(record) = project.functions.get(callable) {
+        paths.insert(normalize_report_path(&record.span.file));
+    }
+    if let Some(record) = project.methods.get(callable) {
+        paths.insert(normalize_report_path(&record.span.file));
+    }
+}
+
+fn add_item_source_path(project: &Project, item: &ItemId, paths: &mut BTreeSet<PathBuf>) {
+    if let Some(record) = project.items.get(item) {
+        paths.insert(normalize_report_path(&record.span.file));
+    }
+}
+
+fn normalize_report_path(path: &Path) -> PathBuf {
+    path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn add_semantic_inventory_hazard(
@@ -2476,6 +2630,44 @@ struct SemanticReportJson {
     resolved_paths: usize,
     unresolved_paths: usize,
     unqueried_paths: usize,
+    selected_root_source_files: usize,
+    selected_root_analyzed_files: usize,
+    selected_root_failed_files: usize,
+    selected_root_skipped_files: usize,
+    selected_root_method_calls: usize,
+    selected_root_queried_method_calls: usize,
+    selected_root_resolved_method_calls: usize,
+    selected_root_callable_method_calls: usize,
+    selected_root_fallback_method_calls: usize,
+    selected_root_unresolved_method_calls: usize,
+    selected_root_unqueried_method_calls: usize,
+    selected_root_paths: usize,
+    selected_root_queried_paths: usize,
+    selected_root_resolved_paths: usize,
+    selected_root_unresolved_paths: usize,
+    selected_root_unqueried_paths: usize,
+    file_reports: Vec<SemanticFileReportJson>,
+}
+
+#[derive(Serialize)]
+struct SemanticFileReportJson {
+    path: PathBuf,
+    selected_root_file: bool,
+    analyzed: bool,
+    failed: bool,
+    skipped_by_file_budget: bool,
+    method_calls: usize,
+    queried_method_calls: usize,
+    resolved_method_calls: usize,
+    callable_method_calls: usize,
+    fallback_method_calls: usize,
+    unresolved_method_calls: usize,
+    unqueried_method_calls: usize,
+    paths: usize,
+    queried_paths: usize,
+    resolved_paths: usize,
+    unresolved_paths: usize,
+    unqueried_paths: usize,
 }
 
 impl SemanticReportJson {
@@ -2500,6 +2692,51 @@ impl SemanticReportJson {
             resolved_paths: report.resolved_paths,
             unresolved_paths: report.unresolved_paths,
             unqueried_paths: report.unqueried_paths,
+            selected_root_source_files: report.selected_root_source_files,
+            selected_root_analyzed_files: report.selected_root_analyzed_files,
+            selected_root_failed_files: report.selected_root_failed_files,
+            selected_root_skipped_files: report.selected_root_skipped_files,
+            selected_root_method_calls: report.selected_root_method_calls,
+            selected_root_queried_method_calls: report.selected_root_queried_method_calls,
+            selected_root_resolved_method_calls: report.selected_root_resolved_method_calls,
+            selected_root_callable_method_calls: report.selected_root_callable_method_calls,
+            selected_root_fallback_method_calls: report.selected_root_fallback_method_calls,
+            selected_root_unresolved_method_calls: report.selected_root_unresolved_method_calls,
+            selected_root_unqueried_method_calls: report.selected_root_unqueried_method_calls,
+            selected_root_paths: report.selected_root_paths,
+            selected_root_queried_paths: report.selected_root_queried_paths,
+            selected_root_resolved_paths: report.selected_root_resolved_paths,
+            selected_root_unresolved_paths: report.selected_root_unresolved_paths,
+            selected_root_unqueried_paths: report.selected_root_unqueried_paths,
+            file_reports: report
+                .file_reports
+                .iter()
+                .map(SemanticFileReportJson::from_report)
+                .collect(),
+        }
+    }
+}
+
+impl SemanticFileReportJson {
+    fn from_report(report: &SemanticFileReport) -> Self {
+        Self {
+            path: report.path.clone(),
+            selected_root_file: report.selected_root_file,
+            analyzed: report.analyzed,
+            failed: report.failed,
+            skipped_by_file_budget: report.skipped_by_file_budget,
+            method_calls: report.method_calls,
+            queried_method_calls: report.queried_method_calls,
+            resolved_method_calls: report.resolved_method_calls,
+            callable_method_calls: report.callable_method_calls,
+            fallback_method_calls: report.fallback_method_calls,
+            unresolved_method_calls: report.unresolved_method_calls,
+            unqueried_method_calls: report.unqueried_method_calls,
+            paths: report.paths,
+            queried_paths: report.queried_paths,
+            resolved_paths: report.resolved_paths,
+            unresolved_paths: report.unresolved_paths,
+            unqueried_paths: report.unqueried_paths,
         }
     }
 }
@@ -2507,6 +2744,7 @@ impl SemanticReportJson {
 #[cfg(test)]
 mod tests {
     use std::{
+        collections::BTreeSet,
         fs,
         path::{Path, PathBuf},
         process::Command,
@@ -2517,8 +2755,9 @@ mod tests {
     use super::generate_with_analyzer;
     use super::{
         add_semantic_inventory_hazard, default_feature_closure, generate,
-        generate_with_analyzer_feedback, write_generate_report, AnalyzerMode, AnalyzerReport,
-        CallableId, CheckDiagnostic, GenerateOptions, SemanticReductionHints, SemanticReport,
+        generate_with_analyzer_feedback, semantic_hazard_metrics, write_generate_report,
+        AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions,
+        SemanticFileReport, SemanticHazardScope, SemanticReductionHints, SemanticReport,
     };
 
     #[test]
@@ -2731,6 +2970,90 @@ theme = []
         assert!(hazards
             .iter()
             .any(|hazard| hazard.code == "semantic_inventory_not_applied"));
+    }
+
+    #[test]
+    fn semantic_hazards_prefer_retained_slice_file_reports() {
+        let retained_path = PathBuf::from("/tmp/slicer-root/src/lib.rs");
+        let unrelated_path = PathBuf::from("/tmp/slicer-root/src/unrelated.rs");
+        let semantic = SemanticReport {
+            source_files: 2,
+            analyzed_files: 2,
+            unresolved_method_calls: 8,
+            unqueried_paths: 5,
+            selected_root_source_files: 1,
+            file_reports: vec![
+                SemanticFileReport {
+                    path: retained_path.clone(),
+                    analyzed: true,
+                    queried_method_calls: 3,
+                    resolved_method_calls: 3,
+                    queried_paths: 2,
+                    resolved_paths: 2,
+                    ..SemanticFileReport::default()
+                },
+                SemanticFileReport {
+                    path: unrelated_path,
+                    analyzed: true,
+                    queried_method_calls: 8,
+                    unresolved_method_calls: 8,
+                    paths: 5,
+                    unqueried_paths: 5,
+                    ..SemanticFileReport::default()
+                },
+            ],
+            ..SemanticReport::default()
+        };
+        let retained_paths = BTreeSet::from([retained_path]);
+
+        let (scope, metrics) = semantic_hazard_metrics(&semantic, &retained_paths);
+
+        assert_eq!(scope, SemanticHazardScope::RetainedSlice);
+        assert_eq!(metrics.source_files, 1);
+        assert_eq!(metrics.unresolved_method_calls, 0);
+        assert_eq!(metrics.unqueried_paths, 0);
+    }
+
+    #[test]
+    fn semantic_hazards_fall_back_to_selected_roots_before_workspace() {
+        let semantic = SemanticReport {
+            source_files: 10,
+            analyzed_files: 10,
+            unresolved_method_calls: 6,
+            unqueried_paths: 4,
+            selected_root_source_files: 1,
+            selected_root_analyzed_files: 1,
+            selected_root_unresolved_method_calls: 0,
+            selected_root_unqueried_paths: 0,
+            ..SemanticReport::default()
+        };
+
+        let (scope, metrics) = semantic_hazard_metrics(&semantic, &BTreeSet::new());
+
+        assert_eq!(scope, SemanticHazardScope::SelectedRoots);
+        assert_eq!(metrics.source_files, 1);
+        assert_eq!(metrics.unresolved_method_calls, 0);
+        assert_eq!(metrics.unqueried_paths, 0);
+    }
+
+    #[test]
+    fn semantic_hazards_keep_workspace_fallback_without_focused_inventory() {
+        let semantic = SemanticReport {
+            source_files: 10,
+            analyzed_files: 9,
+            failed_files: 1,
+            unresolved_method_calls: 6,
+            unqueried_paths: 4,
+            ..SemanticReport::default()
+        };
+
+        let (scope, metrics) = semantic_hazard_metrics(&semantic, &BTreeSet::new());
+
+        assert_eq!(scope, SemanticHazardScope::Workspace);
+        assert_eq!(metrics.source_files, 10);
+        assert_eq!(metrics.failed_files, 1);
+        assert_eq!(metrics.unresolved_method_calls, 6);
+        assert_eq!(metrics.unqueried_paths, 4);
     }
 
     #[test]

@@ -20,6 +20,8 @@ metadata/build artifacts for discovery when
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` is set, but that heavier pass timed out
 on the pinned Litter corpus. Without that opt-in, the semantic walk still visits
 only workspace Rust files, analyzes files containing selected roots first, and
+records per-file semantic inventory so production readiness warnings can be
+scoped to retained slice files instead of unrelated workspace modules. It also
 reports when proc-macro expansion is unavailable.
 
 ```sh

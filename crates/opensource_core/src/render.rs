@@ -684,7 +684,11 @@ impl SupportPackagePlan {
             })
     }
 
-    fn merged_patch_tables(&self, project: &Project) -> Option<Value> {
+    fn merged_patch_tables(
+        &self,
+        project: &Project,
+        retained_patch_names: &BTreeSet<String>,
+    ) -> Option<Value> {
         let mut patches = Table::new();
         if let Some(source_patches) = project
             .workspace
@@ -697,13 +701,21 @@ impl SupportPackagePlan {
                 source_patches,
                 &project.workspace.root,
                 self,
+                retained_patch_names,
             );
         }
         for (workspace_root, manifest) in &self.workspace_manifests {
             if let Some(source_patches) = manifest.get("patch").and_then(Value::as_table) {
-                merge_transformed_patch_tables(&mut patches, source_patches, workspace_root, self);
+                merge_transformed_patch_tables(
+                    &mut patches,
+                    source_patches,
+                    workspace_root,
+                    self,
+                    retained_patch_names,
+                );
             }
         }
+        patches.retain(|_, value| value.as_table().is_none_or(|table| !table.is_empty()));
         (!patches.is_empty()).then_some(Value::Table(patches))
     }
 
@@ -1466,6 +1478,7 @@ fn merge_transformed_patch_tables(
     source_patches: &Table,
     manifest_dir: &Path,
     support_packages: &SupportPackagePlan,
+    retained_patch_names: &BTreeSet<String>,
 ) {
     for (source, value) in source_patches {
         let Some(source_table) = value.as_table() else {
@@ -1481,6 +1494,9 @@ fn merge_transformed_patch_tables(
             continue;
         };
         for (name, dependency) in source_table {
+            if !retained_patch_names.contains(name) {
+                continue;
+            }
             target_table.entry(name.clone()).or_insert_with(|| {
                 support_packages.transformed_workspace_dependency_value(dependency, manifest_dir)
             });
@@ -2326,6 +2342,13 @@ fn write_workspace_manifest(
 
     let workspace_dependencies =
         retained_workspace_dependencies(project, reduced, package_usages, support_packages);
+    let retained_patch_names = retained_patch_dependency_names(
+        project,
+        reduced,
+        package_usages,
+        support_packages,
+        &workspace_dependencies,
+    );
     if !workspace_dependencies.is_empty() {
         workspace.insert(
             "dependencies".to_string(),
@@ -2337,7 +2360,7 @@ fn write_workspace_manifest(
     if let Some(profile) = project.workspace.manifest.get("profile") {
         root.insert("profile".to_string(), profile.clone());
     }
-    if let Some(patch) = support_packages.merged_patch_tables(project) {
+    if let Some(patch) = support_packages.merged_patch_tables(project, &retained_patch_names) {
         root.insert("patch".to_string(), patch);
     }
     if let Some(replace) = support_packages.merged_replace_table(project) {
@@ -2689,6 +2712,81 @@ fn retained_workspace_dependencies(
     }
 
     dependencies
+}
+
+fn retained_patch_dependency_names(
+    project: &Project,
+    reduced: &ReducedProject,
+    package_usages: &HashMap<String, PackageSourceUsage>,
+    _support_packages: &SupportPackagePlan,
+    workspace_dependencies: &Table,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for (alias, value) in workspace_dependencies {
+        names.insert(dependency_patch_name(alias, value));
+    }
+
+    for package_name in &reduced.packages {
+        let Some(package) = project.workspace.packages.get(package_name) else {
+            continue;
+        };
+        let Some(package_usage) = package_usages.get(package_name) else {
+            continue;
+        };
+        let requested_features = requested_local_features(project, reduced, package_name);
+        let feature_required_aliases =
+            dependency_aliases_required_by_features(package, &requested_features);
+        let retain_for_copied_support_source = package_should_copy_library_support_source(package);
+
+        for (table_name, table) in package_dependency_tables(package) {
+            let retention = if table_name == "build-dependencies"
+                && build_script_should_render_with_usage(package, package_usage)
+            {
+                DependencyRetention::BuildScript
+            } else {
+                DependencyRetention::SourceMentioned
+            };
+
+            for (alias, value) in table {
+                let dependency_package = dependency_package_name(alias, value);
+                let is_feature_required = feature_required_aliases.contains(alias);
+                if is_marker_dependency(alias, &dependency_package) {
+                    continue;
+                }
+                if project.workspace.packages.contains_key(&dependency_package)
+                    && !reduced.packages.contains(&dependency_package)
+                    && !is_feature_required
+                {
+                    continue;
+                }
+                if project.workspace.packages.contains_key(&dependency_package)
+                    || dependency_should_render(
+                        project,
+                        reduced,
+                        package_name,
+                        alias,
+                        retention,
+                        DependencyUsageScope::Any,
+                        package_usage,
+                        retain_for_copied_support_source,
+                    )
+                    || is_feature_required
+                {
+                    names.insert(dependency_patch_name(alias, value));
+                }
+            }
+        }
+    }
+    names
+}
+
+fn dependency_patch_name(alias: &str, value: &Value) -> String {
+    value
+        .as_table()
+        .and_then(|table| table.get("package"))
+        .and_then(Value::as_str)
+        .unwrap_or(alias)
+        .to_string()
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]

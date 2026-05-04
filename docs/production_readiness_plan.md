@@ -36,8 +36,12 @@ expansion is not active and continues with bounded HIR. Both rust-analyzer paths
 map exact project-local method/path resolutions into generic `CallableId` /
 `ItemId` reduction hints and apply those hints as additive retained-graph
 edges. Files containing selected `#[opensourced]` roots are analyzed first so
-bounded semantic budgets prioritize the active slice. Production validation
-therefore relies on bounded RA semantics, guarded production
+bounded semantic budgets prioritize the active slice. The analyzer now records
+per-file semantic inventory; after reduction, production readiness scopes
+semantic failure/budget/unresolved warnings to retained slice files when those
+file reports are available, then falls back to selected-root file counts and
+finally workspace-wide counts. Production validation therefore relies on
+bounded RA semantics, guarded production
 proc-macro/build-script discovery, fast static fallback reduction, explicit
 production hazards, and
 `cargo check --message-format=json` feedback.
