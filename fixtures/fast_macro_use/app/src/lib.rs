@@ -18,6 +18,7 @@ use shared::{
 use util::{make_util, DescribeValue, Transform, Useful, UtilValue};
 
 use crate::grouped::{dead_grouped as local_shadow, live_grouped};
+use crate::macro_support::bridge_try;
 use crate::removed::dead_fn as selected_shadow;
 use crate::reexports::reexported_nested;
 
@@ -102,6 +103,24 @@ macro_rules! unused_macro {
     () => {
         0
     };
+}
+
+#[allow(unused_imports, unused_macros)]
+mod macro_support {
+    macro_rules! bridge_try {
+        ($expr:expr) => {
+            $expr.map_err($crate::ClientError::from)
+        };
+    }
+
+    macro_rules! unused_bridge {
+        () => {
+            99
+        };
+    }
+
+    pub(crate) use bridge_try;
+    pub(crate) use unused_bridge;
 }
 
 macro_rules! declare_wire_error {
@@ -294,6 +313,54 @@ impl EdgeCodec<WireDto> for WireCodec {
     }
 }
 
+pub trait LocalBound {
+    fn raw(&self) -> SharedAlias;
+}
+
+#[derive(Clone)]
+pub struct GenericValue(SharedAlias);
+
+impl LocalBound for GenericValue {
+    fn raw(&self) -> SharedAlias {
+        self.0
+    }
+}
+
+pub struct GenericEnvelope<T: LocalBound>
+where
+    T: Clone,
+{
+    value: T,
+}
+
+impl<T> GenericEnvelope<T>
+where
+    T: LocalBound + Clone,
+{
+    pub fn new(value: T) -> Self {
+        Self { value }
+    }
+
+    pub fn score(&self) -> SharedAlias {
+        self.value.raw()
+    }
+}
+
+pub trait GenericApi<T: LocalBound>
+where
+    T: Clone,
+{
+    fn pack(value: T) -> GenericEnvelope<T>;
+}
+
+pub struct GenericCodec;
+
+impl GenericApi<GenericValue> for GenericCodec {
+    fn pack(value: GenericValue) -> GenericEnvelope<GenericValue> {
+        GenericEnvelope::new(value)
+    }
+}
+
 #[derive(Clone)]
 #[derive(macro_helpers::FixtureRecord)]
 #[fixture_serde(rename_all = "snake_case")]
@@ -302,7 +369,7 @@ pub struct SplitRecord {
     pub value: SharedAlias,
 }
 
-#[derive(Debug, FixtureError)]
+#[derive(Clone, Debug, FixtureError)]
 #[fixture_error(display = "client error")]
 #[opensourced]
 pub enum ClientError {
@@ -315,6 +382,72 @@ pub enum ClientError {
 impl From<WireError> for ClientError {
     fn from(error: WireError) -> Self {
         Self::Wire { code: error.code() }
+    }
+}
+
+#[derive(Clone, Copy, Default, FixtureEnum)]
+#[fixture_serde(rename_all = "snake_case")]
+pub enum BoundaryStatus {
+    #[default]
+    Ready,
+    Paused,
+    Closed,
+}
+
+impl BoundaryStatus {
+    pub fn weight(self) -> SharedAlias {
+        match self {
+            BoundaryStatus::Ready => 3,
+            BoundaryStatus::Paused => 5,
+            BoundaryStatus::Closed => 7,
+        }
+    }
+}
+
+#[derive(Clone, FixtureEnum)]
+#[fixture_serde(tag = "type", rename_all = "snake_case")]
+pub enum ServerEvent {
+    Dto {
+        dto: WireDto,
+        status: BoundaryStatus,
+    },
+    Error(ClientError),
+    Empty,
+}
+
+impl ServerEvent {
+    pub fn score(&self) -> SharedAlias {
+        match self {
+            ServerEvent::Dto { dto, status } => dto.score() + status.weight(),
+            ServerEvent::Error(ClientError::Wire { code }) => *code,
+            ServerEvent::Error(ClientError::Missing) | ServerEvent::Empty => 0,
+        }
+    }
+}
+
+#[derive(Clone, FixtureRecord)]
+#[fixture_serde(transparent)]
+pub struct PublicEnvelope {
+    pub event: ServerEvent,
+}
+
+pub struct InternalEnvelope {
+    event: ServerEvent,
+}
+
+impl From<PublicEnvelope> for InternalEnvelope {
+    fn from(envelope: PublicEnvelope) -> Self {
+        Self {
+            event: envelope.event,
+        }
+    }
+}
+
+impl From<InternalEnvelope> for PublicEnvelope {
+    fn from(envelope: InternalEnvelope) -> Self {
+        Self {
+            event: envelope.event,
+        }
     }
 }
 
@@ -337,6 +470,8 @@ impl BridgeObject {
         self.dto.value
     }
 }
+
+macro_helpers::fixture_setup!(BridgeObject);
 
 #[fixture_export(callback_interface)]
 #[opensourced]
@@ -361,6 +496,98 @@ impl RemotePathObject {
         self.path.len() as SharedAlias
     }
 }
+
+macro_helpers::fixture_setup!(RemotePathObject);
+
+#[derive(FixtureObject)]
+pub struct LayeredClient {
+    dto: WireDto,
+    token: DisplayToken,
+}
+
+impl LayeredClient {
+    fn private_seed(value: SharedAlias) -> DisplayToken {
+        DisplayToken::new(value + 1)
+    }
+
+    #[allow(dead_code)]
+    fn dead_private_seed() -> DisplayToken {
+        DisplayToken::new(99)
+    }
+}
+
+#[fixture_export]
+impl LayeredClient {
+    #[fixture_constructor]
+    pub fn new(value: SharedAlias) -> Arc<Self> {
+        Arc::new(Self {
+            dto: WireDto {
+                label: Some(format!("layer-{value}")),
+                mode: SharedMode::Fast(value),
+            },
+            token: Self::private_seed(value),
+        })
+    }
+
+    pub async fn compute(&self) -> SharedAlias {
+        self.dto.score() + self.token.score()
+    }
+
+    pub fn event(&self) -> ServerEvent {
+        ServerEvent::Dto {
+            dto: self.dto.clone(),
+            status: BoundaryStatus::Ready,
+        }
+    }
+}
+
+macro_helpers::fixture_setup!(LayeredClient);
+
+mod private_facade {
+    use super::{SharedAlias, WireDto};
+
+    #[derive(Clone, macro_helpers::FixtureRecord)]
+    #[fixture_serde(rename_all = "snake_case")]
+    pub struct FacadeRecord {
+        dto: WireDto,
+    }
+
+    impl FacadeRecord {
+        pub fn new(dto: WireDto) -> Self {
+            Self { dto }
+        }
+
+        pub fn score(&self) -> SharedAlias {
+            self.dto.score()
+        }
+    }
+
+    #[derive(macro_helpers::FixtureObject)]
+    pub struct FacadeObject {
+        record: FacadeRecord,
+    }
+
+    #[macro_helpers::fixture_export]
+    impl FacadeObject {
+        #[macro_helpers::fixture_constructor]
+        pub fn new(dto: WireDto) -> Self {
+            Self {
+                record: FacadeRecord::new(dto),
+            }
+        }
+
+        pub fn score(&self) -> SharedAlias {
+            self.record.score()
+        }
+    }
+
+    pub fn dead_facade() -> SharedAlias {
+        99
+    }
+}
+
+pub use private_facade::dead_facade as dead_facade_alias;
+pub use private_facade::FacadeObject;
 
 #[fixture_export(callback_interface)]
 pub trait ReconnectCallback {
@@ -397,6 +624,39 @@ pub type BoxDecisionFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
 pub type DecisionCallback = Arc<dyn Fn(&str) -> BoxDecisionFuture + Send + Sync>;
 
 static DECISION_CALLBACK: OnceLock<DecisionCallback> = OnceLock::new();
+
+pub trait RemoteTransport {
+    fn send(&self, event: ServerEvent) -> BoxDecisionFuture;
+}
+
+pub struct TransportBundle {
+    transport: Arc<dyn RemoteTransport + Send + Sync>,
+    keepalive: Option<Arc<dyn Send + Sync>>,
+    client: Arc<LayeredClient>,
+}
+
+impl TransportBundle {
+    pub fn new(
+        transport: Arc<dyn RemoteTransport + Send + Sync>,
+        keepalive: Option<Arc<dyn Send + Sync>>,
+        client: Arc<LayeredClient>,
+    ) -> Self {
+        Self {
+            transport,
+            keepalive,
+            client,
+        }
+    }
+
+    pub fn has_keepalive(&self) -> bool {
+        self.keepalive.is_some()
+    }
+
+    pub fn client_event_score(&self) -> SharedAlias {
+        let _ = &self.transport;
+        self.client.event().score()
+    }
+}
 
 #[fixture_export(shared::helper_marker)]
 pub fn exported_bridge(dto: WireDto, kind: WireKind) -> SharedAlias {
@@ -442,6 +702,10 @@ fn registry_bridge_score(
     let registry = CallbackRegistry::new(callback);
     let remote = RemotePathObject::new(label.clone());
     registry.record(label) + remote.path_len()
+}
+
+fn macro_reexport_conversion(dto: WireDto) -> Result<RootDto, ClientError> {
+    bridge_try!(RootDto::try_from(dto))
 }
 
 #[allow(dead_code)]
@@ -576,6 +840,45 @@ pub fn open_decision_callback(callback: DecisionCallback, label: &str) -> Shared
     } else {
         0
     }
+}
+
+pub fn open_macro_helper_reexport(dto: WireDto) -> SharedAlias {
+    macro_reexport_conversion(dto)
+        .map(|dto| dto.value)
+        .unwrap_or_else(|error| match error {
+            ClientError::Wire { code } => code,
+            ClientError::Missing => 0,
+        })
+}
+
+pub fn open_conversion_roundtrip(event: ServerEvent) -> SharedAlias {
+    let public = PublicEnvelope { event };
+    let internal = InternalEnvelope::from(public);
+    let public = PublicEnvelope::from(internal);
+    public.event.score()
+}
+
+pub fn open_facade_reexport(dto: WireDto) -> SharedAlias {
+    FacadeObject::new(dto).score()
+}
+
+pub fn open_layered_client(value: SharedAlias) -> SharedAlias {
+    let client = LayeredClient::new(value);
+    client.event().score()
+}
+
+pub fn open_transport_bundle(
+    transport: Arc<dyn RemoteTransport + Send + Sync>,
+    keepalive: Option<Arc<dyn Send + Sync>>,
+    value: SharedAlias,
+) -> TransportBundle {
+    TransportBundle::new(transport, keepalive, LayeredClient::new(value))
+}
+
+pub fn open_generic_edges(value: SharedAlias) -> SharedAlias {
+    let envelope = GenericEnvelope::new(GenericValue(value));
+    let packed = <GenericCodec as GenericApi<GenericValue>>::pack(GenericValue(1));
+    envelope.score() + packed.score()
 }
 
 #[fixture_export(async_runtime = "fixture")]

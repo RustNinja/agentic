@@ -48,6 +48,12 @@ not slicer failures.
   constructors, stored callback registries, callback/future aliases, and static
   `include_bytes!` assets. The generic fixes from that fixture are now in the
   reducer/import renderer rather than Litter-specific branches.
+- The same fast fixture now covers private inline facade modules that reexport
+  macro-decorated object surfaces, `pub(crate)` macro-helper reexports, and
+  generic struct/trait/impl headers with `where` bounds. The fix was generic:
+  retained impl surface scanning and render mention indexing now walk inline
+  module items, so constructors, helper methods, local bounds, and imports are
+  retained because the graph needs them, not because of Litter symbol names.
 - After those generic fixes, the pinned five-root `codex-ipc` batch was rerun
   from `/Users/mykyta/Documents/New project 6/litter-analysis/shared/rust-bridge`
   with known source baseline failures allowed. The generated slice remained at

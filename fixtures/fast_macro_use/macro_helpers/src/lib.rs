@@ -39,3 +39,8 @@ pub fn fixture_export(_attr: TokenStream, item: TokenStream) -> TokenStream {
 pub fn fixture_constructor(_attr: TokenStream, item: TokenStream) -> TokenStream {
     item
 }
+
+#[proc_macro]
+pub fn fixture_setup(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
+}

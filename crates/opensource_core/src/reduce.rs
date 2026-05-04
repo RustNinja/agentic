@@ -1972,25 +1972,24 @@ fn item_root_macro_impl_dependencies(project: &Project, item: &ItemId) -> Depend
     let mut dependencies = DependencySet::default();
     let item_path = path_from_item(item);
 
-    for source in project
-        .files
-        .values()
-        .filter(|source| source.package == item.package)
-    {
+    for module_path in project_module_paths(project, &item.package) {
+        let Some(items) = module_items_for_path(project, &item.package, &module_path) else {
+            continue;
+        };
         let aliases = project
             .module_aliases
-            .get(&(source.package.clone(), source.module_path.clone()))
+            .get(&(item.package.clone(), module_path.clone()))
             .cloned()
             .unwrap_or_default();
         let resolver = Resolver {
             project,
-            package: &source.package,
-            module_path: &source.module_path,
+            package: &item.package,
+            module_path: &module_path,
             aliases: &aliases,
             self_type: None,
         };
 
-        for source_item in &source.syntax.items {
+        for source_item in items {
             let Item::Impl(item_impl) = source_item else {
                 continue;
             };
@@ -2006,8 +2005,8 @@ fn item_root_macro_impl_dependencies(project: &Project, item: &ItemId) -> Depend
 
             let impl_resolver = Resolver {
                 project,
-                package: &source.package,
-                module_path: &source.module_path,
+                package: &item.package,
+                module_path: &module_path,
                 aliases: &aliases,
                 self_type: Some(self_type),
             };
@@ -5727,6 +5726,90 @@ fn path_from_item(item: &ItemId) -> Vec<String> {
     let mut path = item.module_path.clone();
     path.push(item.name.clone());
     path
+}
+
+fn project_module_paths(project: &Project, package: &str) -> BTreeSet<Vec<String>> {
+    let mut paths = project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .map(|source| source.module_path.clone())
+        .collect::<BTreeSet<_>>();
+    paths.extend(
+        project
+            .module_aliases
+            .keys()
+            .filter(|(candidate, _)| candidate == package)
+            .map(|(_, module_path)| module_path.clone()),
+    );
+    paths.extend(
+        project
+            .items
+            .keys()
+            .filter(|item| item.package == package)
+            .map(|item| item.module_path.clone()),
+    );
+    paths.extend(
+        project
+            .functions
+            .values()
+            .filter(|record| record.package == package)
+            .map(|record| record.module_path.clone()),
+    );
+    paths.extend(
+        project
+            .methods
+            .iter()
+            .filter(|(id, _)| id.package() == package)
+            .map(|(_, record)| record.module_path.clone()),
+    );
+    paths
+}
+
+fn module_items_for_path<'a>(
+    project: &'a Project,
+    package: &str,
+    module_path: &[String],
+) -> Option<&'a [Item]> {
+    if let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    {
+        return Some(&source.syntax.items);
+    }
+
+    for split in (0..module_path.len()).rev() {
+        let prefix = &module_path[..split];
+        let Some(source) = project
+            .files
+            .values()
+            .find(|source| source.package == package && source.module_path == prefix)
+        else {
+            continue;
+        };
+        if let Some(items) = inline_module_items(&source.syntax.items, &module_path[split..]) {
+            return Some(items);
+        }
+    }
+
+    None
+}
+
+fn inline_module_items<'a>(items: &'a [Item], module_path: &[String]) -> Option<&'a [Item]> {
+    let (name, rest) = module_path.split_first()?;
+    let child = items.iter().find_map(|item| {
+        let Item::Mod(item_mod) = item else {
+            return None;
+        };
+        (item_mod.ident == name.as_str()).then_some(item_mod)
+    })?;
+    let (_, child_items) = child.content.as_ref()?;
+    if rest.is_empty() {
+        Some(child_items.as_slice())
+    } else {
+        inline_module_items(child_items, rest)
+    }
 }
 
 fn type_like_kinds() -> [ItemKind; 5] {

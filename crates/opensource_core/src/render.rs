@@ -174,14 +174,22 @@ impl ReachableMentionIndex {
             index.add_module_idents(&item.package, &item.module_path, idents);
         }
 
-        for source in project
-            .files
-            .values()
-            .filter(|source| reduced.packages.contains(&source.package))
-        {
-            let mut idents = BTreeSet::new();
-            collect_retained_module_surface_idents(project, reduced, source, &mut idents);
-            index.add_module_idents(&source.package, &source.module_path, idents);
+        for package in &reduced.packages {
+            for module_path in project_module_paths(project, package) {
+                let Some(items) = module_items_for_path(project, package, &module_path) else {
+                    continue;
+                };
+                let mut idents = BTreeSet::new();
+                collect_retained_module_surface_idents(
+                    project,
+                    reduced,
+                    package,
+                    &module_path,
+                    items,
+                    &mut idents,
+                );
+                index.add_module_idents(package, &module_path, idents);
+            }
         }
 
         index
@@ -2039,6 +2047,7 @@ fn collect_struct_surface_idents(
     for attr in &item_struct.attrs {
         collect_token_idents(&attr.to_token_stream(), idents);
     }
+    collect_token_idents(&item_struct.generics.to_token_stream(), idents);
     if root_item_should_render(reduced, item_id) {
         collect_token_idents(&item_struct.to_token_stream(), idents);
         return;
@@ -2093,6 +2102,7 @@ fn collect_trait_surface_idents(
     }
     idents.insert(item_id.name.clone());
     idents.extend(item_id.module_path.iter().cloned());
+    collect_token_idents(&item_trait.generics.to_token_stream(), idents);
     for bound in &item_trait.supertraits {
         collect_token_idents(&bound.to_token_stream(), idents);
     }
@@ -2185,31 +2195,23 @@ fn retained_impl_surfaces_mention_ident(
     package: &str,
     ident: &str,
 ) -> bool {
-    project
-        .files
-        .values()
-        .filter(|source| source.package == package)
-        .any(|source| {
-            retained_impl_attrs_mention_ident(project, reduced, package, &source.module_path, ident)
+    project_module_paths(project, package)
+        .into_iter()
+        .any(|module_path| {
+            retained_impl_attrs_mention_ident(project, reduced, package, &module_path, ident)
                 || retained_impl_non_fn_items_mention_ident(
                     project,
                     reduced,
                     package,
-                    &source.module_path,
+                    &module_path,
                     ident,
                 )
-                || retained_impl_items_mention_ident(
-                    project,
-                    reduced,
-                    package,
-                    &source.module_path,
-                    ident,
-                )
+                || retained_impl_items_mention_ident(project, reduced, package, &module_path, ident)
                 || retained_root_macro_impl_items_mention_ident(
                     project,
                     reduced,
                     package,
-                    &source.module_path,
+                    &module_path,
                     ident,
                 )
         })
@@ -2220,17 +2222,22 @@ fn retained_surface_idents_by_package(
     reduced: &ReducedProject,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let mut packages = BTreeMap::<String, BTreeSet<String>>::new();
-    for source in project
-        .files
-        .values()
-        .filter(|source| reduced.packages.contains(&source.package))
-    {
-        let mut idents = BTreeSet::new();
-        collect_retained_module_surface_idents(project, reduced, source, &mut idents);
-        packages
-            .entry(source.package.clone())
-            .or_default()
-            .extend(idents);
+    for package in &reduced.packages {
+        for module_path in project_module_paths(project, package) {
+            let Some(items) = module_items_for_path(project, package, &module_path) else {
+                continue;
+            };
+            let mut idents = BTreeSet::new();
+            collect_retained_module_surface_idents(
+                project,
+                reduced,
+                package,
+                &module_path,
+                items,
+                &mut idents,
+            );
+            packages.entry(package.clone()).or_default().extend(idents);
+        }
     }
     packages
 }
@@ -5382,11 +5389,7 @@ fn retained_impl_attrs_mention_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
     let aliases = project
@@ -5395,7 +5398,7 @@ fn retained_impl_attrs_mention_ident(
         .cloned()
         .unwrap_or_default();
 
-    source.syntax.items.iter().any(|item| {
+    items.iter().any(|item| {
         let Item::Impl(item_impl) = item else {
             return false;
         };
@@ -5416,11 +5419,7 @@ fn retained_impl_attrs_mention_unqualified_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
     let aliases = project
@@ -5429,7 +5428,7 @@ fn retained_impl_attrs_mention_unqualified_ident(
         .cloned()
         .unwrap_or_default();
 
-    source.syntax.items.iter().any(|item| {
+    items.iter().any(|item| {
         let Item::Impl(item_impl) = item else {
             return false;
         };
@@ -5450,11 +5449,7 @@ fn retained_impl_non_fn_items_mention_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
     let aliases = project
@@ -5463,7 +5458,7 @@ fn retained_impl_non_fn_items_mention_ident(
         .cloned()
         .unwrap_or_default();
 
-    source.syntax.items.iter().any(|item| {
+    items.iter().any(|item| {
         let Item::Impl(item_impl) = item else {
             return false;
         };
@@ -5485,11 +5480,7 @@ fn retained_impl_non_fn_items_mention_unqualified_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
     let aliases = project
@@ -5498,7 +5489,7 @@ fn retained_impl_non_fn_items_mention_unqualified_ident(
         .cloned()
         .unwrap_or_default();
 
-    source.syntax.items.iter().any(|item| {
+    items.iter().any(|item| {
         let Item::Impl(item_impl) = item else {
             return false;
         };
@@ -5520,11 +5511,7 @@ fn retained_impl_items_mention_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
     let aliases = project
@@ -5533,7 +5520,7 @@ fn retained_impl_items_mention_ident(
         .cloned()
         .unwrap_or_default();
 
-    source.syntax.items.iter().any(|item| {
+    items.iter().any(|item| {
         let Item::Impl(item_impl) = item else {
             return false;
         };
@@ -5557,11 +5544,7 @@ fn retained_root_macro_impl_items_mention_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
     let aliases = project
@@ -5570,7 +5553,7 @@ fn retained_root_macro_impl_items_mention_ident(
         .cloned()
         .unwrap_or_default();
 
-    source.syntax.items.iter().any(|item| {
+    items.iter().any(|item| {
         let Item::Impl(item_impl) = item else {
             return false;
         };
@@ -5599,11 +5582,7 @@ fn retained_root_macro_impl_items_mention_unqualified_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
     let aliases = project
@@ -5612,7 +5591,7 @@ fn retained_root_macro_impl_items_mention_unqualified_ident(
         .cloned()
         .unwrap_or_default();
 
-    source.syntax.items.iter().any(|item| {
+    items.iter().any(|item| {
         let Item::Impl(item_impl) = item else {
             return false;
         };
@@ -5641,15 +5620,11 @@ fn retained_macro_invocations_mention_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
 
-    source.syntax.items.iter().any(|item| match item {
+    items.iter().any(|item| match item {
         Item::Macro(item_macro) if item_macro.ident.is_none() => {
             token_stream_mentions_ident(&item_macro.mac.tokens, ident)
         }
@@ -5664,15 +5639,11 @@ fn retained_macro_invocations_mention_unqualified_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    let Some(source) = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)
-    else {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
 
-    source.syntax.items.iter().any(|item| match item {
+    items.iter().any(|item| match item {
         Item::Macro(item_macro) if item_macro.ident.is_none() => {
             token_stream_mentions_unqualified_ident(&item_macro.mac.tokens, ident)
         }
@@ -5683,33 +5654,32 @@ fn retained_macro_invocations_mention_unqualified_ident(
 fn collect_retained_module_surface_idents(
     project: &Project,
     reduced: &ReducedProject,
-    source: &SourceFile,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
     idents: &mut BTreeSet<String>,
 ) {
-    let retained_macro_definitions = retained_macro_definitions_for_generated_items(
-        project,
-        reduced,
-        &source.package,
-        &source.syntax.items,
-    );
+    let retained_macro_definitions =
+        retained_macro_definitions_for_generated_items(project, reduced, package, items);
     let aliases = project
         .module_aliases
-        .get(&(source.package.clone(), source.module_path.clone()))
+        .get(&(package.to_string(), module_path.to_vec()))
         .cloned()
         .unwrap_or_default();
 
-    for item in &source.syntax.items {
+    for item in items {
         match item {
             Item::Impl(item_impl) => {
                 let has_reachable_method = impl_has_reachable_method(
                     project,
                     reduced,
-                    &source.package,
-                    &source.module_path,
+                    package,
+                    module_path,
                     item_impl,
                     &aliases,
                 );
                 if has_reachable_method {
+                    collect_impl_header_idents(item_impl, idents);
                     for attr in &item_impl.attrs {
                         collect_token_idents(&attr.to_token_stream(), idents);
                     }
@@ -5717,8 +5687,8 @@ fn collect_retained_module_surface_idents(
                         if root_macro_impl_surface_should_render_for_module(
                             project,
                             reduced,
-                            &source.package,
-                            &source.module_path,
+                            package,
+                            module_path,
                             item_impl,
                             &aliases,
                         ) && root_macro_impl_item_should_render(item_impl, impl_item)
@@ -5737,8 +5707,8 @@ fn collect_retained_module_surface_idents(
                     && impl_should_render(
                         project,
                         reduced,
-                        &source.package,
-                        &source.module_path,
+                        package,
+                        module_path,
                         item_impl,
                         &aliases,
                     )
@@ -5760,6 +5730,14 @@ fn collect_retained_module_surface_idents(
             }
             _ => {}
         }
+    }
+}
+
+fn collect_impl_header_idents(item_impl: &syn::ItemImpl, idents: &mut BTreeSet<String>) {
+    collect_token_idents(&item_impl.generics.to_token_stream(), idents);
+    collect_token_idents(&item_impl.self_ty.to_token_stream(), idents);
+    if let Some((_, trait_path, _)) = &item_impl.trait_ {
+        collect_token_idents(&trait_path.to_token_stream(), idents);
     }
 }
 
@@ -6287,18 +6265,22 @@ fn retained_impl_surfaces_call_inherent_associated_function(
         return false;
     };
 
-    project
-        .files
-        .values()
-        .filter(|source| source.package == package && reduced.packages.contains(&source.package))
-        .any(|source| {
+    project_module_paths(project, package)
+        .into_iter()
+        .any(|module_path| {
+            if !reduced.packages.contains(package) {
+                return false;
+            }
+            let Some(items) = module_items_for_path(project, package, &module_path) else {
+                return false;
+            };
             let aliases = project
                 .module_aliases
-                .get(&(source.package.clone(), source.module_path.clone()))
+                .get(&(package.to_string(), module_path.clone()))
                 .cloned()
                 .unwrap_or_default();
 
-            source.syntax.items.iter().any(|item| {
+            items.iter().any(|item| {
                 let Item::Impl(item_impl) = item else {
                     return false;
                 };
@@ -6306,7 +6288,7 @@ fn retained_impl_surfaces_call_inherent_associated_function(
                     project,
                     reduced,
                     package,
-                    &source.module_path,
+                    &module_path,
                     item_impl,
                     &aliases,
                 ) {
@@ -6544,6 +6526,9 @@ fn reachable_item_mentions_ident(
     {
         return true;
     }
+    if token_stream_mentions_ident(&item_struct.generics.to_token_stream(), ident) {
+        return true;
+    }
     if root_item_should_render(reduced, item_id) {
         return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
     }
@@ -6599,6 +6584,9 @@ fn reachable_item_mentions_unqualified_ident(
     {
         return true;
     }
+    if token_stream_mentions_unqualified_ident(&item_struct.generics.to_token_stream(), ident) {
+        return true;
+    }
     if root_item_should_render(reduced, item_id) {
         return token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident);
     }
@@ -6627,6 +6615,9 @@ fn trait_type_surface_mentions_ident(
     if item_id.name == ident || item_id.module_path.iter().any(|segment| segment == ident) {
         return true;
     }
+    if token_stream_mentions_ident(&item_trait.generics.to_token_stream(), ident) {
+        return true;
+    }
     if item_trait
         .supertraits
         .iter()
@@ -6647,6 +6638,9 @@ fn trait_type_surface_mentions_unqualified_ident(
     ident: &str,
 ) -> bool {
     if item_id.name == ident || item_id.module_path.iter().any(|segment| segment == ident) {
+        return true;
+    }
+    if token_stream_mentions_unqualified_ident(&item_trait.generics.to_token_stream(), ident) {
         return true;
     }
     if item_trait
@@ -8705,6 +8699,90 @@ fn project_has_module(project: &Project, package: &str, module_path: &[String]) 
             .files
             .values()
             .any(|source| source.package == package && source.module_path == module_path)
+}
+
+fn project_module_paths(project: &Project, package: &str) -> BTreeSet<Vec<String>> {
+    let mut paths = project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .map(|source| source.module_path.clone())
+        .collect::<BTreeSet<_>>();
+    paths.extend(
+        project
+            .module_aliases
+            .keys()
+            .filter(|(candidate, _)| candidate == package)
+            .map(|(_, module_path)| module_path.clone()),
+    );
+    paths.extend(
+        project
+            .items
+            .keys()
+            .filter(|item| item.package == package)
+            .map(|item| item.module_path.clone()),
+    );
+    paths.extend(
+        project
+            .functions
+            .values()
+            .filter(|record| record.package == package)
+            .map(|record| record.module_path.clone()),
+    );
+    paths.extend(
+        project
+            .methods
+            .iter()
+            .filter(|(id, _)| id.package() == package)
+            .map(|(_, record)| record.module_path.clone()),
+    );
+    paths
+}
+
+fn module_items_for_path<'a>(
+    project: &'a Project,
+    package: &str,
+    module_path: &[String],
+) -> Option<&'a [Item]> {
+    if let Some(source) = project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+    {
+        return Some(&source.syntax.items);
+    }
+
+    for split in (0..module_path.len()).rev() {
+        let prefix = &module_path[..split];
+        let Some(source) = project
+            .files
+            .values()
+            .find(|source| source.package == package && source.module_path == prefix)
+        else {
+            continue;
+        };
+        if let Some(items) = inline_module_items(&source.syntax.items, &module_path[split..]) {
+            return Some(items);
+        }
+    }
+
+    None
+}
+
+fn inline_module_items<'a>(items: &'a [Item], module_path: &[String]) -> Option<&'a [Item]> {
+    let (name, rest) = module_path.split_first()?;
+    let child = items.iter().find_map(|item| {
+        let Item::Mod(item_mod) = item else {
+            return None;
+        };
+        (item_mod.ident == name.as_str()).then_some(item_mod)
+    })?;
+    let (_, child_items) = child.content.as_ref()?;
+    if rest.is_empty() {
+        Some(child_items.as_slice())
+    } else {
+        inline_module_items(child_items, rest)
+    }
 }
 
 fn local_type_path(

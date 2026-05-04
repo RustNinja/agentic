@@ -199,16 +199,20 @@ only, callback root only, data-item root only, enum root only, trait-item root
 only, macro-exported object root only, path-qualified derive record root,
 derive-helper error enum root, Arc-returning object root, stored callback
 registry object root, callback-registry function root, future-callback alias
-root, trait-edge root only, cfg/asset root only, associated-codec trait item
-root only, combined macro+async roots, and combined macro+trait+cfg roots. That
-caught several important issues: when a trait is selected as a root item, its
-method declarations and their imports are part of the public slice and must be
+root, private inline facade-object reexport root, macro-helper reexport root,
+conversion roundtrip root, generic-header/where-clause root, trait-edge root
+only, cfg/asset root only, associated-codec trait item root only, combined
+macro+async roots, and combined macro+trait+cfg roots. That caught several
+important issues: when a trait is selected as a root item, its method
+declarations and their imports are part of the public slice and must be
 preserved; retained inline modules that contain `include!(concat!(env!(
 "OUT_DIR"), ...))` must still raise an OUT_DIR generated-source production
 hazard even when the inline module is retained only because reachable code
 mentions the module path; selected item roots with macro-bearing inherent impls
 must retain exported constructors/methods and the dependencies from those impl
-signatures and bodies; and path-qualified proc macro derives should not keep
+signatures and bodies even when the object lives behind an inline private
+facade; rendered struct/trait/impl headers must keep local generic and
+where-clause bounds; and path-qualified proc macro derives should not keep
 unused simple imports only because the derive leaf appears in a qualified path.
 
 The dynamic-dispatch rule is now split by ownership. Direct callback inputs on
