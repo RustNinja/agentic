@@ -16,6 +16,7 @@ use syn::{
 use toml::{value::Table, Value};
 
 use crate::{
+    include_path::{static_include_path, StaticIncludePath},
     manifest::Package,
     model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId, SourceFile},
     reduce::{is_cfg_test_attr, is_opensourced_attr, is_test_attr},
@@ -1139,10 +1140,10 @@ fn copy_source_include_assets(
 
     let mut copied = 0;
     for candidate in candidates {
-        let path = if candidate.is_absolute() {
-            candidate
-        } else {
-            source_dir.join(candidate)
+        let path = match candidate {
+            StaticIncludePath::SourceRelative(path) => source_dir.join(path),
+            StaticIncludePath::PackageRelative(path) => package.root.join(path),
+            StaticIncludePath::Absolute(_) => continue,
         };
         let Some(resolved) = resolve_package_copy_source(package, &path)? else {
             continue;
@@ -1157,7 +1158,7 @@ fn copy_source_include_assets(
     Ok(copied)
 }
 
-fn collect_include_macro_paths(tokens: &TokenStream, candidates: &mut BTreeSet<PathBuf>) {
+fn collect_include_macro_paths(tokens: &TokenStream, candidates: &mut BTreeSet<StaticIncludePath>) {
     let mut tokens = tokens.clone().into_iter().peekable();
     while let Some(token) = tokens.next() {
         match token {
@@ -1171,7 +1172,7 @@ fn collect_include_macro_paths(tokens: &TokenStream, candidates: &mut BTreeSet<P
                 let Some(TokenTree::Group(group)) = tokens.next() else {
                     continue;
                 };
-                if let Some(path) = include_macro_literal_path(&group.stream()) {
+                if let Some(path) = static_include_path(&group.stream()) {
                     candidates.insert(path);
                 }
             }
@@ -1183,30 +1184,6 @@ fn collect_include_macro_paths(tokens: &TokenStream, candidates: &mut BTreeSet<P
 
 fn is_file_include_macro(ident: &str) -> bool {
     matches!(ident, "include" | "include_str" | "include_bytes")
-}
-
-fn include_macro_literal_path(tokens: &TokenStream) -> Option<PathBuf> {
-    for token in tokens.clone() {
-        match token {
-            TokenTree::Literal(literal) => {
-                let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) else {
-                    continue;
-                };
-                let value = literal.value();
-                if value.is_empty() || value.contains('\0') {
-                    return None;
-                }
-                return Some(PathBuf::from(value));
-            }
-            TokenTree::Group(group) => {
-                if let Some(path) = include_macro_literal_path(&group.stream()) {
-                    return Some(path);
-                }
-            }
-            TokenTree::Ident(_) | TokenTree::Punct(_) => {}
-        }
-    }
-    None
 }
 
 fn copy_asset(

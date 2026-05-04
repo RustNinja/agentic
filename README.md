@@ -187,12 +187,15 @@ by reduction. A rust-analyzer HIR or rustc-driver backend remains the next
 precision step for resolving hard name-resolution cases before rendering.
 Generation reports fail closed on known syntactic trust hazards as well,
 including retained `include!` source macros that read generated Rust from
-`OUT_DIR`; other retained `include!` source macros and non-literal file include
-macros are reported as validation hazards because they cannot be fully validated
-by static path copying alone. The report fails closed on retained custom
-attribute and derive macros that may generate code outside the static parse
-tree, including macros hidden behind nested `cfg_attr`, and retained
-non-builtin macro invocations. Retained build scripts are also reported because
+`OUT_DIR`; other retained `include!` source macros are reported as validation
+hazards because they cannot be fully validated by static path copying alone.
+Static `include_str!` and `include_bytes!` paths are copied for string literals,
+`concat!` literals, and `concat!(env!("CARGO_MANIFEST_DIR"), "...")` package
+paths. Unknown env-driven paths, `OUT_DIR` file assets, absolute include paths,
+and paths resolving outside the package fail closed. The report fails closed on
+retained custom attribute and derive macros that may generate code outside the
+static parse tree, including macros hidden behind nested `cfg_attr`, and
+retained non-builtin macro invocations. Retained build scripts are also reported because
 they can generate source, link metadata, or asset requirements outside the
 static parse tree. Retained `cfg`/`cfg_attr` attributes are reported when a
 slice needs feature or target matrix validation beyond the current host/default

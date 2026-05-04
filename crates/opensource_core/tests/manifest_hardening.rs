@@ -1128,11 +1128,20 @@ fn copies_assets_referenced_by_retained_include_macros() {
     let lib = read(output.join("include_assets_like/src/lib.rs"));
     assert!(lib.contains("include_str!(\"guidelines/core.md\")"));
     assert!(lib.contains("include_str!(\"../assets/extra.txt\")"));
+    assert!(lib.contains("include_str!(concat!(\"guidelines/\", \"concat.md\"))"));
+    assert!(lib.contains("env!(\"CARGO_MANIFEST_DIR\")"));
+    assert!(lib.contains("\"/assets/manifest.txt\""));
     assert!(!lib.contains("UNUSED"));
     assert!(output
         .join("include_assets_like/src/guidelines/core.md")
         .exists());
+    assert!(output
+        .join("include_assets_like/src/guidelines/concat.md")
+        .exists());
     assert!(output.join("include_assets_like/assets/extra.txt").exists());
+    assert!(output
+        .join("include_assets_like/assets/manifest.txt")
+        .exists());
     assert!(!output
         .join("include_assets_like/src/guidelines/unused.md")
         .exists());
@@ -7347,12 +7356,14 @@ opensourced = {{ path = "{}" }}
 
 const CORE: &str = include_str!("guidelines/core.md");
 const EXTRA: &str = include_str!("../assets/extra.txt");
+const CONCAT: &str = include_str!(concat!("guidelines/", "concat.md"));
+const MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/manifest.txt"));
 const UNUSED: &str = include_str!("guidelines/unused.md");
 
 #[opensourced]
 pub fn selected(include_extra: bool) -> String {
     if include_extra {
-        format!("{CORE}\n{EXTRA}")
+        format!("{CORE}\n{EXTRA}\n{CONCAT}\n{MANIFEST}")
     } else {
         CORE.to_string()
     }
@@ -7368,10 +7379,18 @@ pub fn noisy() -> &'static str {
         "core guideline",
     );
     write(
+        root.join("include_assets_like/src/guidelines/concat.md"),
+        "concat guideline",
+    );
+    write(
         root.join("include_assets_like/src/guidelines/unused.md"),
         "unused guideline",
     );
     write(root.join("include_assets_like/assets/extra.txt"), "extra");
+    write(
+        root.join("include_assets_like/assets/manifest.txt"),
+        "manifest",
+    );
 }
 
 fn write_external_pub_reexport_fixture(root: &Path) {

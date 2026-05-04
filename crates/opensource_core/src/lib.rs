@@ -1,5 +1,6 @@
 mod analyzer;
 mod feedback;
+mod include_path;
 mod manifest;
 mod model;
 mod parse;
@@ -15,6 +16,7 @@ use std::{
     time::Instant,
 };
 
+use include_path::{static_include_path, StaticIncludePath};
 use model::{Project, ReducedProject};
 use proc_macro2::TokenStream;
 use quote::ToTokens;
@@ -799,10 +801,40 @@ fn add_syntactic_production_hazards(
     if counts.nonliteral_file_include_macros > 0 {
         hazards.push(production_hazard(
             "nonliteral_file_include_macros",
-            "warning",
+            "error",
             format!(
-                "{} retained include_str!/include_bytes! macro(s) use non-literal paths; asset copying needs compiler feedback validation",
+                "{} retained include_str!/include_bytes! macro(s) use paths the slicer cannot statically resolve",
                 counts.nonliteral_file_include_macros
+            ),
+        ));
+    }
+    if counts.out_dir_file_include_macros > 0 {
+        hazards.push(production_hazard(
+            "out_dir_file_include_macros",
+            "error",
+            format!(
+                "{} retained include_str!/include_bytes! macro(s) read generated files from OUT_DIR; production slicing cannot semantically model build-generated assets",
+                counts.out_dir_file_include_macros
+            ),
+        ));
+    }
+    if counts.absolute_file_include_macros > 0 {
+        hazards.push(production_hazard(
+            "absolute_file_include_macros",
+            "error",
+            format!(
+                "{} retained include_str!/include_bytes! macro(s) use absolute paths that would read outside the generated slice",
+                counts.absolute_file_include_macros
+            ),
+        ));
+    }
+    if counts.external_file_include_macros > 0 {
+        hazards.push(production_hazard(
+            "external_file_include_macros",
+            "error",
+            format!(
+                "{} retained include_str!/include_bytes! macro(s) resolve outside their package root",
+                counts.external_file_include_macros
             ),
         ));
     }
@@ -880,6 +912,9 @@ struct SyntacticHazardCounts {
     source_include_macros: usize,
     out_dir_source_include_macros: usize,
     nonliteral_file_include_macros: usize,
+    out_dir_file_include_macros: usize,
+    absolute_file_include_macros: usize,
+    external_file_include_macros: usize,
     custom_attribute_macros: usize,
     custom_derive_macros: usize,
     custom_macro_invocations: usize,
@@ -891,6 +926,9 @@ impl SyntacticHazardCounts {
         self.source_include_macros += other.source_include_macros;
         self.out_dir_source_include_macros += other.out_dir_source_include_macros;
         self.nonliteral_file_include_macros += other.nonliteral_file_include_macros;
+        self.out_dir_file_include_macros += other.out_dir_file_include_macros;
+        self.absolute_file_include_macros += other.absolute_file_include_macros;
+        self.external_file_include_macros += other.external_file_include_macros;
         self.custom_attribute_macros += other.custom_attribute_macros;
         self.custom_derive_macros += other.custom_derive_macros;
         self.custom_macro_invocations += other.custom_macro_invocations;
@@ -899,28 +937,81 @@ impl SyntacticHazardCounts {
 }
 
 fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
-    let mut visitor = SyntacticHazardVisitor::default();
+    let mut counts = SyntacticHazardCounts::default();
 
     for callable in &reduced.reachable {
         if let Some(record) = project.functions.get(callable) {
+            let mut visitor = syntactic_hazard_visitor_for_location(
+                project,
+                &record.package,
+                &record.module_path,
+            );
             visitor.visit_item_fn(&record.item);
+            counts.add(visitor.counts);
         } else if let Some(record) = project.methods.get(callable) {
+            let mut visitor = syntactic_hazard_visitor_for_location(
+                project,
+                callable.package(),
+                &record.module_path,
+            );
             visitor.visit_impl_item_fn(&record.item);
+            counts.add(visitor.counts);
         }
     }
 
     for item in &reduced.reachable_items {
         if let Some(record) = project.items.get(item) {
+            let mut visitor = syntactic_hazard_visitor_for_location(
+                project,
+                &record.package,
+                &record.module_path,
+            );
             visitor.visit_item(&record.item);
+            counts.add(visitor.counts);
         }
     }
 
-    visitor.counts
+    counts
 }
 
-#[derive(Default)]
+fn syntactic_hazard_visitor_for_location(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+) -> SyntacticHazardVisitor {
+    let include_context = project.workspace.packages.get(package).and_then(|package| {
+        source_for_module(project, &package.name, module_path).and_then(|source| {
+            source.path.parent().map(|source_dir| IncludeContext {
+                package_root: package.root.clone(),
+                source_dir: source_dir.to_path_buf(),
+            })
+        })
+    });
+    SyntacticHazardVisitor {
+        counts: SyntacticHazardCounts::default(),
+        include_context,
+    }
+}
+
+fn source_for_module<'a>(
+    project: &'a Project,
+    package: &str,
+    module_path: &[String],
+) -> Option<&'a model::SourceFile> {
+    project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+}
+
 struct SyntacticHazardVisitor {
     counts: SyntacticHazardCounts,
+    include_context: Option<IncludeContext>,
+}
+
+struct IncludeContext {
+    package_root: PathBuf,
+    source_dir: PathBuf,
 }
 
 impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
@@ -944,17 +1035,52 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
             } else {
                 self.counts.source_include_macros += 1;
             }
-        } else if (macro_path_ends_with(mac, "include_str")
-            || macro_path_ends_with(mac, "include_bytes"))
-            && !macro_has_literal_path(mac)
+        } else if macro_path_ends_with(mac, "include_str")
+            || macro_path_ends_with(mac, "include_bytes")
         {
-            self.counts.nonliteral_file_include_macros += 1;
+            self.visit_file_include_macro(mac);
         }
         if macro_invocation_requires_expansion_boundary(mac) {
             self.counts.custom_macro_invocations += 1;
         }
 
         syn::visit::visit_macro(self, mac);
+    }
+}
+
+impl SyntacticHazardVisitor {
+    fn visit_file_include_macro(&mut self, mac: &Macro) {
+        if macro_tokens_reference_out_dir(&mac.tokens) {
+            self.counts.out_dir_file_include_macros += 1;
+            return;
+        }
+
+        let Some(path) = static_include_path(&mac.tokens) else {
+            self.counts.nonliteral_file_include_macros += 1;
+            return;
+        };
+        self.count_file_include_path(&path);
+    }
+
+    fn count_file_include_path(&mut self, path: &StaticIncludePath) {
+        let Some(context) = &self.include_context else {
+            return;
+        };
+        let candidate = match path {
+            StaticIncludePath::Absolute(_) => {
+                self.counts.absolute_file_include_macros += 1;
+                return;
+            }
+            StaticIncludePath::SourceRelative(path) => context.source_dir.join(path),
+            StaticIncludePath::PackageRelative(path) => context.package_root.join(path),
+        };
+
+        if candidate
+            .canonicalize()
+            .is_ok_and(|path| !path.starts_with(&context.package_root))
+        {
+            self.counts.external_file_include_macros += 1;
+        }
     }
 }
 
@@ -980,10 +1106,6 @@ fn macro_path_ends_with(mac: &Macro, name: &str) -> bool {
         .segments
         .last()
         .is_some_and(|segment| segment.ident == name)
-}
-
-fn macro_has_literal_path(mac: &Macro) -> bool {
-    syn::parse2::<syn::LitStr>(mac.tokens.clone()).is_ok()
 }
 
 fn macro_invocation_requires_expansion_boundary(mac: &Macro) -> bool {
@@ -1707,18 +1829,23 @@ theme = []
                 opensourced_path
             ),
         );
-        write(
-            root.join("app/src/lib.rs"),
-            r#"use opensourced::opensourced;
+        let absolute_asset = root.join("app/assets/absolute.bin");
+        write(absolute_asset.clone(), "absolute asset");
+        write(root.join("workspace-secret.bin"), "workspace secret");
+        let source = r#"use opensourced::opensourced;
 
 #[opensourced]
 pub fn entry() -> &'static str {
     let _generated = include!("generated_expr.rs");
     let _out_dir_generated = include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+    let _unknown_asset = include_bytes!(env!("DATA_PATH"));
+    let _absolute_asset = include_bytes!(ABSOLUTE_ASSET);
+    let _external_asset = include_bytes!("../../workspace-secret.bin");
     include_str!(concat!("data", ".txt"))
 }
-"#,
-        );
+"#
+        .replace("ABSOLUTE_ASSET", &format!("{absolute_asset:?}"));
+        write(root.join("app/src/lib.rs"), &source);
 
         let report = generate(GenerateOptions {
             workspace_root: root,
@@ -1738,7 +1865,20 @@ pub fn entry() -> &'static str {
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "nonliteral_file_include_macros"));
+            .any(|hazard| hazard.code == "nonliteral_file_include_macros"
+                && hazard.severity == "error"));
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "absolute_file_include_macros"
+                && hazard.severity == "error"));
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "external_file_include_macros"
+                && hazard.severity == "error"));
         assert_eq!(report.production.status, "hazards_detected");
     }
 

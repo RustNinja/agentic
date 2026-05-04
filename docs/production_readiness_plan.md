@@ -51,6 +51,9 @@ assets, output safety, or product diagnostics by itself.
   `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle
   models generated source.
+- File include assets must be copied only for statically resolved package-local
+  paths; unknown env paths, absolute paths, external paths, and `OUT_DIR`
+  generated assets are production-blocking.
 - Feature and platform cfgs form a matrix, not a boolean. A slice should report
   the feature/platform configuration it was generated for.
 - Dependency aliases, workspace dependencies, optional dependency features, and
