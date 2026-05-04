@@ -66,6 +66,13 @@ not slicer failures.
   corpus: the same five-root batch still generated 116 files, had zero preflight
   errors, zero feedback errors, zero warnings, and reached
   `production_ready=accepted` under `--deny-warnings`.
+- The trait/manifest minimality pass tightened generic pruning rather than
+  adding Litter-specific names: type-only trait surfaces now prune dead optional
+  members, local build-dependencies require a retained build script, and local
+  dependency edges are kept by actual edge usage instead of retained package
+  membership. The pinned five-root batch was rerun after that pass and still
+  generated 116 files with zero preflight errors, zero feedback errors, zero
+  warnings, and `production_ready=accepted` under `--deny-warnings`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around

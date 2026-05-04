@@ -434,6 +434,25 @@ field mentions only inside impl items that will render. Non-test `#[cfg(...)]`
 fields remain retained and reported as feedback hazards instead of being
 silently pruned, while `#[cfg(test)]` fields stay test-only.
 
+The next minimality pass applied the same discipline to trait and manifest
+surfaces. Non-root traits that are retained only as type/object surfaces now
+contribute only their type surface dependencies, required members, and members
+explicitly referenced by reachable callables or retained macro impl surfaces.
+Rendered trait impls keep required and reachable members but prune unrelated
+optional default-method overrides and their private dependencies. On the Cargo
+side, local build-dependencies are kept only when the generated package still
+has a retained build script, and local dependency edges/features are rendered by
+edge usage instead of by package-wide retention. A package can remain in the
+slice because another root needs it without forcing unrelated packages to keep a
+dead dependency edge to it.
+
+Proc-macro import pruning is now split by use form. Path-qualified derives still
+keep the proc-macro package without keeping dead simple imports, while retained
+unqualified custom attributes keep the import that brings the attribute macro
+into scope. This avoids both common failures: deleting `use helper::attr` while
+`#[attr]` remains, or retaining `use helper::Derive` only because
+`#[derive(helper::Derive)]` appears in a retained item.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:

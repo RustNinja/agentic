@@ -836,6 +836,8 @@ fn retains_dependencies_from_rendered_trait_impl_surfaces() {
     assert!(lib.contains("pub trait Marker"), "{lib}");
     assert!(lib.contains("pub struct Payload"), "{lib}");
     assert!(lib.contains("impl Marker for Api"), "{lib}");
+    assert!(lib.contains("fn marker(&self) -> Self::Item"), "{lib}");
+    assert!(!lib.contains("fn dead"), "{lib}");
     assert!(!lib.contains("pub struct Dead"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
@@ -4086,6 +4088,10 @@ pub trait Marker {
     type Item;
 
     fn marker(&self) -> Self::Item;
+
+    fn dead(&self) -> Dead {
+        Dead
+    }
 }
 
 #[opensourced]
@@ -4100,6 +4106,10 @@ impl Marker for Api {
 
     fn marker(&self) -> Self::Item {
         Payload
+    }
+
+    fn dead(&self) -> Dead {
+        Dead
     }
 }
 "#,

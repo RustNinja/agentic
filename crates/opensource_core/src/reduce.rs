@@ -253,6 +253,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         let dependencies = reachable_trait_impl_surface_dependencies(
             project,
             &candidate_packages,
+            &reachable,
             &reachable_items,
         );
         evidence.add(&dependencies.evidence);
@@ -615,6 +616,7 @@ fn retained_rendered_use_dependencies(
 fn reachable_trait_impl_surface_dependencies(
     project: &Project,
     candidate_packages: &BTreeSet<String>,
+    reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
@@ -656,22 +658,161 @@ fn reachable_trait_impl_surface_dependencies(
                     continue;
                 };
                 if trait_item_has_public_surface(project, &trait_item) {
-                    dependencies.items.insert(trait_item);
+                    dependencies.items.insert(trait_item.clone());
                     let impl_resolver = Resolver {
                         project,
                         package,
                         module_path: &module_path,
                         aliases: &aliases,
-                        self_type: Some(self_type),
+                        self_type: Some(self_type.clone()),
                     };
                     let mut visitor = DependencyVisitor::new(impl_resolver);
-                    visitor.visit_item_impl(item_impl);
+                    visitor.add_generic_trait_bounds(&item_impl.generics);
+                    for attr in &item_impl.attrs {
+                        visitor.visit_attribute(attr);
+                    }
+                    visitor.visit_type(&item_impl.self_ty);
+                    if let Some((_, trait_path, _)) = &item_impl.trait_ {
+                        visitor.add_item_path(trait_path);
+                    }
+                    let trait_path = path_from_item(&trait_item);
+                    for impl_item in &item_impl.items {
+                        if trait_impl_item_should_scan_surface_dependencies(
+                            project,
+                            reachable,
+                            package,
+                            &self_type.type_path,
+                            &trait_path,
+                            &trait_item,
+                            item_impl,
+                            impl_item,
+                        ) {
+                            visitor.visit_impl_item(impl_item);
+                        }
+                    }
                     dependencies.extend(visitor.dependencies);
                 }
             }
         }
     }
     dependencies
+}
+
+#[allow(clippy::too_many_arguments)]
+fn trait_impl_item_should_scan_surface_dependencies(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    package: &str,
+    type_path: &[String],
+    trait_path: &[String],
+    trait_item: &ItemId,
+    item_impl: &syn::ItemImpl,
+    impl_item: &ImplItem,
+) -> bool {
+    if impl_item_is_test(impl_item) {
+        return false;
+    }
+    if item_impl
+        .attrs
+        .iter()
+        .any(attr_requires_impl_surface_retention)
+    {
+        return true;
+    }
+    if impl_item_attrs_require_surface_retention(impl_item) {
+        return true;
+    }
+    if trait_impl_item_is_required_by_trait(project, trait_item, impl_item) {
+        return true;
+    }
+    let ImplItem::Fn(method) = impl_item else {
+        return false;
+    };
+    reachable.iter().any(|callable| {
+        matches!(
+            callable,
+            CallableId::Method {
+                package: callable_package,
+                type_path: callable_type_path,
+                trait_path: Some(callable_trait_path),
+                method: callable_method,
+                ..
+            } if callable_package == package
+                && callable_type_path == type_path
+                && callable_trait_path == trait_path
+                && callable_method == &method.sig.ident.to_string()
+        )
+    })
+}
+
+fn trait_impl_item_is_required_by_trait(
+    project: &Project,
+    trait_item: &ItemId,
+    impl_item: &ImplItem,
+) -> bool {
+    let Some(record) = project.items.get(trait_item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    match impl_item {
+        ImplItem::Fn(method) => item_trait.items.iter().any(|trait_item| {
+            let syn::TraitItem::Fn(function) = trait_item else {
+                return false;
+            };
+            function.sig.ident == method.sig.ident && function.default.is_none()
+        }),
+        ImplItem::Const(item) => item_trait.items.iter().any(|trait_item| {
+            let syn::TraitItem::Const(constant) = trait_item else {
+                return false;
+            };
+            constant.ident == item.ident && constant.default.is_none()
+        }),
+        ImplItem::Type(item) => item_trait.items.iter().any(|trait_item| {
+            let syn::TraitItem::Type(associated_type) = trait_item else {
+                return false;
+            };
+            associated_type.ident == item.ident && associated_type.default.is_none()
+        }),
+        _ => false,
+    }
+}
+
+fn impl_item_attrs_require_surface_retention(impl_item: &ImplItem) -> bool {
+    match impl_item {
+        ImplItem::Const(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Fn(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Macro(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Type(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn trait_item_type_surface_dependency_should_remain(item: &syn::TraitItem) -> bool {
+    if trait_item_attrs_require_surface_retention(item) {
+        return true;
+    }
+    match item {
+        syn::TraitItem::Fn(method) => method.default.is_none(),
+        syn::TraitItem::Const(item) => item.default.is_none(),
+        syn::TraitItem::Type(item) => item.default.is_none(),
+        syn::TraitItem::Macro(_) | syn::TraitItem::Verbatim(_) => true,
+        _ => true,
+    }
+}
+
+fn trait_item_attrs_require_surface_retention(item: &syn::TraitItem) -> bool {
+    let attrs = match item {
+        syn::TraitItem::Const(item) => &item.attrs,
+        syn::TraitItem::Fn(item) => &item.attrs,
+        syn::TraitItem::Macro(item) => &item.attrs,
+        syn::TraitItem::Type(item) => &item.attrs,
+        syn::TraitItem::Verbatim(_) => return false,
+        _ => return false,
+    };
+    attrs.iter().any(attr_requires_impl_surface_retention)
 }
 
 fn externally_referenced_public_reexport_dependencies(
@@ -1808,6 +1949,9 @@ fn add_local_build_dependency_packages(
             let Some(package) = project.workspace.packages.get(&package_name) else {
                 continue;
             };
+            if manifest_build_script_path(&package.root, &package.manifest).is_none() {
+                continue;
+            }
 
             for dependency_package in local_build_dependency_packages(project, &package.manifest) {
                 for package in package_closure(project, &dependency_package) {
@@ -1871,6 +2015,21 @@ fn add_local_proc_macro_dependency_packages(
         }
     }
     retained_proc_macro_dependencies
+}
+
+fn manifest_build_script_path(root: &FsPath, manifest: &Value) -> Option<PathBuf> {
+    let package_table = manifest.get("package").and_then(Value::as_table);
+    match package_table.and_then(|table| table.get("build")) {
+        Some(Value::Boolean(false)) => None,
+        Some(Value::String(path)) => {
+            let path = root.join(path);
+            path.exists().then_some(path)
+        }
+        _ => {
+            let path = root.join("build.rs");
+            path.exists().then_some(path)
+        }
+    }
 }
 
 fn retain_entire_packages(
@@ -2382,6 +2541,12 @@ fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
         } else {
             visitor.visit_struct_static_surface_dependencies(item_struct);
         }
+    } else if let Item::Trait(item_trait) = &record.item {
+        if item_has_opensourced_attr(&record.item) {
+            visitor.visit_item(&record.item);
+        } else {
+            visitor.visit_trait_type_surface_dependencies(item_trait);
+        }
     } else {
         visitor.visit_item(&record.item);
     }
@@ -2770,6 +2935,78 @@ impl<'a> DependencyVisitor<'a> {
         self.add_generic_field_type_trait_dependencies_for_field(field);
         self.add_serde_default_field_dependencies_for_field(field);
         self.visit_field(field);
+    }
+
+    fn visit_trait_type_surface_dependencies(&mut self, item_trait: &syn::ItemTrait) {
+        for attr in &item_trait.attrs {
+            self.visit_attribute(attr);
+        }
+        self.visit_generics(&item_trait.generics);
+        for bound in &item_trait.supertraits {
+            self.visit_type_param_bound(bound);
+        }
+        for item in &item_trait.items {
+            if !trait_item_type_surface_dependency_should_remain(item) {
+                continue;
+            }
+            self.visit_trait_item_type_surface_dependencies(item);
+        }
+    }
+
+    fn visit_trait_item_type_surface_dependencies(&mut self, item: &syn::TraitItem) {
+        match item {
+            syn::TraitItem::Fn(method) => {
+                for attr in &method.attrs {
+                    self.visit_attribute(attr);
+                }
+                self.visit_signature(&method.sig);
+                if method
+                    .attrs
+                    .iter()
+                    .any(attr_requires_impl_surface_retention)
+                {
+                    if let Some(default) = &method.default {
+                        self.visit_block(default);
+                    }
+                }
+            }
+            syn::TraitItem::Const(item) => {
+                for attr in &item.attrs {
+                    self.visit_attribute(attr);
+                }
+                self.visit_type(&item.ty);
+                if item.attrs.iter().any(attr_requires_impl_surface_retention) {
+                    if let Some((_, default)) = &item.default {
+                        self.visit_expr(default);
+                    }
+                }
+            }
+            syn::TraitItem::Type(item) => {
+                for attr in &item.attrs {
+                    self.visit_attribute(attr);
+                }
+                self.visit_generics(&item.generics);
+                for bound in &item.bounds {
+                    self.visit_type_param_bound(bound);
+                }
+                if item.attrs.iter().any(attr_requires_impl_surface_retention) {
+                    if let Some((_, default)) = &item.default {
+                        self.visit_type(default);
+                    }
+                }
+            }
+            syn::TraitItem::Macro(item) => {
+                for attr in &item.attrs {
+                    self.visit_attribute(attr);
+                }
+                self.add_macro_path(&item.mac.path);
+                self.add_macro_token_dependencies(&item.mac.tokens);
+            }
+            syn::TraitItem::Verbatim(tokens) => {
+                self.add_macro_token_dependencies(tokens);
+            }
+            _ => self.visit_trait_item(item),
+        }
     }
 
     fn insert_generic_trait_bounds(&mut self, name: String, mut trait_items: Vec<ItemId>) {

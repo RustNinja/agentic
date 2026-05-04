@@ -43,6 +43,7 @@ impl RenderPlan {
             if root_item_should_render(reduced, item)
                 || !package_has_reachable_callables(reduced, &item.package)
                 || matches!(item.kind, ItemKind::Const | ItemKind::Static)
+                || reachable_trait_surface_should_render(project, reduced, item)
                 || callable_idents.all.contains(&item.name)
                 || retained_surface_idents
                     .get(&item.package)
@@ -106,6 +107,33 @@ impl RenderPlan {
             .get(package)
             .is_some_and(|idents| idents.contains(ident))
     }
+}
+
+fn reachable_trait_surface_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    item: &ItemId,
+) -> bool {
+    if item.kind != ItemKind::Trait {
+        return false;
+    }
+    let Some(record) = project.items.get(item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    item_trait.items.is_empty()
+        || item_trait.items.iter().any(|trait_item| {
+            trait_item_should_remain_for_type_surface(
+                project,
+                reduced,
+                &item.package,
+                &item.module_path,
+                &item.name,
+                trait_item,
+            )
+        })
 }
 
 #[derive(Default)]
@@ -2094,15 +2122,6 @@ fn collect_trait_surface_idents(
         collect_token_idents(&item_trait.to_token_stream(), idents);
         return;
     }
-    if trait_items_are_referenced_by_reachable_surfaces(
-        project,
-        reduced,
-        &item_id.package,
-        item_trait,
-    ) {
-        collect_token_idents(&item_trait.to_token_stream(), idents);
-        return;
-    }
     idents.insert(item_id.name.clone());
     idents.extend(item_id.module_path.iter().cloned());
     collect_token_idents(&item_trait.generics.to_token_stream(), idents);
@@ -2115,6 +2134,18 @@ fn collect_trait_surface_idents(
         .filter(|attr| is_inert_type_surface_attr(attr))
     {
         collect_token_idents(&attr.to_token_stream(), idents);
+    }
+    for item in &item_trait.items {
+        if trait_item_should_remain_for_type_surface(
+            project,
+            reduced,
+            &item_id.package,
+            &item_id.module_path,
+            &item_id.name,
+            item,
+        ) {
+            collect_token_idents(&item.to_token_stream(), idents);
+        }
     }
 }
 
@@ -2219,34 +2250,6 @@ fn reachable_reduced_callables_mention_ident(
             token_stream_mentions_ident(&record.item.to_token_stream(), ident)
         })
     })
-}
-
-fn retained_impl_surfaces_mention_ident(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &str,
-    ident: &str,
-) -> bool {
-    project_module_paths(project, package)
-        .into_iter()
-        .any(|module_path| {
-            retained_impl_attrs_mention_ident(project, reduced, package, &module_path, ident)
-                || retained_impl_non_fn_items_mention_ident(
-                    project,
-                    reduced,
-                    package,
-                    &module_path,
-                    ident,
-                )
-                || retained_impl_items_mention_ident(project, reduced, package, &module_path, ident)
-                || retained_root_macro_impl_items_mention_ident(
-                    project,
-                    reduced,
-                    package,
-                    &module_path,
-                    ident,
-                )
-        })
 }
 
 fn retained_surface_idents_by_package(
@@ -2362,6 +2365,23 @@ fn copy_source_tree_path_inner(
 
 fn package_should_copy_library_support_source(package: &Package) -> bool {
     package_target_uses_dev_dependencies(package) && package_library_source_path(package).is_some()
+}
+
+fn package_is_proc_macro(project: &Project, package_name: &str) -> bool {
+    let Some(package) = project.workspace.packages.get(package_name) else {
+        return false;
+    };
+    package
+        .manifest
+        .get("lib")
+        .and_then(|lib| lib.get("proc-macro"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || package
+            .entry_target
+            .kind
+            .iter()
+            .any(|kind| kind == "proc-macro")
 }
 
 fn package_library_source_path(package: &Package) -> Option<PathBuf> {
@@ -3271,24 +3291,16 @@ fn retained_patch_dependency_names(
                 if is_marker_dependency(alias, &dependency_package) {
                     continue;
                 }
-                if project.workspace.packages.contains_key(&dependency_package)
-                    && !reduced.packages.contains(&dependency_package)
-                    && !is_feature_required
-                {
-                    continue;
-                }
-                if project.workspace.packages.contains_key(&dependency_package)
-                    || dependency_should_render(
-                        project,
-                        reduced,
-                        package_name,
-                        alias,
-                        retention,
-                        DependencyUsageScope::Any,
-                        package_usage,
-                        retain_for_copied_support_source,
-                    )
-                    || is_feature_required
+                if dependency_should_render(
+                    project,
+                    reduced,
+                    package_name,
+                    alias,
+                    retention,
+                    DependencyUsageScope::Any,
+                    package_usage,
+                    retain_for_copied_support_source,
+                ) || is_feature_required
                 {
                     names.insert(dependency_patch_name(alias, value));
                 }
@@ -3395,22 +3407,28 @@ fn transformed_dependencies(
         }
 
         if project.workspace.packages.contains_key(&dependency_package) {
-            if reduced.packages.contains(&dependency_package) {
-                retained_aliases.insert(alias.clone());
-                dependencies.insert(
-                    alias.clone(),
-                    local_dependency_value(alias, &dependency_package, value),
-                );
-            } else if is_feature_required {
-                retained_aliases.insert(alias.clone());
-                dependencies.insert(
-                    alias.clone(),
+            if dependency_should_render(
+                project,
+                reduced,
+                package_name,
+                alias,
+                retention,
+                usage_scope,
+                package_usage,
+                retain_for_copied_support_source,
+            ) || is_feature_required
+            {
+                let value = if reduced.packages.contains(&dependency_package) {
+                    local_dependency_value(alias, &dependency_package, value)
+                } else {
                     support_packages.transformed_dependency_value(
                         value,
                         &package.root,
                         Path::new(package_name),
-                    ),
-                );
+                    )
+                };
+                retained_aliases.insert(alias.clone());
+                dependencies.insert(alias.clone(), value);
             }
             continue;
         }
@@ -3627,22 +3645,28 @@ fn transformed_dependency_table(
         }
 
         if project.workspace.packages.contains_key(&dependency_package) {
-            if reduced.packages.contains(&dependency_package) {
-                retained_aliases.insert(alias.clone());
-                dependencies.insert(
-                    alias.clone(),
-                    local_dependency_value(alias, &dependency_package, value),
-                );
-            } else if is_feature_required {
-                retained_aliases.insert(alias.clone());
-                dependencies.insert(
-                    alias.clone(),
+            if dependency_should_render(
+                project,
+                reduced,
+                package_name,
+                alias,
+                retention,
+                usage_scope,
+                package_usage,
+                retain_for_copied_support_source,
+            ) || is_feature_required
+            {
+                let value = if reduced.packages.contains(&dependency_package) {
+                    local_dependency_value(alias, &dependency_package, value)
+                } else {
                     support_packages.transformed_dependency_value(
                         value,
                         &package.root,
                         Path::new(package_name),
-                    ),
-                );
+                    )
+                };
+                retained_aliases.insert(alias.clone());
+                dependencies.insert(alias.clone(), value);
             }
             continue;
         }
@@ -4649,8 +4673,14 @@ fn transform_items(
                 render_plan.item_should_render(&id).then(|| {
                     let mut item_trait = item_trait.clone();
                     strip_opensourced_attrs(&mut item_trait.attrs);
+                    for trait_item in &mut item_trait.items {
+                        strip_opensourced_attrs_from_trait_item(trait_item);
+                    }
                     if !preserve_uniffi_surface {
                         strip_uniffi_attrs(&mut item_trait.attrs);
+                        for trait_item in &mut item_trait.items {
+                            strip_uniffi_attrs_from_trait_item(trait_item);
+                        }
                     }
                     if !root_item_should_render(reduced, &id) {
                         prune_trait_items_if_only_type_surface(
@@ -4687,15 +4717,6 @@ fn transform_items(
                     .get(&(package.to_string(), module_path.to_vec()))
                     .cloned()
                     .unwrap_or_default();
-                let Some(type_path) = resolved_local_type_path(
-                    project,
-                    package,
-                    module_path,
-                    &item_impl.self_ty,
-                    &aliases,
-                ) else {
-                    continue;
-                };
                 let trait_path = item_impl
                     .trait_
                     .as_ref()
@@ -4705,11 +4726,83 @@ fn transform_items(
                     .as_ref()
                     .map(|(_, path, _)| trait_input_type_paths(module_path, path, &aliases))
                     .unwrap_or_default();
+                let Some(type_path) = resolved_local_type_path(
+                    project,
+                    package,
+                    module_path,
+                    &item_impl.self_ty,
+                    &aliases,
+                ) else {
+                    let Some(trait_item) = trait_path
+                        .as_ref()
+                        .and_then(|trait_path| trait_item_for_path(project, package, trait_path))
+                    else {
+                        continue;
+                    };
+                    if !reduced.reachable_items.contains(&trait_item)
+                        || !trait_default_method_is_referenced_by_reachable_callables(
+                            project,
+                            reduced,
+                            &trait_item,
+                        )
+                        || !type_tokens_are_referenced_by_reachable_callables(
+                            project,
+                            reduced,
+                            &item_impl.self_ty,
+                        )
+                    {
+                        continue;
+                    }
+                    let mut kept_impl_items = Vec::new();
+                    for impl_item in &item_impl.items {
+                        if retain_test_items
+                            || impl_item_should_render_for_trait_surface(
+                                project,
+                                reduced,
+                                package,
+                                &[],
+                                trait_path.as_deref(),
+                                trait_input_type_paths.as_slice(),
+                                Some(&trait_item),
+                                item_impl,
+                                impl_item,
+                            )
+                        {
+                            let mut impl_item = impl_item.clone();
+                            strip_opensourced_attrs_from_impl_item(&mut impl_item);
+                            if !preserve_uniffi_surface {
+                                strip_uniffi_attrs_from_impl_item(&mut impl_item);
+                            }
+                            allow_dead_code_for_non_public_impl_item(&mut impl_item);
+                            kept_impl_items.push(impl_item);
+                        }
+                    }
+                    let mut item_impl = item_impl.clone();
+                    if !preserve_uniffi_surface {
+                        strip_uniffi_attrs(&mut item_impl.attrs);
+                    }
+                    item_impl.items = kept_impl_items;
+                    transformed.push(Item::Impl(item_impl));
+                    continue;
+                };
                 let mut kept_impl_items = Vec::new();
                 let mut kept_method = false;
                 let trait_impl_is_required = trait_path.as_ref().is_some_and(|trait_path| {
                     trait_impl_items_are_reachable(reduced, package, &type_path, trait_path)
                 });
+                let trait_item = trait_path
+                    .as_ref()
+                    .and_then(|trait_path| trait_item_for_path(project, package, trait_path));
+                let default_trait_impl_is_required =
+                    trait_item.as_ref().is_some_and(|trait_item| {
+                        reduced.reachable_items.contains(trait_item)
+                            && trait_default_method_is_referenced_by_reachable_callables(
+                                project, reduced, trait_item,
+                            )
+                            && trait_impl_self_type_is_referenced_by_reachable_surface(
+                                project, reduced, package, &type_path,
+                            )
+                    });
                 let marker_trait_impl_is_required = trait_path
                     .as_ref()
                     .and_then(|path| path.last())
@@ -4759,13 +4852,26 @@ fn transform_items(
 
                 if kept_method
                     || trait_impl_is_required
+                    || default_trait_impl_is_required
                     || marker_trait_impl_is_required
                     || root_macro_impl_surface_is_required
                 {
                     if trait_path.is_some() {
                         kept_impl_items.clear();
                         for impl_item in &item_impl.items {
-                            if retain_test_items || !impl_item_is_test(impl_item) {
+                            if retain_test_items
+                                || impl_item_should_render_for_trait_surface(
+                                    project,
+                                    reduced,
+                                    package,
+                                    &type_path,
+                                    trait_path.as_deref(),
+                                    trait_input_type_paths.as_slice(),
+                                    trait_item.as_ref(),
+                                    item_impl,
+                                    impl_item,
+                                )
+                            {
                                 let mut impl_item = impl_item.clone();
                                 strip_opensourced_attrs_from_impl_item(&mut impl_item);
                                 if !preserve_uniffi_surface {
@@ -4943,28 +5049,137 @@ fn prune_trait_items_if_only_type_surface(
     ) {
         return;
     }
-    if trait_items_are_referenced_by_reachable_surfaces(project, reduced, package, item_trait) {
-        return;
-    }
 
-    item_trait.items.clear();
-    item_trait.attrs.retain(is_inert_type_surface_attr);
+    let trait_name = item_trait.ident.to_string();
+    item_trait.items = item_trait
+        .items
+        .iter()
+        .filter(|item| {
+            trait_item_should_remain_for_type_surface(
+                project,
+                reduced,
+                package,
+                module_path,
+                &trait_name,
+                item,
+            )
+        })
+        .cloned()
+        .collect();
+    if item_trait.items.is_empty() {
+        item_trait.attrs.retain(is_inert_type_surface_attr);
+    }
 }
 
-fn trait_items_are_referenced_by_reachable_surfaces(
+fn trait_item_should_remain_for_type_surface(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
-    item_trait: &syn::ItemTrait,
+    module_path: &[String],
+    trait_name: &str,
+    item: &TraitItem,
 ) -> bool {
-    item_trait.items.iter().any(|item| {
-        let TraitItem::Fn(method) = item else {
-            return false;
-        };
-        let name = method.sig.ident.to_string();
-        reachable_reduced_callables_mention_ident(project, reduced, &name)
-            || retained_impl_surfaces_mention_ident(project, reduced, package, &name)
-    })
+    if trait_item_attrs_require_surface_retention(item) {
+        return true;
+    }
+    match item {
+        TraitItem::Fn(method) => {
+            let name = method.sig.ident.to_string();
+            reachable_reduced_callables_mention_ident(project, reduced, &name)
+                || retained_root_macro_impl_items_mention_ident(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    &name,
+                )
+                || (method.default.is_none()
+                    && rendered_impl_for_trait_surface_exists(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        trait_name,
+                    ))
+        }
+        TraitItem::Const(item) => {
+            let name = item.ident.to_string();
+            reachable_reduced_callables_mention_ident(project, reduced, &name)
+                || (item.default.is_none()
+                    && rendered_impl_for_trait_surface_exists(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        trait_name,
+                    ))
+        }
+        TraitItem::Type(item) => {
+            let name = item.ident.to_string();
+            reachable_reduced_callables_mention_ident(project, reduced, &name)
+                || (item.default.is_none()
+                    && rendered_impl_for_trait_surface_exists(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        trait_name,
+                    ))
+        }
+        _ => true,
+    }
+}
+
+fn trait_item_attrs_require_surface_retention(item: &TraitItem) -> bool {
+    let attrs = match item {
+        TraitItem::Const(item) => &item.attrs,
+        TraitItem::Fn(item) => &item.attrs,
+        TraitItem::Macro(item) => &item.attrs,
+        TraitItem::Type(item) => &item.attrs,
+        TraitItem::Verbatim(_) => return false,
+        _ => return false,
+    };
+    attrs.iter().any(|attr| !is_inert_type_surface_attr(attr))
+}
+
+fn rendered_impl_for_trait_surface_exists(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    trait_name: &str,
+) -> bool {
+    let mut expected_trait_path = module_path.to_vec();
+    expected_trait_path.push(trait_name.to_string());
+    project_module_paths(project, package)
+        .into_iter()
+        .any(|impl_module_path| {
+            let Some(items) = module_items_for_path(project, package, &impl_module_path) else {
+                return false;
+            };
+            let aliases = project
+                .module_aliases
+                .get(&(package.to_string(), impl_module_path.clone()))
+                .cloned()
+                .unwrap_or_default();
+            items.iter().any(|item| {
+                let Item::Impl(item_impl) = item else {
+                    return false;
+                };
+                let Some((_, trait_path, _)) = &item_impl.trait_ else {
+                    return false;
+                };
+                normalized_path(&impl_module_path, trait_path, &aliases) == expected_trait_path
+                    && impl_should_render(
+                        project,
+                        reduced,
+                        package,
+                        &impl_module_path,
+                        item_impl,
+                        &aliases,
+                    )
+            })
+        })
 }
 
 fn trait_has_reachable_impl_methods(
@@ -6056,39 +6271,6 @@ fn retained_impl_non_fn_items_mention_unqualified_ident(
     })
 }
 
-fn retained_impl_items_mention_ident(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &str,
-    module_path: &[String],
-    ident: &str,
-) -> bool {
-    let Some(items) = module_items_for_path(project, package, module_path) else {
-        return false;
-    };
-    let aliases = project
-        .module_aliases
-        .get(&(package.to_string(), module_path.to_vec()))
-        .cloned()
-        .unwrap_or_default();
-
-    items.iter().any(|item| {
-        let Item::Impl(item_impl) = item else {
-            return false;
-        };
-        if item_impl.trait_.is_none() {
-            return false;
-        }
-        if !impl_should_render(project, reduced, package, module_path, item_impl, &aliases) {
-            return false;
-        }
-        item_impl.items.iter().any(|impl_item| {
-            !impl_item_is_test(impl_item)
-                && token_stream_mentions_ident(&impl_item.to_token_stream(), ident)
-        })
-    })
-}
-
 fn retained_root_macro_impl_items_mention_ident(
     project: &Project,
     reduced: &ReducedProject,
@@ -6432,6 +6614,162 @@ fn impl_should_render(
             .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
 
     trait_impl_is_required || marker_trait_impl_is_required
+}
+
+#[allow(clippy::too_many_arguments)]
+fn impl_item_should_render_for_trait_surface(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    type_path: &[String],
+    trait_path: Option<&[String]>,
+    trait_input_type_paths: &[Vec<String>],
+    trait_item: Option<&ItemId>,
+    item_impl: &syn::ItemImpl,
+    impl_item: &ImplItem,
+) -> bool {
+    if impl_item_is_test(impl_item) {
+        return false;
+    }
+    if item_impl
+        .attrs
+        .iter()
+        .any(attr_requires_impl_surface_retention)
+    {
+        return true;
+    }
+    if impl_item_attrs_require_surface_retention(impl_item) {
+        return true;
+    }
+    if trait_item.is_some_and(|trait_item| {
+        trait_impl_item_is_required_by_trait(project, trait_item, impl_item)
+    }) {
+        return true;
+    }
+    let (Some(trait_path), ImplItem::Fn(method)) = (trait_path, impl_item) else {
+        return trait_item.is_none();
+    };
+    let id = CallableId::Method {
+        package: package.to_string(),
+        type_path: type_path.to_vec(),
+        trait_path: Some(trait_path.to_vec()),
+        trait_input_type_paths: trait_input_type_paths.to_vec(),
+        method: method.sig.ident.to_string(),
+    };
+    reduced.reachable.contains(&id)
+}
+
+fn trait_item_for_path(project: &Project, package: &str, trait_path: &[String]) -> Option<ItemId> {
+    let (name, module_path) = trait_path.split_last()?;
+    let item = ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name: name.clone(),
+        kind: ItemKind::Trait,
+    };
+    project.items.contains_key(&item).then_some(item)
+}
+
+fn trait_default_method_is_referenced_by_reachable_callables(
+    project: &Project,
+    reduced: &ReducedProject,
+    trait_item: &ItemId,
+) -> bool {
+    let Some(record) = project.items.get(trait_item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    item_trait.items.iter().any(|item| {
+        let TraitItem::Fn(method) = item else {
+            return false;
+        };
+        method.default.is_some()
+            && reachable_reduced_callables_mention_ident(
+                project,
+                reduced,
+                &method.sig.ident.to_string(),
+            )
+    })
+}
+
+fn trait_impl_self_type_is_referenced_by_reachable_surface(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    type_path: &[String],
+) -> bool {
+    path_item_is_reachable(
+        reduced,
+        package,
+        type_path,
+        &[
+            ItemKind::Struct,
+            ItemKind::Enum,
+            ItemKind::Union,
+            ItemKind::Type,
+        ],
+    ) || type_path
+        .last()
+        .is_some_and(|name| reachable_reduced_callables_mention_ident(project, reduced, name))
+}
+
+fn type_tokens_are_referenced_by_reachable_callables(
+    project: &Project,
+    reduced: &ReducedProject,
+    ty: &Type,
+) -> bool {
+    let mut idents = BTreeSet::new();
+    collect_token_idents(&ty.to_token_stream(), &mut idents);
+    idents
+        .iter()
+        .any(|ident| reachable_reduced_callables_mention_ident(project, reduced, ident))
+}
+
+fn trait_impl_item_is_required_by_trait(
+    project: &Project,
+    trait_item: &ItemId,
+    impl_item: &ImplItem,
+) -> bool {
+    let Some(record) = project.items.get(trait_item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    match impl_item {
+        ImplItem::Fn(method) => item_trait.items.iter().any(|trait_item| {
+            let TraitItem::Fn(function) = trait_item else {
+                return false;
+            };
+            function.sig.ident == method.sig.ident && function.default.is_none()
+        }),
+        ImplItem::Const(item) => item_trait.items.iter().any(|trait_item| {
+            let TraitItem::Const(constant) = trait_item else {
+                return false;
+            };
+            constant.ident == item.ident && constant.default.is_none()
+        }),
+        ImplItem::Type(item) => item_trait.items.iter().any(|trait_item| {
+            let TraitItem::Type(associated_type) = trait_item else {
+                return false;
+            };
+            associated_type.ident == item.ident && associated_type.default.is_none()
+        }),
+        _ => false,
+    }
+}
+
+fn impl_item_attrs_require_surface_retention(impl_item: &ImplItem) -> bool {
+    match impl_item {
+        ImplItem::Const(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Fn(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Macro(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Type(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Verbatim(_) => false,
+        _ => false,
+    }
 }
 
 fn root_item_impl_surface_should_render(
@@ -7131,7 +7469,9 @@ fn reachable_item_mentions_ident(
         if trait_has_reachable_impl_methods(reduced, package, &item_id.module_path, &item_id.name) {
             return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
         }
-        return trait_type_surface_mentions_ident(item_id, item_trait, ident);
+        return trait_type_surface_mentions_ident(
+            project, reduced, package, item_id, item_trait, ident,
+        );
     }
 
     let Item::Struct(item_struct) = &record.item else {
@@ -7182,14 +7522,12 @@ fn reachable_item_mentions_unqualified_ident(
         if root_item_should_render(reduced, item_id) {
             return token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident);
         }
-        if trait_has_reachable_impl_methods(reduced, package, &item_id.module_path, &item_id.name)
-            || trait_items_are_referenced_by_reachable_surfaces(
-                project, reduced, package, item_trait,
-            )
-        {
+        if trait_has_reachable_impl_methods(reduced, package, &item_id.module_path, &item_id.name) {
             return token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident);
         }
-        return trait_type_surface_mentions_unqualified_ident(item_id, item_trait, ident);
+        return trait_type_surface_mentions_unqualified_ident(
+            project, reduced, package, item_id, item_trait, ident,
+        );
     }
 
     let Item::Struct(item_struct) = &record.item else {
@@ -7229,6 +7567,9 @@ fn reachable_item_mentions_unqualified_ident(
 }
 
 fn trait_type_surface_mentions_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
     item_id: &ItemId,
     item_trait: &syn::ItemTrait,
     ident: &str,
@@ -7251,9 +7592,22 @@ fn trait_type_surface_mentions_ident(
         .iter()
         .filter(|attr| is_inert_type_surface_attr(attr))
         .any(|attr| token_stream_mentions_ident(&attr.to_token_stream(), ident))
+        || item_trait.items.iter().any(|item| {
+            trait_item_should_remain_for_type_surface(
+                project,
+                reduced,
+                package,
+                &item_id.module_path,
+                &item_id.name,
+                item,
+            ) && token_stream_mentions_ident(&item.to_token_stream(), ident)
+        })
 }
 
 fn trait_type_surface_mentions_unqualified_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
     item_id: &ItemId,
     item_trait: &syn::ItemTrait,
     ident: &str,
@@ -7276,6 +7630,16 @@ fn trait_type_surface_mentions_unqualified_ident(
         .iter()
         .filter(|attr| is_inert_type_surface_attr(attr))
         .any(|attr| token_stream_mentions_unqualified_ident(&attr.to_token_stream(), ident))
+        || item_trait.items.iter().any(|item| {
+            trait_item_should_remain_for_type_surface(
+                project,
+                reduced,
+                package,
+                &item_id.module_path,
+                &item_id.name,
+                item,
+            ) && token_stream_mentions_unqualified_ident(&item.to_token_stream(), ident)
+        })
 }
 
 fn reachable_callables_mention_ident(
@@ -8289,6 +8653,11 @@ fn prune_use_tree(
                     package,
                     &dependency_code_name(&path.ident.to_string()),
                 )
+                && !pruned_local_proc_macro_dependency_alias_should_remain(
+                    project,
+                    package,
+                    &path.ident.to_string(),
+                )
             {
                 return None;
             }
@@ -8439,6 +8808,17 @@ fn use_target_resolves_to_removed_symbol(
     module_path: &[String],
     target: &[String],
 ) -> bool {
+    if pruned_local_proc_macro_dependency_target_should_remain(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        target,
+    ) {
+        return false;
+    }
+
     if target
         .first()
         .is_some_and(|first| use_name_is_external_dependency(project, package, first))
@@ -8580,6 +8960,17 @@ fn use_target_should_drop(
         return false;
     }
 
+    if pruned_local_proc_macro_dependency_target_should_remain(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        target,
+    ) {
+        return false;
+    }
+
     if target
         .first()
         .is_some_and(|first| use_name_is_pruned_local_dependency(project, reduced, package, first))
@@ -8622,6 +9013,13 @@ fn use_target_should_drop(
     else {
         return false;
     };
+    if target.last().is_some_and(|leaf| {
+        reduced.packages.contains(&target_package)
+            && package_is_proc_macro(project, &target_package)
+            && reachable_package_mentions_ident(project, reduced, package, leaf)
+    }) {
+        return false;
+    }
 
     let leaf_is_used_in_module = target.last().is_some_and(|leaf| {
         reachable_module_import_scope_mentions_ident(
@@ -8633,6 +9031,12 @@ fn use_target_should_drop(
             leaf,
         )
     });
+    if leaf_is_used_in_module
+        && reduced.packages.contains(&target_package)
+        && package_is_proc_macro(project, &target_package)
+    {
+        return false;
+    }
 
     if let Some(callable) = find_use_function(project, &target_package, &target_path) {
         if !is_public_use && !leaf_is_used_in_module {
@@ -9475,6 +9879,168 @@ fn use_name_is_dependency(project: &Project, package: &str, name: &str) -> bool 
         .dependencies
         .iter()
         .any(|dependency| dependency_name_matches(dependency, name))
+}
+
+fn pruned_local_proc_macro_dependency_alias_should_remain(
+    project: &Project,
+    package: &str,
+    alias: &str,
+) -> bool {
+    let Some(package_record) = project.workspace.packages.get(package) else {
+        return false;
+    };
+    package_record.dependencies.iter().any(|dependency| {
+        dependency_name_matches(dependency, alias)
+            && project.workspace.packages.contains_key(&dependency.package)
+            && package_is_proc_macro(project, &dependency.package)
+    })
+}
+
+fn pruned_local_proc_macro_dependency_target_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+) -> bool {
+    let Some(first) = target.first() else {
+        return false;
+    };
+    if !pruned_local_proc_macro_dependency_alias_should_remain(project, package, first) {
+        return false;
+    }
+    target.last().is_some_and(|leaf| {
+        reachable_package_mentions_ident(project, reduced, package, leaf)
+            || reachable_package_mentions_ident(project, reduced, package, first)
+            || rendered_attrs_mention_unqualified_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                leaf,
+            )
+    })
+}
+
+fn rendered_attrs_mention_unqualified_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
+        return false;
+    };
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+    items.iter().any(|item| match item {
+        Item::Fn(function) => {
+            let id = CallableId::Free {
+                package: package.to_string(),
+                module_path: module_path.to_vec(),
+                name: function.sig.ident.to_string(),
+            };
+            reduced.reachable.contains(&id)
+                && attrs_mention_unqualified_ident(&function.attrs, ident)
+        }
+        Item::Struct(_)
+        | Item::Enum(_)
+        | Item::Union(_)
+        | Item::Type(_)
+        | Item::Const(_)
+        | Item::Static(_)
+        | Item::Macro(_)
+        | Item::Trait(_) => item_id(package, module_path, item).is_some_and(|id| {
+            render_plan.item_should_render(&id) && item_attrs_mention_unqualified_ident(item, ident)
+        }),
+        Item::Impl(item_impl) => {
+            impl_should_render(project, reduced, package, module_path, item_impl, &aliases)
+                && (attrs_mention_unqualified_ident(&item_impl.attrs, ident)
+                    || item_impl
+                        .items
+                        .iter()
+                        .any(|item| impl_item_attrs_mention_unqualified_ident(item, ident)))
+        }
+        _ => false,
+    })
+}
+
+fn item_attrs_mention_unqualified_ident(item: &Item, ident: &str) -> bool {
+    match item {
+        Item::Const(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        Item::Enum(item) => {
+            attrs_mention_unqualified_ident(&item.attrs, ident)
+                || item.variants.iter().any(|variant| {
+                    attrs_mention_unqualified_ident(&variant.attrs, ident)
+                        || variant
+                            .fields
+                            .iter()
+                            .any(|field| attrs_mention_unqualified_ident(&field.attrs, ident))
+                })
+        }
+        Item::Macro(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        Item::Mod(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        Item::Static(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        Item::Struct(item) => {
+            attrs_mention_unqualified_ident(&item.attrs, ident)
+                || item
+                    .fields
+                    .iter()
+                    .any(|field| attrs_mention_unqualified_ident(&field.attrs, ident))
+        }
+        Item::Trait(item) => {
+            attrs_mention_unqualified_ident(&item.attrs, ident)
+                || item
+                    .items
+                    .iter()
+                    .any(|item| trait_item_attrs_mention_unqualified_ident(item, ident))
+        }
+        Item::Type(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        Item::Union(item) => {
+            attrs_mention_unqualified_ident(&item.attrs, ident)
+                || item
+                    .fields
+                    .named
+                    .iter()
+                    .any(|field| attrs_mention_unqualified_ident(&field.attrs, ident))
+        }
+        _ => false,
+    }
+}
+
+fn trait_item_attrs_mention_unqualified_ident(item: &TraitItem, ident: &str) -> bool {
+    match item {
+        TraitItem::Const(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        TraitItem::Fn(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        TraitItem::Macro(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        TraitItem::Type(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        TraitItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn impl_item_attrs_mention_unqualified_ident(item: &ImplItem, ident: &str) -> bool {
+    match item {
+        ImplItem::Const(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        ImplItem::Fn(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        ImplItem::Macro(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        ImplItem::Type(item) => attrs_mention_unqualified_ident(&item.attrs, ident),
+        ImplItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn attrs_mention_unqualified_ident(attrs: &[syn::Attribute], ident: &str) -> bool {
+    attrs
+        .iter()
+        .any(|attr| token_stream_mentions_unqualified_ident(&attr.to_token_stream(), ident))
 }
 
 fn resolve_use_target_path(

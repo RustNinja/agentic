@@ -84,6 +84,7 @@ file.
 | `ffi.callback_direct_input.001` | covered | Retained `extern "C" fn(...)` callback inputs are reported as direct API boundary warnings while preserving their signature imports |
 | `trait.rendered_impl_surface_dependencies.001` | covered | Trait impls rendered because both self type and public trait surface are reachable retain impl header, associated item, and method-body dependencies |
 | `trait.pruned_type_surface_method_hazard.001` | covered | Trait methods pruned from a type-only trait surface do not contribute false function-pointer production hazards |
+| `trait.required_surface_member_pruning.001` | covered | Type-surface trait retention keeps required/mentioned trait members needed by rendered impls while pruning optional default-method dependencies and dead impl overrides |
 | `serde.flatten_contract_field.001` | covered | Serde contract fields such as `#[serde(flatten)]` stay even when private and not read by live bodies, while unannotated dead private fields are pruned |
 | `serde.flatten_nested_payload.001` | covered | Nested serde-flatten payload structs stay when the retained DTO contract depends on them, while dead nested DTOs prune away |
 | `serde.deserialize_with_private_wire.001` | covered | Private wire DTOs using `#[serde(deserialize_with = "helper")]` retain helper functions, deserializer trait imports, and the private DTO surface used by `serde_json::from_str::<T>` |
@@ -118,7 +119,10 @@ file.
 | `build.option_env.001` | covered | Retained `option_env!` reads of non-Cargo metadata are production-blocking and dead sibling env readers are pruned |
 | `manifest.support_library_module_closure.001` | covered | No-build support path packages copy only the library external-module graph plus live static assets, skipping `#[cfg(test)]` external modules and orphan Rust files |
 | `manifest.support_build_script_hazard_parity.001` | covered | Copied support path packages report build-script, `OUT_DIR` source include, compile-time env, nonliteral include, absolute include, and package-external include hazards with generated support file details |
+| `manifest.local_build_dependency.no_build_script.001` | covered | Local build-dependencies are rendered only when a retained package has a retained build script, so no-build packages do not keep build-only workspace crates |
+| `manifest.local_dependency_edge.pruned_retained_package.001` | covered | A globally retained local package does not force every source package to keep an unused dependency edge or feature entry pointing at it |
 | `macro.path_qualified_derive.001` | covered | Path-qualified derive macros such as `macro_helpers::FixtureRecord` keep the proc-macro package but do not retain unused simple `use` imports |
+| `macro.proc_attr_import_retention.001` | covered | Unqualified retained custom attributes keep the proc-macro import that brings the attribute into scope while still pruning unused derive-only imports |
 | `macro.root_item_impl_surface.001` | covered | Selected item roots with macro-bearing inherent impls keep exported constructors/methods plus their signature/body dependencies |
 | `macro.inline_root_item_impl_surface.001` | covered | Selected item roots inside inline modules keep macro-bearing impl surfaces, helper constructor/method dependencies, and the imports referenced by retained impl bodies |
 | `dyn.callback.registry_object.001` | covered | Selected object roots with stored `Arc<dyn Trait + Send + Sync>` callback fields keep the callback trait method surface and report hard dynamic-dispatch hazards |

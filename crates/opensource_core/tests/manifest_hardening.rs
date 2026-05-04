@@ -1986,6 +1986,93 @@ fn retains_local_build_dependencies_for_retained_build_scripts() {
 }
 
 #[test]
+fn prunes_local_build_dependencies_without_retained_build_scripts() {
+    let workspace = temp_path("unused-build-dependency-workspace");
+    let output = temp_path("unused-build-dependency-output");
+    let target_dir = temp_path("unused-build-dependency-target");
+    write_unused_build_dependency_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app"]);
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    assert!(
+        !app_manifest.contains("build-dependencies"),
+        "app manifest should prune local build-dependencies when no build script is retained\n{app_manifest}"
+    );
+    assert!(
+        !output.join("build_helper").exists(),
+        "unused local build helper package should not be copied"
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated unused-build-dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+    );
+}
+
+#[test]
+fn prunes_unused_local_dependency_edges_to_retained_packages() {
+    let workspace = temp_path("unused-local-edge-workspace");
+    let output = temp_path("unused-local-edge-output");
+    let target_dir = temp_path("unused-local-edge-target");
+    write_unused_local_dependency_edge_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "hub", "shared"]);
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    let hub_manifest = read(output.join("hub/Cargo.toml"));
+    assert!(
+        app_manifest.contains("hub"),
+        "app manifest should retain the dependency used by selected code\n{app_manifest}"
+    );
+    assert!(
+        !app_manifest.contains("shared"),
+        "app manifest should prune unused direct local dependency even when the package is retained elsewhere\n{app_manifest}"
+    );
+    assert!(
+        hub_manifest.contains("shared"),
+        "hub manifest should keep its live local dependency\n{hub_manifest}"
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated unused-local-edge slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+    );
+}
+
+#[test]
 fn retains_target_build_dependencies_for_retained_build_scripts() {
     let workspace = temp_path("target-build-dependency-workspace");
     let output = temp_path("target-build-dependency-output");
@@ -6113,6 +6200,127 @@ pub fn selected() -> &'static str {
     );
 }
 
+fn write_unused_build_dependency_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "build_helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+
+[build-dependencies]
+build_helper = { path = "../build_helper" }
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    "selected"
+}
+"#,
+    );
+    write_package(
+        root,
+        "build_helper",
+        r#"pub fn emit() {
+    println!("cargo:rerun-if-changed=build.rs");
+}
+"#,
+    );
+}
+
+fn write_unused_local_dependency_edge_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "hub", "shared"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hub = { path = "../hub" }
+opensourced.workspace = true
+shared = { path = "../shared" }
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    hub::selected()
+}
+"#,
+    );
+    write(
+        root.join("hub/Cargo.toml"),
+        r#"[package]
+name = "hub"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+shared = { path = "../shared" }
+"#,
+    );
+    write(
+        root.join("hub/src/lib.rs"),
+        r#"pub fn selected() -> &'static str {
+    shared::message()
+}
+"#,
+    );
+    write_package(
+        root,
+        "shared",
+        r#"pub fn message() -> &'static str {
+    "shared"
+}
+"#,
+    );
+}
+
 fn write_target_build_dependency_fixture(root: &Path) {
     if root.exists() {
         fs::remove_dir_all(root).unwrap();
@@ -8999,6 +9207,7 @@ resolver = "2"
 name = "app"
 version = "0.1.0"
 edition = "2021"
+build = "build.rs"
 
 [dependencies]
 opensourced = {{ path = "{}" }}
@@ -9009,6 +9218,7 @@ bridge = {{ path = "../bridge" }}
             manifest_path(&opensourced_path)
         ),
     );
+    write(root.join("app/build.rs"), "fn main() {}\n");
     write(
         root.join("app/src/lib.rs"),
         r#"use opensourced::opensourced;
