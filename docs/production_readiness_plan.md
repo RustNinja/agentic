@@ -59,6 +59,9 @@ assets, output safety, or product diagnostics by itself.
 - Retained `include!` Rust source files must fail closed even when their paths
   are static and copied, because the included Rust is outside the current
   reachability graph.
+- Retained `env!` or `option_env!` macros must fail closed unless they read
+  Cargo manifest-derived package metadata, because they can embed machine-local
+  compile-time state.
 - File include assets must be copied only for statically resolved package-local
   paths; unknown env paths, absolute paths, external paths, and `OUT_DIR`
   generated assets are production-blocking.

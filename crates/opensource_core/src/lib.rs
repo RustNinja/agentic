@@ -1096,6 +1096,16 @@ fn add_syntactic_production_hazards(
             ),
         ));
     }
+    if counts.compile_env_macros > 0 {
+        hazards.push(production_hazard(
+            "compile_env_macros",
+            "error",
+            format!(
+                "{} retained env!/option_env! macro(s) read compile-time environment outside the manifest model",
+                counts.compile_env_macros
+            ),
+        ));
+    }
     if counts.custom_attribute_macros > 0 {
         hazards.push(production_hazard(
             "custom_attribute_macros",
@@ -1196,6 +1206,7 @@ struct SyntacticHazardCounts {
     custom_attribute_macros: usize,
     custom_derive_macros: usize,
     custom_macro_invocations: usize,
+    compile_env_macros: usize,
     function_pointer_surfaces: usize,
     trait_object_surfaces: usize,
     conditional_compilation_attrs: usize,
@@ -1212,6 +1223,7 @@ impl SyntacticHazardCounts {
         self.custom_attribute_macros += other.custom_attribute_macros;
         self.custom_derive_macros += other.custom_derive_macros;
         self.custom_macro_invocations += other.custom_macro_invocations;
+        self.compile_env_macros += other.compile_env_macros;
         self.function_pointer_surfaces += other.function_pointer_surfaces;
         self.trait_object_surfaces += other.trait_object_surfaces;
         self.conditional_compilation_attrs += other.conditional_compilation_attrs;
@@ -1384,6 +1396,8 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
             || macro_path_ends_with(mac, "include_bytes")
         {
             self.visit_file_include_macro(mac);
+        } else if macro_path_ends_with(mac, "env") || macro_path_ends_with(mac, "option_env") {
+            self.visit_compile_env_macro(mac);
         }
         if macro_invocation_requires_expansion_boundary(mac) {
             self.counts.custom_macro_invocations += 1;
@@ -1404,6 +1418,16 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
 }
 
 impl SyntacticHazardVisitor {
+    fn visit_compile_env_macro(&mut self, mac: &Macro) {
+        if macro_first_string_literal(&mac.tokens)
+            .as_deref()
+            .is_some_and(cargo_manifest_modeled_env_var)
+        {
+            return;
+        }
+        self.counts.compile_env_macros += 1;
+    }
+
     fn visit_file_include_macro(&mut self, mac: &Macro) {
         if macro_tokens_reference_out_dir(&mac.tokens) {
             self.counts.out_dir_file_include_macros += 1;
@@ -1441,6 +1465,22 @@ impl SyntacticHazardVisitor {
 
 fn macro_tokens_reference_out_dir(tokens: &TokenStream) -> bool {
     token_stream_mentions_string_literal(tokens, "OUT_DIR")
+}
+
+fn macro_first_string_literal(tokens: &TokenStream) -> Option<String> {
+    tokens.clone().into_iter().find_map(|token| match token {
+        proc_macro2::TokenTree::Literal(literal) => {
+            syn::parse2::<syn::LitStr>(literal.to_token_stream())
+                .ok()
+                .map(|literal| literal.value())
+        }
+        proc_macro2::TokenTree::Group(group) => macro_first_string_literal(&group.stream()),
+        proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => None,
+    })
+}
+
+fn cargo_manifest_modeled_env_var(name: &str) -> bool {
+    name.starts_with("CARGO_PKG_") || matches!(name, "CARGO_CRATE_NAME" | "CARGO_BIN_NAME")
 }
 
 fn token_stream_mentions_string_literal(tokens: &TokenStream, value: &str) -> bool {
@@ -2234,6 +2274,46 @@ pub fn entry() -> &'static str {
             .iter()
             .any(|hazard| hazard.code == "external_file_include_macros"
                 && hazard.severity == "error"));
+        assert_eq!(report.production.status, "hazards_detected");
+    }
+
+    #[test]
+    fn reports_compile_env_macro_production_hazards() {
+        let root = temp_output("compile-env-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> (&'static str, Option<&'static str>) {
+    (env!("CARGO_PKG_VERSION"), option_env!("APP_MODE"))
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("compile-env-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "compile_env_macros" && hazard.severity == "error"));
         assert_eq!(report.production.status, "hazards_detected");
     }
 
