@@ -241,6 +241,14 @@ pub fn reduce_with_extra_roots_and_semantics(
         &mut reachable_items,
         &mut evidence,
     );
+    let proc_macro_dependency_packages =
+        add_local_proc_macro_dependency_packages(project, &mut packages);
+    retain_entire_packages(
+        project,
+        &proc_macro_dependency_packages,
+        &mut reachable,
+        &mut reachable_items,
+    );
     let build_dependency_packages = add_local_build_dependency_packages(project, &mut packages);
     retain_entire_packages(
         project,
@@ -1195,6 +1203,31 @@ fn add_local_library_support_dependency_packages(
     retained_library_dependencies
 }
 
+fn add_local_proc_macro_dependency_packages(
+    project: &Project,
+    packages: &mut BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut retained_proc_macro_dependencies = BTreeSet::new();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for package_name in packages.clone() {
+            let Some(package) = project.workspace.packages.get(&package_name) else {
+                continue;
+            };
+            if !package_is_proc_macro(package) {
+                continue;
+            }
+
+            for package in package_closure(project, &package_name) {
+                retained_proc_macro_dependencies.insert(package.clone());
+                changed |= packages.insert(package);
+            }
+        }
+    }
+    retained_proc_macro_dependencies
+}
+
 fn retain_entire_packages(
     project: &Project,
     packages: &BTreeSet<String>,
@@ -1289,6 +1322,21 @@ fn package_should_copy_library_support_source(package: &crate::manifest::Package
         .iter()
         .any(|kind| matches!(kind.as_str(), "example" | "test" | "bench"))
         && package_library_source_path(package).is_some()
+}
+
+fn package_is_proc_macro(package: &crate::manifest::Package) -> bool {
+    package
+        .manifest
+        .get("lib")
+        .and_then(Value::as_table)
+        .and_then(|lib| lib.get("proc-macro"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+        || package
+            .entry_target
+            .kind
+            .iter()
+            .any(|kind| kind == "proc-macro")
 }
 
 fn package_library_source_path(package: &crate::manifest::Package) -> Option<PathBuf> {
@@ -3177,6 +3225,16 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         if macro_path_ends_with(attribute.path(), "handle_error") {
             if let Ok(path) = syn::parse_str::<Path>("error_support::convert_log_report_error") {
                 self.add_call_path(&path);
+            }
+        }
+        if attribute_can_expand_to_code(attribute) {
+            for segments in token_path_candidates(&attribute.meta.to_token_stream()) {
+                let Ok(path) = syn::parse_str::<Path>(&segments.join("::")) else {
+                    continue;
+                };
+                self.add_call_path(&path);
+                self.add_item_path(&path);
+                self.add_macro_path(&path);
             }
         }
         for segments in string_literal_path_candidates(&attribute.meta.to_token_stream()) {
@@ -5118,6 +5176,18 @@ fn attrs_include_serde_default(attrs: &[syn::Attribute]) -> bool {
         collect_token_idents(&attr.to_token_stream(), &mut idents);
         idents.contains("default")
     })
+}
+
+fn attribute_can_expand_to_code(attr: &syn::Attribute) -> bool {
+    let path = attr.path();
+    !(path.is_ident("allow")
+        || path.is_ident("cfg")
+        || path.is_ident("deny")
+        || path.is_ident("deprecated")
+        || path.is_ident("doc")
+        || path.is_ident("expect")
+        || path.is_ident("must_use")
+        || path.is_ident("repr"))
 }
 
 fn trait_path_is_conversion_like(trait_path: &[String]) -> bool {

@@ -102,11 +102,15 @@ checks from blocking the feedback loop.
   query a semantic oracle, or fail with an unsupported-construct report.
 - Retained custom derives, custom attributes, and non-builtin macro invocations
   must be preserved verbatim and require compiler feedback until
-  macro-expanded items are mapped into the retained reachability graph. The
-  production analyzer can now request rust-analyzer proc-macro expansion, but
-  macro-generated source is still not rendered as first-class slice source.
-  These feedback-required macro hazards include structured package/module/file
-  and line details for direct retained macro surfaces.
+  macro-expanded items are mapped into the retained reachability graph. Local
+  proc-macro crates referenced by retained source are kept whole because their
+  compile-time implementation is part of the derive/attribute contract, and
+  helper paths inside retained helper attributes are promoted into the
+  reachability graph. The production analyzer can request rust-analyzer
+  proc-macro expansion, but macro-generated source is still not rendered as
+  first-class slice source. These feedback-required macro hazards include
+  structured package/module/file and line details for direct retained macro
+  surfaces.
 - Build scripts can execute arbitrary project logic and generate source under
   `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle

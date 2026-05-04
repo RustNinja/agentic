@@ -3098,6 +3098,49 @@ fn prunes_unused_serde_derive_imports_after_dead_items_are_removed() {
 }
 
 #[test]
+fn retains_local_proc_macro_derive_and_helper_attr_dependencies() {
+    let workspace = temp_path("proc-macro-helper-workspace");
+    let output = temp_path("proc-macro-helper-output");
+    let target_dir = temp_path("proc-macro-helper-target");
+    write_local_proc_macro_helper_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app = read(output.join("app/src/lib.rs"));
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    let macro_source = read(output.join("derive-support/src/lib.rs"));
+    assert!(app.contains("derive_support::UseHelper"));
+    assert!(app.contains("default_token"));
+    assert!(!app.contains("unused_helper"));
+    assert!(!app.contains("DeadWire"));
+    assert!(app_manifest.contains("[dependencies.derive-support]"));
+    assert!(macro_source.contains("proc_macro_derive(UseHelper"));
+    assert!(!app.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated proc-macro helper slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\nderive-support/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+        app,
+        macro_source,
+    );
+}
+
+#[test]
 fn retains_serde_trait_import_for_associated_deserialize_call() {
     let workspace = temp_path("serde-trait-associated-workspace");
     let output = temp_path("serde-trait-associated-output");
@@ -5963,6 +6006,102 @@ pub struct KeptWire {
 #[opensourced]
 pub fn selected(value: i32) -> KeptWire {
     KeptWire { value }
+}
+"#,
+    );
+}
+
+fn write_local_proc_macro_helper_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "derive-support"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+derive-support = {{ path = "../derive-support" }}
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use derive_support::UseHelper;
+use opensourced::opensourced;
+
+#[derive(UseHelper)]
+pub struct RetainedWire {
+    #[helper(default = default_token)]
+    value: u32,
+}
+
+#[derive(UseHelper)]
+pub struct DeadWire {
+    #[helper(default = unused_helper)]
+    value: u32,
+}
+
+#[opensourced]
+pub fn selected(value: u32) -> u32 {
+    RetainedWire { value }.generated()
+}
+
+fn default_token() -> u32 {
+    7
+}
+
+fn unused_helper() -> u32 {
+    99
+}
+"#,
+    );
+    write(
+        root.join("derive-support/Cargo.toml"),
+        r#"[package]
+name = "derive-support"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+    );
+    write(
+        root.join("derive-support/src/lib.rs"),
+        r#"extern crate proc_macro;
+
+use proc_macro::TokenStream;
+
+#[proc_macro_derive(UseHelper, attributes(helper))]
+pub fn use_helper(input: TokenStream) -> TokenStream {
+    let input = input.to_string();
+    let name = input
+        .split_whitespace()
+        .skip_while(|token| *token != "struct")
+        .nth(1)
+        .expect("derive input should contain a struct name")
+        .trim_matches('{')
+        .trim_matches(';')
+        .split('<')
+        .next()
+        .expect("struct name should not be empty");
+    format!("impl {name} {{ pub fn generated(&self) -> u32 {{ default_token() }} }}")
+        .parse()
+        .expect("generated derive output should parse")
 }
 "#,
     );

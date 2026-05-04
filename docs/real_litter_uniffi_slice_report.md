@@ -478,8 +478,10 @@ Known remaining risks:
   feature-resolution semantics are still conservative.
 - Proc macro expansion can be requested by the production analyzer, but
   macro-expanded items are not yet mapped into first-class retained source.
-  Full Cargo dependency artifact discovery for proc macros is opt-in because it
-  timed out on this pinned Litter corpus.
+  Retained helper-attribute paths are promoted into the graph and
+  source-mentioned local proc-macro crates are kept whole; full Cargo dependency
+  artifact discovery for proc macros is still opt-in because it timed out on
+  this pinned Litter corpus.
 - Glob imports/reexports are still conservative.
 - Full rustc-equivalent `cfg` matrix inventory is not implemented.
 
