@@ -574,7 +574,7 @@ impl SupportPackagePlan {
         let mut copied = 0;
         for package in self.packages.values() {
             let package_output = output_root.join(&package.output_rel_dir);
-            copied += copy_support_package_tree(&package.root, &package_output)?;
+            copied += copy_support_package_tree(package, &package_output)?;
             copied += copy_support_include_assets(package, &package_output, &output_root)?;
             let manifest = self.transformed_support_manifest(package)?;
             fs::write(
@@ -604,23 +604,58 @@ impl SupportPackagePlan {
         }
         materialize_workspace_lints(&mut manifest, package.workspace.as_ref())?;
 
-        for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
-            if let Some(table) = manifest.get_mut(table_name).and_then(Value::as_table_mut) {
+        for target_table in ["bin", "example", "test", "bench"] {
+            manifest.remove(target_table);
+        }
+
+        let has_build_script = support_build_script_path(package).is_some();
+
+        if let Some(table) = manifest
+            .get_mut("dependencies")
+            .and_then(Value::as_table_mut)
+        {
+            self.transform_support_dependency_table(package, table)?;
+        }
+        if has_build_script {
+            if let Some(table) = manifest
+                .get_mut("build-dependencies")
+                .and_then(Value::as_table_mut)
+            {
                 self.transform_support_dependency_table(package, table)?;
             }
+        } else {
+            manifest.remove("build-dependencies");
         }
+        manifest.remove("dev-dependencies");
 
         if let Some(targets) = manifest.get_mut("target").and_then(Value::as_table_mut) {
             for (_target_name, target) in targets.iter_mut() {
                 let Some(target) = target.as_table_mut() else {
                     continue;
                 };
-                for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
-                    if let Some(table) = target.get_mut(table_name).and_then(Value::as_table_mut) {
+                if let Some(table) = target.get_mut("dependencies").and_then(Value::as_table_mut) {
+                    self.transform_support_dependency_table(package, table)?;
+                }
+                if has_build_script {
+                    if let Some(table) = target
+                        .get_mut("build-dependencies")
+                        .and_then(Value::as_table_mut)
+                    {
                         self.transform_support_dependency_table(package, table)?;
                     }
+                } else {
+                    target.remove("build-dependencies");
                 }
+                target.remove("dev-dependencies");
             }
+            targets.retain(|_, target| target.as_table().is_some_and(|table| !table.is_empty()));
+        }
+        if manifest
+            .get("target")
+            .and_then(Value::as_table)
+            .is_some_and(Table::is_empty)
+        {
+            manifest.remove("target");
         }
 
         manifest.remove("workspace");
@@ -973,8 +1008,13 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         manifest: &Value,
         workspace: Option<&SupportWorkspace>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
-            if let Some(table) = manifest.get(table_name).and_then(Value::as_table) {
+        let has_build_script = manifest_build_script_path(package_root, manifest).is_some();
+
+        if let Some(table) = manifest.get("dependencies").and_then(Value::as_table) {
+            self.collect_support_dependency_table_paths(package_root, table, workspace)?;
+        }
+        if has_build_script {
+            if let Some(table) = manifest.get("build-dependencies").and_then(Value::as_table) {
                 self.collect_support_dependency_table_paths(package_root, table, workspace)?;
             }
         }
@@ -984,8 +1024,12 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                 let Some(target) = target.as_table() else {
                     continue;
                 };
-                for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
-                    if let Some(table) = target.get(table_name).and_then(Value::as_table) {
+                if let Some(table) = target.get("dependencies").and_then(Value::as_table) {
+                    self.collect_support_dependency_table_paths(package_root, table, workspace)?;
+                }
+                if has_build_script {
+                    if let Some(table) = target.get("build-dependencies").and_then(Value::as_table)
+                    {
                         self.collect_support_dependency_table_paths(
                             package_root,
                             table,
@@ -1381,12 +1425,81 @@ fn sanitize_support_package_dir(package_name: &str) -> String {
 }
 
 fn copy_support_package_tree(
+    package: &SupportPackage,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    if support_build_script_path(package).is_some() {
+        return copy_support_package_tree_broad(&package.root, package_output);
+    }
+
+    copy_support_package_library_source_tree(package, package_output)
+}
+
+fn copy_support_package_tree_broad(
     package_root: &Path,
     package_output: &Path,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let package_root = package_root.canonicalize()?;
     let mut visited = BTreeSet::new();
     copy_support_package_tree_inner(&package_root, &package_root, package_output, &mut visited)
+}
+
+fn copy_support_package_library_source_tree(
+    package: &SupportPackage,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let package_root = package.root.canonicalize()?;
+    let mut copied = copy_support_package_file(
+        &package_root,
+        &package_root.join("Cargo.toml"),
+        package_output,
+    )?;
+    let Some(lib_path) = support_library_source_path(package) else {
+        return Ok(copied);
+    };
+    let src_dir = package_root.join("src");
+    if lib_path.starts_with(&src_dir) {
+        copied += copy_support_package_tree_inner(
+            &package_root,
+            &src_dir,
+            package_output,
+            &mut BTreeSet::new(),
+        )?;
+        return Ok(copied);
+    }
+    let source_root = lib_path.parent().unwrap_or(&lib_path);
+    copied += copy_support_package_tree_inner(
+        &package_root,
+        source_root,
+        package_output,
+        &mut BTreeSet::new(),
+    )?;
+    Ok(copied)
+}
+
+fn copy_support_package_file(
+    package_root: &Path,
+    path: &Path,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let metadata = match fs::metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    if !metadata.is_file() {
+        return Ok(0);
+    }
+    let relative = path.strip_prefix(package_root)?;
+    let output_path = package_output.join(relative);
+    if output_path.exists() {
+        return Ok(0);
+    }
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(path, output_path)?;
+    Ok(1)
 }
 
 fn copy_support_package_tree_inner(
@@ -2042,16 +2155,38 @@ fn package_library_source_path(package: &Package) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+fn support_library_source_path(package: &SupportPackage) -> Option<PathBuf> {
+    if let Some(path) = package
+        .manifest
+        .get("lib")
+        .and_then(|lib| lib.get("path"))
+        .and_then(Value::as_str)
+    {
+        let path = package.root.join(path);
+        return path.exists().then_some(path);
+    }
+    let path = package.root.join("src/lib.rs");
+    path.exists().then_some(path)
+}
+
 fn build_script_path(package: &Package) -> Option<PathBuf> {
-    let package_table = package.manifest.get("package").and_then(Value::as_table);
+    manifest_build_script_path(&package.root, &package.manifest)
+}
+
+fn support_build_script_path(package: &SupportPackage) -> Option<PathBuf> {
+    manifest_build_script_path(&package.root, &package.manifest)
+}
+
+fn manifest_build_script_path(root: &Path, manifest: &Value) -> Option<PathBuf> {
+    let package_table = manifest.get("package").and_then(Value::as_table);
     match package_table.and_then(|table| table.get("build")) {
         Some(Value::Boolean(false)) => None,
         Some(Value::String(path)) => {
-            let path = package.root.join(path);
+            let path = root.join(path);
             path.exists().then_some(path)
         }
         _ => {
-            let path = package.root.join("build.rs");
+            let path = root.join("build.rs");
             path.exists().then_some(path)
         }
     }

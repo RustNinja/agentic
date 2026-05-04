@@ -2962,6 +2962,193 @@ edition = "2021"
 }
 
 #[test]
+fn prunes_unused_support_package_dev_build_and_tool_surfaces() {
+    let workspace = temp_path("minimal-external-path-dep-workspace");
+    let output = temp_path("minimal-external-path-dep-output");
+    let target_dir = temp_path("minimal-external-path-dep-target");
+    let helper = temp_path("minimal-external-path-dep-helper");
+    let leaf = temp_path("minimal-external-path-dep-leaf");
+    let unused_build = temp_path("minimal-external-path-dep-unused-build");
+    let unused_dev = temp_path("minimal-external-path-dep-unused-dev");
+    let unused_target_build = temp_path("minimal-external-path-dep-unused-target-build");
+    let unused_target_dev = temp_path("minimal-external-path-dep-unused-target-dev");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    external_helper::decorate(value)
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+external-leaf = {{ path = "{}" }}
+
+[build-dependencies]
+unused-build = {{ path = "{}" }}
+
+[dev-dependencies]
+unused-dev = {{ path = "{}" }}
+
+[target.'cfg(unix)'.build-dependencies]
+unused-target-build = {{ path = "{}" }}
+
+[target.'cfg(unix)'.dev-dependencies]
+unused-target-dev = {{ path = "{}" }}
+
+[[example]]
+name = "unused_example"
+path = "examples/unused.rs"
+
+[[test]]
+name = "unused_test"
+path = "tests/unused.rs"
+
+[[bench]]
+name = "unused_bench"
+path = "benches/unused.rs"
+"#,
+            manifest_path(&leaf),
+            manifest_path(&unused_build),
+            manifest_path(&unused_dev),
+            manifest_path(&unused_target_build),
+            manifest_path(&unused_target_dev),
+        ),
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"pub fn decorate(value: &str) -> String {
+    format!("{value}{}", external_leaf::suffix())
+}
+"#,
+    );
+    write(helper.join("examples/unused.rs"), "fn main() {}\n");
+    write(helper.join("tests/unused.rs"), "#[test]\nfn unused() {}\n");
+    write(helper.join("benches/unused.rs"), "fn main() {}\n");
+    write(helper.join("fixtures/dead.txt"), "dead support fixture");
+    write(
+        leaf.join("Cargo.toml"),
+        r#"[package]
+name = "external-leaf"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        leaf.join("src/lib.rs"),
+        r#"pub fn suffix() -> &'static str {
+    ":leaf"
+}
+"#,
+    );
+    for package in [
+        (&unused_build, "unused-build"),
+        (&unused_dev, "unused-dev"),
+        (&unused_target_build, "unused-target-build"),
+        (&unused_target_dev, "unused-target-dev"),
+    ] {
+        write(
+            package.0.join("Cargo.toml"),
+            &format!(
+                r#"[package]
+name = "{}"
+version = "0.1.0"
+edition = "2021"
+"#,
+                package.1
+            ),
+        );
+        write(package.0.join("src/lib.rs"), "pub fn unused() {}\n");
+    }
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let helper_manifest = read(output.join("support/external-helper/Cargo.toml"));
+    assert!(helper_manifest.contains("external-leaf"));
+    assert!(!helper_manifest.contains("build-dependencies"));
+    assert!(!helper_manifest.contains("dev-dependencies"));
+    assert!(!helper_manifest.contains("unused-build"));
+    assert!(!helper_manifest.contains("unused-dev"));
+    assert!(!helper_manifest.contains("unused-target-build"));
+    assert!(!helper_manifest.contains("unused-target-dev"));
+    assert!(!helper_manifest.contains("[[example]]"));
+    assert!(!helper_manifest.contains("[[test]]"));
+    assert!(!helper_manifest.contains("[[bench]]"));
+    assert!(output.join("support/external-helper/src/lib.rs").exists());
+    assert!(output.join("support/external-leaf/src/lib.rs").exists());
+    assert!(!output.join("support/external-helper/examples").exists());
+    assert!(!output.join("support/external-helper/tests").exists());
+    assert!(!output.join("support/external-helper/benches").exists());
+    assert!(!output.join("support/external-helper/fixtures").exists());
+    assert!(!output.join("support/unused-build").exists());
+    assert!(!output.join("support/unused-dev").exists());
+    assert!(!output.join("support/unused-target-build").exists());
+    assert!(!output.join("support/unused-target-dev").exists());
+
+    for original in [
+        &helper,
+        &leaf,
+        &unused_build,
+        &unused_dev,
+        &unused_target_build,
+        &unused_target_dev,
+    ] {
+        fs::rename(original, original.with_extension("moved")).unwrap();
+    }
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated minimal external dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nhelper/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper_manifest,
+    );
+}
+
+#[test]
 fn preserves_replace_tables_with_resolved_paths() {
     let workspace = temp_path("replace-table-workspace");
     let output = temp_path("replace-table-output");

@@ -226,6 +226,12 @@ build-script `rustc-env`/`env!` blockers, nested callback/future aliases, and
 `pub(crate)` macro helper reexports. Litter examples should be converted into
 these generic groups before any slicer behavior is changed.
 
+The generated rule catalog is the scalable backlog for that work. It validates
+1,200 generic rule records across import, macro, trait, dyn, include, build,
+UniFFI, manifest, repair, and cfg axes without naming Litter or any other real
+project. A catalog entry becomes an executable fixture only when it protects a
+distinct reducer, renderer, manifest, or production-gate behavior.
+
 The second rule-database pass added eight more non-cfg shapes and exposed two
 generic reducer issues. Retained `macro_rules!` bodies can call methods on
 metavariables, so the reducer now links `$receiver.method()` patterns to the
@@ -249,6 +255,14 @@ roots generated 12-15 files, while the bridge/state roots generated 850+ files.
 That means correctness is improving, but support-package/path-dependency
 precision is now a high-priority production-size problem. See
 `docs/litter_probe_report.md` for the concrete run notes.
+
+The first support-package precision fix is manifest/source-tree bounded.
+Generated support packages now drop dev-dependencies, test/example/bench targets,
+and build-dependencies when the support package has no build script. No-build
+support packages copy their library source tree plus statically referenced
+include assets instead of the whole package root, which removes dead examples,
+tests, benches, fixtures, and dev/build-only path packages without slicing the
+support package semantically yet.
 
 ## Current Production Boundaries
 

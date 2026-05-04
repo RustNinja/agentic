@@ -22,7 +22,10 @@ Use stable group prefixes when adding cases:
 | `repair.*` | compiler-feedback cleanup, import repair, repeated diagnostics |
 
 Current executable seed cases live in
-`crates/opensource_core/tests/rule_database.rs`.
+`crates/opensource_core/tests/rule_database.rs`. The broader generated catalog
+of planned generic combinations lives in
+`crates/opensource_core/tests/rule_catalog.rs` and is documented in
+`docs/rule_catalog.md`.
 
 ## First Seed Rules
 
@@ -60,9 +63,10 @@ When a real repo slice fails or retains too much code:
 5. Run `scripts/fast_rule_loop.sh`, then the broader workspace checks before
    committing.
 
-The target is hundreds of small rules plus generated combinations where useful,
-not a thousand hand-written one-off tests. More cases are valuable only when
-they introduce a distinct Rust/Cargo shape or a distinct failure mode.
+The target is hundreds of small executable rules plus thousands of generated
+catalog combinations, not a thousand hand-written one-off tests. More executable
+cases are valuable only when they introduce a distinct Rust/Cargo shape or a
+distinct failure mode.
 
 ## Litter Patterns To Convert Next
 
@@ -85,5 +89,9 @@ Read-only Litter exploration found these high-value non-cfg patterns:
   type is the only generic way to retain the required method.
 - Direct callback API boundaries, source `include!` blockers, dependency aliases
   inside macro bodies, and inline script-bundle modules.
+- Support path dependencies that compile but over-copy examples, tests, benches,
+  dev/build-only path packages, and fixture assets.
 
-Cfg/custom-cfg matrix expansion is intentionally not part of this batch.
+Cfg/custom-cfg matrix expansion is not expanded blindly. Catalog rules track
+cfg gates as move-intact/fail-closed work, and executable rules should be added
+only when a concrete reducer/render/validation bug appears.
