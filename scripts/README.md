@@ -8,6 +8,11 @@ random candidate roots, injects `#[opensourced::opensourced]`, runs `slicers`
 with `--slice-report` plus either fast preflight or compiler feedback, then
 appends one JSONL metrics row per batch.
 
+The runner defaults to the `syn` analyzer. Pass `--analyzer ra-hir` to build the
+CLI with the optional `ra-hir` feature and collect rust-analyzer HIR semantic
+inventory, but treat that output as report-only until semantic edges are wired
+into reduction.
+
 ```sh
 scripts/corpus_feedback_loop.py \
   --source /path/to/rust/workspace \
@@ -83,6 +88,10 @@ production hazard codes and structured hazard details, compiler feedback
 widening candidate/hazard kinds, feedback-widened root counts, compiler
 suggestion counts, and conservative repair totals including applied
 machine-applicable suggestions.
+Feedback cargo checks drain stdout/stderr while Cargo runs, so large
+`--message-format=json` output from real dependency graphs does not block the
+child process. Repair validation removes repairable warnings, including unused
+imports, before accepting a successful generated check.
 Dynamic dispatch blockers such as retained `fn(...)` pointer surfaces and
 `dyn Trait` objects include package/module/file/line details and the retained
 surface text in the structured hazard payload.

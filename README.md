@@ -12,8 +12,8 @@ workspace instead of the full source tree.
 
 - `crates/opensourced`: proc-macro crate that validates and preserves a marked
   free function.
-- `crates/opensource_core`: `syn`-based parser, call-graph reducer, and source
-  renderer.
+- `crates/opensource_core`: `syn`-first parser, call-graph reducer, source
+  renderer, compiler-feedback repair, and optional rust-analyzer HIR inventory.
 - `crates/opensource_cli`: command-line wrapper around `opensource_core`.
   The primary binary is `slicers`.
 - `fixtures/a` through `fixtures/e`: five crates used as the proof workspace.
@@ -91,6 +91,15 @@ cargo run -p opensource_cli --bin slicers -- --slice-report /tmp/slicers-report.
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
 
+The default analyzer is `syn`. The optional rust-analyzer path is available for
+semantic inventory/reporting, not yet as the authoritative reachability oracle:
+
+```sh
+cargo run -p opensource_cli --bin slicers --features ra-hir -- \
+  --analyzer ra-hir \
+  . /tmp/slicers-ra-report
+```
+
 `--preflight` is the fast prediction tier. It writes `slice-preflight.json` and
 validates the generated workspace without compiling dependencies: manifests,
 no-build `cargo metadata --no-deps`, local path dependencies, Cargo target
@@ -103,17 +112,20 @@ build-script paths. `--feedback` runs this preflight first and fails before
 workspace, prints prioritized compiler diagnostics, and writes
 `slice-feedback.json` under the slice output, including exit code, timeout
 state, duration, Cargo working directory, target directory, timeout, and extra
-cargo check arguments for reproducibility. Feedback and baseline Cargo commands
-run from the checked manifest's parent directory, and generated slices preserve
-workspace-level `.cargo/config.toml` or legacy `.cargo/config` files so
-validation sees the same Cargo cfg, target, registry, source-replacement, and
-rustflag context as the source workspace. Generated slices also preserve root
-`rust-toolchain.toml` or `rust-toolchain` files so Cargo validation uses the
-same pinned toolchain, plus root `[profile.*]` policy so profile-sensitive
-checks do not fall back to Cargo defaults. Rendered source and asset copies
-resolve symlinks through the package root: internal package links are copied at
-the path the generated source expects, while links that resolve outside the
-package are not copied into the slice. `--feedback-loop <n>` repeats that
+cargo check arguments for reproducibility. Feedback Cargo stdout/stderr are
+drained while the child process is running, so dependency-heavy
+`--message-format=json` checks cannot deadlock the feedback loop by filling a
+captured output pipe. Feedback and baseline Cargo commands run from the checked
+manifest's parent directory, and generated slices preserve workspace-level
+`.cargo/config.toml` or legacy `.cargo/config` files so validation sees the same
+Cargo cfg, target, registry, source-replacement, and rustflag context as the
+source workspace. Generated slices also preserve root `rust-toolchain.toml` or
+`rust-toolchain` files so Cargo validation uses the same pinned toolchain, plus
+root `[profile.*]` policy so profile-sensitive checks do not fall back to Cargo
+defaults. Rendered source and asset copies resolve symlinks through the package
+root: internal package links are copied at the path the generated source
+expects, while links that resolve outside the package are not copied into the
+slice. `--feedback-loop <n>` repeats that
 compiler feedback pass up to `n` times, widens the generated slice from bounded
 compiler diagnostics when they map back to known project symbols, stops early
 when diagnostics repeat without progress, and fails with the JSON report path
@@ -152,8 +164,10 @@ source repairs between attempts. The first repair tier only handles diagnostics
 that are safe to edit mechanically, such as `unused_imports`, item-level
 `dead_code`, and deferred dead-code allows for retained fields or enum variants.
 It also applies rustc `MachineApplicable` suggestions when every edited span is
-inside the generated output root. It stops on repeated diagnostics,
-low-progress diagnostic shapes, or no-progress rounds.
+inside the generated output root, including whole-use unused-import removals
+reported as warning help. Repair mode does not accept a successful Cargo check
+until repairable warnings have been removed or exhausted. It stops on repeated
+diagnostics, low-progress diagnostic shapes, or no-progress rounds.
 Validation runs write `slice-validation.json` by default. That report is the
 authoritative gate verdict: final status, rejection reason when present,
 baseline/preflight/feedback gate states, cargo check arguments, and per-attempt
@@ -351,13 +365,15 @@ e::Score(Type)
 
 ## Current Boundaries
 
-This proof intentionally uses a syntactic call graph instead of rustc name
-resolution. It is useful for controlled workspaces and for proving the slice
-pipeline, but it is not a full compiler frontend. It now handles direct trait
-method calls when the receiver type can be inferred locally, borrowed UFCS trait
-calls, workspace member globs, external dependencies, local path crate pruning,
-and copied non-workspace path support packages. It also scans retained macro
-bodies for direct local paths and prunes external dependencies whose crate alias
-is absent from the retained source. Complex function pointers, trait objects,
-broad `cfg` feature matrices, full macro expansion, build scripts, and
-rustc-level unused import analysis remain outside the current syntactic model.
+This branch uses a syntactic call graph as the default reducer and rustc
+feedback as the correctness gate; it is not yet a full compiler frontend. It
+now handles direct trait method calls when the receiver type can be inferred
+locally, borrowed UFCS trait calls, contextual `into`/`try_into` conversions,
+workspace member globs, external dependencies, local path crate pruning, copied
+non-workspace path support packages, and compiler-driven unused-import cleanup
+in repair/production validation. It also scans retained macro bodies for direct
+local paths and prunes external dependencies whose crate alias is absent from
+the retained source. Complex function pointers, trait objects, custom proc
+macro expansion, `OUT_DIR` generated Rust, broad custom cfg inventories, and
+rustc-equivalent name resolution remain outside the current reducer and are
+reported as production hazards or feedback-required boundaries.

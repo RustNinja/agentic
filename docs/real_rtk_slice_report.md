@@ -1,6 +1,7 @@
 # Real Hard-Rust Slice Report: rtk-ai/rtk
 
 Date: 2026-05-02
+Last updated: 2026-05-04
 
 Source project: `rtk-ai/rtk`
 
@@ -151,6 +152,6 @@ output retained only the source modules, functions, data items, generated macro
 items, manifest dependencies, and build-script assets needed for each selected
 root. Unit tests from the source project were not copied.
 
-Remaining expected warning: generated slices can still contain unused imports.
-That does not change runtime semantics and remains warning-only under
-`cargo check`.
+Fast preflight can still predict slices that later need compiler cleanup, but
+repair/production validation now removes repairable unused imports before
+accepting a warning-free generated `cargo check`.

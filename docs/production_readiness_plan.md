@@ -1,5 +1,7 @@
 # Production Readiness Plan
 
+Last updated: 2026-05-04
+
 ## Direction
 
 The fastest credible route is a hybrid slicer:
@@ -13,6 +15,22 @@ The fastest credible route is a hybrid slicer:
 This is intentionally not a rust-analyzer rewrite. HIR can answer semantic
 questions, but it does not solve rendering, manifest rewriting, build-script
 assets, output safety, or product diagnostics by itself.
+
+## Current Branch Status
+
+`codex/production-hardening` is currently a `syn`-first slicer with rustc
+feedback/repair as the production gate. The CLI accepts `--analyzer ra-hir`
+when built with `--features ra-hir`, but that rust-analyzer path is report-only
+semantic inventory today; it does not yet drive the retained graph. Production
+validation therefore relies on fast static reduction, explicit production
+hazards, and `cargo check --message-format=json` feedback.
+
+The latest hardening milestone validated the pinned Litter UniFFI cases in
+strict repair mode with `--deny-warnings`: all three pinned roots reached zero
+final warnings, and the apply-snapshot case removed three unused imports through
+the compiler repair loop. The feedback runner now drains Cargo stdout/stderr
+while the child process runs, preventing large JSON output from dependency-heavy
+checks from blocking the feedback loop.
 
 ## Inspirations
 
@@ -132,10 +150,14 @@ assets, output safety, or product diagnostics by itself.
 
 3. Feedback widening:
    - Parse `cargo check --message-format=json`.
+   - Drain Cargo stdout/stderr while the child process is running so large JSON
+     output cannot fill captured pipes.
    - Classify missing item/module/import/dependency/feature failures.
    - Widen the retained graph with a bounded iteration cap.
    - Apply only rustc `MachineApplicable` suggestions whose spans are inside
-     the generated output root.
+     the generated output root, including whole-use unused-import help.
+   - Keep feedback repair running until repairable warnings are removed or
+     exhausted before accepting a warning-bearing successful check.
    - Treat selected warnings, especially unreachable patterns, as semantic hazards.
 
 4. Semantic oracle:
@@ -149,10 +171,13 @@ assets, output safety, or product diagnostics by itself.
    - Generate slices, run feedback checks, and compare selected behavior probes.
    - Store retained/pruned inventories and failure reports.
 
-## Current First Step
+## Current Implementation Summary
 
-This branch starts with the safety gate because it removes destructive failure
-modes before larger resolver work begins. It also begins the Cargo metadata
-substrate by using `cargo metadata --no-deps` for workspace member, target entry,
-and dependency discovery, while preserving the existing TOML renderer for slice
-manifests.
+This branch has moved beyond the initial safety gate. It now has guarded output
+replacement, Cargo metadata-backed workspace/target/dependency discovery,
+preflight validation, compiler feedback widening, conservative repair,
+production validation gates, pinned corpus cases, and documented production
+hazard reporting for known unsupported surfaces. The main unfinished production
+step is consuming semantic oracle edges from rust-analyzer HIR or rustc for
+unresolved high-risk constructs instead of using the oracle as report-only
+inventory.

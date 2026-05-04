@@ -1,6 +1,7 @@
 # Real UniFFI Slice Report: dnakov/litter
 
 Date: 2026-05-02
+Last updated: 2026-05-04
 
 Source project: `dnakov/litter`
 
@@ -245,12 +246,16 @@ The real slices did not include:
 
 ## Remaining Known Gaps
 
-These experiments now build, but the slicer is still syntactic, not rustc or
-rust-analyzer based.
+These experiments now pass strict compiler feedback repair, but the default
+reducer is still syntactic. The optional `ra-hir` analyzer can load
+rust-analyzer HIR and report semantic inventory, but this branch does not yet
+consume those HIR edges as the authoritative reachability graph.
 
 Known remaining risks:
 
-- Generated slices can retain unused imports. This is currently warning-only.
+- Fast preflight can still predict slices that later need compiler repair.
+  Production/repair validation now removes repairable unused imports before
+  accepting warning-free feedback.
 - `build.rs` and referenced non-Rust assets are copied, but generated `OUT_DIR`
   Rust code is not semantically modeled.
 - Target-specific dependency tables are preserved when retained source
