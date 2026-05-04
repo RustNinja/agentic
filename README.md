@@ -196,20 +196,21 @@ Static `include_str!` and `include_bytes!` paths are copied for string literals,
 `concat!` literals, and `concat!(env!("CARGO_MANIFEST_DIR"), "...")` package
 paths. Unknown env-driven paths, `OUT_DIR` file assets, absolute include paths,
 and paths resolving outside the package fail closed. The report fails closed on
-retained custom attribute and derive macros that may generate code outside the
-static parse tree, including macros hidden behind nested `cfg_attr`, and
-retained non-builtin macro invocations. Retained build scripts are also reported because
-they can generate source, link metadata, or asset requirements outside the
-static parse tree. Retained local path dependencies that are not workspace
+function pointer and trait-object surfaces plus retained build scripts because
+they can hide callback/dispatch edges, generate source, emit link metadata, or
+add asset requirements outside the static parse tree. Retained custom derives,
+custom attributes, non-builtin macro invocations, and non-root `cfg`/`cfg_attr`
+surfaces are feedback-gated warnings: the source is preserved, but production
+acceptance requires compiler feedback for the selected matrix.
+Retained local path dependencies that are not workspace
 members are copied into `support/`, their own path dependency closures are
 rewritten to generated-local paths, and workspace-inherited package/dependency
 fields are materialized so generated manifests do not point back to the
 original checkout.
-Retained `cfg`/`cfg_attr` attributes are reported when a
-slice needs feature or target matrix validation beyond the current host/default
-configuration; selected roots behind non-test `cfg` or `cfg_attr` gates are
+Selected roots behind non-test `cfg` or `cfg_attr` gates remain
 production-blocking until the exact feature/target matrix is proven by
-validation arguments.
+validation arguments because the selected root itself may not exist under the
+default configuration.
 
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
 mode/notes, production-readiness hazards, roots, packages, reachable
@@ -338,8 +339,8 @@ resolution. It is useful for controlled workspaces and for proving the slice
 pipeline, but it is not a full compiler frontend. It now handles direct trait
 method calls when the receiver type can be inferred locally, borrowed UFCS trait
 calls, workspace member globs, external dependencies, local path crate pruning,
-and copied non-workspace path support packages. It also scans retained macro bodies for direct local paths and prunes
-external dependencies whose crate alias is absent from the retained source.
-Complex function pointers, trait objects, broad `cfg` feature matrices, full
-macro expansion, build scripts, and rustc-level unused import analysis remain
-outside the current syntactic model.
+and copied non-workspace path support packages. It also scans retained macro
+bodies for direct local paths and prunes external dependencies whose crate alias
+is absent from the retained source. Complex function pointers, trait objects,
+broad `cfg` feature matrices, full macro expansion, build scripts, and
+rustc-level unused import analysis remain outside the current syntactic model.

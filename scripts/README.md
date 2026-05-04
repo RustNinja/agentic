@@ -45,9 +45,11 @@ the source checkout has a lockfile. Generated slices also preserve root
 `[profile.*]` policy and refuse to copy symlinked assets that resolve outside
 their package root. They copy retained non-workspace path packages into
 `support/` and rewrite copied package manifests so local path dependency
-closures stay self-contained. They also fail production on file includes with unresolved
-env paths, absolute paths, external paths, or `OUT_DIR` generated assets. Use
-`--deny-warnings` for production gates that require warning-free generated feedback. Each corpus row includes
+closures stay self-contained. They also fail production on file includes with
+unresolved env paths, absolute paths, external paths, or `OUT_DIR` generated
+assets, while retained macros and non-root cfg surfaces are preserved and
+require compiler feedback. Use `--deny-warnings` for production gates that
+require warning-free generated feedback. Each corpus row includes
 the slicer's authoritative validation verdict, production-readiness status,
 production hazard codes, compiler feedback widening candidate/hazard kinds,
 feedback-widened root counts, compiler suggestion counts, and conservative

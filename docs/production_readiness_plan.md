@@ -43,13 +43,14 @@ assets, output safety, or product diagnostics by itself.
 
 - Compile success can still be semantically wrong. The Litter const-pattern
   failure showed that a slice can build while changing behavior.
-- Dynamic dispatch and function-pointer callback surfaces can also compile
-  while hiding concrete call edges; they must fail closed until semantic
-  resolution proves the retained implementation set.
+- Dynamic dispatch and function-pointer callback surfaces can compile while
+  hiding concrete call edges; they must fail closed until semantic resolution
+  proves the retained implementation or callback set.
 - Unknown macros should not be pruned silently. Either retain bounded source,
   query a semantic oracle, or fail with an unsupported-construct report.
 - Retained custom derives, custom attributes, and non-builtin macro invocations
-  are production-blocking until macro expansion feeds the reachability graph.
+  must be preserved verbatim and require compiler feedback until macro
+  expansion feeds the reachability graph.
 - Build scripts can execute arbitrary project logic and generate source under
   `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle
@@ -68,7 +69,9 @@ assets, output safety, or product diagnostics by itself.
 - Feature and platform cfgs form a matrix, not a boolean. A slice should report
   the feature/platform configuration it was generated for, and only `cfg(test)`
   should be treated as test-only pruning. Retained non-test `cfg`/`cfg_attr`
-  surfaces must fail closed until validation explicitly covers that matrix.
+  surfaces require compiler feedback for the selected matrix; selected roots
+  behind non-test cfg gates still fail closed until validation explicitly covers
+  that matrix.
 - Dependency aliases, workspace dependencies, optional dependency features, and
   target-specific dependencies need Cargo's resolver model.
 - Retained direct or target-specific path dependencies outside the workspace are

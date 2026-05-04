@@ -20,7 +20,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Trait definitions | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Trait items retained when trait impl methods are reachable |
 | Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Receiver calls, explicit `<Type as Trait>::method`, `Trait::method(&receiver, ...)`, format-only `Display`, and `to_string()`-required `Display` impls |
 | Trait impl peers | `component_matrix.rs` | Required peer methods and associated type/const items are retained so trait impls compile |
-| Dynamic dispatch boundaries | core production-readiness tests | Retained `dyn Trait` and `fn(...)` function pointer surfaces are production-blocking until semantic analysis can prove concrete callback/dispatch edges |
+| Dynamic dispatch boundaries | core production-readiness tests | Retained `dyn Trait` and `fn(...)` function pointer surfaces are production-blocking until semantic analysis can prove concrete dispatch/callback edges |
 | Associated types/consts | `component_matrix.rs` | Associated type and associated const dependencies are followed from retained impls |
 | External trait imports | `manifest_hardening.rs` | Extension traits such as `tokio::io::AsyncReadExt`, private std traits such as `std::io::Write`, and trait-method imports without an `Ext` suffix such as `base64::Engine` are retained |
 | External modules | `module_reexports.rs`, `component_matrix.rs`, core output-safety tests | `mod file;`, `mod/name/mod.rs`, nested modules, empty dead module pruning, and rejection of path-attributed modules that would escape package output |
@@ -36,7 +36,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Required target features | `manifest_hardening.rs`, CLI unit tests | `required-features` on retained example/test/bench/bin targets are reported and validation rejects Cargo argument sets that would skip the selected target or leave required bin features inactive |
 | Feature pruning | `manifest_hardening.rs` | Optional dependency feature entries are removed when the dependency is pruned |
 | Local path dependency pruning | `uniffi_mobile.rs`, `component_matrix.rs` | Unused local crates are omitted from manifests and source imports |
-| Non-workspace path dependencies | core production-readiness tests | Retained source references to direct or target-specific path dependencies outside the workspace are production-blocking so generated slices do not point back to the original checkout |
+| Non-workspace path dependencies | core production-readiness tests | Retained source references to direct or target-specific path dependencies outside the workspace are copied into generated-local `support/` packages when the path resolves to a local Cargo package root; uncopyable path entries remain production-blocking |
 | Macro definitions | `component_matrix.rs` | Used `macro_rules!` definitions are kept, unused macro definitions are pruned, and direct helper calls inside retained macro bodies are followed |
 | Item macro-generated items | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Item macro invocations such as `lazy_static!` are retained when generated identifiers are referenced by reachable code |
 | Build-script assets | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | Non-Rust assets referenced by `build.rs` string literal paths are copied without copying unrelated package docs/config; retained build scripts are production-blocking until hermetic build-script modeling exists |
@@ -48,7 +48,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Toolchain context | `manifest_hardening.rs` | Root `rust-toolchain.toml` / `rust-toolchain` files are copied so generated validation uses the source workspace's pinned Rust toolchain |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
-| Non-test cfg roots and surfaces | core production-readiness tests | Selected roots and retained source surfaces behind feature/platform cfgs, including `runtime-benchmarks`, are retained in the graph and reported as production-blocking cfg hazards instead of being pruned as tests |
+| Non-test cfg roots and surfaces | core production-readiness tests | Selected roots and retained source surfaces behind feature/platform cfgs, including `runtime-benchmarks`, are retained in the graph instead of being pruned as tests; selected cfg-gated roots remain production-blocking, and non-root cfg surfaces require compiler feedback for the selected matrix |
 | UniFFI-shaped API | `uniffi_mobile.rs`, `uniffi_setup.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, retained `uniffi::setup_scaffolding!()`, serde DTOs, and mobile bridge shape |
 | Real UniFFI project | `docs/real_litter_uniffi_slice_report.md` | Litter `codex-mobile-client` cloud sync and preferences slices build after pruning |
 | Real high-star Rust project | `docs/real_rtk_slice_report.md` | RTK `find_corrections` and `filter_json_string` slices build after binary, automod, macro, and build-script hardening |
@@ -60,14 +60,14 @@ These are tracked limitations, not silently claimed support:
 | Area | Boundary |
 | --- | --- |
 | Full rustc name resolution | The reducer is syntactic and does not replace rustc or rust-analyzer name resolution |
-| Macro-expanded dependencies | The slicer does not run macro expansion; retained custom derives, custom attributes, module-boundary custom attributes, and non-builtin macro invocations are production-blocking until an expansion-aware analyzer is available |
+| Macro-expanded dependencies | The slicer does not run macro expansion; retained custom derives, custom attributes, module-boundary custom attributes, and non-builtin macro invocations are preserved verbatim and require compiler feedback until an expansion-aware analyzer is available |
 | Generic trait receiver inference | Calls through generic bounds such as `value.trait_method()` are not fully resolved without a concrete receiver type |
-| Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed; retained `fn(...)` and `dyn Trait` surfaces are production-blocking |
+| Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed; retained `fn(...)` and `dyn Trait` surfaces remain production-blocking |
 | Build scripts and `include!` source | `build.rs` and referenced non-Rust assets are copied; generated Rust files under `OUT_DIR`, build-script side effects, and any retained `include!` Rust source are not semantically modeled, so they are production-blocking hazards |
 | Compile-time environment | `env!`/`option_env!` values outside Cargo package metadata are not modeled and are production-blocking |
-| Feature/platform cfg matrices | Only `#[cfg(test)]` is pruned as test-only; broader feature/platform matrix evaluation is conservative and retained non-test cfg roots/surfaces are production-blocking until validation proves the exact matrix |
+| Feature/platform cfg matrices | Only `#[cfg(test)]` is pruned as test-only; broader feature/platform matrix evaluation is conservative, cfg-gated selected roots are production-blocking, and retained non-root cfg surfaces require compiler feedback for the selected matrix |
 | External crate pruning | External dependencies are pruned when their crate alias is absent from retained source tokens; full rustc-level unused import analysis is not implemented |
-| Non-workspace path dependencies | Production mode fails closed on retained references instead of copying external path packages; bounded copying is future work |
+| Non-workspace path dependencies | Copying is bounded to local path package roots that expose `Cargo.toml`; uncopyable path entries remain production-blocking |
 
 ## Verification Commands
 

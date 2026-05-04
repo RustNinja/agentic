@@ -1145,9 +1145,9 @@ fn add_syntactic_production_hazards(
     if counts.custom_attribute_macros > 0 {
         hazards.push(production_hazard(
             "custom_attribute_macros",
-            "error",
+            "warning",
             format!(
-                "{} retained custom attribute macro/helper attribute(s) require macro expansion before the slice can be production trusted",
+                "{} retained custom attribute macro/helper attribute(s) require compiler feedback because they may rewrite source outside the static parse tree",
                 counts.custom_attribute_macros
             ),
         ));
@@ -1155,9 +1155,9 @@ fn add_syntactic_production_hazards(
     if counts.custom_derive_macros > 0 {
         hazards.push(production_hazard(
             "custom_derive_macros",
-            "error",
+            "warning",
             format!(
-                "{} retained custom derive macro(s) may generate impls or bounds outside the static parse tree",
+                "{} retained custom derive macro(s) require compiler feedback because they may generate impls or bounds outside the static parse tree",
                 counts.custom_derive_macros
             ),
         ));
@@ -1165,9 +1165,9 @@ fn add_syntactic_production_hazards(
     if counts.custom_macro_invocations > 0 {
         hazards.push(production_hazard(
             "custom_macro_invocations",
-            "error",
+            "warning",
             format!(
-                "{} retained non-builtin macro invocation(s) may expand code outside the static parse tree",
+                "{} retained non-builtin macro invocation(s) require compiler feedback because they may expand code outside the static parse tree",
                 counts.custom_macro_invocations
             ),
         ));
@@ -1195,9 +1195,9 @@ fn add_syntactic_production_hazards(
     if counts.conditional_compilation_attrs > 0 {
         hazards.push(production_hazard(
             "conditional_compilation_attrs",
-            "error",
+            "warning",
             format!(
-                "{} retained cfg/cfg_attr attribute(s) require explicit feature or target matrix validation before production acceptance",
+                "{} retained cfg/cfg_attr attribute(s) require compiler feedback for the selected feature and target matrix before production acceptance",
                 counts.conditional_compilation_attrs
             ),
         ));
@@ -2387,12 +2387,10 @@ pub fn entry() -> Vec<i32> {
         })
         .expect("reduction should succeed");
 
-        assert!(report
-            .production
-            .hazards
-            .iter()
-            .any(|hazard| hazard.code == "custom_macro_invocations" && hazard.severity == "error"));
-        assert_eq!(report.production.status, "hazards_detected");
+        assert!(report.production.hazards.iter().any(|hazard| hazard.code
+            == "custom_macro_invocations"
+            && hazard.severity == "warning"));
+        assert_eq!(report.production.status, "requires_feedback");
     }
 
     #[test]
@@ -2786,17 +2784,20 @@ pub struct Payload {
         })
         .expect("reduction should succeed");
 
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "custom_attribute_macros"
+                    && hazard.severity == "warning")
+        );
         assert!(report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "error"));
-        assert!(report
-            .production
-            .hazards
-            .iter()
-            .any(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "error"));
-        assert_eq!(report.production.status, "hazards_detected");
+            .any(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "warning"));
+        assert_eq!(report.production.status, "requires_feedback");
     }
 
     #[test]
@@ -2838,21 +2839,30 @@ pub fn entry() -> i32 {
         })
         .expect("reduction should succeed");
 
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "custom_attribute_macros"
+                    && hazard.severity == "warning")
+        );
         assert!(report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "error"));
+            .any(|hazard| hazard.code == "conditional_compilation_attrs"
+                && hazard.severity == "warning"));
         assert!(report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "conditional_compilation_attrs"));
+            .any(|hazard| hazard.code == "cfg_gated_roots" && hazard.severity == "error"));
         assert_eq!(report.production.status, "hazards_detected");
     }
 
     #[test]
-    fn reports_retained_non_root_cfg_surfaces_as_error_hazards() {
+    fn reports_retained_non_root_cfg_surfaces_as_feedback_hazards() {
         let root = temp_output("cfg-surface-hazard-source");
         let opensourced_path = workspace_root().join("crates/opensourced");
         write(
@@ -2893,9 +2903,9 @@ pub struct Extra;
         .expect("reduction should succeed");
 
         assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "conditional_compilation_attrs" && hazard.severity == "error"
+            hazard.code == "conditional_compilation_attrs" && hazard.severity == "warning"
         }));
-        assert_eq!(report.production.status, "hazards_detected");
+        assert_eq!(report.production.status, "requires_feedback");
     }
 
     #[test]
@@ -2936,22 +2946,26 @@ pub struct Payload {
         })
         .expect("reduction should succeed");
 
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "custom_attribute_macros"
+                    && hazard.severity == "warning")
+        );
         assert!(report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "error"));
+            .any(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "warning"));
         assert!(report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "error"));
-        assert!(report
-            .production
-            .hazards
-            .iter()
-            .any(|hazard| hazard.code == "conditional_compilation_attrs"));
-        assert_eq!(report.production.status, "hazards_detected");
+            .any(|hazard| hazard.code == "conditional_compilation_attrs"
+                && hazard.severity == "warning"));
+        assert_eq!(report.production.status, "requires_feedback");
     }
 
     #[test]
