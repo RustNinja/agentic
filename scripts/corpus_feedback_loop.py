@@ -863,6 +863,10 @@ def slicers_command(
             str(validation_report_path),
         ]
     )
+    if args.baseline_check:
+        command.append("--baseline-check")
+    if args.allow_baseline_failures:
+        command.append("--allow-baseline-failures")
     if args.validation == "preflight":
         command.append("--preflight")
     elif args.validation == "production":
