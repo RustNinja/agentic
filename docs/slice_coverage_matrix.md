@@ -56,7 +56,7 @@ These are tracked limitations, not silently claimed support:
 | Area | Boundary |
 | --- | --- |
 | Full rustc name resolution | The reducer is syntactic and does not replace rustc or rust-analyzer name resolution |
-| Macro-expanded dependencies | The slicer does not run macro expansion; it has conservative support for item macros whose token identifiers feed reachable code |
+| Macro-expanded dependencies | The slicer does not run macro expansion; retained custom derives, custom attributes, and non-builtin macro invocations are production-blocking until an expansion-aware analyzer is available |
 | Generic trait receiver inference | Calls through generic bounds such as `value.trait_method()` are not fully resolved without a concrete receiver type |
 | Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed |
 | Build scripts | `build.rs` and referenced non-Rust assets are copied; generated Rust files under `OUT_DIR` are not semantically modeled, and retained `include!(concat!(env!("OUT_DIR"), ...))` roots are production-blocking hazards |

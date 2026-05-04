@@ -45,6 +45,8 @@ assets, output safety, or product diagnostics by itself.
   failure showed that a slice can build while changing behavior.
 - Unknown macros should not be pruned silently. Either retain bounded source,
   query a semantic oracle, or fail with an unsupported-construct report.
+- Retained custom derives, custom attributes, and non-builtin macro invocations
+  are production-blocking until macro expansion feeds the reachability graph.
 - Build scripts can execute arbitrary project logic and generate source under
   `OUT_DIR`; copied `build.rs` files are not enough for semantic modeling, so
   retained `OUT_DIR` Rust includes must fail closed until a semantic oracle

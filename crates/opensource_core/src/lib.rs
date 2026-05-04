@@ -809,9 +809,9 @@ fn add_syntactic_production_hazards(
     if counts.custom_attribute_macros > 0 {
         hazards.push(production_hazard(
             "custom_attribute_macros",
-            "warning",
+            "error",
             format!(
-                "{} retained custom attribute macro/helper attribute(s) require compiler expansion to fully trust the slice",
+                "{} retained custom attribute macro/helper attribute(s) require macro expansion before the slice can be production trusted",
                 counts.custom_attribute_macros
             ),
         ));
@@ -819,7 +819,7 @@ fn add_syntactic_production_hazards(
     if counts.custom_derive_macros > 0 {
         hazards.push(production_hazard(
             "custom_derive_macros",
-            "warning",
+            "error",
             format!(
                 "{} retained custom derive macro(s) may generate impls or bounds outside the static parse tree",
                 counts.custom_derive_macros
@@ -829,7 +829,7 @@ fn add_syntactic_production_hazards(
     if counts.custom_macro_invocations > 0 {
         hazards.push(production_hazard(
             "custom_macro_invocations",
-            "warning",
+            "error",
             format!(
                 "{} retained non-builtin macro invocation(s) may expand code outside the static parse tree",
                 counts.custom_macro_invocations
@@ -1028,6 +1028,7 @@ fn builtin_macro_name(name: &str) -> bool {
             | "include_bytes"
             | "include_str"
             | "line"
+            | "macro_rules"
             | "matches"
             | "module_path"
             | "option_env"
@@ -1779,7 +1780,8 @@ pub fn entry() -> Vec<i32> {
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_macro_invocations"));
+            .any(|hazard| hazard.code == "custom_macro_invocations" && hazard.severity == "error"));
+        assert_eq!(report.production.status, "hazards_detected");
     }
 
     #[test]
@@ -1923,12 +1925,13 @@ pub struct Payload {
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_attribute_macros"));
+            .any(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "error"));
         assert!(report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_derive_macros"));
+            .any(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "error"));
+        assert_eq!(report.production.status, "hazards_detected");
     }
 
     #[test]
@@ -1973,17 +1976,18 @@ pub struct Payload {
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_attribute_macros"));
+            .any(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "error"));
         assert!(report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "custom_derive_macros"));
+            .any(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "error"));
         assert!(report
             .production
             .hazards
             .iter()
             .any(|hazard| hazard.code == "conditional_compilation_attrs"));
+        assert_eq!(report.production.status, "hazards_detected");
     }
 
     #[test]
