@@ -1238,6 +1238,79 @@ fn retains_renamed_external_imports_used_only_by_retained_macro_invocations() {
 }
 
 #[test]
+fn prunes_renamed_imports_when_resolved_target_is_removed() {
+    let workspace = temp_path("removed-rename-workspace");
+    let output = temp_path("removed-rename-output");
+    let target_dir = temp_path("removed-rename-target");
+    write_removed_renamed_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("removed_rename_like/src/lib.rs"));
+    assert!(lib.contains("pub fn selected"));
+    assert!(lib.contains("let selected_value = 1"));
+    assert!(!lib.contains("dead_fn as selected_value"));
+    assert!(!lib.contains("dead_fn"));
+    assert!(!lib.contains("mod dead"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated removed rename slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_renamed_imports_used_after_inner_shadow() {
+    let workspace = temp_path("shadowed-rename-workspace");
+    let output = temp_path("shadowed-rename-output");
+    let target_dir = temp_path("shadowed-rename-target");
+    write_shadowed_renamed_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("shadowed_rename_like/src/lib.rs"));
+    assert!(lib.contains("pub fn selected"));
+    assert!(lib.contains("live_fn as selected_value"));
+    assert!(lib.contains("pub fn live_fn"));
+    assert!(lib.contains("let selected_value = 1"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated shadowed rename slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
 fn retains_parent_imports_used_by_inline_child_super_glob() {
     let workspace = temp_path("inline-super-workspace");
     let output = temp_path("inline-super-output");
@@ -2212,6 +2285,7 @@ fn retains_inline_generated_modules_macro_deref_helpers_and_backend_bridges() {
     let app = read(output.join("app/src/lib.rs"));
     assert!(app.contains("mod msg_types"));
     assert!(app.contains("include!(\"generated.rs\")"));
+    assert!(app.contains("use crate::msg_types"));
     assert!(app.contains("impl std::ops::Deref for HeaderName"));
     assert!(app.contains("fn set_value"));
     assert!(app.contains("impl old_backend::Backend for Arc<dyn Backend>"));
@@ -8224,6 +8298,104 @@ pub fn selected() -> usize {
 
 pub fn dead() -> usize {
     0
+}
+"#,
+    );
+}
+
+fn write_removed_renamed_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["removed_rename_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("removed_rename_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "removed_rename_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("removed_rename_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use crate::dead::dead_fn as selected_value;
+
+mod dead {
+    pub fn dead_fn() -> u32 {
+        99
+    }
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let selected_value = 1;
+    let closure = |selected_value: u32| selected_value + 1;
+    let via_match = match Some(2) {
+        Some(selected_value) => selected_value,
+        None => 0,
+    };
+    let mut via_loop = 0;
+    for selected_value in [3] {
+        via_loop += selected_value;
+    }
+    selected_value + closure(2) + via_match + via_loop
+}
+"#,
+    );
+}
+
+fn write_shadowed_renamed_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["shadowed_rename_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("shadowed_rename_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "shadowed_rename_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("shadowed_rename_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use crate::live::live_fn as selected_value;
+
+mod live {
+    pub fn live_fn() -> u32 {
+        41
+    }
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let shadow = {
+        let selected_value = 1;
+        selected_value
+    };
+    shadow + selected_value()
 }
 "#,
     );

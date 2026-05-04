@@ -4575,7 +4575,66 @@ fn module_should_render(
         item.package == package
             && (path_has_prefix(&item.module_path, module_path)
                 || path_has_prefix(&path_from_item(item), module_path))
+    }) || inline_module_fallback_macro_should_render(project, reduced, package, module_path)
+}
+
+fn inline_module_fallback_macro_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    let Some(module_name) = module_path.last() else {
+        return false;
+    };
+    if !reachable_package_mentions_ident(project, reduced, package, module_name) {
+        return false;
+    }
+
+    inline_module_items_for_path(project, package, module_path).is_some_and(|items| {
+        items
+            .iter()
+            .any(|item| matches!(item, Item::Macro(item_macro) if item_macro.ident.is_none()))
     })
+}
+
+fn inline_module_items_for_path<'a>(
+    project: &'a Project,
+    package: &str,
+    module_path: &[String],
+) -> Option<&'a [Item]> {
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .filter(|source| source.module_path.len() < module_path.len())
+        .filter(|source| path_has_prefix(module_path, &source.module_path))
+        .max_by_key(|source| source.module_path.len())
+        .and_then(|source| {
+            find_inline_module_items(
+                &source.syntax.items,
+                &module_path[source.module_path.len()..],
+            )
+        })
+}
+
+fn find_inline_module_items<'a>(items: &'a [Item], module_path: &[String]) -> Option<&'a [Item]> {
+    let (name, rest) = module_path.split_first()?;
+    let child_items = items.iter().find_map(|item| {
+        let Item::Mod(item_mod) = item else {
+            return None;
+        };
+        if item_mod.ident != name {
+            return None;
+        }
+        item_mod.content.as_ref().map(|(_, items)| items.as_slice())
+    })?;
+
+    if rest.is_empty() {
+        Some(child_items)
+    } else {
+        find_inline_module_items(child_items, rest)
+    }
 }
 
 fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
@@ -6410,7 +6469,14 @@ fn prune_use_tree(
                 name.ident.to_string()
             };
             prefix.push(name.ident.to_string());
-            (!use_target_should_drop(
+            (!use_target_resolves_to_removed_symbol(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &prefix,
+            ) && (!use_target_should_drop(
                 project,
                 reduced,
                 render_plan,
@@ -6424,13 +6490,20 @@ fn prune_use_tree(
                     reduced,
                     package,
                     &visible_name,
-                )))
+                ))))
             .then(|| UseTree::Name(name.clone()))
         }
         UseTree::Rename(rename) => {
             prefix.push(rename.ident.to_string());
             let alias = rename.rename.to_string();
-            (!use_target_should_drop(
+            (!use_target_resolves_to_removed_symbol(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &prefix,
+            ) && (!use_target_should_drop(
                 project,
                 reduced,
                 render_plan,
@@ -6450,7 +6523,7 @@ fn prune_use_tree(
                 && (reachable_reduced_packages_mention_ident(project, reduced, &alias)
                     || public_reexport_name_is_referenced_by_reduced_package(
                         project, reduced, package, &alias,
-                    ))))
+                    )))))
             .then(|| UseTree::Rename(rename.clone()))
         }
         UseTree::Group(group) => {
@@ -6509,6 +6582,77 @@ fn renamed_use_alias_is_reachable(
     is_public_use
         && (render_plan.package_mentions_ident(package, alias)
             || reachable_package_mentions_ident(project, reduced, package, alias))
+}
+
+fn use_target_resolves_to_removed_symbol(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+) -> bool {
+    if target
+        .first()
+        .is_some_and(|first| use_name_is_external_dependency(project, package, first))
+        || target
+            .first()
+            .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
+    {
+        return false;
+    }
+
+    let Some((target_package, target_path)) =
+        resolve_use_target_path(project, package, module_path, target)
+    else {
+        return false;
+    };
+
+    local_use_target_resolves_to_removed_symbol(
+        project,
+        reduced,
+        render_plan,
+        &target_package,
+        &target_path,
+    ) || resolve_reexported_use_path(project, &target_package, &target_path).is_some_and(
+        |(alias_package, alias_path)| {
+            local_use_target_resolves_to_removed_symbol(
+                project,
+                reduced,
+                render_plan,
+                &alias_package,
+                &alias_path,
+            )
+        },
+    )
+}
+
+fn local_use_target_resolves_to_removed_symbol(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    target_package: &str,
+    target_path: &[String],
+) -> bool {
+    if let Some(callable) = find_use_function(project, target_package, target_path) {
+        return !reduced.reachable.contains(&callable);
+    }
+    if let Some(item) = find_use_item(project, target_package, target_path) {
+        if item.kind == ItemKind::Mod {
+            let mut module_path = item.module_path.clone();
+            module_path.push(item.name.clone());
+            return !render_plan.item_should_render(&item)
+                && !module_should_render(
+                    project,
+                    reduced,
+                    render_plan,
+                    &item.package,
+                    &module_path,
+                );
+        }
+        return !render_plan.item_should_render(&item);
+    }
+    false
 }
 
 fn public_reexport_name_is_referenced_by_reduced_package(

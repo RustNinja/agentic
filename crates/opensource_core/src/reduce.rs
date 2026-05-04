@@ -432,6 +432,7 @@ fn retained_rendered_use_dependencies(
     let mut module_ident_cache = HashMap::new();
     let mut package_ident_cache = HashMap::new();
     let mut public_reexport_ident_cache = HashMap::new();
+    let mut visible_name_usage_cache = HashMap::new();
     for source in project
         .files
         .values()
@@ -509,7 +510,20 @@ fn retained_rendered_use_dependencies(
             );
 
             for path in named_paths {
-                if reachable_idents.contains(&path.visible_name) {
+                let visible_name_is_used = if path.renamed {
+                    reachable_import_scope_uses_visible_name_cached(
+                        project,
+                        reachable,
+                        reachable_items,
+                        &source.package,
+                        &source.module_path,
+                        &path.visible_name,
+                        &mut visible_name_usage_cache,
+                    )
+                } else {
+                    reachable_idents.contains(&path.visible_name)
+                };
+                if visible_name_is_used {
                     dependencies.extend(resolve_use_named_dependency(&resolver, &path.segments));
                 }
             }
@@ -854,6 +868,299 @@ fn reachable_import_scope_source_idents_cached(
     idents
 }
 
+fn reachable_import_scope_uses_visible_name_cached(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    package: &str,
+    module_path: &[String],
+    visible_name: &str,
+    cache: &mut HashMap<(String, Vec<String>, String), bool>,
+) -> bool {
+    let key = (
+        package.to_string(),
+        module_path.to_vec(),
+        visible_name.to_string(),
+    );
+    if let Some(used) = cache.get(&key) {
+        return *used;
+    }
+
+    let used = reachable_source_uses_visible_name(
+        project,
+        reachable,
+        reachable_items,
+        package,
+        module_path,
+        visible_name,
+    ) || project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .filter(|source| source.module_path.len() == module_path.len() + 1)
+        .filter(|source| path_has_prefix(&source.module_path, module_path))
+        .filter(|source| module_has_reachable_code(project, reachable, reachable_items, source))
+        .filter(|source| file_has_super_glob_import(&source.syntax))
+        .any(|source| {
+            reachable_import_scope_uses_visible_name_cached(
+                project,
+                reachable,
+                reachable_items,
+                package,
+                &source.module_path,
+                visible_name,
+                cache,
+            )
+        });
+
+    cache.insert(key, used);
+    used
+}
+
+fn reachable_source_uses_visible_name(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    package: &str,
+    module_path: &[String],
+    visible_name: &str,
+) -> bool {
+    for callable in reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+    {
+        if let Some(record) = project.functions.get(callable) {
+            if record.module_path == module_path
+                && item_fn_uses_import_visible_name(&record.item, visible_name)
+            {
+                return true;
+            }
+        }
+        if let Some(record) = project.methods.get(callable) {
+            if record.module_path == module_path
+                && impl_item_fn_uses_import_visible_name(&record.item, visible_name)
+            {
+                return true;
+            }
+        }
+    }
+    for item in reachable_items
+        .iter()
+        .filter(|item| item.package == package && item.module_path == module_path)
+    {
+        if let Some(record) = project.items.get(item) {
+            if item_uses_import_visible_name(&record.item, visible_name) {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn item_fn_uses_import_visible_name(item: &syn::ItemFn, visible_name: &str) -> bool {
+    let mut visitor = ImportVisibleNameUseVisitor::new(visible_name);
+    visitor.visit_item_fn(item);
+    visitor.found
+}
+
+fn impl_item_fn_uses_import_visible_name(item: &syn::ImplItemFn, visible_name: &str) -> bool {
+    let mut visitor = ImportVisibleNameUseVisitor::new(visible_name);
+    visitor.visit_impl_item_fn(item);
+    visitor.found
+}
+
+fn item_uses_import_visible_name(item: &Item, visible_name: &str) -> bool {
+    let mut visitor = ImportVisibleNameUseVisitor::new(visible_name);
+    visitor.visit_item(item);
+    visitor.found
+}
+
+struct ImportVisibleNameUseVisitor<'a> {
+    visible_name: &'a str,
+    local_scopes: Vec<BTreeSet<String>>,
+    found: bool,
+}
+
+impl<'a> ImportVisibleNameUseVisitor<'a> {
+    fn new(visible_name: &'a str) -> Self {
+        Self {
+            visible_name,
+            local_scopes: vec![BTreeSet::new()],
+            found: false,
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.local_scopes.push(BTreeSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.local_scopes.pop();
+        if self.local_scopes.is_empty() {
+            self.local_scopes.push(BTreeSet::new());
+        }
+    }
+
+    fn insert_local_binding(&mut self, name: String) {
+        self.local_scopes
+            .last_mut()
+            .expect("visitor should always have a local scope")
+            .insert(name);
+    }
+
+    fn bind_local_pattern_names(&mut self, pattern: &Pat) {
+        let scope = self
+            .local_scopes
+            .last_mut()
+            .expect("visitor should always have a local scope");
+        collect_pattern_ident_names(pattern, scope);
+    }
+
+    fn local_binding_visible(&self) -> bool {
+        self.local_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(self.visible_name))
+    }
+
+    fn path_uses_visible_name(&self, path: &Path) -> bool {
+        path.segments
+            .first()
+            .is_some_and(|segment| segment.ident == self.visible_name)
+    }
+
+    fn macro_tokens_use_visible_name(&self, tokens: &TokenStream) -> bool {
+        token_stream_mentions_ident(tokens, self.visible_name)
+    }
+}
+
+impl<'ast> Visit<'ast> for ImportVisibleNameUseVisitor<'_> {
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        self.push_scope();
+        visit::visit_block(self, block);
+        self.pop_scope();
+    }
+
+    fn visit_local(&mut self, local: &'ast Local) {
+        for attr in &local.attrs {
+            self.visit_attribute(attr);
+        }
+        if let Some(init) = &local.init {
+            self.visit_expr(&init.expr);
+            if let Some((_, diverge)) = &init.diverge {
+                self.visit_expr(diverge);
+            }
+        }
+        self.bind_local_pattern_names(&local.pat);
+        self.visit_pat(&local.pat);
+    }
+
+    fn visit_arm(&mut self, arm: &'ast syn::Arm) {
+        self.push_scope();
+        visit::visit_arm(self, arm);
+        self.pop_scope();
+    }
+
+    fn visit_expr_if(&mut self, expr_if: &'ast syn::ExprIf) {
+        if let Expr::Let(expr_let) = expr_if.cond.as_ref() {
+            self.visit_expr(&expr_let.expr);
+            self.push_scope();
+            self.bind_local_pattern_names(&expr_let.pat);
+            self.visit_pat(&expr_let.pat);
+            self.visit_block(&expr_if.then_branch);
+            self.pop_scope();
+        } else {
+            self.visit_expr(&expr_if.cond);
+            self.visit_block(&expr_if.then_branch);
+        }
+
+        if let Some((_, else_branch)) = &expr_if.else_branch {
+            self.visit_expr(else_branch);
+        }
+    }
+
+    fn visit_expr_while(&mut self, expr_while: &'ast syn::ExprWhile) {
+        if let Expr::Let(expr_let) = expr_while.cond.as_ref() {
+            self.visit_expr(&expr_let.expr);
+            self.push_scope();
+            self.bind_local_pattern_names(&expr_let.pat);
+            self.visit_pat(&expr_let.pat);
+            self.visit_block(&expr_while.body);
+            self.pop_scope();
+        } else {
+            self.visit_expr(&expr_while.cond);
+            self.visit_block(&expr_while.body);
+        }
+    }
+
+    fn visit_expr_for_loop(&mut self, expr_for_loop: &'ast syn::ExprForLoop) {
+        self.visit_expr(&expr_for_loop.expr);
+        self.push_scope();
+        self.bind_local_pattern_names(&expr_for_loop.pat);
+        self.visit_pat(&expr_for_loop.pat);
+        self.visit_block(&expr_for_loop.body);
+        self.pop_scope();
+    }
+
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        self.push_scope();
+        for input in &closure.inputs {
+            self.bind_local_pattern_names(input);
+        }
+        visit::visit_expr_closure(self, closure);
+        self.pop_scope();
+    }
+
+    fn visit_pat_ident(&mut self, pat: &'ast syn::PatIdent) {
+        self.insert_local_binding(pat.ident.to_string());
+        visit::visit_pat_ident(self, pat);
+    }
+
+    fn visit_expr_path(&mut self, expr: &'ast ExprPath) {
+        if self.path_uses_visible_name(&expr.path)
+            && (expr.path.segments.len() > 1 || !self.local_binding_visible())
+        {
+            self.found = true;
+        }
+        visit::visit_expr_path(self, expr);
+    }
+
+    fn visit_type_path(&mut self, ty: &'ast TypePath) {
+        if self.path_uses_visible_name(&ty.path) {
+            self.found = true;
+        }
+        visit::visit_type_path(self, ty);
+    }
+
+    fn visit_expr_struct(&mut self, expr: &'ast ExprStruct) {
+        if self.path_uses_visible_name(&expr.path) {
+            self.found = true;
+        }
+        visit::visit_expr_struct(self, expr);
+    }
+
+    fn visit_expr_macro(&mut self, expr: &'ast ExprMacro) {
+        if self.macro_tokens_use_visible_name(&expr.mac.tokens) {
+            self.found = true;
+        }
+        visit::visit_expr_macro(self, expr);
+    }
+
+    fn visit_item_macro(&mut self, item: &'ast ItemMacro) {
+        if self.macro_tokens_use_visible_name(&item.mac.tokens) {
+            self.found = true;
+        }
+        visit::visit_item_macro(self, item);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast Macro) {
+        if self.macro_tokens_use_visible_name(&mac.tokens) {
+            self.found = true;
+        }
+        visit::visit_macro(self, mac);
+    }
+}
+
 fn file_has_super_glob_import(file: &syn::File) -> bool {
     file.items.iter().any(|item| {
         let Item::Use(item_use) = item else {
@@ -915,6 +1222,7 @@ fn module_has_reachable_code(
 struct UseDependencyPath {
     segments: Vec<String>,
     visible_name: String,
+    renamed: bool,
 }
 
 fn collect_use_dependency_paths(
@@ -941,6 +1249,7 @@ fn collect_use_dependency_paths(
             named_paths.push(UseDependencyPath {
                 segments: prefix,
                 visible_name,
+                renamed: false,
             });
         }
         UseTree::Rename(rename) => {
@@ -948,6 +1257,7 @@ fn collect_use_dependency_paths(
             named_paths.push(UseDependencyPath {
                 segments: prefix,
                 visible_name: rename.rename.to_string(),
+                renamed: true,
             });
         }
         UseTree::Group(group) => {
@@ -1764,6 +2074,7 @@ struct DependencyVisitor<'a> {
     variable_trait_bounds: HashMap<String, Vec<ItemId>>,
     variables: HashMap<String, TypeRef>,
     variable_candidates: HashMap<String, Vec<TypeRef>>,
+    local_value_scopes: Vec<BTreeSet<String>>,
     visible_packages: BTreeSet<String>,
     expected_parse_types: BTreeSet<TypeRef>,
     expected_error_types: BTreeSet<TypeRef>,
@@ -1780,6 +2091,7 @@ impl<'a> DependencyVisitor<'a> {
             variable_trait_bounds: HashMap::new(),
             variables: HashMap::new(),
             variable_candidates: HashMap::new(),
+            local_value_scopes: vec![BTreeSet::new()],
             visible_packages,
             expected_parse_types: BTreeSet::new(),
             expected_error_types: BTreeSet::new(),
@@ -1844,6 +2156,7 @@ impl<'a> DependencyVisitor<'a> {
             let FnArg::Typed(input) = input else {
                 continue;
             };
+            self.bind_local_value_names(input.pat.as_ref());
             let Pat::Ident(ident) = input.pat.as_ref() else {
                 continue;
             };
@@ -1859,6 +2172,42 @@ impl<'a> DependencyVisitor<'a> {
     fn insert_variable_type(&mut self, name: String, type_ref: TypeRef) {
         let candidates = self.resolver.type_ref_candidates(&type_ref);
         self.insert_variable_candidates(name, type_ref, candidates);
+    }
+
+    fn bind_local_value_names(&mut self, pattern: &Pat) {
+        let scope = self
+            .local_value_scopes
+            .last_mut()
+            .expect("dependency visitor should always have a local value scope");
+        collect_pattern_ident_names(pattern, scope);
+    }
+
+    fn push_local_value_scope(&mut self) {
+        self.local_value_scopes.push(BTreeSet::new());
+    }
+
+    fn pop_local_value_scope(&mut self) {
+        self.local_value_scopes.pop();
+        if self.local_value_scopes.is_empty() {
+            self.local_value_scopes.push(BTreeSet::new());
+        }
+    }
+
+    fn local_value_binding_visible(&self, name: &str) -> bool {
+        self.local_value_scopes
+            .iter()
+            .rev()
+            .any(|scope| scope.contains(name))
+    }
+
+    fn expr_path_is_local_value(&self, path: &ExprPath) -> bool {
+        path.qself.is_none()
+            && path.path.segments.len() == 1
+            && path
+                .path
+                .segments
+                .first()
+                .is_some_and(|segment| self.local_value_binding_visible(&segment.ident.to_string()))
     }
 
     fn insert_variable_candidates(
@@ -3219,6 +3568,12 @@ impl<'ast> Visit<'ast> for CollectMethodVisitor {
 }
 
 impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
+    fn visit_block(&mut self, block: &'ast syn::Block) {
+        self.push_local_value_scope();
+        visit::visit_block(self, block);
+        self.pop_local_value_scope();
+    }
+
     fn visit_attribute(&mut self, attribute: &'ast syn::Attribute) {
         self.add_macro_path(attribute.path());
         self.add_item_path(attribute.path());
@@ -3276,11 +3631,14 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.insert_variable_candidates(name, type_ref, candidates);
         }
         visit::visit_local(self, local);
+        self.bind_local_value_names(&local.pat);
     }
 
     fn visit_expr_call(&mut self, call: &'ast ExprCall) {
         if let Expr::Path(path) = call.func.as_ref() {
-            let resolved_callables = if path.qself.is_some() {
+            let resolved_callables = if self.expr_path_is_local_value(path) {
+                Vec::new()
+            } else if path.qself.is_some() {
                 self.resolver.resolve_qself_call(path)
             } else {
                 self.resolver.resolve_call_path(&path.path)
@@ -3329,11 +3687,14 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             if let Some(match_type) = &match_type {
                 self.add_pattern_bindings_for_type(&arm.pat, match_type);
             }
+            self.push_local_value_scope();
+            self.bind_local_value_names(&arm.pat);
             self.visit_pat(&arm.pat);
             if let Some((_, guard)) = &arm.guard {
                 self.visit_expr(guard);
             }
             self.visit_expr(&arm.body);
+            self.pop_local_value_scope();
             self.variables = variables;
             self.variable_candidates = variable_candidates;
         }
@@ -3348,12 +3709,16 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.bind_single_payload_pattern(&expr_let.pat, type_ref);
             }
             self.visit_expr(&expr_let.expr);
+            self.push_local_value_scope();
+            self.bind_local_value_names(&expr_let.pat);
             self.visit_pat(&expr_let.pat);
+            self.visit_block(&expr_if.then_branch);
+            self.pop_local_value_scope();
         } else {
             self.visit_expr(&expr_if.cond);
+            self.visit_block(&expr_if.then_branch);
         }
 
-        self.visit_block(&expr_if.then_branch);
         self.variables = outer_variables.clone();
         self.variable_candidates = outer_variable_candidates.clone();
 
@@ -3362,6 +3727,42 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         }
         self.variables = outer_variables;
         self.variable_candidates = outer_variable_candidates;
+    }
+
+    fn visit_expr_while(&mut self, expr_while: &'ast syn::ExprWhile) {
+        if let Expr::Let(expr_let) = expr_while.cond.as_ref() {
+            let type_arguments = self.expression_type_arguments(&expr_let.expr);
+            if let [type_ref] = type_arguments.as_slice() {
+                self.bind_single_payload_pattern(&expr_let.pat, type_ref);
+            }
+            self.visit_expr(&expr_let.expr);
+            self.push_local_value_scope();
+            self.bind_local_value_names(&expr_let.pat);
+            self.visit_pat(&expr_let.pat);
+            self.visit_block(&expr_while.body);
+            self.pop_local_value_scope();
+        } else {
+            self.visit_expr(&expr_while.cond);
+            self.visit_block(&expr_while.body);
+        }
+    }
+
+    fn visit_expr_for_loop(&mut self, expr_for_loop: &'ast syn::ExprForLoop) {
+        self.visit_expr(&expr_for_loop.expr);
+        self.push_local_value_scope();
+        self.bind_local_value_names(&expr_for_loop.pat);
+        self.visit_pat(&expr_for_loop.pat);
+        self.visit_block(&expr_for_loop.body);
+        self.pop_local_value_scope();
+    }
+
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        self.push_local_value_scope();
+        for input in &closure.inputs {
+            self.bind_local_value_names(input);
+        }
+        visit::visit_expr_closure(self, closure);
+        self.pop_local_value_scope();
     }
 
     fn visit_expr_macro(&mut self, expr: &'ast ExprMacro) {
@@ -3510,6 +3911,10 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_expr_path(&mut self, path: &'ast ExprPath) {
+        if self.expr_path_is_local_value(path) {
+            visit::visit_expr_path(self, path);
+            return;
+        }
         self.add_expr_path_call(path);
         if path.qself.is_none() {
             if is_conversion_adapter_path(&path.path, "Into", "into") {
@@ -5317,6 +5722,42 @@ fn binding_name_and_type(pattern: &Pat) -> Option<(String, Option<&Type>)> {
     }
 }
 
+fn collect_pattern_ident_names(pattern: &Pat, names: &mut BTreeSet<String>) {
+    match pattern {
+        Pat::Ident(ident) => {
+            names.insert(ident.ident.to_string());
+        }
+        Pat::Reference(reference) => collect_pattern_ident_names(&reference.pat, names),
+        Pat::Type(pat_type) => collect_pattern_ident_names(&pat_type.pat, names),
+        Pat::Tuple(tuple) => {
+            for element in &tuple.elems {
+                collect_pattern_ident_names(element, names);
+            }
+        }
+        Pat::TupleStruct(tuple) => {
+            for element in &tuple.elems {
+                collect_pattern_ident_names(element, names);
+            }
+        }
+        Pat::Struct(item_struct) => {
+            for field in &item_struct.fields {
+                collect_pattern_ident_names(&field.pat, names);
+            }
+        }
+        Pat::Slice(slice) => {
+            for element in &slice.elems {
+                collect_pattern_ident_names(element, names);
+            }
+        }
+        Pat::Or(or) => {
+            for case in &or.cases {
+                collect_pattern_ident_names(case, names);
+            }
+        }
+        _ => {}
+    }
+}
+
 fn token_path_candidates(tokens: &TokenStream) -> Vec<Vec<String>> {
     let mut candidates = Vec::new();
     collect_token_path_candidates(tokens, &mut candidates);
@@ -5425,6 +5866,12 @@ fn collect_token_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
             TokenTree::Punct(_) | TokenTree::Literal(_) => {}
         }
     }
+}
+
+fn token_stream_mentions_ident(tokens: &TokenStream, ident: &str) -> bool {
+    let mut idents = BTreeSet::new();
+    collect_token_idents(tokens, &mut idents);
+    idents.contains(ident)
 }
 
 fn macro_generated_reference_candidate(ident: &str) -> bool {
