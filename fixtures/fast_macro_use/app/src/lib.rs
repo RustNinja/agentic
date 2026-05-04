@@ -1,10 +1,15 @@
 use macro_helpers::{fixture_attr, FixtureDerive};
 use opensourced::opensourced;
-use shared::{fixture_value as selected_value, SharedRecord};
-use util::{make_util, Useful};
+use shared::{
+    fixture_value as selected_value,
+    prelude::{exported_nested, SharedAlias, SharedMode, FEATURE_FLAG},
+    SharedRecord, SHARED_STATIC,
+};
+use util::{make_util, Useful, UtilValue};
 
 use crate::grouped::{dead_grouped as local_shadow, live_grouped};
 use crate::removed::dead_fn as selected_shadow;
+use crate::reexports::reexported_nested;
 
 pub(crate) mod generated_types {
     include!("generated.rs");
@@ -31,6 +36,20 @@ mod grouped {
 mod removed {
     pub fn dead_fn() -> u32 {
         99
+    }
+}
+
+#[allow(unused_imports)]
+mod reexports {
+    pub use shared::dead_shared as dead_reexport;
+    pub use shared::nested::nested_value as reexported_nested;
+}
+
+mod inline_child {
+    use super::{RootDto, SharedMode};
+
+    pub fn child_score(dto: &RootDto) -> u32 {
+        SharedMode::Fast(dto.value).score()
     }
 }
 
@@ -80,10 +99,25 @@ pub fn open_macro_use_entry(input: u32) -> u32 {
     let util: util::UtilValue = make_util(input);
     let record = SharedRecord::new(selected_value());
     let dto = RootDto::new(record.value);
+    let mode = SharedMode::Fast(record.value);
+    let alias_value: SharedAlias = selected_value();
+    let const_mix = FEATURE_FLAG + SHARED_STATIC + exported_nested() + reexported_nested();
 
     local_sum!(
-        shared::shared_macro!(dto.value) + live_grouped() + util.useful(),
-        generated.value() + selected_shadow + local_shadow + closure(1) + via_match + via_loop
+        shared::shared_macro!(dto.value)
+            + live_grouped()
+            + util.useful()
+            + UtilValue::BONUS
+            + mode.score()
+            + inline_child::child_score(&dto),
+        generated.value()
+            + selected_shadow
+            + local_shadow
+            + closure(1)
+            + via_match
+            + via_loop
+            + alias_value
+            + const_mix
     )
 }
 

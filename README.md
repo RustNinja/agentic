@@ -343,8 +343,11 @@ with different source shapes and then run the reducer against them:
   removed from the slice.
 - `fast_macro_use.rs`: a checked-in tiny multi-package corpus that exercises
   renamed imports with local shadows, custom derive and attribute proc macros,
-  macro_rules definitions, retained include-generated source, trait imports,
-  and dead item/package pruning without waiting on a large repository.
+  macro_rules definitions, retained include-generated source, prelude and
+  module reexports, inline child imports, type aliases, const/static items,
+  enums, associated trait items, trait imports, and dead item/package pruning
+  without waiting on a large repository. Run `scripts/fast_fixture_loop.sh` for
+  the shortest source-check plus generated-slice check loop.
 
 See `docs/uniffi_slicer_experiment.md` for the UniFFI fixture rationale and
 verified result.

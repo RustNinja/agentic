@@ -153,7 +153,10 @@ The useful corpus pattern is:
 - strict mode with `--deny-warnings`, `--feedback`, repair loops, and explicit
   package/target Cargo args.
 - one tiny checked-in stress workspace for fast macro/use iteration, so common
-  graph and render regressions are caught before running a large repository.
+  graph and render regressions are caught before running a large repository;
+- one scriptable short loop that checks the stress workspace source and the
+  generated slice, so production-hardening changes do not require a Litter run
+  for first feedback.
 
 For Litter-like UniFFI/mobile crates, the most important acceptance checks are:
 

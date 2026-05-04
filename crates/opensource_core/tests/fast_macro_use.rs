@@ -30,19 +30,37 @@ fn slices_fast_macro_use_fixture_and_compiles() {
     assert!(app.contains("fixture_attr"));
     assert!(app.contains("use crate::generated_types"));
     assert!(app.contains("include!(\"generated.rs\")"));
+    assert!(app.contains("mod inline_child"));
+    assert!(app.contains("mod reexports"));
+    assert!(app.contains("reexported_nested"));
+    assert!(app.contains("SharedMode"));
+    assert!(app.contains("SharedAlias"));
+    assert!(app.contains("FEATURE_FLAG"));
+    assert!(app.contains("SHARED_STATIC"));
+    assert!(app.contains("UtilValue::BONUS"));
     assert!(!app.contains("dead_fn as selected_shadow"));
     assert!(!app.contains("dead_grouped as local_shadow"));
+    assert!(!app.contains("dead_reexport"));
     assert!(!app.contains("unused_macro"));
     assert!(!app.contains("dead_public_api"));
 
     let shared = read(output.join("shared/src/lib.rs"));
+    assert!(shared.contains("pub type SharedAlias"));
+    assert!(shared.contains("pub const FEATURE_FLAG"));
+    assert!(shared.contains("pub static SHARED_STATIC"));
+    assert!(shared.contains("pub enum SharedMode"));
+    assert!(shared.contains("pub mod prelude"));
     assert!(shared.contains("pub fn fixture_value"));
     assert!(shared.contains("pub fn helper_marker"));
     assert!(!shared.contains("dead_shared"));
     assert!(!shared.contains("dead_nested"));
+    assert!(!shared.contains("DeadEnum"));
+    assert!(!shared.contains("dead_prelude"));
 
     let util = read(output.join("util/src/lib.rs"));
     assert!(util.contains("pub trait Useful"));
+    assert!(util.contains("type Output"));
+    assert!(util.contains("const BONUS"));
     assert!(util.contains("pub fn make_util"));
     assert!(!util.contains("dead_util"));
 

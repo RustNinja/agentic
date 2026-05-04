@@ -1,12 +1,20 @@
 pub trait Useful {
-    fn useful(&self) -> u32;
+    type Output;
+
+    const BONUS: u32;
+
+    fn useful(&self) -> Self::Output;
 }
 
 pub struct UtilValue(pub u32);
 
 impl Useful for UtilValue {
-    fn useful(&self) -> u32 {
-        self.0 + helper()
+    type Output = u32;
+
+    const BONUS: u32 = 6;
+
+    fn useful(&self) -> Self::Output {
+        self.0 + helper() + Self::BONUS
     }
 }
 
