@@ -66,6 +66,9 @@ machine-applicable suggestions.
 Dynamic dispatch blockers such as retained `fn(...)` pointer surfaces and
 `dyn Trait` objects include package/module/file/line details in the structured
 hazard payload.
+Retained Rust `include!`, unresolved/external/absolute include assets, OUT_DIR
+include assets, and unmodeled `env!`/`option_env!` calls also include the same
+location details.
 
 ## Litter Feedback Loop
 

@@ -1217,73 +1217,80 @@ fn add_syntactic_production_hazards(
 ) {
     let counts = syntactic_hazard_counts(project, reduced);
     if counts.source_include_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "source_include_macros",
             "error",
             format!(
                 "{} retained include! macro(s) inject Rust source outside the static reachability graph",
                 counts.source_include_macros
             ),
+            counts.source_include_details,
         ));
     }
     if counts.out_dir_source_include_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "out_dir_source_include_macros",
             "error",
             format!(
                 "{} retained include! macro(s) read generated Rust from OUT_DIR; production slicing cannot semantically model build-generated source",
                 counts.out_dir_source_include_macros
             ),
+            counts.out_dir_source_include_details,
         ));
     }
     if counts.nonliteral_file_include_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "nonliteral_file_include_macros",
             "error",
             format!(
                 "{} retained include_str!/include_bytes! macro(s) use paths the slicer cannot statically resolve",
                 counts.nonliteral_file_include_macros
             ),
+            counts.nonliteral_file_include_details,
         ));
     }
     if counts.out_dir_file_include_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "out_dir_file_include_macros",
             "error",
             format!(
                 "{} retained include_str!/include_bytes! macro(s) read generated files from OUT_DIR; production slicing cannot semantically model build-generated assets",
                 counts.out_dir_file_include_macros
             ),
+            counts.out_dir_file_include_details,
         ));
     }
     if counts.absolute_file_include_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "absolute_file_include_macros",
             "error",
             format!(
                 "{} retained include_str!/include_bytes! macro(s) use absolute paths that would read outside the generated slice",
                 counts.absolute_file_include_macros
             ),
+            counts.absolute_file_include_details,
         ));
     }
     if counts.external_file_include_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "external_file_include_macros",
             "error",
             format!(
                 "{} retained include_str!/include_bytes! macro(s) resolve outside their package root",
                 counts.external_file_include_macros
             ),
+            counts.external_file_include_details,
         ));
     }
     if counts.compile_env_macros > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "compile_env_macros",
             "error",
             format!(
                 "{} retained env!/option_env! macro(s) read compile-time environment outside the manifest model",
                 counts.compile_env_macros
             ),
+            counts.compile_env_details,
         ));
     }
     if counts.custom_attribute_macros > 0 {
@@ -1381,15 +1388,22 @@ fn add_reduction_evidence_production_hazards(
 #[derive(Default)]
 struct SyntacticHazardCounts {
     source_include_macros: usize,
+    source_include_details: Vec<ProductionHazardDetail>,
     out_dir_source_include_macros: usize,
+    out_dir_source_include_details: Vec<ProductionHazardDetail>,
     nonliteral_file_include_macros: usize,
+    nonliteral_file_include_details: Vec<ProductionHazardDetail>,
     out_dir_file_include_macros: usize,
+    out_dir_file_include_details: Vec<ProductionHazardDetail>,
     absolute_file_include_macros: usize,
+    absolute_file_include_details: Vec<ProductionHazardDetail>,
     external_file_include_macros: usize,
+    external_file_include_details: Vec<ProductionHazardDetail>,
     custom_attribute_macros: usize,
     custom_derive_macros: usize,
     custom_macro_invocations: usize,
     compile_env_macros: usize,
+    compile_env_details: Vec<ProductionHazardDetail>,
     function_pointer_surfaces: usize,
     function_pointer_details: Vec<ProductionHazardDetail>,
     trait_object_surfaces: usize,
@@ -1401,15 +1415,28 @@ struct SyntacticHazardCounts {
 impl SyntacticHazardCounts {
     fn add(&mut self, other: Self) {
         self.source_include_macros += other.source_include_macros;
+        self.source_include_details
+            .extend(other.source_include_details);
         self.out_dir_source_include_macros += other.out_dir_source_include_macros;
+        self.out_dir_source_include_details
+            .extend(other.out_dir_source_include_details);
         self.nonliteral_file_include_macros += other.nonliteral_file_include_macros;
+        self.nonliteral_file_include_details
+            .extend(other.nonliteral_file_include_details);
         self.out_dir_file_include_macros += other.out_dir_file_include_macros;
+        self.out_dir_file_include_details
+            .extend(other.out_dir_file_include_details);
         self.absolute_file_include_macros += other.absolute_file_include_macros;
+        self.absolute_file_include_details
+            .extend(other.absolute_file_include_details);
         self.external_file_include_macros += other.external_file_include_macros;
+        self.external_file_include_details
+            .extend(other.external_file_include_details);
         self.custom_attribute_macros += other.custom_attribute_macros;
         self.custom_derive_macros += other.custom_derive_macros;
         self.custom_macro_invocations += other.custom_macro_invocations;
         self.compile_env_macros += other.compile_env_macros;
+        self.compile_env_details.extend(other.compile_env_details);
         self.function_pointer_surfaces += other.function_pointer_surfaces;
         self.function_pointer_details
             .extend(other.function_pointer_details);
@@ -1617,8 +1644,14 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
         if macro_path_ends_with(mac, "include") {
             if macro_tokens_reference_out_dir(&mac.tokens) {
                 self.counts.out_dir_source_include_macros += 1;
+                self.counts
+                    .out_dir_source_include_details
+                    .push(self.span_detail(mac));
             } else {
                 self.counts.source_include_macros += 1;
+                self.counts
+                    .source_include_details
+                    .push(self.span_detail(mac));
             }
         } else if macro_path_ends_with(mac, "include_str")
             || macro_path_ends_with(mac, "include_bytes")
@@ -1666,6 +1699,10 @@ impl SyntacticHazardVisitor {
     }
 
     fn type_surface_detail<T: Spanned>(&self, node: &T) -> ProductionHazardDetail {
+        self.span_detail(node)
+    }
+
+    fn span_detail<T: Spanned>(&self, node: &T) -> ProductionHazardDetail {
         ProductionHazardDetail {
             subject: self.location.subject(),
             package: Some(self.location.package.clone()),
@@ -1688,28 +1725,38 @@ impl SyntacticHazardVisitor {
             return;
         }
         self.counts.compile_env_macros += 1;
+        self.counts.compile_env_details.push(self.span_detail(mac));
     }
 
     fn visit_file_include_macro(&mut self, mac: &Macro) {
         if macro_tokens_reference_out_dir(&mac.tokens) {
             self.counts.out_dir_file_include_macros += 1;
+            self.counts
+                .out_dir_file_include_details
+                .push(self.span_detail(mac));
             return;
         }
 
         let Some(path) = static_include_path(&mac.tokens) else {
             self.counts.nonliteral_file_include_macros += 1;
+            self.counts
+                .nonliteral_file_include_details
+                .push(self.span_detail(mac));
             return;
         };
-        self.count_file_include_path(&path);
+        self.count_file_include_path(mac, &path);
     }
 
-    fn count_file_include_path(&mut self, path: &StaticIncludePath) {
+    fn count_file_include_path(&mut self, mac: &Macro, path: &StaticIncludePath) {
         let Some(context) = &self.include_context else {
             return;
         };
         let candidate = match path {
             StaticIncludePath::Absolute(_) => {
                 self.counts.absolute_file_include_macros += 1;
+                self.counts
+                    .absolute_file_include_details
+                    .push(self.span_detail(mac));
                 return;
             }
             StaticIncludePath::SourceRelative(path) => context.source_dir.join(path),
@@ -1721,6 +1768,9 @@ impl SyntacticHazardVisitor {
             .is_ok_and(|path| !path.starts_with(&context.package_root))
         {
             self.counts.external_file_include_macros += 1;
+            self.counts
+                .external_file_include_details
+                .push(self.span_detail(mac));
         }
     }
 }
@@ -2520,11 +2570,20 @@ pub fn entry() -> &'static str {
         })
         .expect("reduction should succeed");
 
-        assert!(report
+        let source_include = report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "source_include_macros" && hazard.severity == "error"));
+            .find(|hazard| hazard.code == "source_include_macros" && hazard.severity == "error")
+            .expect("source include hazard should be reported");
+        assert!(source_include.details.iter().any(|detail| {
+            detail.subject == "app"
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.start_line == Some(5)
+        }));
         assert!(report.production.hazards.iter().any(|hazard| {
             hazard.code == "out_dir_source_include_macros" && hazard.severity == "error"
         }));
@@ -2540,12 +2599,18 @@ pub fn entry() -> &'static str {
             .iter()
             .any(|hazard| hazard.code == "absolute_file_include_macros"
                 && hazard.severity == "error"));
-        assert!(report
+        let external_include = report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "external_file_include_macros"
-                && hazard.severity == "error"));
+            .find(|hazard| {
+                hazard.code == "external_file_include_macros" && hazard.severity == "error"
+            })
+            .expect("external include hazard should be reported");
+        assert!(external_include
+            .details
+            .iter()
+            .any(|detail| detail.start_line == Some(9)));
         assert_eq!(report.production.status, "hazards_detected");
     }
 
@@ -2581,11 +2646,20 @@ pub fn entry() -> (&'static str, Option<&'static str>) {
         })
         .expect("reduction should succeed");
 
-        assert!(report
+        let hazard = report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "compile_env_macros" && hazard.severity == "error"));
+            .find(|hazard| hazard.code == "compile_env_macros" && hazard.severity == "error")
+            .expect("compile env hazard should be reported");
+        assert!(hazard.details.iter().any(|detail| {
+            detail.subject == "app"
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.start_line == Some(5)
+        }));
         assert_eq!(report.production.status, "hazards_detected");
     }
 

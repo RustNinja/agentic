@@ -61,7 +61,9 @@ assets, output safety, or product diagnostics by itself.
   changes compiled behavior.
 - Retained `include!` Rust source files must fail closed even when their paths
   are static and copied, because the included Rust is outside the current
-  reachability graph.
+  reachability graph. Include and compile-time environment hazards report
+  package/module/file/line details so a production run points at the retained
+  source surface directly.
 - Retained `env!` or `option_env!` macros must fail closed unless they read
   Cargo manifest-derived package metadata, because they can embed machine-local
   compile-time state.
