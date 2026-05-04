@@ -2083,6 +2083,73 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
 }
 
 #[test]
+fn preserves_replace_tables_with_resolved_paths() {
+    let workspace = temp_path("replace-table-workspace");
+    let output = temp_path("replace-table-output");
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[replace]
+"replace-helper:0.1.0" = { path = "replace-helper" }
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+    write(
+        workspace.join("replace-helper/Cargo.toml"),
+        r#"[package]
+name = "replace-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        workspace.join("replace-helper/src/lib.rs"),
+        r#"pub fn value() -> i32 {
+    7
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let root_manifest = read(output.join("Cargo.toml"));
+    assert!(root_manifest.contains("replace-helper:0.1.0"));
+    assert!(root_manifest.contains("path = \"/"));
+    assert!(!root_manifest.contains("path = \"replace-helper\""));
+}
+
+#[test]
 fn retains_external_extension_trait_imports_for_method_resolution() {
     let workspace = temp_path("extension-trait-workspace");
     let output = temp_path("extension-trait-output");

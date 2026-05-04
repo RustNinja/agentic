@@ -1223,6 +1223,9 @@ fn write_workspace_manifest(
     if let Some(patch) = transformed_patch_tables(project) {
         root.insert("patch".to_string(), patch);
     }
+    if let Some(replace) = transformed_replace_table(project) {
+        root.insert("replace".to_string(), replace);
+    }
     fs::write(
         output_root.join("Cargo.toml"),
         toml::to_string_pretty(&Value::Table(root))?,
@@ -1250,6 +1253,19 @@ fn transformed_patch_tables(project: &Project) -> Option<Value> {
     }
 
     (!patches.is_empty()).then_some(Value::Table(patches))
+}
+
+fn transformed_replace_table(project: &Project) -> Option<Value> {
+    let source_replacements = project.workspace.manifest.get("replace")?.as_table()?;
+    let mut replacements = Table::new();
+    for (name, dependency) in source_replacements {
+        replacements.insert(
+            name.clone(),
+            dependency_value_with_resolved_path(dependency, &project.workspace.root),
+        );
+    }
+
+    (!replacements.is_empty()).then_some(Value::Table(replacements))
 }
 
 fn write_package_manifest(

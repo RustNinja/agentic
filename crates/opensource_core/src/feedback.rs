@@ -879,13 +879,9 @@ mod tests {
         let _ = fs::remove_dir_all(&root);
         fs::create_dir_all(&root).unwrap();
         let fake_cargo = root.join("fake-cargo");
-        let args_path = root.join("args.txt");
         fs::write(
             &fake_cargo,
-            format!(
-                "#!/bin/sh\nprintf '%s\\n' \"$@\" > '{}'\necho '{{\"reason\":\"build-finished\",\"success\":true}}'\n",
-                args_path.display()
-            ),
+            "#!/bin/sh\nprintf 'ARG:%s\\n' \"$@\" >&2\necho '{\"reason\":\"build-finished\",\"success\":true}'\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&fake_cargo).unwrap().permissions();
@@ -907,15 +903,15 @@ mod tests {
         )
         .expect("fake cargo should run");
 
-        let args = fs::read_to_string(&args_path).unwrap();
         assert!(report.success);
         assert_eq!(
             report.cargo_args,
             ["--all-features", "--target", "wasm32-unknown-unknown"]
         );
         assert_eq!(report.timeout_ms, Some(1_000));
-        assert!(args.contains("--all-features"));
-        assert!(args.contains("--target\nwasm32-unknown-unknown"));
+        assert!(report.stderr.contains("ARG:--all-features"));
+        assert!(report.stderr.contains("ARG:--target"));
+        assert!(report.stderr.contains("ARG:wasm32-unknown-unknown"));
 
         let _ = fs::remove_dir_all(root);
     }
@@ -935,13 +931,9 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
         let fake_cargo = root.join("fake-cargo");
-        let cwd_path = root.join("cwd.txt");
         fs::write(
             &fake_cargo,
-            format!(
-                "#!/bin/sh\npwd > '{}'\necho '{{\"reason\":\"build-finished\",\"success\":true}}'\n",
-                cwd_path.display()
-            ),
+            "#!/bin/sh\npwd >&2\necho '{\"reason\":\"build-finished\",\"success\":true}'\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&fake_cargo).unwrap().permissions();
@@ -959,7 +951,7 @@ mod tests {
         )
         .expect("fake cargo should run");
 
-        let actual = PathBuf::from(fs::read_to_string(&cwd_path).unwrap().trim()).canonicalize();
+        let actual = PathBuf::from(report.stderr.trim()).canonicalize();
         let expected = workspace.canonicalize();
         assert_eq!(actual.unwrap(), expected.unwrap());
         assert_eq!(report.working_dir.as_deref(), Some(workspace.as_path()));
@@ -982,13 +974,9 @@ mod tests {
         fs::create_dir_all(&workspace).unwrap();
         fs::write(workspace.join("Cargo.toml"), "[workspace]\n").unwrap();
         let fake_cargo = root.join("fake-cargo");
-        let target_path = root.join("target-dir.txt");
         fs::write(
             &fake_cargo,
-            format!(
-                "#!/bin/sh\nprintf '%s' \"$CARGO_TARGET_DIR\" > '{}'\necho '{{\"reason\":\"build-finished\",\"success\":true}}'\n",
-                target_path.display()
-            ),
+            "#!/bin/sh\nprintf '%s' \"$CARGO_TARGET_DIR\" >&2\necho '{\"reason\":\"build-finished\",\"success\":true}'\n",
         )
         .unwrap();
         let mut permissions = fs::metadata(&fake_cargo).unwrap().permissions();
@@ -1008,10 +996,7 @@ mod tests {
         )
         .expect("fake cargo should run");
 
-        assert_eq!(
-            fs::read_to_string(&target_path).unwrap(),
-            expected_target.display().to_string()
-        );
+        assert_eq!(report.stderr, expected_target.display().to_string());
         assert_eq!(
             report.target_dir.as_deref(),
             Some(expected_target.as_path())
