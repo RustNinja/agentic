@@ -51,7 +51,11 @@ assets, while retained macros and non-root cfg surfaces are preserved and
 require compiler feedback. Selected roots behind concrete Cargo feature cfg
 gates are reported with structured details and can proceed to feedback when the
 same corpus run passes matching `--features` values or `--all-features`; cfg
-gates without feature hints still fail production before feedback. Use
+gates without feature hints still fail production before feedback. Retained
+non-root feature cfg hints now trigger an additional production matrix check,
+with source and generated matrix reports recorded next to the primary feedback
+report, so corpus rows can distinguish primary feedback from feature-surface
+validation. Use
 `--deny-warnings` for production gates that
 require warning-free generated feedback. Each corpus row includes
 the slicer's authoritative validation verdict, production-readiness status,

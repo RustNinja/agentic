@@ -79,7 +79,10 @@ assets, output safety, or product diagnostics by itself.
   `--cargo-check-arg --all-features`; cfg gates without feature hints remain
   production-blocking. Retained non-root cfg surfaces also report structured
   package/module/file/cfg details so corpus and matrix planners can validate the
-  selected shape without scraping warning text.
+  selected shape without scraping warning text. The first matrix planner is
+  bounded to a concrete Cargo feature union derived from retained cfg details;
+  it validates a matching source baseline and generated slice after primary
+  feedback, then records `production_matrix` gates before final acceptance.
 - Dependency aliases, workspace dependencies, optional dependency features, and
   target-specific dependencies need Cargo's resolver model.
 - Retained direct or target-specific path dependencies outside the workspace are

@@ -1103,6 +1103,8 @@ def build_row(
     validation_status = (validation_report or {}).get("status")
     validation_gates = validation_gate_statuses(validation_report)
     cargo_check_args = validation_cargo_check_args(args, roots)
+    if validation_status == "rejected" and validation_gates.get("production_matrix") == "failed":
+        classification = "slice_production_matrix_failed"
     passed = classification in {
         "slice_check_passed",
         "slice_preflight_passed",

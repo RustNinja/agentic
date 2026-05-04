@@ -131,7 +131,10 @@ remain reported in `slice-report.json`; when their structured
 `suggested_cargo_args` are covered by the supplied `--cargo-check-arg` values
 or by `--all-features`, the production gate downgrades them to compiler
 feedback instead of failing before validation. Unsupported cfg forms and other
-error hazards remain fail-closed.
+error hazards remain fail-closed. Retained non-root feature cfg surfaces also
+feed a bounded production matrix pass: after the primary feedback loop, the CLI
+runs matching source and generated checks for uncovered concrete feature hints
+and writes `slice-baseline-matrix-N.json` plus `slice-feedback-matrix-N.json`.
 Feedback reports classify unresolved compiler diagnostics into widening
 candidates and production hazards, so missing paths, items, methods, crates,
 module files, timeouts, and manifest-shape failures can be triaged without

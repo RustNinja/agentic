@@ -278,6 +278,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         run_plain_check_gate(&options, &mut validation)?;
     }
 
+    if let Err(error) =
+        run_production_validation_matrix(&options, &report.production, &mut validation)
+    {
+        let reason = error.to_string();
+        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        return Err(reason.into());
+    }
+
     record_final_production_readiness(&options, &mut validation);
     finish_validation(&options, &mut validation, "accepted", None)?;
     Ok(())
@@ -366,6 +374,13 @@ struct ValidationAttemptReport {
 struct FeedbackWideningState {
     diagnostics: Vec<CheckDiagnostic>,
     seen_root_sets: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ProductionMatrixEntry {
+    name: String,
+    reason: String,
+    cargo_args: Vec<String>,
 }
 
 impl ValidationReport {
@@ -692,11 +707,23 @@ fn run_preflight(options: &CliOptions) -> Result<PreflightReport, Box<dyn std::e
 
 fn run_baseline_check(options: &CliOptions) -> Result<CheckReport, Box<dyn std::error::Error>> {
     println!("baseline: cargo check --message-format=json");
+    run_baseline_check_with_args(
+        options,
+        options.cargo_check_args.clone(),
+        baseline_target_dir(options),
+    )
+}
+
+fn run_baseline_check_with_args(
+    options: &CliOptions,
+    cargo_args: Vec<String>,
+    target_dir: PathBuf,
+) -> Result<CheckReport, Box<dyn std::error::Error>> {
     check_workspace(CheckOptions {
         manifest_path: options.workspace_root.join("Cargo.toml"),
-        target_dir: Some(baseline_target_dir(options)),
+        target_dir: Some(target_dir),
         timeout: options.feedback_timeout,
-        cargo_args: options.cargo_check_args.clone(),
+        cargo_args,
     })
 }
 
@@ -1694,6 +1721,290 @@ fn run_feedback_repair_loop(
     .into())
 }
 
+fn run_production_validation_matrix(
+    options: &CliOptions,
+    production: &opensource_core::ProductionReadinessReport,
+    validation: &mut ValidationReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !options.production_preset {
+        return Ok(());
+    }
+
+    let entries = production_validation_matrix_entries(options, production);
+    if entries.is_empty() {
+        validation.gates.push(ValidationGateReport {
+            name: "production_matrix".to_string(),
+            status: "not_required".to_string(),
+            reason: "no uncovered concrete feature cfg matrix entries were discovered".to_string(),
+            report_path: slice_report_path(options),
+            error_count: None,
+            warning_count: None,
+            semantic_warning_hazards: None,
+        });
+        return Ok(());
+    }
+
+    let mut baseline_limited = false;
+    for (index, entry) in entries.iter().enumerate() {
+        let attempt = index + 1;
+        let baseline_report_path = production_matrix_baseline_report_path(options, attempt);
+        let feedback_report_path = production_matrix_feedback_report_path(options, attempt);
+        println!(
+            "production matrix {attempt}/{} ({}): cargo check --message-format=json {}",
+            entries.len(),
+            entry.name,
+            entry.cargo_args.join(" ")
+        );
+
+        let baseline = run_baseline_check_with_args(
+            options,
+            entry.cargo_args.clone(),
+            production_matrix_baseline_target_dir(options, attempt),
+        )?;
+        write_report(&baseline, &baseline_report_path)?;
+        validation.add_check_gate(
+            "baseline-matrix",
+            if baseline.success {
+                "passed"
+            } else if options.allow_baseline_failures {
+                "baseline_allowed"
+            } else {
+                "failed"
+            },
+            if baseline.success {
+                "source workspace matrix cargo check passed"
+            } else if options.allow_baseline_failures {
+                "source workspace matrix baseline failed but --allow-baseline-failures is enabled"
+            } else {
+                "source workspace matrix baseline failed"
+            },
+            &baseline,
+            Some(baseline_report_path.clone()),
+            0,
+        );
+        if !baseline.success && !options.allow_baseline_failures {
+            return Err(format!(
+                "source workspace failed production matrix baseline {}; report written to {}",
+                entry.name,
+                baseline_report_path.display()
+            )
+            .into());
+        }
+
+        let report = check_workspace(CheckOptions {
+            manifest_path: options.output_root.join("Cargo.toml"),
+            target_dir: Some(feedback_target_dir(options)),
+            timeout: options.feedback_timeout,
+            cargo_args: entry.cargo_args.clone(),
+        })?;
+        write_report(&report, &feedback_report_path)?;
+        print_feedback(&report, options.feedback_limit, &feedback_report_path);
+
+        let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, Some(&baseline));
+        let repairable_warnings = repairable_warning_count(&report.diagnostics);
+        if feedback_is_accepted(&report, Some(&baseline), options.deny_warnings) {
+            record_feedback_attempt(
+                validation,
+                "production-matrix",
+                attempt,
+                "accepted",
+                &entry.reason,
+                &report,
+                feedback_report_path,
+                false,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            continue;
+        }
+        if options.allow_baseline_failures
+            && baseline_limited_feedback_is_accepted(
+                &report,
+                Some(&baseline),
+                options.deny_warnings,
+            )
+        {
+            baseline_limited = true;
+            record_feedback_attempt(
+                validation,
+                "production-matrix",
+                attempt,
+                "baseline_limited",
+                "generated matrix errors match the source matrix baseline",
+                &report,
+                feedback_report_path,
+                true,
+                semantic_warnings,
+                repairable_warnings,
+                None,
+                None,
+            );
+            continue;
+        }
+
+        record_feedback_attempt(
+            validation,
+            "production-matrix",
+            attempt,
+            if report.timed_out {
+                "timed_out"
+            } else {
+                "failed"
+            },
+            "generated workspace failed production matrix feedback",
+            &report,
+            feedback_report_path.clone(),
+            false,
+            semantic_warnings,
+            repairable_warnings,
+            None,
+            None,
+        );
+        record_feedback_gate(
+            validation,
+            "production_matrix",
+            "failed",
+            "generated workspace failed production matrix feedback",
+            &report,
+            feedback_report_path.clone(),
+            semantic_warnings,
+        );
+        return Err(format!(
+            "generated workspace failed production matrix {}; report written to {}",
+            entry.name,
+            feedback_report_path.display()
+        )
+        .into());
+    }
+
+    validation.gates.push(ValidationGateReport {
+        name: "production_matrix".to_string(),
+        status: if baseline_limited {
+            "baseline_limited"
+        } else {
+            "accepted"
+        }
+        .to_string(),
+        reason: format!(
+            "{} production feature matrix check(s) passed compiler feedback",
+            entries.len()
+        ),
+        report_path: Some(production_matrix_feedback_report_path(
+            options,
+            entries.len(),
+        )),
+        error_count: Some(0),
+        warning_count: Some(0),
+        semantic_warning_hazards: Some(0),
+    });
+    Ok(())
+}
+
+fn production_validation_matrix_entries(
+    options: &CliOptions,
+    production: &opensource_core::ProductionReadinessReport,
+) -> Vec<ProductionMatrixEntry> {
+    if !options.production_preset
+        || options
+            .cargo_check_args
+            .iter()
+            .any(|arg| arg == "--all-features")
+    {
+        return Vec::new();
+    }
+
+    let mut uncovered_features = BTreeSet::new();
+    for hazard in &production.hazards {
+        if !matches!(
+            hazard.code.as_str(),
+            "cfg_gated_roots" | "conditional_compilation_attrs"
+        ) {
+            continue;
+        }
+        for detail in &hazard.details {
+            if cfg_gate_detail_is_covered_by_args(options, detail) {
+                continue;
+            }
+            let package = detail.package.as_deref();
+            for feature in enabled_cargo_features(&detail.suggested_cargo_args) {
+                if feature_is_enabled_for_matrix_detail(
+                    &feature,
+                    package,
+                    &options.cargo_check_args,
+                ) {
+                    continue;
+                }
+                uncovered_features.insert(match package {
+                    Some(package) if !feature.contains('/') => format!("{package}/{feature}"),
+                    _ => feature,
+                });
+            }
+        }
+    }
+
+    if uncovered_features.is_empty() {
+        return Vec::new();
+    }
+
+    let mut cargo_args = options.cargo_check_args.clone();
+    cargo_args.push("--features".to_string());
+    cargo_args.push(
+        uncovered_features
+            .iter()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join(","),
+    );
+    vec![ProductionMatrixEntry {
+        name: format!(
+            "features:{}",
+            uncovered_features
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(",")
+        ),
+        reason: "production matrix validated retained feature cfg surfaces".to_string(),
+        cargo_args,
+    }]
+}
+
+fn feature_is_enabled_for_matrix_detail(
+    feature: &str,
+    package: Option<&str>,
+    cargo_args: &[String],
+) -> bool {
+    if cargo_args.iter().any(|arg| arg == "--all-features") {
+        return true;
+    }
+    let enabled = enabled_cargo_features(cargo_args);
+    enabled.contains(feature)
+        || package
+            .map(|package| enabled.contains(&format!("{package}/{feature}")))
+            .unwrap_or(false)
+}
+
+fn production_matrix_feedback_report_path(options: &CliOptions, index: usize) -> PathBuf {
+    options
+        .output_root
+        .join(format!("slice-feedback-matrix-{index}.json"))
+}
+
+fn production_matrix_baseline_report_path(options: &CliOptions, index: usize) -> PathBuf {
+    options
+        .output_root
+        .join(format!("slice-baseline-matrix-{index}.json"))
+}
+
+fn production_matrix_baseline_target_dir(options: &CliOptions, index: usize) -> PathBuf {
+    sibling_output_path(
+        &options.output_root,
+        &format!("target-baseline-matrix-{index}"),
+    )
+}
+
 fn feedback_target_dir(options: &CliOptions) -> PathBuf {
     options
         .feedback_target_dir
@@ -1798,18 +2109,29 @@ fn record_final_production_readiness(options: &CliOptions, validation: &mut Vali
         .find(|gate| gate.name == "production_readiness")
         .map(|gate| gate.status.as_str())
         .unwrap_or("missing_production_readiness");
+    let production_matrix_status = validation
+        .gates
+        .iter()
+        .rev()
+        .find(|gate| gate.name == "production_matrix")
+        .map(|gate| gate.status.as_str())
+        .unwrap_or("not_required");
     let (status, reason) = match feedback_status {
         _ if production_readiness_status == "hazards_detected" => (
             "failed",
             "production readiness reported error hazards for the final generated slice",
         ),
-        "accepted" => (
-            "accepted",
-            "production preset passed baseline, generation, preflight, target coverage, and compiler feedback",
+        _ if production_matrix_status == "failed" => (
+            "failed",
+            "production matrix validation failed for the final generated slice",
         ),
-        "baseline_limited" => (
+        _ if production_matrix_status == "baseline_limited" || feedback_status == "baseline_limited" => (
             "baseline_limited",
             "production preset matched an allowed failing source baseline; generated workspace is not cleanly production-ready",
+        ),
+        "accepted" if matches!(production_matrix_status, "accepted" | "not_required") => (
+            "accepted",
+            "production preset passed baseline, generation, preflight, target coverage, and compiler feedback",
         ),
         _ => (
             "failed",
@@ -2283,11 +2605,12 @@ mod tests {
     use super::{
         baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
-        production_readiness_blocks_validation, record_final_production_readiness,
-        record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
-        run_plain_check_gate, semantic_hazard_warning_count, slice_report_path,
-        try_widen_from_feedback, uncovered_validation_targets, validation_report_path,
-        FeedbackWideningState, ValidationGateReport, ValidationReport,
+        production_readiness_blocks_validation, production_validation_matrix_entries,
+        record_final_production_readiness, record_production_readiness_gate,
+        refresh_generated_lockfile_for_locked_validation, run_plain_check_gate,
+        semantic_hazard_warning_count, slice_report_path, try_widen_from_feedback,
+        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
+        ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -2762,6 +3085,44 @@ mod tests {
     }
 
     #[test]
+    fn production_matrix_plans_uncovered_feature_cfg_surfaces() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let report = production_report(vec![conditional_cfg_hazard("app", "extra")]);
+
+        let entries = production_validation_matrix_entries(&production, &report);
+
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "features:app/extra");
+        assert!(entries[0]
+            .cargo_args
+            .ends_with(&["--features".to_string(), "app/extra".to_string()]));
+    }
+
+    #[test]
+    fn production_matrix_skips_cfg_surfaces_covered_by_user_args() {
+        let production = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--features",
+            "--cargo-check-arg",
+            "app/extra",
+            "workspace",
+            "out",
+        ]);
+        let all_features = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--all-features",
+            "workspace",
+            "out",
+        ]);
+        let report = production_report(vec![conditional_cfg_hazard("app", "extra")]);
+
+        assert!(production_validation_matrix_entries(&production, &report).is_empty());
+        assert!(production_validation_matrix_entries(&all_features, &report).is_empty());
+    }
+
+    #[test]
     fn production_preset_records_final_readiness_after_feedback_accepts() {
         let options = parse_options(["--production", "workspace", "out"]);
         let mut validation = ValidationReport::new(&options);
@@ -2797,6 +3158,70 @@ mod tests {
             .find(|gate| gate.name == "production_ready")
             .expect("production_ready gate should be recorded");
         assert_eq!(gate.status, "failed");
+    }
+
+    #[test]
+    fn production_preset_final_readiness_tracks_matrix_baseline_limits() {
+        let options = parse_options(["--production", "workspace", "out"]);
+        let mut validation = ValidationReport::new(&options);
+        validation
+            .gates
+            .push(gate("production_readiness", "requires_feedback"));
+        validation.gates.push(gate("feedback-repair", "accepted"));
+        validation
+            .gates
+            .push(gate("production_matrix", "baseline_limited"));
+
+        record_final_production_readiness(&options, &mut validation);
+
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "production_ready")
+            .expect("production_ready gate should be recorded");
+        assert_eq!(gate.status, "baseline_limited");
+    }
+
+    #[test]
+    fn production_preset_final_readiness_requires_matrix_acceptance() {
+        let options = parse_options(["--production", "workspace", "out"]);
+        let mut validation = ValidationReport::new(&options);
+        validation
+            .gates
+            .push(gate("production_readiness", "requires_feedback"));
+        validation.gates.push(gate("feedback-repair", "accepted"));
+        validation.gates.push(gate("production_matrix", "failed"));
+
+        record_final_production_readiness(&options, &mut validation);
+
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "production_ready")
+            .expect("production_ready gate should be recorded");
+        assert_eq!(gate.status, "failed");
+    }
+
+    #[test]
+    fn production_preset_final_readiness_accepts_unneeded_matrix() {
+        let options = parse_options(["--production", "workspace", "out"]);
+        let mut validation = ValidationReport::new(&options);
+        validation
+            .gates
+            .push(gate("production_readiness", "requires_feedback"));
+        validation.gates.push(gate("feedback-repair", "accepted"));
+        validation
+            .gates
+            .push(gate("production_matrix", "not_required"));
+
+        record_final_production_readiness(&options, &mut validation);
+
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "production_ready")
+            .expect("production_ready gate should be recorded");
+        assert_eq!(gate.status, "accepted");
     }
 
     #[test]
@@ -3298,6 +3723,26 @@ pub fn helper() -> usize {
             message: "root is cfg gated".to_string(),
             details: vec![opensource_core::ProductionHazardDetail {
                 subject: format!("{package}::entry"),
+                package: Some(package.to_string()),
+                module_path: None,
+                file: None,
+                start_line: None,
+                cfg: Some(format!("#[cfg(feature = \"{feature}\")]")),
+                suggested_cargo_args: vec!["--features".to_string(), feature.to_string()],
+            }],
+        }
+    }
+
+    fn conditional_cfg_hazard(
+        package: &str,
+        feature: &str,
+    ) -> opensource_core::ProductionHazardReport {
+        opensource_core::ProductionHazardReport {
+            code: "conditional_compilation_attrs".to_string(),
+            severity: "warning".to_string(),
+            message: "retained cfg surface".to_string(),
+            details: vec![opensource_core::ProductionHazardDetail {
+                subject: package.to_string(),
                 package: Some(package.to_string()),
                 module_path: None,
                 file: None,
