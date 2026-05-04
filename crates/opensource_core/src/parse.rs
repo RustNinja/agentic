@@ -4,16 +4,19 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use proc_macro2::TokenTree;
+use proc_macro2::{Span, TokenTree};
 use quote::ToTokens;
+use syn::spanned::Spanned;
 use syn::{
-    GenericArgument, ImplItem, Item, ItemImpl, ItemMod, ItemUse, PathArguments, Type, UseTree,
+    Expr, GenericArgument, ImplItem, Item, ItemImpl, ItemMod, ItemUse, Lit, Meta, PathArguments,
+    Type, UseTree,
 };
 
 use crate::{
     manifest::Workspace,
     model::{
-        CallableId, FunctionRecord, ItemId, ItemKind, ItemRecord, MethodRecord, Project, SourceFile,
+        CallableId, FunctionRecord, ItemId, ItemKind, ItemRecord, MethodRecord, Project,
+        SourceFile, SourceSpan,
     },
     reduce::is_cfg_test_attr,
 };
@@ -79,11 +82,16 @@ impl Parser {
         let text = fs::read_to_string(&file_path)?;
         let syntax = syn::parse_file(&text)
             .map_err(|error| format!("failed to parse {}: {error}", file_path.display()))?;
-        let aliases = collect_aliases(&syntax.items);
+        let parent_aliases = module_path.split_last().and_then(|_| {
+            let parent_path = &module_path[..module_path.len().saturating_sub(1)];
+            self.module_aliases
+                .get(&(package.to_string(), parent_path.to_vec()))
+        });
+        let aliases = collect_aliases(&syntax.items, parent_aliases);
         self.module_aliases
             .insert((package.to_string(), module_path.clone()), aliases.clone());
 
-        self.collect_items(package, &module_path, &syntax.items, &aliases)?;
+        self.collect_items(package, &module_path, &file_path, &syntax.items, &aliases)?;
 
         self.files.insert(
             file_path.clone(),
@@ -127,6 +135,7 @@ impl Parser {
         &mut self,
         package: &str,
         module_path: &[String],
+        file_path: &Path,
         items: &[Item],
         aliases: &HashMap<String, Vec<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
@@ -144,13 +153,14 @@ impl Parser {
                             id,
                             package: package.to_string(),
                             module_path: module_path.to_vec(),
+                            span: source_span(file_path, function.span()),
                             item: function.clone(),
                             aliases: aliases.clone(),
                         },
                     );
                 }
                 Item::Impl(item_impl) => {
-                    self.collect_impl(package, module_path, item_impl, aliases)?;
+                    self.collect_impl(package, module_path, file_path, item_impl, aliases)?;
                 }
                 Item::Struct(_)
                 | Item::Enum(_)
@@ -160,7 +170,12 @@ impl Parser {
                 | Item::Const(_)
                 | Item::Static(_)
                 | Item::Macro(_) => {
-                    if let Some((name, kind)) = item_name_and_kind(item) {
+                    if let Some((name, kind)) = item_name_and_kind(item).or_else(|| {
+                        let Item::Macro(item_macro) = item else {
+                            return None;
+                        };
+                        bitflags_struct_name(item_macro).map(|name| (name, ItemKind::Struct))
+                    }) {
                         let id = ItemId {
                             package: package.to_string(),
                             module_path: module_path.to_vec(),
@@ -172,6 +187,7 @@ impl Parser {
                             ItemRecord {
                                 package: package.to_string(),
                                 module_path: module_path.to_vec(),
+                                span: source_span(file_path, item.span()),
                                 item: item.clone(),
                                 aliases: aliases.clone(),
                             },
@@ -179,15 +195,34 @@ impl Parser {
                     }
                 }
                 Item::Mod(item_mod) => {
+                    if item_mod.attrs.iter().any(is_cfg_test_attr) {
+                        continue;
+                    }
+                    let id = ItemId {
+                        package: package.to_string(),
+                        module_path: module_path.to_vec(),
+                        name: item_mod.ident.to_string(),
+                        kind: ItemKind::Mod,
+                    };
+                    self.items.insert(
+                        id,
+                        ItemRecord {
+                            package: package.to_string(),
+                            module_path: module_path.to_vec(),
+                            span: source_span(file_path, item.span()),
+                            item: item.clone(),
+                            aliases: aliases.clone(),
+                        },
+                    );
                     if let Some((_, items)) = &item_mod.content {
                         let mut child_path = module_path.to_vec();
                         child_path.push(item_mod.ident.to_string());
-                        let child_aliases = collect_aliases(items);
+                        let child_aliases = collect_aliases(items, Some(aliases));
                         self.module_aliases.insert(
                             (package.to_string(), child_path.clone()),
                             child_aliases.clone(),
                         );
-                        self.collect_items(package, &child_path, items, &child_aliases)?;
+                        self.collect_items(package, &child_path, file_path, items, &child_aliases)?;
                     }
                 }
                 _ => {}
@@ -201,10 +236,13 @@ impl Parser {
         &mut self,
         package: &str,
         module_path: &[String],
+        file_path: &Path,
         item_impl: &ItemImpl,
         aliases: &HashMap<String, Vec<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        let Some(type_path) = local_type_path(module_path, &item_impl.self_ty, aliases) else {
+        let Some(type_path) =
+            self.canonical_impl_type_path(package, module_path, &item_impl.self_ty, aliases)
+        else {
             return Ok(());
         };
         let trait_path = item_impl
@@ -230,7 +268,9 @@ impl Parser {
                     id.clone(),
                     MethodRecord {
                         module_path: module_path.to_vec(),
+                        span: source_span(file_path, method.span()),
                         item: method.clone(),
+                        impl_generics: item_impl.generics.clone(),
                         impl_items: item_impl.items.clone(),
                         trait_input_type_paths: trait_input_type_paths.clone(),
                         aliases: aliases.clone(),
@@ -259,12 +299,28 @@ impl Parser {
 
         let name = item_mod.ident.to_string();
         let source_name = module_source_name(&name);
+        let path_attr = path_attr(item_mod);
         let file_path = module_dir.join(format!("{source_name}.rs"));
-        let mod_path = module_dir.join(&source_name).join("mod.rs");
-        let (next_file, next_dir) = if file_path.exists() {
-            (file_path, module_dir.join(&source_name))
+        let mod_path = module_dir.join(source_name).join("mod.rs");
+        let (next_file, next_dir) = if let Some(path_attr) = path_attr {
+            let path = if path_attr.is_absolute() {
+                path_attr
+            } else {
+                module_dir.join(path_attr)
+            };
+            if !path.exists() {
+                return Err(format!(
+                    "module {name} path attribute points to missing source file in package {package}: {}",
+                    path.display()
+                )
+                .into());
+            }
+            let next_dir = path.parent().unwrap_or(module_dir).to_path_buf();
+            (path, next_dir)
+        } else if file_path.exists() {
+            (file_path, module_dir.join(source_name))
         } else if mod_path.exists() {
-            (mod_path, module_dir.join(&source_name))
+            (mod_path, module_dir.join(source_name))
         } else {
             return Err(format!(
                 "module {name} has no matching source file in package {package} at {} (looked for {} and {})",
@@ -321,6 +377,106 @@ impl Parser {
 
         Ok(())
     }
+
+    fn canonical_impl_type_path(
+        &self,
+        package: &str,
+        module_path: &[String],
+        self_ty: &Type,
+        aliases: &HashMap<String, Vec<String>>,
+    ) -> Option<Vec<String>> {
+        if let Some(path) = raw_local_type_path(module_path, self_ty) {
+            let canonical = self.canonical_type_path(package, module_path, path);
+            if self.has_type_like_item(package, &canonical) {
+                return Some(canonical);
+            }
+        }
+        let path = local_type_path(module_path, self_ty, aliases)?;
+        Some(self.canonical_type_path(package, module_path, path))
+    }
+
+    fn canonical_type_path(
+        &self,
+        package: &str,
+        module_path: &[String],
+        path: Vec<String>,
+    ) -> Vec<String> {
+        if self.has_type_like_item(package, &path) {
+            return path;
+        }
+
+        if let Some(path) = self.resolve_reexported_type_path(package, &path, &mut Vec::new()) {
+            return path;
+        }
+
+        if path.len() == module_path.len() + 1 && path.starts_with(module_path) {
+            if let Some(name) = path.last() {
+                for depth in (0..module_path.len()).rev() {
+                    let mut candidate = module_path[..depth].to_vec();
+                    candidate.push(name.clone());
+                    if self.has_type_like_item(package, &candidate) {
+                        return candidate;
+                    }
+                    if let Some(path) =
+                        self.resolve_reexported_type_path(package, &candidate, &mut Vec::new())
+                    {
+                        return path;
+                    }
+                }
+            }
+        }
+
+        path
+    }
+
+    fn resolve_reexported_type_path(
+        &self,
+        package: &str,
+        path: &[String],
+        visited: &mut Vec<Vec<String>>,
+    ) -> Option<Vec<String>> {
+        if path.is_empty() || visited.iter().any(|seen| seen == path) {
+            return None;
+        }
+        visited.push(path.to_vec());
+
+        let name = path.last()?;
+        let module_path = &path[..path.len() - 1];
+        let aliases = self
+            .module_aliases
+            .get(&(package.to_string(), module_path.to_vec()))?;
+        let target = aliases.get(name)?;
+        let resolved = normalize_segments(module_path, target.clone())?;
+        if self.has_type_like_item(package, &resolved) {
+            return Some(resolved);
+        }
+        self.resolve_reexported_type_path(package, &resolved, visited)
+    }
+
+    fn has_type_like_item(&self, package: &str, path: &[String]) -> bool {
+        if path.is_empty() {
+            return false;
+        }
+        let name = path.last().expect("path is not empty");
+        let module_path = &path[..path.len() - 1];
+        [
+            ItemKind::Struct,
+            ItemKind::Enum,
+            ItemKind::Union,
+            ItemKind::Type,
+            ItemKind::Trait,
+        ]
+        .iter()
+        .any(|kind| {
+            let id = ItemId {
+                package: package.to_string(),
+                module_path: module_path.to_vec(),
+                name: name.clone(),
+                kind: *kind,
+            };
+            self.items.contains_key(&id)
+        })
+    }
 }
 
 fn automod_dir_path(item_macro: &syn::ItemMacro) -> Option<PathBuf> {
@@ -356,6 +512,7 @@ fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
         Item::Union(item) => Some((item.ident.to_string(), ItemKind::Union)),
         Item::Type(item) => Some((item.ident.to_string(), ItemKind::Type)),
         Item::Trait(item) => Some((item.ident.to_string(), ItemKind::Trait)),
+        Item::Mod(item) => Some((item.ident.to_string(), ItemKind::Mod)),
         Item::Const(item) => Some((item.ident.to_string(), ItemKind::Const)),
         Item::Static(item) => Some((item.ident.to_string(), ItemKind::Static)),
         Item::Macro(item) => item
@@ -366,14 +523,83 @@ fn item_name_and_kind(item: &Item) -> Option<(String, ItemKind)> {
     }
 }
 
-fn collect_aliases(items: &[Item]) -> HashMap<String, Vec<String>> {
-    let mut aliases = HashMap::new();
+fn bitflags_struct_name(item: &syn::ItemMacro) -> Option<String> {
+    if item
+        .mac
+        .path
+        .segments
+        .last()
+        .is_none_or(|segment| segment.ident != "bitflags")
+    {
+        return None;
+    }
+    let mut saw_struct = false;
+    for token in item.mac.tokens.clone() {
+        let TokenTree::Ident(ident) = token else {
+            continue;
+        };
+        if saw_struct {
+            return Some(ident.to_string());
+        }
+        saw_struct = ident == "struct";
+    }
+    None
+}
+
+fn source_span(file_path: &Path, span: Span) -> SourceSpan {
+    let start = span.start();
+    let end = span.end();
+    SourceSpan {
+        file: file_path.to_path_buf(),
+        start_line: start.line,
+        start_column: start.column,
+        end_line: end.line,
+        end_column: end.column,
+    }
+}
+
+fn collect_aliases(
+    items: &[Item],
+    parent_aliases: Option<&HashMap<String, Vec<String>>>,
+) -> HashMap<String, Vec<String>> {
+    let mut aliases = if items_have_super_glob_import(items) {
+        parent_aliases.cloned().unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
     for item in items {
         if let Item::Use(ItemUse { tree, .. }) = item {
             collect_use_tree(tree, Vec::new(), &mut aliases);
         }
     }
     aliases
+}
+
+fn items_have_super_glob_import(items: &[Item]) -> bool {
+    items.iter().any(|item| {
+        let Item::Use(ItemUse { tree, .. }) = item else {
+            return false;
+        };
+        use_tree_has_super_glob_import(tree)
+    })
+}
+
+fn use_tree_has_super_glob_import(tree: &UseTree) -> bool {
+    match tree {
+        UseTree::Path(path) if path.ident == "super" => use_tree_contains_glob(&path.tree),
+        UseTree::Path(path) => use_tree_has_super_glob_import(&path.tree),
+        UseTree::Group(group) => group.items.iter().any(use_tree_has_super_glob_import),
+        UseTree::Name(_) | UseTree::Rename(_) | UseTree::Glob(_) => false,
+    }
+}
+
+fn use_tree_contains_glob(tree: &UseTree) -> bool {
+    match tree {
+        UseTree::Glob(_) => true,
+        UseTree::Path(path) => use_tree_contains_glob(&path.tree),
+        UseTree::Group(group) => group.items.iter().any(use_tree_contains_glob),
+        UseTree::Name(_) | UseTree::Rename(_) => false,
+    }
 }
 
 fn collect_use_tree(
@@ -424,6 +650,21 @@ fn local_type_path(
         aliases,
     );
     normalize_segments(module_path, segments)
+}
+
+fn raw_local_type_path(module_path: &[String], self_ty: &Type) -> Option<Vec<String>> {
+    let Type::Path(type_path) = self_ty else {
+        return None;
+    };
+    normalize_segments(
+        module_path,
+        type_path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+    )
 }
 
 fn normalized_path(
@@ -527,4 +768,22 @@ fn collect_type_paths(
 
 fn module_source_name(name: &str) -> &str {
     name.strip_prefix("r#").unwrap_or(name)
+}
+
+fn path_attr(item_mod: &syn::ItemMod) -> Option<PathBuf> {
+    item_mod.attrs.iter().find_map(|attribute| {
+        if !attribute.path().is_ident("path") {
+            return None;
+        }
+        let Meta::NameValue(name_value) = &attribute.meta else {
+            return None;
+        };
+        let Expr::Lit(expr_lit) = &name_value.value else {
+            return None;
+        };
+        let Lit::Str(lit) = &expr_lit.lit else {
+            return None;
+        };
+        Some(PathBuf::from(lit.value()))
+    })
 }

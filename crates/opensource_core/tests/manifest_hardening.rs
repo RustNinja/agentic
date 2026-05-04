@@ -2,10 +2,403 @@ use std::{
     fs,
     path::{Path, PathBuf},
     process::Command,
-    time::{SystemTime, UNIX_EPOCH},
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
-use opensource_core::{generate, GenerateOptions};
+use opensource_core::{check_workspace, generate, CheckOptions, GenerateOptions};
+
+#[test]
+fn cargo_metadata_workspace_excludes_define_loaded_members() {
+    let workspace = temp_path("metadata-exclude-workspace");
+    let output = temp_path("metadata-exclude-output");
+    let target_dir = temp_path("metadata-exclude-target");
+    write_metadata_exclude_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app"]);
+    assert!(output.join("app/src/lib.rs").exists());
+    assert!(
+        !output.join("dead").exists(),
+        "workspace.exclude members must not be rendered"
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated metadata-exclude slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+    );
+}
+
+#[test]
+fn copies_workspace_cargo_config_and_feedback_uses_generated_cargo_context() {
+    let workspace = temp_path("cargo-config-workspace");
+    let output = temp_path("cargo-config-output");
+    let target_dir = temp_path("cargo-config-target");
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join(".cargo/config.toml"),
+        r#"[build]
+rustflags = ["--cfg", "slicers_config_probe", "--check-cfg=cfg(slicers_config_probe)"]
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[cfg(not(slicers_config_probe))]
+compile_error!("workspace cargo config was not applied");
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join(".cargo/config.toml").exists());
+    let report = check_workspace(CheckOptions {
+        manifest_path: output.join("Cargo.toml"),
+        target_dir: Some(target_dir),
+        timeout: Some(Duration::from_secs(60)),
+        cargo_args: Vec::new(),
+    })
+    .expect("generated workspace cargo check should run");
+
+    assert!(
+        report.success,
+        "generated cargo check should use copied .cargo/config.toml\nstderr:\n{}",
+        report.stderr
+    );
+    assert_eq!(report.working_dir.as_deref(), Some(output.as_path()));
+}
+
+#[test]
+fn copies_workspace_rust_toolchain_file() {
+    let workspace = temp_path("toolchain-workspace");
+    let output = temp_path("toolchain-output");
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("rust-toolchain.toml"),
+        &format!("[toolchain]\nchannel = {:?}\n", current_rustup_toolchain()),
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace.clone(),
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(
+        read(output.join("rust-toolchain.toml")),
+        read(workspace.join("rust-toolchain.toml"))
+    );
+}
+
+#[test]
+fn preserves_cargo_lint_policy_for_generated_validation() {
+    let workspace = temp_path("lint-policy-workspace");
+    let output = temp_path("lint-policy-output");
+    let target_dir = temp_path("lint-policy-target");
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.lints.rust]
+unsafe_code = "deny"
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+
+[lints]
+workspace = true
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    unsafe { 7 }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let root_manifest = read(output.join("Cargo.toml"));
+    let package_manifest = read(output.join("app/Cargo.toml"));
+    assert!(root_manifest.contains("[workspace.lints.rust]"));
+    assert!(root_manifest.contains("unsafe_code = \"deny\""));
+    assert!(package_manifest.contains("[lints]"));
+    assert!(package_manifest.contains("workspace = true"));
+
+    let report = check_workspace(CheckOptions {
+        manifest_path: output.join("Cargo.toml"),
+        target_dir: Some(target_dir),
+        timeout: Some(Duration::from_secs(60)),
+        cargo_args: Vec::new(),
+    })
+    .expect("generated workspace cargo check should run");
+
+    let diagnostic_text = report
+        .diagnostics
+        .iter()
+        .map(|diagnostic| diagnostic.message.as_str())
+        .collect::<Vec<_>>()
+        .join("\n");
+    assert!(
+        !report.success && diagnostic_text.contains("unsafe"),
+        "generated cargo check should enforce preserved unsafe_code lint\ndiagnostics:\n{}\nstderr:\n{}",
+        diagnostic_text,
+        report.stderr
+    );
+}
+
+#[test]
+fn preserves_workspace_profile_policy() {
+    let workspace = temp_path("profile-policy-workspace");
+    let output = temp_path("profile-policy-output");
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+overflow-checks = false
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let manifest = read(output.join("Cargo.toml"));
+    assert!(manifest.contains("[profile.dev]"));
+    assert!(manifest.contains("panic = \"abort\""));
+    assert!(manifest.contains("overflow-checks = false"));
+}
+
+#[cfg(unix)]
+#[test]
+fn source_include_symlink_inside_package_is_copied_at_link_path() {
+    let workspace = temp_path("source-include-internal-link-workspace");
+    let output = temp_path("source-include-internal-link-output");
+    write_basic_workspace(&workspace);
+    write_basic_app_manifest(&workspace);
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    include_str!("data-link.txt").len()
+}
+"#,
+    );
+    write(
+        workspace.join("app/data/message.txt"),
+        "internal package data",
+    );
+    symlink_file(
+        &workspace.join("app/data/message.txt"),
+        &workspace.join("app/src/data-link.txt"),
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(
+        read(output.join("app/src/data-link.txt")),
+        "internal package data"
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn source_include_symlink_outside_package_is_not_copied() {
+    let workspace = temp_path("source-include-external-link-workspace");
+    let output = temp_path("source-include-external-link-output");
+    let external = temp_path("source-include-external-link-secret");
+    write_basic_workspace(&workspace);
+    write_basic_app_manifest(&workspace);
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    include_str!("secret-link.txt").len()
+}
+"#,
+    );
+    write(external.join("secret.txt"), "external secret");
+    symlink_file(
+        &external.join("secret.txt"),
+        &workspace.join("app/src/secret-link.txt"),
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(!output.join("app/src/secret-link.txt").exists());
+}
+
+#[cfg(unix)]
+#[test]
+fn build_script_asset_symlink_outside_package_is_not_copied() {
+    let workspace = temp_path("build-asset-external-link-workspace");
+    let output = temp_path("build-asset-external-link-output");
+    let external = temp_path("build-asset-external-link-secret");
+    write_basic_workspace(&workspace);
+    write_basic_app_manifest(&workspace);
+    write(
+        workspace.join("app/build.rs"),
+        r#"fn main() {
+    let _ = std::fs::read_to_string("asset-link.txt");
+}
+"#,
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+    write(external.join("secret.txt"), "external build secret");
+    symlink_file(
+        &external.join("secret.txt"),
+        &workspace.join("app/asset-link.txt"),
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join("app/build.rs").exists());
+    assert!(!output.join("app/asset-link.txt").exists());
+}
 
 #[test]
 fn slices_single_package_binary_crate_with_stub_main() {
@@ -39,6 +432,492 @@ fn slices_single_package_binary_crate_with_stub_main() {
     assert!(
         cargo_check.status.success(),
         "generated binary slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/main.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn slices_marked_bin_target_when_package_also_has_lib_target() {
+    let workspace = temp_path("bin-with-lib-workspace");
+    let output = temp_path("bin-with-lib-output");
+    let target_dir = temp_path("bin-with-lib-target");
+    write_bin_with_lib_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app"]);
+    let source = read(output.join("app/src/bin/tool/main.rs"));
+    let command = read(output.join("app/src/bin/tool/command.rs"));
+    assert!(source.contains("mod command"));
+    assert!(source.contains("fn main()"));
+    assert!(command.contains("pub fn selected"));
+    assert!(command.contains("fn helper"));
+    assert!(!source.contains("dead_lib"));
+    assert!(!source.contains("dead_bin"));
+    assert!(!command.contains("dead_command"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated bin-with-lib slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/bin/tool/main.rs:\n{}\nsrc/bin/tool/command.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+        command,
+    );
+}
+
+#[test]
+fn slices_marked_example_target_and_preserves_manifest_entry() {
+    let workspace = temp_path("example-target-workspace");
+    let output = temp_path("example-target-output");
+    let target_dir = temp_path("example-target-build");
+    write_example_target_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "lib_support", "support"]);
+    let app_target = report
+        .targets
+        .iter()
+        .find(|target| target.package == "app")
+        .expect("app target should be reported");
+    assert_eq!(app_target.required_features, ["demo-mode"]);
+    assert_eq!(app_target.default_features, ["demo-mode"]);
+    let manifest = read(output.join("app/Cargo.toml"));
+    assert!(manifest.contains("[[example]]"));
+    assert!(manifest.contains("name = \"demo\""));
+    assert!(manifest.contains("path = \"examples/demo.rs\""));
+    assert!(manifest.contains("required-features = [\"demo-mode\"]"));
+    assert!(manifest.contains("[dependencies.lib_support]"));
+    assert!(manifest.contains("[dev-dependencies.support]"));
+
+    let source = read(output.join("app/examples/demo.rs"));
+    let lib = read(output.join("app/src/lib.rs"));
+    let lib_support = read(output.join("lib_support/src/lib.rs"));
+    let support = read(output.join("support/src/lib.rs"));
+    assert!(lib.contains("pub fn library_label"));
+    assert!(lib_support.contains("pub fn label"));
+    assert!(source.contains("fn main()"));
+    assert!(source.contains("pub fn selected"));
+    assert!(support.contains("pub fn format_value"));
+    assert!(!source.contains("dead_example"));
+    assert!(!support.contains("dead_support"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .arg("--package")
+        .arg("app")
+        .arg("--example")
+        .arg("demo")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated example-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/examples/demo.rs:\n{}\nlib_support/src/lib.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        lib,
+        source,
+        lib_support,
+        support,
+    );
+}
+
+#[test]
+fn slices_marked_integration_test_target_and_preserves_manifest_entry() {
+    let workspace = temp_path("test-target-workspace");
+    let output = temp_path("test-target-output");
+    let target_dir = temp_path("test-target-build");
+    write_test_target_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(
+        report.packages,
+        ["app", "lib_support", "platform_support", "support"]
+    );
+    let manifest = read(output.join("app/Cargo.toml"));
+    assert!(manifest.contains("[[test]]"));
+    assert!(manifest.contains("name = \"behavior\""));
+    assert!(manifest.contains("path = \"tests/behavior.rs\""));
+    assert!(manifest.contains("[dependencies.lib_support]"));
+    assert!(manifest.contains("[dev-dependencies.support]"));
+    assert!(manifest.contains("[target.\"cfg(unix)\".dev-dependencies.platform_support]"));
+
+    let source = read(output.join("app/tests/behavior.rs"));
+    let lib = read(output.join("app/src/lib.rs"));
+    let lib_support = read(output.join("lib_support/src/lib.rs"));
+    let platform_support = read(output.join("platform_support/src/lib.rs"));
+    let support = read(output.join("support/src/lib.rs"));
+    assert!(lib.contains("pub fn library_label"));
+    assert!(lib_support.contains("pub fn label"));
+    assert!(platform_support.contains("pub fn format_value"));
+    assert!(source.contains("#[test]"));
+    assert!(source.contains("fn selected_behavior"));
+    assert!(support.contains("pub fn format_value"));
+    assert!(!source.contains("dead_test"));
+    assert!(!support.contains("dead_support"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .arg("--package")
+        .arg("app")
+        .arg("--test")
+        .arg("behavior")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated test-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/tests/behavior.rs:\n{}\nlib_support/src/lib.rs:\n{}\nplatform_support/src/lib.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        lib,
+        source,
+        lib_support,
+        platform_support,
+        support,
+    );
+}
+
+#[test]
+fn slices_marked_bench_target_and_preserves_manifest_entry() {
+    let workspace = temp_path("bench-target-workspace");
+    let output = temp_path("bench-target-output");
+    let target_dir = temp_path("bench-target-build");
+    write_bench_target_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "lib_support", "support"]);
+    let manifest = read(output.join("app/Cargo.toml"));
+    assert!(manifest.contains("[[bench]]"));
+    assert!(manifest.contains("name = \"throughput\""));
+    assert!(manifest.contains("path = \"benches/throughput.rs\""));
+    assert!(manifest.contains("[dependencies.lib_support]"));
+    assert!(manifest.contains("[dev-dependencies.support]"));
+
+    let source = read(output.join("app/benches/throughput.rs"));
+    let lib = read(output.join("app/src/lib.rs"));
+    let lib_support = read(output.join("lib_support/src/lib.rs"));
+    let support = read(output.join("support/src/lib.rs"));
+    assert!(lib.contains("pub fn library_label"));
+    assert!(lib_support.contains("pub fn label"));
+    assert!(source.contains("pub fn selected_bench_value"));
+    assert!(support.contains("pub fn format_value"));
+    assert!(!source.contains("dead_bench"));
+    assert!(!support.contains("dead_support"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .arg("--package")
+        .arg("app")
+        .arg("--bench")
+        .arg("throughput")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated bench-target slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\napp/benches/throughput.rs:\n{}\nlib_support/src/lib.rs:\n{}\nsupport/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        manifest,
+        lib,
+        source,
+        lib_support,
+        support,
+    );
+}
+
+#[test]
+fn slices_path_attributed_external_modules() {
+    let workspace = temp_path("path-attr-workspace");
+    let output = temp_path("path-attr-output");
+    let target_dir = temp_path("path-attr-target");
+    write_path_attr_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["path_attr_like"]);
+    let lib = read(output.join("path_attr_like/src/lib.rs"));
+    let custom = read(output.join("path_attr_like/src/generated/custom.rs"));
+    assert!(lib.contains("mod custom"));
+    assert!(lib.contains("path = \"generated/custom.rs\""));
+    assert!(custom.contains("pub fn selected"));
+    assert!(custom.contains("fn helper"));
+    assert!(!lib.contains("dead_lib"));
+    assert!(!custom.contains("dead_custom"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated path-attr slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}\nsrc/generated/custom.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+        custom,
+    );
+}
+
+#[test]
+fn rejects_markers_spread_across_multiple_package_targets() {
+    let workspace = temp_path("multi-target-marker-workspace");
+    let output = temp_path("multi-target-marker-output");
+    write_multi_target_marker_fixture(&workspace);
+
+    let error = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output,
+    })
+    .expect_err("markers across multiple target roots should fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("multiple package targets contain #[opensourced] markers"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn rejects_markers_spread_across_lib_and_integration_test_targets() {
+    let workspace = temp_path("lib-test-marker-workspace");
+    let output = temp_path("lib-test-marker-output");
+    write_lib_and_test_marker_fixture(&workspace);
+
+    let error = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output,
+    })
+    .expect_err("markers across lib and integration test roots should fail closed");
+
+    assert!(
+        error
+            .to_string()
+            .contains("multiple package targets contain #[opensourced] markers"),
+        "unexpected error: {error}"
+    );
+}
+
+#[test]
+fn slices_multiple_marked_function_roots() {
+    let workspace = temp_path("multi-root-workspace");
+    let output = temp_path("multi-root-output");
+    let target_dir = temp_path("multi-root-target");
+    write_multi_root_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let roots = report
+        .roots
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roots,
+        [
+            "multi_root_like::selected_a",
+            "multi_root_like::selected_b",
+            "multi_root_like::hidden::selected_hidden"
+        ]
+    );
+
+    let source = read(output.join("multi_root_like/src/lib.rs"));
+    assert!(source.contains("pub fn selected_a"));
+    assert!(source.contains("pub fn selected_b"));
+    assert!(source.contains("pub mod hidden"));
+    assert!(source.contains("pub fn selected_hidden"));
+    assert!(source.contains("fn helper_a"));
+    assert!(source.contains("fn helper_b"));
+    assert!(source.contains("fn helper_hidden"));
+    assert!(!source.contains("dead_root"));
+    assert!(!source.contains("dead_helper"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated multi-root slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn slices_marked_data_item_roots() {
+    let workspace = temp_path("item-root-workspace");
+    let output = temp_path("item-root-output");
+    let target_dir = temp_path("item-root-target");
+    write_item_root_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let roots = report
+        .roots
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(
+        roots,
+        [
+            "item_root_like::Api(Struct)",
+            "item_root_like::PrivateKind(Enum)"
+        ]
+    );
+
+    let reachable_items = report
+        .reachable_items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    for expected in [
+        "item_root_like::Api(Struct)",
+        "item_root_like::Handler(Trait)",
+        "item_root_like::Mode(Enum)",
+        "item_root_like::PrivateKind(Enum)",
+    ] {
+        assert!(
+            reachable_items.iter().any(|actual| actual == expected),
+            "missing reachable item {expected}; got {reachable_items:?}",
+        );
+    }
+
+    let source = read(output.join("item_root_like/src/lib.rs"));
+    assert!(source.contains("#[allow(dead_code)]\npub struct Api"));
+    assert!(source.contains("pub struct Api"));
+    assert!(source.contains("state: PrivateState"));
+    assert!(source.contains("struct PrivateState"));
+    assert!(source.contains("pub enum Mode"));
+    assert!(source.contains("#[allow(dead_code)]\nenum PrivateKind"));
+    assert!(source.contains("pub trait Handler"));
+    assert!(!source.contains("Dead"));
+    assert!(!source.contains("#[opensourced]"));
+    assert!(!source.contains("opensourced::opensourced"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated item-root slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn slices_marked_module_roots() {
+    let workspace = temp_path("module-root-workspace");
+    let output = temp_path("module-root-output");
+    let target_dir = temp_path("module-root-target");
+    write_module_root_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let roots = report
+        .roots
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    assert_eq!(roots, ["module_root_like::api(Mod)"]);
+
+    let source = read(output.join("module_root_like/src/lib.rs"));
+    assert!(source.contains("pub mod api"));
+    assert!(source.contains("pub struct Request"));
+    assert!(source.contains("pub enum Mode"));
+    assert!(source.contains("pub fn run"));
+    assert!(source.contains("fn helper"));
+    assert!(!source.contains("pub mod dead"));
+    assert!(!source.contains("module_test_helper"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated module-root slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
@@ -249,11 +1128,20 @@ fn copies_assets_referenced_by_retained_include_macros() {
     let lib = read(output.join("include_assets_like/src/lib.rs"));
     assert!(lib.contains("include_str!(\"guidelines/core.md\")"));
     assert!(lib.contains("include_str!(\"../assets/extra.txt\")"));
+    assert!(lib.contains("include_str!(concat!(\"guidelines/\", \"concat.md\"))"));
+    assert!(lib.contains("env!(\"CARGO_MANIFEST_DIR\")"));
+    assert!(lib.contains("\"/assets/manifest.txt\""));
     assert!(!lib.contains("UNUSED"));
     assert!(output
         .join("include_assets_like/src/guidelines/core.md")
         .exists());
+    assert!(output
+        .join("include_assets_like/src/guidelines/concat.md")
+        .exists());
     assert!(output.join("include_assets_like/assets/extra.txt").exists());
+    assert!(output
+        .join("include_assets_like/assets/manifest.txt")
+        .exists());
     assert!(!output
         .join("include_assets_like/src/guidelines/unused.md")
         .exists());
@@ -307,6 +1195,299 @@ fn prunes_unused_external_pub_reexport_names() {
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         lib,
+    );
+}
+
+#[test]
+fn retains_renamed_external_imports_used_only_by_retained_macro_invocations() {
+    let workspace = temp_path("macro-rename-workspace");
+    let output = temp_path("macro-rename-output");
+    let target_dir = temp_path("macro-rename-target");
+    write_macro_renamed_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("macro_rename_like/src/lib.rs"));
+    assert!(
+        lib.contains("use serde_json::Value as JsonValue"),
+        "macro-only renamed import should remain\n{lib}"
+    );
+    assert!(lib.contains("define_api"));
+    assert!(lib.contains("generated"));
+    assert!(!lib.contains("dead"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro rename slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn prunes_renamed_imports_when_resolved_target_is_removed() {
+    let workspace = temp_path("removed-rename-workspace");
+    let output = temp_path("removed-rename-output");
+    let target_dir = temp_path("removed-rename-target");
+    write_removed_renamed_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("removed_rename_like/src/lib.rs"));
+    assert!(lib.contains("pub fn selected"));
+    assert!(lib.contains("let selected_value = 1"));
+    assert!(!lib.contains("dead_fn as selected_value"));
+    assert!(!lib.contains("dead_fn"));
+    assert!(!lib.contains("mod dead"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated removed rename slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_renamed_imports_used_after_inner_shadow() {
+    let workspace = temp_path("shadowed-rename-workspace");
+    let output = temp_path("shadowed-rename-output");
+    let target_dir = temp_path("shadowed-rename-target");
+    write_shadowed_renamed_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("shadowed_rename_like/src/lib.rs"));
+    assert!(lib.contains("pub fn selected"));
+    assert!(lib.contains("live_fn as selected_value"));
+    assert!(lib.contains("pub fn live_fn"));
+    assert!(lib.contains("let selected_value = 1"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated shadowed rename slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_parent_imports_used_by_inline_child_super_glob() {
+    let workspace = temp_path("inline-super-workspace");
+    let output = temp_path("inline-super-output");
+    let target_dir = temp_path("inline-super-target");
+    write_inline_super_glob_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("inline_super_like/src/lib.rs"));
+    assert!(lib.contains("Path"));
+    assert!(lib.contains("use super::*"));
+    assert!(!lib.contains("PathBuf"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated inline super-glob slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_string_literal_callback_paths_with_keyword_segments() {
+    let workspace = temp_path("serde-callback-workspace");
+    let output = temp_path("serde-callback-output");
+    let target_dir = temp_path("serde-callback-target");
+    write_serde_callback_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("serde_callback_like/src/lib.rs"));
+    assert!(lib.contains("fn skip_if_default"));
+    assert!(lib.contains("crate::skip_if_default"));
+    assert!(!lib.contains("pub fn dead"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde callback slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_local_public_reexports_referenced_through_dependency_crate_paths() {
+    let workspace = temp_path("public-reexport-workspace");
+    let output = temp_path("public-reexport-output");
+    let target_dir = temp_path("public-reexport-target");
+    write_local_public_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider = read(output.join("provider/src/lib.rs"));
+    assert!(provider.contains("mod error"));
+    assert!(provider.contains("pub use crate::error::Error"));
+    assert!(output.join("provider/src/error.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated local public reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider,
+    );
+}
+
+#[test]
+fn closes_public_reexports_referenced_from_retained_build_dependencies() {
+    let workspace = temp_path("build-reexport-workspace");
+    let output = temp_path("build-reexport-output");
+    let target_dir = temp_path("build-reexport-target");
+    write_build_dependency_public_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider = read(output.join("provider/src/lib.rs"));
+    assert!(provider.contains("mod error"));
+    assert!(provider.contains("pub use crate::error::Error"));
+    assert!(output.join("provider/src/error.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated build dependency public reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider,
+    );
+}
+
+#[test]
+fn retains_macro_generated_public_reexports_referenced_through_dependency_crate_paths() {
+    let workspace = temp_path("macro-public-reexport-workspace");
+    let output = temp_path("macro-public-reexport-output");
+    let target_dir = temp_path("macro-public-reexport-target");
+    write_macro_generated_public_reexport_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider = read(output.join("provider/src/lib.rs"));
+    let error = read(output.join("provider/src/error.rs"));
+    let macro_provider = read(output.join("macro-provider/src/lib.rs"));
+    assert!(provider.contains("mod error"));
+    assert!(provider.contains("pub use crate::error::Error"));
+    assert!(error.contains("pub enum ErrorKind"));
+    assert!(error.contains("macro_provider::define_error!"));
+    assert!(macro_provider.contains("macro_rules! define_error"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro public reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}\nprovider/src/error.rs:\n{}\nmacro-provider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider,
+        error,
+        macro_provider,
     );
 }
 
@@ -500,6 +1681,40 @@ fn retains_trait_impls_required_by_derive_field_bounds() {
 }
 
 #[test]
+fn retains_default_impls_required_by_serde_default_fields() {
+    let workspace = temp_path("serde-default-workspace");
+    let output = temp_path("serde-default-output");
+    let target_dir = temp_path("serde-default-target");
+    write_serde_default_field_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("serde_default_like/src/lib.rs"));
+    assert!(source.contains("impl Default for HomeSelection"));
+    assert!(source.contains("#[serde(default)]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde-default slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn retains_deref_impls_for_autoderef_method_calls() {
     let workspace = temp_path("deref-method-workspace");
     let output = temp_path("deref-method-output");
@@ -515,7 +1730,7 @@ fn retains_deref_impls_for_autoderef_method_calls() {
     let lib = read(output.join("deref_method_like/src/lib.rs"));
     assert!(lib.contains("impl std::ops::Deref for Slug"));
     assert!(lib.contains("fn as_str"));
-    assert!(!lib.contains("dead"));
+    assert!(!lib.contains("fn dead("));
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -733,6 +1948,516 @@ fn rewrites_features_and_keeps_target_dependencies_and_build_script() {
 }
 
 #[test]
+fn retains_local_build_dependencies_for_retained_build_scripts() {
+    let workspace = temp_path("build-dependency-workspace");
+    let output = temp_path("build-dependency-output");
+    let target_dir = temp_path("build-dependency-target");
+    write_build_dependency_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "build_helper"]);
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    assert!(
+        app_manifest.contains("build_helper"),
+        "app manifest should retain local build-dependency\n{app_manifest}"
+    );
+    assert!(output.join("build_helper/src/lib.rs").exists());
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated build-dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+    );
+}
+
+#[test]
+fn retains_target_build_dependencies_for_retained_build_scripts() {
+    let workspace = temp_path("target-build-dependency-workspace");
+    let output = temp_path("target-build-dependency-output");
+    let target_dir = temp_path("target-build-dependency-target");
+    write_target_build_dependency_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert_eq!(report.packages, ["app", "build_helper"]);
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    assert!(
+        app_manifest.contains("cfg(all())"),
+        "app manifest should preserve target cfg\n{app_manifest}"
+    );
+    assert!(
+        app_manifest.contains("build-dependencies"),
+        "app manifest should retain target build-dependencies\n{app_manifest}"
+    );
+    assert!(
+        app_manifest.contains("build_helper"),
+        "app manifest should retain target build helper\n{app_manifest}"
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated target build-dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+    );
+}
+
+#[test]
+fn keeps_optional_dependency_requested_by_retained_local_package_feature() {
+    let workspace = temp_path("implicit-feature-workspace");
+    let output = temp_path("implicit-feature-output");
+    let target_dir = temp_path("implicit-feature-target");
+    write_implicit_feature_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    let helper_manifest = read(output.join("helper/Cargo.toml"));
+    assert!(app_manifest.contains("features = [\"feature_dep\"]"));
+    assert!(
+        helper_manifest.contains("feature_dep"),
+        "helper manifest should retain optional dependency requested through app feature\n{helper_manifest}"
+    );
+    assert!(
+        helper_manifest.contains("optional = true"),
+        "helper manifest should preserve optional dependency metadata\n{helper_manifest}"
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated implicit feature slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\nhelper/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+        helper_manifest,
+    );
+}
+
+#[test]
+fn retains_mutex_guard_field_method_and_associated_const_imports() {
+    let workspace = temp_path("mutex-field-workspace");
+    let output = temp_path("mutex-field-output");
+    let target_dir = temp_path("mutex-field-target");
+    write_mutex_field_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(source.contains("Duration"));
+    assert!(source.contains("fn push"));
+    assert!(source.contains("const INTERVAL"));
+    assert!(source.contains("Weak"));
+    assert!(source.contains("SqlInterruptHandle"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated mutex field slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn retains_marker_trait_impls_external_trait_imports_and_method_arg_impls() {
+    let workspace = temp_path("external-trait-workspace");
+    let output = temp_path("external-trait-output");
+    let target_dir = temp_path("external-trait-target");
+    write_external_trait_method_arg_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("app/src/lib.rs"));
+    assert!(lib.contains("Engine"));
+    assert!(lib.contains("impl Eq for Guid"));
+    assert!(lib.contains("unsafe impl Sync for Guid"));
+    assert!(lib.contains("impl Visitor"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external trait slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_associated_conversion_impls_for_external_targets() {
+    let workspace = temp_path("associated-conversion-workspace");
+    let output = temp_path("associated-conversion-output");
+    let target_dir = temp_path("associated-conversion-target");
+    write_associated_conversion_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("app/src/lib.rs"));
+    assert!(lib.contains("impl From<Timestamp> for SystemTime"));
+    assert!(lib.contains("impl From<SystemTime> for Timestamp"));
+    if cfg!(unix) {
+        assert!(lib.contains("ExitStatusExt"));
+    }
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated associated conversion slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
+fn retains_extension_traits_macro_reexports_try_conversions_and_impl_trait_bounds() {
+    let workspace = temp_path("feedback-layer-workspace");
+    let output = temp_path("feedback-layer-output");
+    let target_dir = temp_path("feedback-layer-target");
+    write_feedback_layer_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("app/src/lib.rs"));
+    let db = read(output.join("app/src/db.rs"));
+    assert!(lib.contains("error_support"));
+    assert!(db.contains("trait ConnExt"));
+    assert!(db.contains("impl ConnExt for SystemTime"));
+    assert!(db.contains("fmt::Display for RepeatDisplay"));
+    assert!(db.contains("impl From<std::io::Error> for LocalError"));
+    assert!(db.contains("impl std::error::Error for Interrupted"));
+    assert!(db.contains("fn is_valid"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated feedback layer slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}\nsrc/db.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+        db,
+    );
+}
+
+#[test]
+fn retains_struct_literals_glob_reexported_functions_collect_impls_and_attr_macro_helpers() {
+    let workspace = temp_path("feedback-places-workspace");
+    let output = temp_path("feedback-places-output");
+    let target_dir = temp_path("feedback-places-target");
+    write_feedback_places_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app_db = read(output.join("app/src/db.rs"));
+    let helper_lib = read(output.join("helper/src/lib.rs"));
+    let helper_chunks = read(output.join("helper/src/chunks.rs"));
+    let error_support = read(output.join("error-support/src/lib.rs"));
+    assert!(app_db.contains("struct PlacesInitializer"));
+    assert!(app_db.contains("impl Initializer for PlacesInitializer"));
+    assert!(app_db.contains("struct HistoryRecord"));
+    assert!(app_db.contains("impl std::iter::FromIterator<VisitType> for VisitTransitionSet"));
+    assert!(helper_lib.contains("pub use chunks::*"));
+    assert!(helper_chunks.contains("pub fn each_chunk"));
+    assert!(error_support.contains("convert_log_report_error"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated feedback places slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/src/db.rs:\n{}\nhelper/src/lib.rs:\n{}\nhelper/src/chunks.rs:\n{}\nerror-support/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_db,
+        helper_lib,
+        helper_chunks,
+        error_support,
+    );
+}
+
+#[test]
+fn retains_inline_generated_modules_macro_deref_helpers_and_backend_bridges() {
+    let workspace = temp_path("feedback-viaduct-workspace");
+    let output = temp_path("feedback-viaduct-output");
+    let target_dir = temp_path("feedback-viaduct-target");
+    write_feedback_viaduct_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app = read(output.join("app/src/lib.rs"));
+    assert!(app.contains("mod msg_types"));
+    assert!(app.contains("include!(\"generated.rs\")"));
+    assert!(app.contains("use crate::msg_types"));
+    assert!(app.contains("impl std::ops::Deref for HeaderName"));
+    assert!(app.contains("fn set_value"));
+    assert!(app.contains("impl old_backend::Backend for Arc<dyn Backend>"));
+    assert!(!app.contains("ErrorHandling"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated feedback viaduct slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app,
+    );
+}
+
+#[test]
+fn resolves_arbitrary_untyped_closure_and_wrapper_trait_methods_without_name_allowlist() {
+    let workspace = temp_path("generic-method-recovery-workspace");
+    let output = temp_path("generic-method-recovery-output");
+    let target_dir = temp_path("generic-method-recovery-target");
+    write_generic_method_recovery_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(source.contains("fn persist_widget"));
+    assert!(source.contains("fn calculate_marker"));
+    assert!(source.contains("impl MarkerSum for Vec<Widget>"));
+    assert!(!source.contains("discarded_noise"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated generic method recovery slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn resolves_generic_trait_bound_receiver_methods_without_name_only_fallback() {
+    let workspace = temp_path("generic-bound-method-workspace");
+    let output = temp_path("generic-bound-method-output");
+    let target_dir = temp_path("generic-bound-method-target");
+    write_basic_workspace(&workspace);
+    write_basic_app_manifest(&workspace);
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub trait Worker {
+    fn work(&self) -> usize;
+}
+
+pub trait Factory {
+    fn make(&self) -> Product;
+}
+
+pub struct Product;
+
+impl Product {
+    fn finish(&self) -> usize {
+        3
+    }
+
+    fn unused_finish(&self) -> usize {
+        30
+    }
+}
+
+pub struct Concrete;
+
+impl Worker for Concrete {
+    fn work(&self) -> usize {
+        concrete_work()
+    }
+}
+
+fn concrete_work() -> usize {
+    11
+}
+
+pub struct Decoy;
+
+impl Decoy {
+    fn work(&self) -> usize {
+        dead_work()
+    }
+
+    fn make(&self) -> Product {
+        Product
+    }
+}
+
+fn dead_work() -> usize {
+    99
+}
+
+#[opensourced]
+pub fn selected<T>(worker: T, other: impl Worker, factory: impl Factory) -> usize
+where
+    T: Worker,
+{
+    let rebound: T = worker;
+    rebound.work() + other.work() + factory.make().finish()
+}
+"#,
+    );
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(
+        !report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "syntactic_method_fallbacks"),
+        "generic trait-bound receiver calls should not use name-only fallback: {:?}",
+        report.production.hazards
+    );
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(source.contains("pub trait Worker"));
+    assert!(source.contains("pub trait Factory"));
+    assert!(source.contains("fn finish"));
+    assert!(!source.contains("struct Decoy"));
+    assert!(!source.contains("dead_work"));
+    assert!(!source.contains("unused_finish"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated generic-bound method slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn resolves_external_workspace_path_dependencies_from_original_root() {
     let workspace = temp_path("external-workspace-dep-workspace");
     let output = temp_path("external-workspace-dep-output");
@@ -748,12 +2473,38 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
     let root_manifest = read(output.join("Cargo.toml"));
     let app_manifest = read(output.join("app/Cargo.toml"));
     let lockfile = read(output.join("Cargo.lock"));
+    let support_manifest = read(output.join("support/external-helper/Cargo.toml"));
+    let support_leaf_manifest = read(output.join("support/external-leaf/Cargo.toml"));
+    let support_source = read(output.join("support/external-helper/src/lib.rs"));
     assert!(root_manifest.contains("external_helper"));
-    assert!(root_manifest.contains("path = \"/"));
+    assert!(root_manifest.contains("path = \"support/external-helper\""));
+    assert!(root_manifest.contains("path = \"support/external-leaf\""));
+    assert!(!root_manifest.contains("path = \"/"));
     assert!(!root_manifest.contains("path = \"../"));
     assert!(root_manifest.contains("[patch.crates-io.external-helper]"));
+    assert!(root_manifest.contains("[patch.crates-io.external-leaf]"));
     assert!(app_manifest.contains("external_helper"));
+    assert!(support_manifest.contains("name = \"external-helper\""));
+    assert!(support_leaf_manifest.contains("name = \"external-leaf\""));
+    assert!(support_source.contains("pub fn decorate"));
     assert!(lockfile.contains("version = 3"));
+
+    let external_name = format!(
+        "{}-external-helper",
+        workspace.file_name().unwrap().to_string_lossy()
+    );
+    let external_leaf_name = format!(
+        "{}-external-leaf",
+        workspace.file_name().unwrap().to_string_lossy()
+    );
+    let external_root = workspace.parent().unwrap().join(external_name);
+    let external_leaf_root = workspace.parent().unwrap().join(external_leaf_name);
+    fs::rename(&external_root, external_root.with_extension("moved")).unwrap();
+    fs::rename(
+        &external_leaf_root,
+        external_leaf_root.with_extension("moved"),
+    )
+    .unwrap();
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -771,6 +2522,513 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
         root_manifest,
         app_manifest,
     );
+}
+
+#[test]
+fn copies_workspace_assets_referenced_by_copied_support_include_macros() {
+    let workspace = temp_path("support-include-asset-workspace");
+    let output = temp_path("support-include-asset-output");
+    let target_dir = temp_path("support-include-asset-target");
+    let support_ws_name = format!(
+        "{}-support-ws",
+        workspace.file_name().unwrap().to_string_lossy()
+    );
+    let support_ws = workspace.parent().unwrap().join(&support_ws_name);
+    if workspace.exists() {
+        fs::remove_dir_all(&workspace).unwrap();
+    }
+    if support_ws.exists() {
+        fs::remove_dir_all(&support_ws).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+helper = {{ path = "../{support_ws_name}/helper" }}
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helper.workspace = true
+opensourced.workspace = true
+"#,
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    helper::decorate(value)
+}
+"#,
+    );
+    write(
+        support_ws.join("Cargo.toml"),
+        r#"[workspace]
+members = ["helper"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        support_ws.join("helper/Cargo.toml"),
+        r#"[package]
+name = "helper"
+version.workspace = true
+edition.workspace = true
+"#,
+    );
+    write(
+        support_ws.join("helper/src/lib.rs"),
+        r#"const SHARED: &str = include_str!("../../shared.txt");
+
+pub fn decorate(value: &str) -> String {
+    format!("{value}:{SHARED}")
+}
+"#,
+    );
+    write(support_ws.join("shared.txt"), "support-shared");
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join("support/helper/src/lib.rs").exists());
+    assert!(output.join("support/shared.txt").exists());
+
+    fs::rename(&support_ws, support_ws.with_extension("moved")).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated support include asset slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nCargo.toml:\n{}\nhelper lib:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        read(output.join("Cargo.toml")),
+        read(output.join("support/helper/src/lib.rs")),
+    );
+}
+
+#[test]
+fn retains_imports_used_only_by_format_string_captures() {
+    let workspace = temp_path("format-capture-import-workspace");
+    let output = temp_path("format-capture-import-output");
+    let target_dir = temp_path("format-capture-import-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"mod constants {
+    pub const PROFILE_INIT: &str = "init";
+}
+
+mod launcher {
+    use opensourced::opensourced;
+    use super::constants::PROFILE_INIT;
+
+    #[opensourced]
+    pub fn selected() -> String {
+        format!("{PROFILE_INIT} run")
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let generated = read(output.join("app/src/lib.rs"));
+    assert!(generated.contains("PROFILE_INIT"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated format-capture import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nlib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        generated,
+    );
+}
+
+#[test]
+fn retains_parent_trait_imports_used_by_child_super_glob() {
+    let workspace = temp_path("super-glob-trait-import-workspace");
+    let output = temp_path("super-glob-trait-import-output");
+    let target_dir = temp_path("super-glob-trait-import-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
+mod child {
+    use opensourced::opensourced;
+    use super::*;
+
+    #[opensourced]
+    pub fn selected(value: &str) -> u64 {
+        let mut hasher = DefaultHasher::new();
+        value.hash(&mut hasher);
+        hasher.finish()
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let generated = read(output.join("app/src/lib.rs"));
+    assert!(generated.contains("Hash"));
+    assert!(generated.contains("Hasher"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated super-glob trait import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nlib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        generated,
+    );
+}
+
+#[test]
+fn retains_from_str_trait_import_for_associated_function_calls() {
+    let workspace = temp_path("from-str-import-workspace");
+    let output = temp_path("from-str-import-output");
+    let target_dir = temp_path("from-str-import-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use std::str::FromStr;
+
+#[opensourced]
+pub fn selected(value: &str) -> Result<u16, std::num::ParseIntError> {
+    u16::from_str(value)
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let generated = read(output.join("app/src/lib.rs"));
+    assert!(generated.contains("FromStr"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated FromStr import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nlib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        generated,
+    );
+}
+
+#[test]
+fn copies_direct_external_path_dependency_closure_into_generated_output() {
+    let workspace = temp_path("direct-external-path-dep-workspace");
+    let output = temp_path("direct-external-path-dep-output");
+    let target_dir = temp_path("direct-external-path-dep-target");
+    let helper = temp_path("direct-external-path-dep-helper");
+    let leaf = temp_path("direct-external-path-dep-leaf");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    external_helper::decorate(value)
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+external-leaf = {{ path = "{}" }}
+"#,
+            manifest_path(&leaf)
+        ),
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"pub fn decorate(value: &str) -> String {
+    format!("{value}{}", external_leaf::suffix())
+}
+"#,
+    );
+    write(
+        leaf.join("Cargo.toml"),
+        r#"[package]
+name = "external-leaf"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        leaf.join("src/lib.rs"),
+        r#"pub fn suffix() -> &'static str {
+    ":leaf"
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    let helper_manifest = read(output.join("support/external-helper/Cargo.toml"));
+    let leaf_manifest = read(output.join("support/external-leaf/Cargo.toml"));
+    assert!(app_manifest.contains("path = \"../support/external-helper\""));
+    assert!(helper_manifest.contains("path = \"../external-leaf\""));
+    assert!(leaf_manifest.contains("name = \"external-leaf\""));
+    assert!(!app_manifest.contains(&manifest_path(&helper)));
+    assert!(!helper_manifest.contains(&manifest_path(&leaf)));
+
+    fs::rename(&helper, helper.with_extension("moved")).unwrap();
+    fs::rename(&leaf, leaf.with_extension("moved")).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated direct external dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\nhelper/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+        helper_manifest,
+    );
+}
+
+#[test]
+fn preserves_replace_tables_with_resolved_paths() {
+    let workspace = temp_path("replace-table-workspace");
+    let output = temp_path("replace-table-output");
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[replace]
+"replace-helper:0.1.0" = { path = "replace-helper" }
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+    write(
+        workspace.join("replace-helper/Cargo.toml"),
+        r#"[package]
+name = "replace-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        workspace.join("replace-helper/src/lib.rs"),
+        r#"pub fn value() -> i32 {
+    7
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let root_manifest = read(output.join("Cargo.toml"));
+    let support_manifest = read(output.join("support/replace-helper/Cargo.toml"));
+    assert!(root_manifest.contains("replace-helper:0.1.0"));
+    assert!(root_manifest.contains("path = \"support/replace-helper\""));
+    assert!(!root_manifest.contains("path = \"/"));
+    assert!(!root_manifest.contains("path = \"replace-helper\""));
+    assert!(support_manifest.contains("name = \"replace-helper\""));
 }
 
 #[test]
@@ -800,6 +3058,41 @@ fn retains_external_extension_trait_imports_for_method_resolution() {
     assert!(
         cargo_check.status.success(),
         "generated extension trait slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn prunes_unused_external_extension_trait_imports_after_dead_items_are_removed() {
+    let workspace = temp_path("unused-extension-trait-workspace");
+    let output = temp_path("unused-extension-trait-output");
+    let target_dir = temp_path("unused-extension-trait-target");
+    write_unused_extension_trait_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("unused_extension_trait_like/src/lib.rs"));
+    assert!(!source.contains("AsyncReadExt"));
+    assert!(!source.contains("AsyncWriteExt"));
+    assert!(!source.contains("tokio::io"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated unused extension trait slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
@@ -842,6 +3135,347 @@ fn retains_external_trait_imports_without_ext_suffix_for_method_resolution() {
 }
 
 #[test]
+fn prunes_unused_serde_derive_imports_after_dead_items_are_removed() {
+    let workspace = temp_path("serde-derive-import-workspace");
+    let output = temp_path("serde-derive-import-output");
+    let target_dir = temp_path("serde-derive-import-target");
+    write_unused_serde_derive_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("serde_derive_import_like/src/lib.rs"));
+    assert!(source.contains("pub fn selected"));
+    assert!(source.contains("serde::Serialize"));
+    assert!(!source.contains("Deserialize"));
+    assert!(!source.contains("DeadWire"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde derive import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn retains_local_proc_macro_derive_and_helper_attr_dependencies() {
+    let workspace = temp_path("proc-macro-helper-workspace");
+    let output = temp_path("proc-macro-helper-output");
+    let target_dir = temp_path("proc-macro-helper-target");
+    write_local_proc_macro_helper_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app = read(output.join("app/src/lib.rs"));
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    let macro_source = read(output.join("derive-support/src/lib.rs"));
+    assert!(app.contains("derive_support::UseHelper"));
+    assert!(app.contains("default_token"));
+    assert!(!app.contains("unused_helper"));
+    assert!(!app.contains("DeadWire"));
+    assert!(app_manifest.contains("[dependencies.derive-support]"));
+    assert!(macro_source.contains("proc_macro_derive(UseHelper"));
+    assert!(!app.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated proc-macro helper slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\nderive-support/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+        app,
+        macro_source,
+    );
+}
+
+#[test]
+fn retains_serde_trait_import_for_associated_deserialize_call() {
+    let workspace = temp_path("serde-trait-associated-workspace");
+    let output = temp_path("serde-trait-associated-output");
+    let target_dir = temp_path("serde-trait-associated-target");
+    write_serde_trait_associated_call_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("serde_trait_associated_like/src/lib.rs"));
+    assert!(source.contains("use serde::Deserialize"));
+    assert!(source.contains("Option::<serde_json::Value>::deserialize"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde trait associated slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn retains_digest_trait_import_for_associated_new_call() {
+    let workspace = temp_path("digest-trait-associated-workspace");
+    let output = temp_path("digest-trait-associated-output");
+    let target_dir = temp_path("digest-trait-associated-target");
+    write_digest_trait_associated_call_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("digest_trait_associated_like/src/lib.rs"));
+    assert!(source.contains("sha1::{Digest, Sha1}"));
+    assert!(source.contains("Sha1::new"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated digest trait associated slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn prunes_digest_trait_import_when_hash_usage_is_dead() {
+    let workspace = temp_path("digest-trait-dead-hash-workspace");
+    let output = temp_path("digest-trait-dead-hash-output");
+    let target_dir = temp_path("digest-trait-dead-hash-target");
+    write_digest_trait_dead_hash_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("digest_trait_dead_hash_like/src/lib.rs"));
+    assert!(source.contains("pub fn selected"));
+    assert!(source.contains("Mutex::new"));
+    assert!(!source.contains("sha1"));
+    assert!(!source.contains("Digest"));
+    assert!(!source.contains("Sha1"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let manifest = read(output.join("digest_trait_dead_hash_like/Cargo.toml"));
+    assert!(!manifest.contains("sha1"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-Dwarnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated dead digest trait import slice did not compile cleanly\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn prunes_unused_private_external_type_imports_after_dead_items_are_removed() {
+    let workspace = temp_path("external-type-import-workspace");
+    let output = temp_path("external-type-import-output");
+    let target_dir = temp_path("external-type-import-target");
+    write_unused_external_type_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("external_type_import_like/src/lib.rs"));
+    assert!(source.contains("pub fn selected"));
+    assert!(!source.contains("serde_json"));
+    assert!(!source.contains("Map"));
+    assert!(!source.contains("Value"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external type import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn prunes_unused_private_local_imports_even_when_item_is_reachable_elsewhere() {
+    let workspace = temp_path("local-import-workspace");
+    let output = temp_path("local-import-output");
+    let target_dir = temp_path("local-import-target");
+    write_unused_local_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let feature = read(output.join("local_import_like/src/feature.rs"));
+    let other = read(output.join("local_import_like/src/other.rs"));
+    assert!(feature.contains("FeatureValue"));
+    assert!(!feature.contains("OtherValue"));
+    assert!(other.contains("OtherValue"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated local import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nfeature.rs:\n{}\nother.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        feature,
+        other,
+    );
+}
+
+#[test]
+fn retains_parent_imports_used_by_child_super_glob_and_prunes_unused_child_glob() {
+    let workspace = temp_path("super-glob-workspace");
+    let output = temp_path("super-glob-output");
+    let target_dir = temp_path("super-glob-target");
+    write_super_glob_parent_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let parent = read(output.join("super_glob_like/src/parent/mod.rs"));
+    let child = read(output.join("super_glob_like/src/parent/child.rs"));
+    assert!(parent.contains("PendingApproval"));
+    assert!(parent.contains("PendingApprovalSeed"));
+    assert!(!parent.contains("self::child"));
+    assert!(child.contains("use super::*"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated super glob slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nparent/mod.rs:\n{}\nparent/child.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        parent,
+        child,
+    );
+}
+
+#[test]
+fn prunes_unused_private_struct_fields_and_their_imports() {
+    let workspace = temp_path("private-field-workspace");
+    let output = temp_path("private-field-output");
+    let target_dir = temp_path("private-field-target");
+    write_unused_private_struct_field_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("private_field_like/src/lib.rs"));
+    assert!(source.contains("raw_params"));
+    assert!(source.contains("Serialize"));
+    assert!(source.contains("Deserialize"));
+    assert!(!source.contains("request_id"));
+    assert!(!source.contains("serde_json"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated private field slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn retains_std_trait_imports_for_method_resolution() {
     let workspace = temp_path("std-trait-import-workspace");
     let output = temp_path("std-trait-import-output");
@@ -858,6 +3492,8 @@ fn retains_std_trait_imports_for_method_resolution() {
     assert!(source.contains("Hash"));
     assert!(source.contains("Hasher"));
     assert!(source.contains("Write"));
+    assert!(!source.contains("AtomicI64"));
+    assert!(!source.contains("Ordering"));
     assert!(!source.contains("#[opensourced]"));
 
     let cargo_check = Command::new("cargo")
@@ -1201,6 +3837,10 @@ edition = "2021"
 
 [dependencies]
 opensourced = {{ path = "{}" }}
+
+[[bin]]
+name = "tool"
+path = "src/bin/tool/main.rs"
 "#,
             manifest_path(&opensourced_path)
         ),
@@ -1228,6 +3868,730 @@ fn noisy_entrypoint() {
 
 fn dead() -> String {
     "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_bin_with_lib_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"pub fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("app/src/bin/tool/main.rs"),
+        r#"mod command;
+
+fn dead_bin() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("app/src/bin/tool/command.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    helper(value)
+}
+
+fn helper(value: &str) -> String {
+    format!("bin:{value}")
+}
+
+fn dead_command() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_example_target_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "lib_support", "support"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[example]]
+name = "demo"
+path = "examples/demo.rs"
+required-features = ["demo-mode"]
+
+[features]
+default = ["demo-mode"]
+demo-mode = []
+
+[dependencies]
+lib_support = {{ path = "../lib_support" }}
+
+[dev-dependencies]
+opensourced = {{ path = "{}" }}
+support = {{ path = "../support" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"pub fn library_label(value: &str) -> String {
+    lib_support::label(value)
+}
+
+pub fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("app/examples/demo.rs"),
+        r#"use opensourced::opensourced;
+
+fn main() {
+    println!("{}", selected("runtime"));
+}
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    format!("{}:{}", app::library_label(value), support::format_value(value))
+}
+
+fn dead_example() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("lib_support/Cargo.toml"),
+        r#"[package]
+name = "lib_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("lib_support/src/lib.rs"),
+        r#"pub fn label(value: &str) -> String {
+    format!("lib:{value}")
+}
+
+pub fn dead_label() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("support/Cargo.toml"),
+        r#"[package]
+name = "support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support/src/lib.rs"),
+        r#"pub fn format_value(value: &str) -> String {
+    format!("example:{value}")
+}
+
+pub fn dead_support() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_test_target_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "lib_support", "platform_support", "support"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[test]]
+name = "behavior"
+path = "tests/behavior.rs"
+
+[dependencies]
+lib_support = {{ path = "../lib_support" }}
+
+[dev-dependencies]
+opensourced = {{ path = "{}" }}
+support = {{ path = "../support" }}
+
+[target.'cfg(unix)'.dev-dependencies]
+platform_support = {{ path = "../platform_support" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"pub fn library_label(value: &str) -> String {
+    lib_support::label(value)
+}
+
+pub fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("app/tests/behavior.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+#[test]
+fn selected_behavior() {
+    assert_eq!(app::library_label("runtime"), "lib:runtime");
+    assert_eq!(support::format_value("runtime"), "test:runtime");
+    #[cfg(unix)]
+    assert_eq!(platform_support::format_value("runtime"), "platform:runtime");
+}
+
+fn dead_test() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("lib_support/Cargo.toml"),
+        r#"[package]
+name = "lib_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("lib_support/src/lib.rs"),
+        r#"pub fn label(value: &str) -> String {
+    format!("lib:{value}")
+}
+
+pub fn dead_label() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("platform_support/Cargo.toml"),
+        r#"[package]
+name = "platform_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("platform_support/src/lib.rs"),
+        r#"pub fn format_value(value: &str) -> String {
+    format!("platform:{value}")
+}
+
+pub fn dead_platform_support() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("support/Cargo.toml"),
+        r#"[package]
+name = "support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support/src/lib.rs"),
+        r#"pub fn format_value(value: &str) -> String {
+    format!("test:{value}")
+}
+
+pub fn dead_support() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_bench_target_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "lib_support", "support"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[bench]]
+name = "throughput"
+path = "benches/throughput.rs"
+
+[dependencies]
+lib_support = {{ path = "../lib_support" }}
+
+[dev-dependencies]
+opensourced = {{ path = "{}" }}
+support = {{ path = "../support" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"pub fn library_label(value: &str) -> String {
+    lib_support::label(value)
+}
+
+pub fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("app/benches/throughput.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_bench_value(value: &str) -> String {
+    format!("{}:{}", app::library_label(value), support::format_value(value))
+}
+
+fn dead_bench() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("lib_support/Cargo.toml"),
+        r#"[package]
+name = "lib_support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("lib_support/src/lib.rs"),
+        r#"pub fn label(value: &str) -> String {
+    format!("lib:{value}")
+}
+
+pub fn dead_label() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("support/Cargo.toml"),
+        r#"[package]
+name = "support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support/src/lib.rs"),
+        r#"pub fn format_value(value: &str) -> String {
+    format!("bench:{value}")
+}
+
+pub fn dead_support() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_path_attr_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "path_attr_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"#[path = "generated/custom.rs"]
+mod custom;
+
+fn dead_lib() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("src/generated/custom.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    helper(value)
+}
+
+fn helper(value: &str) -> String {
+    format!("custom:{value}")
+}
+
+fn dead_custom() -> String {
+    "dead".to_string()
+}
+"#,
+    );
+}
+
+fn write_multi_target_marker_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "multi_target_marker_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+
+[[bin]]
+name = "tool"
+path = "src/bin/tool.rs"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn lib_selected() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("src/bin/tool.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn bin_selected() -> i32 {
+    2
+}
+"#,
+    );
+}
+
+fn write_lib_and_test_marker_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "lib_test_marker_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+
+[[test]]
+name = "behavior"
+path = "tests/behavior.rs"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn lib_selected() -> i32 {
+    1
+}
+"#,
+    );
+    write(
+        root.join("tests/behavior.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+#[test]
+fn selected_behavior() {
+    assert_eq!(lib_test_marker_like::lib_selected(), 1);
+}
+"#,
+    );
+}
+
+fn write_multi_root_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "multi_root_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_a(value: i32) -> i32 {
+    helper_a(value)
+}
+
+#[opensourced]
+pub fn selected_b(value: i32) -> i32 {
+    helper_b(value)
+}
+
+fn helper_a(value: i32) -> i32 {
+    value + 1
+}
+
+fn helper_b(value: i32) -> i32 {
+    value * 2
+}
+
+mod hidden {
+    use opensourced::opensourced;
+
+    #[opensourced]
+    pub fn selected_hidden(value: i32) -> i32 {
+        helper_hidden(value)
+    }
+
+    fn helper_hidden(value: i32) -> i32 {
+        value * value
+    }
+
+    pub fn dead_hidden(value: i32) -> i32 {
+        value - 10
+    }
+}
+
+pub fn dead_root(value: i32) -> i32 {
+    dead_helper(value)
+}
+
+fn dead_helper(value: i32) -> i32 {
+    value - 1
+}
+"#,
+    );
+}
+
+fn write_item_root_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "item_root_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub struct Api {
+    pub mode: Mode,
+    pub handler: Box<dyn Handler>,
+    state: PrivateState,
+}
+
+struct PrivateState {
+    generation: usize,
+}
+
+pub enum Mode {
+    Read,
+    Write,
+}
+
+#[opensourced]
+enum PrivateKind {
+    Fast,
+    Slow,
+}
+
+pub trait Handler {
+    #[opensourced]
+    fn handle(&self, mode: Mode) -> usize;
+}
+
+pub struct Dead;
+
+pub fn dead_factory() -> Dead {
+    Dead
+}
+"#,
+    );
+}
+
+fn write_module_root_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "module_root_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub mod api {
+    pub struct Request {
+        pub mode: Mode,
+    }
+
+    pub enum Mode {
+        Read,
+        Write,
+    }
+
+    pub fn run(request: Request) -> usize {
+        helper(request.mode)
+    }
+
+    fn helper(mode: Mode) -> usize {
+        match mode {
+            Mode::Read => 1,
+            Mode::Write => 2,
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        pub fn module_test_helper() -> usize {
+            99
+        }
+    }
+}
+
+pub mod dead {
+    pub fn unused() -> usize {
+        0
+    }
 }
 "#,
     );
@@ -1617,6 +4981,59 @@ impl std::fmt::Debug for Guid {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         formatter.write_str(self.as_str())
     }
+}
+"#,
+    );
+}
+
+fn write_serde_default_field_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_default_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct HomeSelection {
+    selected_project_id: Option<String>,
+}
+
+impl Default for HomeSelection {
+    fn default() -> Self {
+        Self {
+            selected_project_id: None,
+        }
+    }
+}
+
+#[derive(Deserialize)]
+pub struct PersistedPreferences {
+    #[serde(default)]
+    home_selection: HomeSelection,
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> bool {
+    serde_json::from_str::<PersistedPreferences>(input).is_ok()
 }
 "#,
     );
@@ -2276,6 +5693,126 @@ pub fn dead() -> String {
     );
 }
 
+fn write_build_dependency_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "build_helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+opensourced.workspace = true
+
+[build-dependencies]
+build_helper = { path = "../build_helper" }
+"#,
+    );
+    write(
+        root.join("app/build.rs"),
+        r#"fn main() {
+    build_helper::emit();
+}
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    "selected"
+}
+"#,
+    );
+    write_package(
+        root,
+        "build_helper",
+        r#"pub fn emit() {
+    println!("cargo:rerun-if-changed=build.rs");
+}
+"#,
+    );
+}
+
+fn write_target_build_dependency_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "build_helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+
+[dependencies]
+opensourced.workspace = true
+
+[target.'cfg(all())'.build-dependencies]
+build_helper = { path = "../build_helper" }
+"#,
+    );
+    write(
+        root.join("app/build.rs"),
+        r#"fn main() {
+    build_helper::emit();
+}
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    "selected"
+}
+"#,
+    );
+    write_package(
+        root,
+        "build_helper",
+        r#"pub fn emit() {
+    println!("cargo:rerun-if-changed=build.rs");
+}
+"#,
+    );
+}
+
 fn write_external_workspace_path_fixture(root: &Path) {
     if root.exists() {
         fs::remove_dir_all(root).unwrap();
@@ -2284,9 +5821,17 @@ fn write_external_workspace_path_fixture(root: &Path) {
         "{}-external-helper",
         root.file_name().unwrap().to_string_lossy()
     );
+    let external_leaf_name = format!(
+        "{}-external-leaf",
+        root.file_name().unwrap().to_string_lossy()
+    );
     let external_root = root.parent().unwrap().join(&external_name);
     if external_root.exists() {
         fs::remove_dir_all(&external_root).unwrap();
+    }
+    let external_leaf_root = root.parent().unwrap().join(&external_leaf_name);
+    if external_leaf_root.exists() {
+        fs::remove_dir_all(&external_leaf_root).unwrap();
     }
     let opensourced_path = repo_root().join("crates/opensourced");
 
@@ -2303,6 +5848,7 @@ opensourced = {{ path = "{}" }}
 
 [patch.crates-io]
 external-helper = {{ path = "../{external_name}" }}
+external-leaf = {{ path = "../{external_leaf_name}" }}
 "#,
             manifest_path(&opensourced_path)
         ),
@@ -2345,16 +5891,34 @@ pub fn dead() -> String {
 name = "external-helper"
 version = "0.1.0"
 edition = "2021"
+
+[dependencies]
+external_leaf = { package = "external-leaf", version = "0.1.0" }
 "#,
     );
     write(
         external_root.join("src/lib.rs"),
         r#"pub fn decorate(value: &str) -> String {
-    format!("external:{value}")
+    format!("external:{value}:{}", external_leaf::suffix())
 }
 
 pub fn unused() -> &'static str {
     "unused"
+}
+"#,
+    );
+    write(
+        external_leaf_root.join("Cargo.toml"),
+        r#"[package]
+name = "external-leaf"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        external_leaf_root.join("src/lib.rs"),
+        r#"pub fn suffix() -> &'static str {
+    "leaf"
 }
 "#,
     );
@@ -2398,6 +5962,48 @@ pub async fn dead() -> &'static str {
     );
 }
 
+fn write_unused_extension_trait_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "unused_extension_trait_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+tokio = {{ version = "1", features = ["io-util"] }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    let _ = std::fs::read_to_string(value).ok();
+    value.to_string()
+}
+
+pub async fn dead<R: tokio::io::AsyncRead + tokio::io::AsyncWrite + Unpin>(
+    stream: &mut R,
+) -> std::io::Result<String> {
+    let mut value = String::new();
+    stream.read_to_string(&mut value).await?;
+    stream.write_all(value.as_bytes()).await?;
+    Ok(value)
+}
+"#,
+    );
+}
+
 fn write_external_trait_fixture(root: &Path) {
     if root.exists() {
         fs::remove_dir_all(root).unwrap();
@@ -2436,6 +6042,470 @@ pub fn dead() -> &'static str {
     );
 }
 
+fn write_unused_serde_derive_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_derive_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct DeadWire {
+    value: String,
+}
+
+#[derive(serde::Serialize)]
+pub struct KeptWire {
+    value: i32,
+}
+
+#[opensourced]
+pub fn selected(value: i32) -> KeptWire {
+    KeptWire { value }
+}
+"#,
+    );
+}
+
+fn write_local_proc_macro_helper_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "derive-support"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+derive-support = {{ path = "../derive-support" }}
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use derive_support::UseHelper;
+use opensourced::opensourced;
+
+#[derive(UseHelper)]
+pub struct RetainedWire {
+    #[helper(default = default_token)]
+    value: u32,
+}
+
+#[derive(UseHelper)]
+pub struct DeadWire {
+    #[helper(default = unused_helper)]
+    value: u32,
+}
+
+#[opensourced]
+pub fn selected(value: u32) -> u32 {
+    RetainedWire { value }.generated()
+}
+
+fn default_token() -> u32 {
+    7
+}
+
+fn unused_helper() -> u32 {
+    99
+}
+"#,
+    );
+    write(
+        root.join("derive-support/Cargo.toml"),
+        r#"[package]
+name = "derive-support"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+    );
+    write(
+        root.join("derive-support/src/lib.rs"),
+        r#"extern crate proc_macro;
+
+use proc_macro::TokenStream;
+
+#[proc_macro_derive(UseHelper, attributes(helper))]
+pub fn use_helper(input: TokenStream) -> TokenStream {
+    let input = input.to_string();
+    let name = input
+        .split_whitespace()
+        .skip_while(|token| *token != "struct")
+        .nth(1)
+        .expect("derive input should contain a struct name")
+        .trim_matches('{')
+        .trim_matches(';')
+        .split('<')
+        .next()
+        .expect("struct name should not be empty");
+    format!("impl {name} {{ pub fn generated(&self) -> u32 {{ default_token() }} }}")
+        .parse()
+        .expect("generated derive output should parse")
+}
+"#,
+    );
+}
+
+fn write_serde_trait_associated_call_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_trait_associated_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+#[opensourced]
+pub fn selected<'de, D>(deserializer: D) -> Result<Option<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<serde_json::Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| match value {
+        serde_json::Value::Null => None,
+        serde_json::Value::String(text) => Some(text),
+        other => serde_json::to_string(&other).ok(),
+    }))
+}
+"#,
+    );
+}
+
+fn write_digest_trait_associated_call_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "digest_trait_associated_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hex = "0.4"
+opensourced = {{ path = "{}" }}
+sha1 = "0.10"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use sha1::{Digest, Sha1};
+
+#[opensourced]
+pub fn selected(input: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
+}
+"#,
+    );
+}
+
+fn write_digest_trait_dead_hash_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "digest_trait_dead_hash_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hex = "0.4"
+opensourced = {{ path = "{}" }}
+sha1 = "0.10"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use sha1::{Digest, Sha1};
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+pub type Cache = Mutex<HashMap<String, String>>;
+
+#[opensourced]
+pub fn selected() -> Cache {
+    Mutex::new(HashMap::new())
+}
+
+fn dead_bucket(input: &str) -> String {
+    let mut hasher = Sha1::new();
+    hasher.update(input.as_bytes());
+    hex::encode(hasher.finalize())
+}
+"#,
+    );
+}
+
+fn write_unused_external_type_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external_type_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde_json::{Map, Value};
+
+#[opensourced]
+pub fn selected(value: i32) -> i32 {
+    value + 1
+}
+
+pub fn dead(input: Map<String, Value>) -> Option<Value> {
+    input.into_iter().next().map(|(_, value)| value)
+}
+"#,
+    );
+}
+
+fn write_unused_local_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "local_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"pub mod feature;
+pub mod other;
+pub mod shared;
+"#,
+    );
+    write(
+        root.join("src/feature.rs"),
+        r#"use crate::shared::{FeatureValue, OtherValue};
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_feature() -> FeatureValue {
+    FeatureValue { value: 1 }
+}
+
+pub fn dead() -> OtherValue {
+    OtherValue { value: 2 }
+}
+"#,
+    );
+    write(
+        root.join("src/other.rs"),
+        r#"use crate::shared::OtherValue;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_other() -> OtherValue {
+    OtherValue { value: 3 }
+}
+"#,
+    );
+    write(
+        root.join("src/shared.rs"),
+        r#"pub struct FeatureValue {
+    pub value: i32,
+}
+
+pub struct OtherValue {
+    pub value: i32,
+}
+"#,
+    );
+}
+
+fn write_super_glob_parent_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "super_glob_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"pub mod parent;
+pub mod types;
+"#,
+    );
+    write(
+        root.join("src/types.rs"),
+        r#"pub struct PendingApproval {
+    pub id: String,
+}
+
+pub struct PendingApprovalSeed {
+    pub raw_params: String,
+}
+"#,
+    );
+    write(
+        root.join("src/parent/mod.rs"),
+        r#"use crate::types::{PendingApproval, PendingApprovalSeed};
+
+pub mod child;
+use self::child::*;
+"#,
+    );
+    write(
+        root.join("src/parent/child.rs"),
+        r#"use opensourced::opensourced;
+use super::*;
+
+#[opensourced]
+pub fn selected(
+    approval: &PendingApproval,
+    seed: Option<&PendingApprovalSeed>,
+) -> Option<String> {
+    seed.map(|seed| format!("{}:{}", approval.id, seed.raw_params))
+}
+"#,
+    );
+}
+
+fn write_unused_private_struct_field_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "private_field_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub(crate) struct Seed {
+    request_id: Value,
+    raw_params: String,
+}
+
+#[opensourced]
+pub(crate) fn selected(seed: &Seed) -> String {
+    seed.raw_params.clone()
+}
+"#,
+    );
+}
+
 fn write_std_trait_import_fixture(root: &Path) {
     if root.exists() {
         fs::remove_dir_all(root).unwrap();
@@ -2459,6 +6529,7 @@ opensourced = {{ path = "{}" }}
         root.join("src/lib.rs"),
         r#"use std::hash::{Hash, Hasher};
 use std::io::Write;
+use std::sync::atomic::{AtomicI64, Ordering};
 
 #[opensourced]
 pub fn selected(value: &str) -> u64 {
@@ -2679,6 +6750,1004 @@ pub enum AppAskForApproval {
 
 pub enum DeadPolicy {
     Noise,
+}
+"#,
+    );
+}
+
+fn write_implicit_feature_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "helper"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+helper = { path = "../helper", features = ["feature_dep"] }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> String {
+    helper::value()
+}
+"#,
+    );
+    write(
+        root.join("helper/Cargo.toml"),
+        r#"[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+feature_dep = { path = "../feature_dep", optional = true }
+"#,
+    );
+    write(
+        root.join("helper/src/lib.rs"),
+        r#"pub fn value() -> String {
+    "helper".to_string()
+}
+"#,
+    );
+    write_package(
+        root,
+        "feature_dep",
+        r#"pub fn value() -> &'static str {
+    "feature"
+}
+"#,
+    );
+}
+
+fn write_mutex_field_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+lazy_static = "1"
+opensourced.workspace = true
+parking_lot = "0.12"
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use std::{
+    collections::HashMap,
+    sync::Weak,
+    time::{Duration, Instant},
+};
+
+use opensourced::opensourced;
+use parking_lot::Mutex;
+
+static GLOBALS: Mutex<Globals> = Mutex::new(Globals::new());
+
+lazy_static::lazy_static! {
+    static ref REGISTERED_INTERRUPTS: Mutex<Vec<Weak<dyn AsRef<SqlInterruptHandle> + Send + Sync>>> = Mutex::new(Vec::new());
+}
+
+#[opensourced]
+pub fn selected(message: String) {
+    GLOBALS.lock().breadcrumbs.push(message);
+    let _registered_count = REGISTERED_INTERRUPTS.lock().len();
+}
+
+pub struct SqlInterruptHandle;
+
+impl AsRef<SqlInterruptHandle> for SqlInterruptHandle {
+    fn as_ref(&self) -> &SqlInterruptHandle {
+        self
+    }
+}
+
+struct Globals {
+    breadcrumbs: BreadcrumbRingBuffer,
+    rate_limiter: RateLimiter,
+}
+
+impl Globals {
+    const fn new() -> Self {
+        Self {
+            breadcrumbs: BreadcrumbRingBuffer::new(),
+            rate_limiter: RateLimiter::new(),
+        }
+    }
+}
+
+#[derive(Default)]
+struct BreadcrumbRingBuffer {
+    breadcrumbs: Vec<String>,
+    pos: usize,
+}
+
+impl BreadcrumbRingBuffer {
+    const MAX_ITEMS: usize = 20;
+
+    const fn new() -> Self {
+        Self {
+            breadcrumbs: Vec::new(),
+            pos: 0,
+        }
+    }
+
+    fn push(&mut self, breadcrumb: String) {
+        if self.breadcrumbs.len() < Self::MAX_ITEMS {
+            self.breadcrumbs.push(breadcrumb);
+        } else {
+            self.breadcrumbs[self.pos] = breadcrumb;
+            self.pos = (self.pos + 1) % Self::MAX_ITEMS;
+        }
+    }
+}
+
+struct RateLimiter {
+    last_report: Option<HashMap<String, Instant>>,
+}
+
+impl RateLimiter {
+    const INTERVAL: Duration = Duration::from_secs(180);
+
+    const fn new() -> Self {
+        Self { last_report: None }
+    }
+}
+"#,
+    );
+}
+
+fn write_external_trait_method_arg_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+base64 = "0.21"
+opensourced.workspace = true
+serde = "1"
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use std::{cmp::Ordering, fmt};
+
+use base64::{engine::general_purpose::URL_SAFE_NO_PAD, Engine};
+use opensourced::opensourced;
+use serde::de::{self, Deserializer, Visitor};
+
+#[derive(Clone)]
+pub struct Guid(String);
+
+impl Guid {
+    fn as_bytes(&self) -> &[u8] {
+        self.0.as_bytes()
+    }
+}
+
+impl Ord for Guid {
+    #[opensourced]
+    fn cmp(&self, other: &Self) -> Ordering {
+        self.as_bytes().cmp(other.as_bytes())
+    }
+}
+
+impl PartialOrd for Guid {
+    #[opensourced]
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
+        Some(self.cmp(other))
+    }
+}
+
+impl PartialEq for Guid {
+    #[opensourced]
+    fn eq(&self, other: &Self) -> bool {
+        self.as_bytes() == other.as_bytes()
+    }
+}
+
+impl Eq for Guid {}
+
+unsafe impl Sync for Guid {}
+
+struct GuidVisitor;
+
+impl Visitor<'_> for GuidVisitor {
+    type Value = Guid;
+
+    fn expecting(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str("a guid")
+    }
+
+    fn visit_str<E: de::Error>(self, value: &str) -> Result<Self::Value, E> {
+        Ok(Guid(value.to_string()))
+    }
+}
+
+#[opensourced]
+pub fn selected<'de, D>(deserializer: D) -> Result<Guid, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let bytes = [0u8; 9];
+    let mut output = [0u8; 12];
+    URL_SAFE_NO_PAD.encode_slice(bytes, &mut output).unwrap();
+    let left = Guid("a".to_string());
+    let right = Guid("b".to_string());
+    let _ordering = Ord::cmp(&left, &right);
+    let _same = PartialEq::eq(&left, &right);
+    deserializer.deserialize_str(GuidVisitor)
+}
+"#,
+    );
+}
+
+fn write_associated_conversion_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"#[cfg(unix)]
+use std::os::unix::process::ExitStatusExt;
+use std::process::ExitStatus;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
+
+use opensourced::opensourced;
+
+#[derive(Copy, Clone)]
+pub struct Timestamp(pub u64);
+
+impl Timestamp {
+    #[opensourced]
+    pub fn checked_sub(self, d: Duration) -> Option<Timestamp> {
+        SystemTime::from(self).checked_sub(d).map(Into::into)
+    }
+}
+
+#[cfg(unix)]
+#[opensourced]
+pub fn status_from_code(code: i32) -> ExitStatus {
+    ExitStatus::from_raw(code << 8)
+}
+
+impl From<SystemTime> for Timestamp {
+    fn from(st: SystemTime) -> Self {
+        let d = st.duration_since(UNIX_EPOCH).unwrap();
+        Timestamp((d.as_secs()) * 1000 + (u64::from(d.subsec_nanos()) / 1_000_000))
+    }
+}
+
+impl From<Timestamp> for SystemTime {
+    fn from(ts: Timestamp) -> Self {
+        UNIX_EPOCH + Duration::from_millis(ts.0)
+    }
+}
+
+impl From<u64> for Timestamp {
+    fn from(ts: u64) -> Self {
+        Timestamp(ts)
+    }
+}
+"#,
+    );
+}
+
+fn write_feedback_layer_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "error-support"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("error-support/Cargo.toml"),
+        r#"[package]
+name = "error-support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("error-support/src/lib.rs"),
+        r#"#[macro_export]
+macro_rules! debug {
+    ($($tokens:tt)*) => {};
+}
+
+#[macro_export]
+macro_rules! warn {
+    ($($tokens:tt)*) => {};
+}
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support = { path = "../error-support" }
+opensourced.workspace = true
+thiserror = "2"
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"#![allow(unused_macros)]
+
+mod db;
+
+use error_support::{debug, warn};
+
+pub use db::selected;
+"#,
+    );
+    write(
+        root.join("app/src/db.rs"),
+        r#"use std::{fmt, time::SystemTime};
+
+use crate::{debug, warn};
+use opensourced::opensourced;
+use thiserror::Error;
+
+type Result<T> = std::result::Result<T, LocalError>;
+
+#[derive(Debug, Error)]
+pub enum LocalError {
+    #[error("io")]
+    Io,
+    #[error("interrupted {0}")]
+    Interrupted(#[from] Interrupted),
+}
+
+impl From<std::io::Error> for LocalError {
+    fn from(_: std::io::Error) -> Self {
+        Self::Io
+    }
+}
+
+#[derive(Debug)]
+pub struct Interrupted;
+
+impl Interrupted {
+    fn is_valid(&self) -> bool {
+        true
+    }
+}
+
+impl fmt::Display for Interrupted {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("interrupted")
+    }
+}
+
+impl std::error::Error for Interrupted {}
+
+pub trait ConnExt {
+    fn conn(&self) -> &SystemTime;
+
+    fn set_pragma(&self) -> std::result::Result<(), std::io::Error> {
+        let _ = self.conn();
+        fallible()
+    }
+}
+
+impl ConnExt for SystemTime {
+    fn conn(&self) -> &SystemTime {
+        self
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct RepeatDisplay<'a, F> {
+    count: usize,
+    sep: &'a str,
+    fmt_one: F,
+}
+
+impl<F> fmt::Display for RepeatDisplay<'_, F>
+where
+    F: Fn(usize, &mut fmt::Formatter<'_>) -> fmt::Result,
+{
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        for i in 0..self.count {
+            if i != 0 {
+                f.write_str(self.sep)?;
+            }
+            (self.fmt_one)(i, f)?;
+        }
+        Ok(())
+    }
+}
+
+fn repeat_display<F>(count: usize, sep: &str, fmt_one: F) -> RepeatDisplay<'_, F>
+where
+    F: Fn(usize, &mut fmt::Formatter<'_>) -> fmt::Result,
+{
+    RepeatDisplay { count, sep, fmt_one }
+}
+
+pub fn repeat_sql_vars(count: usize) -> impl fmt::Display {
+    repeat_display(count, ",", |_, f| write!(f, "?"))
+}
+
+fn fallible() -> std::result::Result<(), std::io::Error> {
+    Ok(())
+}
+
+#[opensourced]
+pub fn selected(conn: &SystemTime, interrupted: Interrupted) -> Result<impl fmt::Display> {
+    debug!("selected");
+    warn!("selected");
+    assert!(interrupted.is_valid(), "invalid interrupted");
+    conn.set_pragma()?;
+    fallible()?;
+    Ok(repeat_sql_vars(1))
+}
+"#,
+    );
+}
+
+fn write_feedback_viaduct_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "error-support"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("error-support/Cargo.toml"),
+        r#"[package]
+name = "error-support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("error-support/src/lib.rs"),
+        r#"#[macro_export]
+macro_rules! warn {
+    ($($tokens:tt)*) => {};
+}
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support = { path = "../error-support" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use error_support::{warn, ErrorHandling};
+use opensourced::opensourced;
+use std::borrow::Cow;
+use std::sync::Arc;
+
+pub(crate) mod msg_types {
+    include!("generated.rs");
+}
+
+mod ffi {
+    use crate::msg_types;
+
+    pub fn message() -> msg_types::Message {
+        msg_types::Message
+    }
+}
+
+mod old_backend {
+    pub trait Backend: Send + Sync + 'static {
+        fn send(&self) -> u8;
+    }
+
+    pub fn set_backend(_: &'static dyn Backend) -> Result<(), ()> {
+        Ok(())
+    }
+}
+
+pub trait Backend: Send + Sync + 'static {
+    fn send_request(&self) -> u8;
+}
+
+pub fn init_backend(backend: Arc<dyn Backend>) -> Result<(), ()> {
+    old_backend::set_backend(Box::leak(Box::new(backend.clone())))?;
+    Ok(())
+}
+
+impl old_backend::Backend for Arc<dyn Backend> {
+    fn send(&self) -> u8 {
+        self.send_request()
+    }
+}
+
+#[derive(PartialEq)]
+pub struct HeaderName(Cow<'static, str>);
+
+impl HeaderName {
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl std::ops::Deref for HeaderName {
+    type Target = str;
+
+    fn deref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+macro_rules! partialeq_boilerplate {
+    ($T0:ty, $T1:ty) => {
+        impl<'a> PartialEq<$T0> for $T1 {
+            fn eq(&self, other: &$T0) -> bool {
+                (&*self).eq_ignore_ascii_case(&*other)
+            }
+        }
+        impl<'a> PartialEq<$T1> for $T0 {
+            fn eq(&self, other: &$T1) -> bool {
+                PartialEq::eq(other, self)
+            }
+        }
+    };
+}
+
+partialeq_boilerplate!(HeaderName, str);
+partialeq_boilerplate!(HeaderName, &'a str);
+
+pub struct Header {
+    name: HeaderName,
+    value: String,
+}
+
+impl Header {
+    pub fn new(name: HeaderName, value: impl Into<String>) -> Self {
+        Self {
+            name,
+            value: value.into(),
+        }
+    }
+
+    fn set_value(&mut self, value: impl AsRef<str>) -> Result<(), ()> {
+        self.value.clear();
+        self.value.push_str(value.as_ref());
+        Ok(())
+    }
+}
+
+#[derive(Default)]
+pub struct Headers {
+    headers: Vec<Header>,
+}
+
+impl Headers {
+    pub fn insert(&mut self, name: HeaderName, value: impl AsRef<str> + Into<String>) -> Result<(), ()> {
+        if let Some(entry) = self.headers.iter_mut().find(|header| header.name == name) {
+            entry.set_value(value)?;
+        } else {
+            self.headers.push(Header::new(name, value));
+        }
+        Ok(())
+    }
+}
+
+#[opensourced]
+pub fn selected(
+    backend: Arc<dyn Backend>,
+    headers: &mut Headers,
+    name: HeaderName,
+) -> Result<bool, ()> {
+    warn!("selected");
+    let _message = ffi::message();
+    init_backend(backend)?;
+    headers.insert(name, "updated")?;
+    Ok(true)
+}
+"#,
+    );
+    write(
+        root.join("app/src/generated.rs"),
+        r#"pub struct Message;
+"#,
+    );
+}
+
+fn write_generic_method_recovery_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub struct Processor {
+    widgets: Vec<Widget>,
+}
+
+impl Processor {
+    pub fn new() -> Self {
+        Self {
+            widgets: vec![Widget::new(1)],
+        }
+    }
+
+    fn with_writer(
+        &mut self,
+        op: impl FnOnce(&mut Writer) -> Result<usize, ()>,
+    ) -> Result<usize, ()> {
+        let mut writer = Writer { widgets: Vec::new() };
+        let written = op(&mut writer)?;
+        self.widgets.extend(writer.widgets);
+        Ok(written + self.widgets.calculate_marker())
+    }
+}
+
+pub struct Writer {
+    widgets: Vec<Widget>,
+}
+
+impl Writer {
+    fn persist_widget(&mut self, widget: Widget) -> Result<usize, ()> {
+        self.widgets.push(widget);
+        Ok(self.widgets.calculate_marker())
+    }
+
+    fn discarded_noise(&self) -> usize {
+        999
+    }
+}
+
+#[derive(Clone)]
+pub struct Widget {
+    value: usize,
+}
+
+impl Widget {
+    fn new(value: usize) -> Self {
+        Self { value }
+    }
+}
+
+trait MarkerSum {
+    fn calculate_marker(&self) -> usize;
+}
+
+impl MarkerSum for Vec<Widget> {
+    fn calculate_marker(&self) -> usize {
+        self.iter().map(|widget| widget.value).sum()
+    }
+}
+
+#[opensourced]
+pub fn selected(processor: &mut Processor) -> Result<usize, ()> {
+    processor.with_writer(|writer| writer.persist_widget(Widget::new(41)))
+}
+"#,
+    );
+}
+
+fn write_feedback_places_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app", "helper", "error-support", "error-support-macros"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("error-support-macros/Cargo.toml"),
+        r#"[package]
+name = "error-support-macros"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+    );
+    write(
+        root.join("error-support-macros/src/lib.rs"),
+        r#"use proc_macro::TokenStream;
+
+#[proc_macro_attribute]
+pub fn handle_error(_args: TokenStream, input: TokenStream) -> TokenStream {
+    input
+}
+"#,
+    );
+    write(
+        root.join("error-support/Cargo.toml"),
+        r#"[package]
+name = "error-support"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support-macros = { path = "../error-support-macros" }
+"#,
+    );
+    write(
+        root.join("error-support/src/lib.rs"),
+        r#"pub use error_support_macros::handle_error;
+
+pub fn convert_log_report_error<E>(error: E) -> E {
+    error
+}
+"#,
+    );
+    write(
+        root.join("helper/Cargo.toml"),
+        r#"[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("helper/src/lib.rs"),
+        r#"mod chunks;
+pub use chunks::*;
+
+pub fn unused_root() {}
+"#,
+    );
+    write(
+        root.join("helper/src/chunks.rs"),
+        r#"pub fn each_chunk<T, F>(items: &[T], mut do_chunk: F)
+where
+    F: FnMut(&[T]),
+{
+    do_chunk(items);
+}
+
+pub fn unused_chunk() {}
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error-support = { path = "../error-support" }
+helper = { path = "../helper" }
+opensourced.workspace = true
+"#,
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"mod db;
+
+pub use db::selected;
+"#,
+    );
+    write(
+        root.join("app/src/db.rs"),
+        r#"use error_support::handle_error;
+use opensourced::opensourced;
+
+#[derive(Debug)]
+pub struct LocalError;
+
+struct PlacesInitializer {
+    seed: usize,
+}
+
+trait Initializer {
+    fn seed(&self) -> usize;
+}
+
+impl Initializer for PlacesInitializer {
+    fn seed(&self) -> usize {
+        self.seed
+    }
+}
+
+fn open_with_initializer<I: Initializer>(initializer: &I) -> usize {
+    initializer.seed()
+}
+
+struct HistoryRecord {
+    id: String,
+}
+
+#[derive(Clone)]
+pub enum VisitType {
+    Link,
+}
+
+pub struct VisitTransitionSet(Vec<VisitType>);
+
+impl VisitTransitionSet {
+    fn for_specific(types: &[VisitType]) -> VisitTransitionSet {
+        types.iter().cloned().collect()
+    }
+
+    fn len(&self) -> usize {
+        self.0.len()
+    }
+}
+
+impl std::iter::FromIterator<VisitType> for VisitTransitionSet {
+    fn from_iter<T>(iter: T) -> Self
+    where
+        T: IntoIterator<Item = VisitType>,
+    {
+        let mut items = Vec::new();
+        for item in iter {
+            items.push(item);
+        }
+        Self(items)
+    }
+}
+
+#[opensourced]
+#[handle_error(LocalError)]
+pub fn selected(values: Vec<VisitType>) -> std::result::Result<usize, LocalError> {
+    let initializer = PlacesInitializer { seed: 1 };
+    let record = HistoryRecord {
+        id: "history".to_string(),
+    };
+    let transitions = VisitTransitionSet::for_specific(&values);
+    helper::each_chunk(&values, |_| {});
+    Ok(open_with_initializer(&initializer) + record.id.len() + transitions.len())
 }
 "#,
     );
@@ -3105,12 +8174,14 @@ opensourced = {{ path = "{}" }}
 
 const CORE: &str = include_str!("guidelines/core.md");
 const EXTRA: &str = include_str!("../assets/extra.txt");
+const CONCAT: &str = include_str!(concat!("guidelines/", "concat.md"));
+const MANIFEST: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/manifest.txt"));
 const UNUSED: &str = include_str!("guidelines/unused.md");
 
 #[opensourced]
 pub fn selected(include_extra: bool) -> String {
     if include_extra {
-        format!("{CORE}\n{EXTRA}")
+        format!("{CORE}\n{EXTRA}\n{CONCAT}\n{MANIFEST}")
     } else {
         CORE.to_string()
     }
@@ -3126,10 +8197,18 @@ pub fn noisy() -> &'static str {
         "core guideline",
     );
     write(
+        root.join("include_assets_like/src/guidelines/concat.md"),
+        "concat guideline",
+    );
+    write(
         root.join("include_assets_like/src/guidelines/unused.md"),
         "unused guideline",
     );
     write(root.join("include_assets_like/assets/extra.txt"), "extra");
+    write(
+        root.join("include_assets_like/assets/manifest.txt"),
+        "manifest",
+    );
 }
 
 fn write_external_pub_reexport_fixture(root: &Path) {
@@ -3173,6 +8252,476 @@ pub fn noisy(map: Map<String, Value>, number: Number) -> usize {
     );
 }
 
+fn write_macro_renamed_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["macro_rename_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("macro_rename_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "macro_rename_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("macro_rename_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde_json::Value as JsonValue;
+
+macro_rules! define_api {
+    ($name:ident, $ty:ty) => {
+        pub fn $name(value: $ty) -> usize {
+            value.to_string().len()
+        }
+    };
+}
+
+define_api!(generated, JsonValue);
+
+#[opensourced]
+pub fn selected() -> usize {
+    generated(serde_json::json!({"live": true}))
+}
+
+pub fn dead() -> usize {
+    0
+}
+"#,
+    );
+}
+
+fn write_removed_renamed_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["removed_rename_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("removed_rename_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "removed_rename_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("removed_rename_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use crate::dead::dead_fn as selected_value;
+
+mod dead {
+    pub fn dead_fn() -> u32 {
+        99
+    }
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let selected_value = 1;
+    let closure = |selected_value: u32| selected_value + 1;
+    let via_match = match Some(2) {
+        Some(selected_value) => selected_value,
+        None => 0,
+    };
+    let mut via_loop = 0;
+    for selected_value in [3] {
+        via_loop += selected_value;
+    }
+    selected_value + closure(2) + via_match + via_loop
+}
+"#,
+    );
+}
+
+fn write_shadowed_renamed_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["shadowed_rename_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("shadowed_rename_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "shadowed_rename_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("shadowed_rename_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use crate::live::live_fn as selected_value;
+
+mod live {
+    pub fn live_fn() -> u32 {
+        41
+    }
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let shadow = {
+        let selected_value = 1;
+        selected_value
+    };
+    shadow + selected_value()
+}
+"#,
+    );
+}
+
+fn write_inline_super_glob_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["inline_super_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("inline_super_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "inline_super_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("inline_super_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use std::path::{Path, PathBuf};
+
+#[opensourced]
+pub mod child {
+    use super::*;
+
+    pub fn selected() -> bool {
+        Path::new("live").is_relative()
+    }
+}
+
+pub fn dead() -> PathBuf {
+    PathBuf::from("dead")
+}
+"#,
+    );
+}
+
+fn write_serde_callback_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["serde_callback_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("serde_callback_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_callback_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1", features = ["derive"] }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("serde_callback_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::Serialize;
+
+#[opensourced]
+#[derive(Serialize)]
+pub struct Api {
+    #[serde(skip_serializing_if = "crate::skip_if_default")]
+    value: u32,
+}
+
+fn skip_if_default<T: PartialEq + Default>(v: &T) -> bool {
+    *v == T::default()
+}
+
+pub fn dead() -> bool {
+    false
+}
+"#,
+    );
+}
+
+fn write_local_public_reexport_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "provider"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "../provider", optional = true }}
+
+[features]
+default = ["provider"]
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> Result<(), provider::Error> {
+    Err(provider::Error::Bad)
+}
+"#,
+    );
+    write(
+        root.join("provider/Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("provider/src/lib.rs"),
+        r#"mod error;
+pub use crate::error::Error;
+
+pub fn dead() -> usize {
+    0
+}
+"#,
+    );
+    write(
+        root.join("provider/src/error.rs"),
+        r#"#[derive(Debug)]
+pub enum Error {
+    Bad,
+}
+"#,
+    );
+}
+
+fn write_build_dependency_public_reexport_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "bridge", "provider"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+
+[build-dependencies]
+bridge = {{ path = "../bridge" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    7
+}
+"#,
+    );
+    write(
+        root.join("bridge/Cargo.toml"),
+        r#"[package]
+name = "bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+provider = { path = "../provider", optional = true }
+
+[features]
+default = []
+with-provider = ["provider"]
+"#,
+    );
+    write(
+        root.join("bridge/src/lib.rs"),
+        r#"#[cfg(feature = "with-provider")]
+pub enum BridgeError {
+    Provider(provider::Error),
+}
+"#,
+    );
+    write(
+        root.join("provider/Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("provider/src/lib.rs"),
+        r#"mod error;
+pub use crate::error::{Error};
+"#,
+    );
+    write(
+        root.join("provider/src/error.rs"),
+        r#"#[derive(Debug)]
+pub enum Error {
+    Bad,
+}
+"#,
+    );
+}
+
+fn write_macro_generated_public_reexport_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app", "macro-provider", "provider"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "../provider" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> Result<(), provider::Error> {
+    unreachable!()
+}
+"#,
+    );
+    write(
+        root.join("provider/Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+macro-provider = { path = "../macro-provider" }
+"#,
+    );
+    write(
+        root.join("provider/src/lib.rs"),
+        r#"mod error;
+pub use crate::error::Error;
+"#,
+    );
+    write(
+        root.join("provider/src/error.rs"),
+        r#"#[derive(Debug)]
+pub enum ErrorKind {
+    Bad,
+}
+
+macro_provider::define_error!(ErrorKind);
+"#,
+    );
+    write(
+        root.join("macro-provider/Cargo.toml"),
+        r#"[package]
+name = "macro-provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("macro-provider/src/lib.rs"),
+        r#"#[macro_export]
+macro_rules! define_error {
+    ($kind:ident) => {
+        #[derive(Debug)]
+        pub struct Error(pub $kind);
+    };
+}
+"#,
+    );
+}
+
 fn write_package(root: &Path, name: &str, source: &str) {
     write(
         root.join(name).join("Cargo.toml"),
@@ -3187,6 +8736,74 @@ edition = "2021"
     write(root.join(name).join("src/lib.rs"), source);
 }
 
+fn write_basic_workspace(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+}
+
+fn write_basic_app_manifest(root: &Path) {
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+}
+
+fn write_metadata_exclude_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["crates/*"]
+exclude = ["crates/dead"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("crates/app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("crates/app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+    write(
+        root.join("crates/dead/Cargo.toml"),
+        r#"[not_a_package]
+name = "dead"
+"#,
+    );
+}
+
 fn write(path: PathBuf, contents: &str) {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).unwrap();
@@ -3196,6 +8813,14 @@ fn write(path: PathBuf, contents: &str) {
 
 fn read(path: PathBuf) -> String {
     fs::read_to_string(path).unwrap()
+}
+
+#[cfg(unix)]
+fn symlink_file(original: &Path, link: &Path) {
+    if let Some(parent) = link.parent() {
+        fs::create_dir_all(parent).unwrap();
+    }
+    std::os::unix::fs::symlink(original, link).unwrap();
 }
 
 fn temp_path(label: &str) -> PathBuf {
@@ -3213,6 +8838,10 @@ fn repo_root() -> PathBuf {
         .parent()
         .unwrap()
         .to_path_buf()
+}
+
+fn current_rustup_toolchain() -> String {
+    std::env::var("RUSTUP_TOOLCHAIN").unwrap_or_else(|_| "stable".to_string())
 }
 
 fn manifest_path(path: &Path) -> String {

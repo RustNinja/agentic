@@ -1,0 +1,41 @@
+{
+  "name": "dnakov-litter-uniffi-smoke",
+  "repository": "https://github.com/dnakov/litter",
+  "commit": "5ccb9a7641946805abdd057e7327dbf005719a77",
+  "source": "shared/rust-bridge",
+  "batches": [
+    {
+      "name": "cloud-sync-export-snapshot",
+      "roots": [
+        {
+          "package": "codex-mobile-client",
+          "path": "codex-mobile-client/src/cloud_sync/mod.rs",
+          "kind": "fn",
+          "name": "cloud_sync_export_snapshot"
+        }
+      ]
+    },
+    {
+      "name": "cloud-sync-apply-snapshot",
+      "roots": [
+        {
+          "package": "codex-mobile-client",
+          "path": "codex-mobile-client/src/cloud_sync/mod.rs",
+          "kind": "fn",
+          "name": "cloud_sync_apply_snapshot"
+        }
+      ]
+    },
+    {
+      "name": "preferences-add-hidden-thread",
+      "roots": [
+        {
+          "package": "codex-mobile-client",
+          "path": "codex-mobile-client/src/preferences.rs",
+          "kind": "fn",
+          "name": "preferences_add_hidden_thread"
+        }
+      ]
+    }
+  ]
+}
