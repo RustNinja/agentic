@@ -88,6 +88,69 @@ receiver-less fallback matches and reports ambiguous matches as feedback
 hazards, which keeps these pinned UniFFI slices small without hardcoding Litter
 paths or symbols.
 
+## RA Feedback 10-Root Codex IPC Smoke
+
+On 2026-05-04, a fresh `dnakov/litter` clone at
+`50be6e1 pets perf; fix server filter on search` was tested with the
+`codex/slice-ra-feedback` branch. The Codex submodule was initialized, then a
+temporary copy under `/tmp/litter-ra-feedback-marked` added the local
+`opensourced` marker dependency and marked 10 real functions in one module:
+`shared/rust-bridge/codex-ipc/src/conversation_state.rs`.
+
+Marked roots:
+
+- `strip_request_wrapper`
+- `infer_cwd`
+- `parse_turn_status`
+- `serialize_turn_status`
+- `parse_unix_seconds`
+- `parse_timestamp`
+- `request_id_string`
+- `path_to_string`
+- `non_empty`
+- `non_empty_option_owned`
+
+Command shape:
+
+```sh
+slicers \
+  --analyzer ra-feedback \
+  --preflight \
+  --check \
+  --feedback \
+  --feedback-repair-loop 4 \
+  --deny-warnings \
+  --cargo-check-arg -p \
+  --cargo-check-arg codex-ipc \
+  --cargo-check-arg --all-targets \
+  /tmp/litter-ra-feedback-marked/shared/rust-bridge \
+  /tmp/litter-ra-feedback-slice-clean
+```
+
+Result:
+
+- Generation passed in about 12s.
+- Preflight passed for 1 retained package and 2 retained Rust files.
+- Reachable callables were exactly the 10 marked functions.
+- Reachable support items were `DesktopConversationState`,
+  `DesktopPendingRequest`, `DesktopTurn`, `DesktopTurnParams`, and
+  `MY_REQUEST_HEADER`.
+- First feedback check passed compilation but reported 6 warnings.
+- Conservative repair removed 3 unused imports across `conversation_state.rs`
+  and `lib.rs`.
+- Second feedback check passed with 0 warnings.
+- Final validation status: `accepted` with `--deny-warnings`.
+
+The generated `codex-ipc/src/conversation_state.rs` retained these declarations
+only:
+
+- `MY_REQUEST_HEADER`
+- `DesktopConversationState`
+- `DesktopTurn`
+- `DesktopTurnParams`
+- `DesktopPendingRequest`
+- the 10 selected helper functions above
+
 ### `cloud_sync_export_snapshot`
 
 Retained package: `codex-mobile-client`
