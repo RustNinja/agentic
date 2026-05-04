@@ -311,6 +311,16 @@ names. The same pass added serde flatten contract-field pruning coverage and a
 nonstandard support package `[lib] path` fixture, so support copying honors the
 actual library root instead of assuming `src/lib.rs`.
 
+The ninth rule-database pass raised the executable fast rule set to 47 cases.
+Serde `with = "module"` attrs now retain the module's `serialize` and
+`deserialize` helpers generically, not only direct string function paths.
+External trait imports that are commonly derive-only, such as
+`serde::Serialize`, are still pruned for pure derives but stay when retained
+helper bodies call their trait methods. Foreign `extern` retained-item liveness
+now contributes unqualified type imports, so `extern` statics keep required ABI
+types while dead sibling foreign items stay pruned. Returned trait objects are
+locked as hard dynamic-dispatch hazards.
+
 Five real Litter `codex-ipc` probes now pass production validation with compiler
 feedback: `project_conversation_state`, `Method::from_wire`,
 `PendingRequests::resolve`, `read_frame`, and `IpcBridge::new`. The compact

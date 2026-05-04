@@ -4228,6 +4228,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_call_path(&path);
             self.add_item_path(&path);
             self.add_macro_path(&path);
+            if macro_path_ends_with(attribute.path(), "serde") {
+                for path in serde_module_helper_paths(&segments) {
+                    self.add_call_path(&path);
+                    self.add_item_path(&path);
+                }
+            }
         }
     }
 
@@ -6749,6 +6755,15 @@ fn string_literal_path_candidates(tokens: &TokenStream) -> Vec<Vec<String>> {
     let mut candidates = Vec::new();
     collect_string_literal_path_candidates(tokens, &mut candidates);
     candidates
+}
+
+fn serde_module_helper_paths(segments: &[String]) -> Vec<Path> {
+    ["serialize", "deserialize"]
+        .into_iter()
+        .filter_map(|helper| {
+            syn::parse_str::<Path>(&format!("{}::{helper}", segments.join("::"))).ok()
+        })
+        .collect()
 }
 
 fn collect_string_literal_path_candidates(tokens: &TokenStream, candidates: &mut Vec<Vec<String>>) {

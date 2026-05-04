@@ -270,6 +270,29 @@ fn retains_serde_default_function_paths_from_attrs() {
 }
 
 #[test]
+fn retains_serde_with_module_helpers_from_attrs() {
+    let workspace = temp_path("rule-serde-with-module-workspace");
+    let output = temp_path("rule-serde-with-module-output");
+    let target_dir = temp_path("rule-serde-with-module-target");
+    write_serde_with_module_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde with module rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_with_module_rule/src/lib.rs"));
+    assert!(lib.contains("#[serde(with = \"codec\")]"), "{lib}");
+    assert!(lib.contains("mod codec"), "{lib}");
+    assert!(lib.contains("pub fn serialize"), "{lib}");
+    assert!(lib.contains("pub fn deserialize"), "{lib}");
+    assert!(!lib.contains("dead_codec"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_async_trait_object_surfaces_with_macro_attr() {
     let workspace = temp_path("rule-async-trait-workspace");
     let output = temp_path("rule-async-trait-output");
@@ -316,6 +339,53 @@ fn retains_foreign_extern_functions_called_by_selected_roots() {
     assert!(lib.contains("extern \"C\""), "{lib}");
     assert!(lib.contains("fn live_c() -> i32"), "{lib}");
     assert!(!lib.contains("dead_c"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn reports_returned_trait_object_surfaces_as_dynamic_hazards() {
+    let workspace = temp_path("rule-returned-dyn-workspace");
+    let output = temp_path("rule-returned-dyn-output");
+    let target_dir = temp_path("rule-returned-dyn-target");
+    write_returned_trait_object_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("returned dyn rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "trait_object_surfaces"
+            && hazard
+                .details
+                .iter()
+                .any(|detail| detail.subject.contains("dyn Reader"))
+    }));
+    let lib = read(output.join("returned_dyn_rule/src/lib.rs"));
+    assert!(lib.contains("Box<dyn Reader>"), "{lib}");
+    assert!(lib.contains("pub trait Reader"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_foreign_extern_static_symbols_called_by_selected_roots() {
+    let workspace = temp_path("rule-ffi-static-workspace");
+    let output = temp_path("rule-ffi-static-output");
+    let target_dir = temp_path("rule-ffi-static-target");
+    write_ffi_static_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("ffi static rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("ffi_static_rule/src/lib.rs"));
+    assert!(lib.contains("static LIVE_FLAG: c_int"), "{lib}");
+    assert!(!lib.contains("DEAD_FLAG"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -1473,6 +1543,56 @@ pub fn selected() -> Config {
     );
 }
 
+fn write_serde_with_module_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_with_module_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+"#,
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+pub struct Wire {
+    #[serde(with = "codec")]
+    value: Value,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Value(u32);
+
+mod codec {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+
+    use super::Value;
+
+    pub fn serialize<S>(value: &Value, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: Serializer,
+    {
+        value.0.serialize(serializer)
+    }
+
+    pub fn deserialize<'de, D>(deserializer: D) -> Result<Value, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        u32::deserialize(deserializer).map(Value)
+    }
+}
+
+mod dead_codec {
+    pub fn serialize() {}
+}
+
+#[opensourced]
+pub fn selected() -> Wire {
+    Wire { value: Value(7) }
+}
+"#,
+    );
+}
+
 fn write_async_trait_object_rule_fixture(root: &Path) {
     write_workspace_with_dependencies(
         root,
@@ -1496,6 +1616,54 @@ pub struct DeadTransport;
 #[opensourced]
 pub fn selected(handler: Arc<dyn Transport + Send + Sync>) -> Arc<dyn Transport + Send + Sync> {
     handler
+}
+"#,
+    );
+}
+
+fn write_returned_trait_object_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "returned_dyn_rule",
+        r#"
+use opensourced::opensourced;
+
+pub trait Reader {
+    fn read(&self) -> u32;
+}
+
+pub struct LiveReader;
+
+impl Reader for LiveReader {
+    fn read(&self) -> u32 {
+        1
+    }
+}
+
+#[opensourced]
+pub fn selected() -> Box<dyn Reader> {
+    Box::new(LiveReader)
+}
+"#,
+    );
+}
+
+fn write_ffi_static_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "ffi_static_rule",
+        r#"use std::os::raw::c_int;
+
+use opensourced::opensourced;
+
+extern "C" {
+    static LIVE_FLAG: c_int;
+    static DEAD_FLAG: c_int;
+}
+
+#[opensourced]
+pub fn selected() -> i32 {
+    unsafe { LIVE_FLAG as i32 }
 }
 "#,
     );

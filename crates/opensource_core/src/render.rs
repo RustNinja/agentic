@@ -5846,10 +5846,62 @@ fn collect_retained_module_surface_idents(
             Item::Macro(item_macro) if item_macro.ident.is_none() => {
                 collect_token_idents(&item_macro.mac.tokens, idents);
             }
+            Item::ForeignMod(foreign_mod) => {
+                for foreign_item in &foreign_mod.items {
+                    if foreign_item_feeds_reachable_code(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        foreign_item,
+                    ) {
+                        collect_token_idents(&foreign_item.to_token_stream(), idents);
+                    }
+                }
+            }
             _ => {}
         }
     }
     expand_alias_surface_idents(&aliases, idents);
+}
+
+fn foreign_item_feeds_reachable_code(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    foreign_item: &ForeignItem,
+) -> bool {
+    let Some(name) = foreign_item_name(foreign_item) else {
+        return false;
+    };
+    reachable_module_mentions_ident(project, reduced, package, module_path, &name)
+        || reachable_package_mentions_ident(project, reduced, package, &name)
+}
+
+fn retained_foreign_items_mention_unqualified_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    module_items_for_path(project, package, module_path).is_some_and(|items| {
+        items.iter().any(|item| {
+            let Item::ForeignMod(foreign_mod) = item else {
+                return false;
+            };
+            foreign_mod.items.iter().any(|foreign_item| {
+                foreign_item_feeds_reachable_code(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    foreign_item,
+                ) && token_stream_mentions_unqualified_ident(&foreign_item.to_token_stream(), ident)
+            })
+        })
+    })
 }
 
 fn collect_impl_header_idents(item_impl: &syn::ItemImpl, idents: &mut BTreeSet<String>) {
@@ -6246,6 +6298,13 @@ fn reachable_module_mentions_unqualified_ident(
             ident,
         )
         || retained_macro_invocations_mention_unqualified_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || retained_foreign_items_mention_unqualified_ident(
             project,
             reduced,
             package,
@@ -8336,6 +8395,20 @@ fn external_trait_import_should_remain(
     }
     if is_derive_only_external_trait_import(leaf) {
         if render_plan.module_mentions_ident(package, module_path, leaf) {
+            return true;
+        }
+        if known_trait_method_idents(target, leaf).is_some_and(|methods| {
+            methods.iter().any(|method| {
+                reachable_import_scope_has_method_call(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    method,
+                )
+            })
+        }) {
             return true;
         }
         let Some(functions) = known_trait_associated_function_idents(target, leaf) else {
