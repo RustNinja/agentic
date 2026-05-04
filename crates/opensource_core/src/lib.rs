@@ -672,10 +672,11 @@ fn retained_workspace_patch_replace_path_dependencies(project: &Project) -> BTre
         .and_then(toml::Value::as_table)
     {
         for (source, value) in patches {
-            collect_manifest_path_dependencies(
+            collect_uncopyable_manifest_path_dependencies(
                 &mut dependencies,
                 &format!("patch.{source}"),
                 value,
+                &project.workspace.root,
             );
         }
     }
@@ -686,30 +687,39 @@ fn retained_workspace_patch_replace_path_dependencies(project: &Project) -> BTre
         .and_then(toml::Value::as_table)
     {
         for (name, value) in replacements {
-            collect_manifest_path_dependencies(
+            collect_uncopyable_manifest_path_dependencies(
                 &mut dependencies,
                 &format!("replace.{name}"),
                 value,
+                &project.workspace.root,
             );
         }
     }
     dependencies
 }
 
-fn collect_manifest_path_dependencies(
+fn collect_uncopyable_manifest_path_dependencies(
     dependencies: &mut BTreeSet<String>,
     prefix: &str,
     value: &toml::Value,
+    manifest_dir: &Path,
 ) {
     let Some(table) = value.as_table() else {
         return;
     };
     if table.get("path").and_then(toml::Value::as_str).is_some() {
-        dependencies.insert(prefix.to_string());
+        if !path_dependency_is_copyable(value, manifest_dir) {
+            dependencies.insert(prefix.to_string());
+        }
         return;
     }
     for (name, value) in table {
-        collect_manifest_path_dependencies(dependencies, &format!("{prefix}.{name}"), value);
+        collect_uncopyable_manifest_path_dependencies(
+            dependencies,
+            &format!("{prefix}.{name}"),
+            value,
+            manifest_dir,
+        );
     }
 }
 
@@ -724,7 +734,12 @@ fn retained_non_workspace_path_dependencies(
         };
         for (_table_name, table) in package_dependency_tables(package) {
             for (alias, value) in table {
-                let source = workspace_resolved_dependency_value(project, alias, value);
+                let (source, manifest_dir) = workspace_resolved_dependency_value_with_dir(
+                    project,
+                    alias,
+                    value,
+                    &package.root,
+                );
                 if !dependency_has_path(source) {
                     continue;
                 }
@@ -740,7 +755,8 @@ fn retained_non_workspace_path_dependencies(
                     package_name,
                     alias,
                     &dependency_package,
-                ) {
+                ) && !path_dependency_is_copyable(source, manifest_dir)
+                {
                     dependencies.insert(format!("{package_name}:{alias}"));
                 }
             }
@@ -788,13 +804,14 @@ fn package_dependency_tables(
     tables
 }
 
-fn workspace_resolved_dependency_value<'a>(
+fn workspace_resolved_dependency_value_with_dir<'a>(
     project: &'a Project,
     alias: &str,
     value: &'a toml::Value,
-) -> &'a toml::Value {
+    package_root: &'a Path,
+) -> (&'a toml::Value, &'a Path) {
     if !dependency_uses_workspace(value) {
-        return value;
+        return (value, package_root);
     }
     project
         .workspace
@@ -803,7 +820,26 @@ fn workspace_resolved_dependency_value<'a>(
         .and_then(|workspace| workspace.get("dependencies"))
         .and_then(toml::Value::as_table)
         .and_then(|dependencies| dependencies.get(alias))
-        .unwrap_or(value)
+        .map(|value| (value, project.workspace.root.as_path()))
+        .unwrap_or((value, package_root))
+}
+
+fn path_dependency_is_copyable(value: &toml::Value, manifest_dir: &Path) -> bool {
+    let Some(path) = value
+        .as_table()
+        .and_then(|table| table.get("path"))
+        .and_then(toml::Value::as_str)
+    else {
+        return false;
+    };
+    let path = PathBuf::from(path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    };
+    path.canonicalize()
+        .is_ok_and(|root| root.join("Cargo.toml").is_file())
 }
 
 fn dependency_uses_workspace(value: &toml::Value) -> bool {
@@ -2566,7 +2602,7 @@ pub fn entry() -> &'static str {
     }
 
     #[test]
-    fn reports_retained_non_workspace_path_dependency_hazards() {
+    fn accepts_copyable_retained_non_workspace_path_dependencies() {
         let root = temp_output("path-dependency-hazard-source");
         let external = temp_output("path-dependency-hazard-external");
         let opensourced_path = workspace_root().join("crates/opensourced");
@@ -2606,16 +2642,15 @@ pub fn entry() -> usize {
         })
         .expect("reduction should succeed");
 
-        assert_eq!(report.production.status, "hazards_detected");
-        assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "retained_non_workspace_path_dependencies"
-                && hazard.severity == "error"
-                && hazard.message.contains("app:external-helper")
-        }));
+        assert!(!report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "retained_non_workspace_path_dependencies"));
     }
 
     #[test]
-    fn reports_retained_target_non_workspace_path_dependency_hazards() {
+    fn accepts_copyable_retained_target_non_workspace_path_dependencies() {
         let root = temp_output("target-path-dependency-hazard-source");
         let external = temp_output("target-path-dependency-hazard-external");
         let opensourced_path = workspace_root().join("crates/opensourced");
@@ -2655,16 +2690,15 @@ pub fn entry() -> usize {
         })
         .expect("reduction should succeed");
 
-        assert_eq!(report.production.status, "hazards_detected");
-        assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "retained_non_workspace_path_dependencies"
-                && hazard.severity == "error"
-                && hazard.message.contains("app:external-helper")
-        }));
+        assert!(!report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "retained_non_workspace_path_dependencies"));
     }
 
     #[test]
-    fn reports_retained_workspace_patch_path_dependency_hazards() {
+    fn accepts_copyable_retained_workspace_patch_path_dependencies() {
         let root = temp_output("patch-path-dependency-hazard-source");
         let external = temp_output("patch-path-dependency-hazard-external");
         let opensourced_path = workspace_root().join("crates/opensourced");
@@ -2707,12 +2741,11 @@ pub fn entry() -> usize {
         })
         .expect("reduction should succeed");
 
-        assert_eq!(report.production.status, "hazards_detected");
-        assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "retained_workspace_patch_replace_path_dependencies"
-                && hazard.severity == "error"
-                && hazard.message.contains("patch.crates-io.external-helper")
-        }));
+        assert!(!report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| { hazard.code == "retained_workspace_patch_replace_path_dependencies" }));
     }
 
     #[test]

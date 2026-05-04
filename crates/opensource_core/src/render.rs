@@ -23,6 +23,7 @@ use crate::{
 };
 
 const OUTPUT_MARKER: &str = ".slicers-output";
+const SUPPORT_PACKAGE_DIR: &str = "support";
 
 struct RenderPlan {
     reachable_items: BTreeSet<ItemId>,
@@ -262,13 +263,21 @@ pub fn write_reduced_workspace(
 
     let render_plan = RenderPlan::build(project, reduced);
     let package_usages = package_source_usages(project, reduced, &render_plan);
+    let support_packages = SupportPackagePlan::build(project, reduced, &package_usages)?;
 
-    write_workspace_manifest(project, reduced, output_root, &package_usages)?;
+    write_workspace_manifest(
+        project,
+        reduced,
+        output_root,
+        &package_usages,
+        &support_packages,
+    )?;
 
     let mut files_written = 1
         + copy_workspace_lockfile(project, output_root)?
         + copy_workspace_cargo_config(project, output_root)?
         + copy_workspace_toolchain_files(project, output_root)?;
+    files_written += support_packages.copy_to(output_root)?;
     for package_name in &reduced.packages {
         let package = project
             .workspace
@@ -287,6 +296,7 @@ pub fn write_reduced_workspace(
             package_name,
             &package_output.join("Cargo.toml"),
             package_usage,
+            &support_packages,
         )?;
         files_written += 1;
 
@@ -524,6 +534,985 @@ fn copy_workspace_toolchain_files(
         copied += 1;
     }
     Ok(copied)
+}
+
+#[derive(Default)]
+struct SupportPackagePlan {
+    packages: BTreeMap<PathBuf, SupportPackage>,
+    workspace_manifests: BTreeMap<PathBuf, Value>,
+    generated_workspace_roots: BTreeMap<PathBuf, PathBuf>,
+}
+
+struct SupportPackage {
+    root: PathBuf,
+    output_rel_dir: PathBuf,
+    manifest: Value,
+    workspace: Option<SupportWorkspace>,
+}
+
+#[derive(Clone)]
+struct SupportWorkspace {
+    root: PathBuf,
+    manifest: Value,
+}
+
+impl SupportPackagePlan {
+    fn build(
+        project: &Project,
+        reduced: &ReducedProject,
+        package_usages: &HashMap<String, PackageSourceUsage>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let mut builder = SupportPackagePlanBuilder::new(project, reduced);
+        builder.collect_retained_dependency_paths(reduced, package_usages)?;
+        builder.collect_workspace_dependency_paths()?;
+        builder
+            .collect_patch_replace_paths(&project.workspace.root, &project.workspace.manifest)?;
+        builder.finish()
+    }
+
+    fn copy_to(&self, output_root: &Path) -> Result<usize, Box<dyn std::error::Error>> {
+        let mut copied = 0;
+        for package in self.packages.values() {
+            let package_output = output_root.join(&package.output_rel_dir);
+            copied += copy_support_package_tree(&package.root, &package_output)?;
+            let manifest = self.transformed_support_manifest(package)?;
+            fs::write(
+                package_output.join("Cargo.toml"),
+                toml::to_string_pretty(&manifest)?,
+            )?;
+        }
+        Ok(copied)
+    }
+
+    fn transformed_support_manifest(
+        &self,
+        package: &SupportPackage,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let mut manifest = package
+            .manifest
+            .as_table()
+            .cloned()
+            .unwrap_or_else(default_package_manifest_table);
+
+        if let Some(package_table) = manifest.get_mut("package").and_then(Value::as_table_mut) {
+            materialize_workspace_inherited_fields(
+                package_table,
+                package.workspace.as_ref(),
+                &["package"],
+            )?;
+        }
+        materialize_workspace_lints(&mut manifest, package.workspace.as_ref())?;
+
+        for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+            if let Some(table) = manifest.get_mut(table_name).and_then(Value::as_table_mut) {
+                self.transform_support_dependency_table(package, table)?;
+            }
+        }
+
+        if let Some(targets) = manifest.get_mut("target").and_then(Value::as_table_mut) {
+            for (_target_name, target) in targets.iter_mut() {
+                let Some(target) = target.as_table_mut() else {
+                    continue;
+                };
+                for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                    if let Some(table) = target.get_mut(table_name).and_then(Value::as_table_mut) {
+                        self.transform_support_dependency_table(package, table)?;
+                    }
+                }
+            }
+        }
+
+        manifest.remove("workspace");
+        manifest.remove("patch");
+        manifest.remove("replace");
+        manifest.remove("profile");
+        Ok(Value::Table(manifest))
+    }
+
+    fn transform_support_dependency_table(
+        &self,
+        package: &SupportPackage,
+        dependencies: &mut Table,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let aliases = dependencies.keys().cloned().collect::<Vec<_>>();
+        for alias in aliases {
+            let Some(value) = dependencies.get(&alias).cloned() else {
+                continue;
+            };
+            let transformed = self.transformed_support_dependency_value(package, &alias, &value)?;
+            dependencies.insert(alias, transformed);
+        }
+        Ok(())
+    }
+
+    fn transformed_support_dependency_value(
+        &self,
+        package: &SupportPackage,
+        alias: &str,
+        value: &Value,
+    ) -> Result<Value, Box<dyn std::error::Error>> {
+        let (mut value, manifest_dir) =
+            materialized_support_dependency_value(package, alias, value)?;
+        rewrite_dependency_path_value(&mut value, &manifest_dir, &package.output_rel_dir, self)?;
+        remove_workspace_dependency_marker(&mut value);
+        Ok(value)
+    }
+
+    fn transformed_workspace_dependency_value(&self, value: &Value, manifest_dir: &Path) -> Value {
+        self.transformed_dependency_value(value, manifest_dir, Path::new(""))
+    }
+
+    fn transformed_dependency_value(
+        &self,
+        value: &Value,
+        manifest_dir: &Path,
+        output_manifest_dir: &Path,
+    ) -> Value {
+        let mut value = value.clone();
+        let _ = rewrite_dependency_path_value(&mut value, manifest_dir, output_manifest_dir, self);
+        value
+    }
+
+    fn support_output_for_root(&self, root: &Path) -> Option<&Path> {
+        let root = root.canonicalize().ok()?;
+        self.packages
+            .get(&root)
+            .map(|package| package.output_rel_dir.as_path())
+            .or_else(|| {
+                self.generated_workspace_roots
+                    .get(&root)
+                    .map(PathBuf::as_path)
+            })
+    }
+
+    fn merged_patch_tables(&self, project: &Project) -> Option<Value> {
+        let mut patches = Table::new();
+        if let Some(source_patches) = project
+            .workspace
+            .manifest
+            .get("patch")
+            .and_then(Value::as_table)
+        {
+            merge_transformed_patch_tables(
+                &mut patches,
+                source_patches,
+                &project.workspace.root,
+                self,
+            );
+        }
+        for (workspace_root, manifest) in &self.workspace_manifests {
+            if let Some(source_patches) = manifest.get("patch").and_then(Value::as_table) {
+                merge_transformed_patch_tables(&mut patches, source_patches, workspace_root, self);
+            }
+        }
+        (!patches.is_empty()).then_some(Value::Table(patches))
+    }
+
+    fn merged_replace_table(&self, project: &Project) -> Option<Value> {
+        let mut replacements = Table::new();
+        if let Some(source_replacements) = project
+            .workspace
+            .manifest
+            .get("replace")
+            .and_then(Value::as_table)
+        {
+            merge_transformed_replace_table(
+                &mut replacements,
+                source_replacements,
+                &project.workspace.root,
+                self,
+            );
+        }
+        for (workspace_root, manifest) in &self.workspace_manifests {
+            if let Some(source_replacements) = manifest.get("replace").and_then(Value::as_table) {
+                merge_transformed_replace_table(
+                    &mut replacements,
+                    source_replacements,
+                    workspace_root,
+                    self,
+                );
+            }
+        }
+        (!replacements.is_empty()).then_some(Value::Table(replacements))
+    }
+}
+
+struct SupportPackagePlanBuilder<'a> {
+    project: &'a Project,
+    pending: BTreeSet<PathBuf>,
+    packages: BTreeMap<PathBuf, SupportPackage>,
+    workspace_manifests: BTreeMap<PathBuf, Value>,
+    used_output_dirs: BTreeSet<PathBuf>,
+    generated_workspace_roots: BTreeMap<PathBuf, PathBuf>,
+}
+
+impl<'a> SupportPackagePlanBuilder<'a> {
+    fn new(project: &'a Project, reduced: &ReducedProject) -> Self {
+        let generated_workspace_roots = reduced
+            .packages
+            .iter()
+            .filter_map(|package_name| {
+                let package = project.workspace.packages.get(package_name)?;
+                Some((package.root.clone(), PathBuf::from(package_name)))
+            })
+            .collect();
+        Self {
+            project,
+            pending: BTreeSet::new(),
+            packages: BTreeMap::new(),
+            workspace_manifests: BTreeMap::new(),
+            used_output_dirs: BTreeSet::new(),
+            generated_workspace_roots,
+        }
+    }
+
+    fn collect_retained_dependency_paths(
+        &mut self,
+        reduced: &ReducedProject,
+        package_usages: &HashMap<String, PackageSourceUsage>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for package_name in &reduced.packages {
+            let Some(package) = self.project.workspace.packages.get(package_name) else {
+                continue;
+            };
+            let Some(package_usage) = package_usages.get(package_name) else {
+                continue;
+            };
+            let requested_features = requested_local_features(self.project, reduced, package_name);
+            let feature_required_aliases =
+                dependency_aliases_required_by_features(package, &requested_features);
+            let retain_for_copied_support_source =
+                package_should_copy_library_support_source(package);
+
+            for (table_name, table) in package_dependency_tables(package) {
+                let retention = if table_name == "build-dependencies"
+                    && build_script_should_render_with_usage(package, package_usage)
+                {
+                    DependencyRetention::BuildScript
+                } else {
+                    DependencyRetention::SourceMentioned
+                };
+
+                for (alias, value) in table {
+                    self.collect_retained_dependency_path(
+                        reduced,
+                        package,
+                        package_name,
+                        alias,
+                        value,
+                        retention,
+                        package_usage,
+                        feature_required_aliases.contains(alias),
+                        retain_for_copied_support_source,
+                    )?;
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_workspace_dependency_paths(&mut self) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(dependencies) = self
+            .project
+            .workspace
+            .manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(Value::as_table)
+        else {
+            return Ok(());
+        };
+        for (alias, value) in dependencies {
+            let dependency_package = dependency_package_name(alias, value);
+            if is_marker_dependency(alias, &dependency_package) {
+                continue;
+            }
+            self.add_dependency_path(value, &self.project.workspace.root)?;
+        }
+        Ok(())
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn collect_retained_dependency_path(
+        &mut self,
+        reduced: &ReducedProject,
+        package: &Package,
+        package_name: &str,
+        alias: &str,
+        value: &Value,
+        retention: DependencyRetention,
+        package_usage: &PackageSourceUsage,
+        is_feature_required: bool,
+        retain_for_copied_support_source: bool,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let (source, manifest_dir) =
+            workspace_resolved_dependency_value_with_dir(self.project, alias, value, &package.root);
+        let dependency_package = dependency_package_name(alias, source);
+        if is_marker_dependency(alias, &dependency_package)
+            || self
+                .project
+                .workspace
+                .packages
+                .contains_key(&dependency_package)
+        {
+            return Ok(());
+        }
+        if !(dependency_should_render(
+            self.project,
+            reduced,
+            package_name,
+            alias,
+            retention,
+            DependencyUsageScope::Any,
+            package_usage,
+            retain_for_copied_support_source,
+        ) || is_feature_required)
+        {
+            return Ok(());
+        }
+
+        self.add_dependency_path(source, manifest_dir)
+    }
+
+    fn collect_patch_replace_paths(
+        &mut self,
+        manifest_dir: &Path,
+        manifest: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if let Some(patches) = manifest.get("patch").and_then(Value::as_table) {
+            for value in patches.values() {
+                self.collect_manifest_path_dependencies(manifest_dir, value)?;
+            }
+        }
+        if let Some(replacements) = manifest.get("replace").and_then(Value::as_table) {
+            for value in replacements.values() {
+                self.collect_manifest_path_dependencies(manifest_dir, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_manifest_path_dependencies(
+        &mut self,
+        manifest_dir: &Path,
+        value: &Value,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(table) = value.as_table() else {
+            return Ok(());
+        };
+        if table.get("path").and_then(Value::as_str).is_some() {
+            return self.add_dependency_path(value, manifest_dir);
+        }
+        for value in table.values() {
+            self.collect_manifest_path_dependencies(manifest_dir, value)?;
+        }
+        Ok(())
+    }
+
+    fn add_dependency_path(
+        &mut self,
+        value: &Value,
+        manifest_dir: &Path,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(root) = dependency_path_root(value, manifest_dir)? else {
+            return Ok(());
+        };
+        if self.generated_workspace_roots.contains_key(&root) {
+            return Ok(());
+        }
+        if !self.packages.contains_key(&root) {
+            self.pending.insert(root);
+        }
+        Ok(())
+    }
+
+    fn finish(mut self) -> Result<SupportPackagePlan, Box<dyn std::error::Error>> {
+        while let Some(root) = self.pending.pop_first() {
+            if self.packages.contains_key(&root) {
+                continue;
+            }
+            let manifest = read_toml_value(&root.join("Cargo.toml"))?;
+            let name = manifest_package_name(&manifest).unwrap_or_else(|| {
+                root.file_name()
+                    .and_then(|name| name.to_str())
+                    .unwrap_or("package")
+                    .to_string()
+            });
+            let workspace = support_workspace_for_package(&root)?;
+            if let Some(workspace) = &workspace {
+                self.workspace_manifests
+                    .entry(workspace.root.clone())
+                    .or_insert_with(|| workspace.manifest.clone());
+                self.collect_patch_replace_paths(&workspace.root, &workspace.manifest)?;
+            }
+            self.collect_support_manifest_dependency_paths(&root, &manifest, workspace.as_ref())?;
+            let output_rel_dir = self.allocate_output_dir(&name);
+            self.packages.insert(
+                root.clone(),
+                SupportPackage {
+                    root,
+                    output_rel_dir,
+                    manifest,
+                    workspace,
+                },
+            );
+        }
+
+        Ok(SupportPackagePlan {
+            packages: self.packages,
+            workspace_manifests: self.workspace_manifests,
+            generated_workspace_roots: self.generated_workspace_roots,
+        })
+    }
+
+    fn collect_support_manifest_dependency_paths(
+        &mut self,
+        package_root: &Path,
+        manifest: &Value,
+        workspace: Option<&SupportWorkspace>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+            if let Some(table) = manifest.get(table_name).and_then(Value::as_table) {
+                self.collect_support_dependency_table_paths(package_root, table, workspace)?;
+            }
+        }
+
+        if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+            for target in targets.values() {
+                let Some(target) = target.as_table() else {
+                    continue;
+                };
+                for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                    if let Some(table) = target.get(table_name).and_then(Value::as_table) {
+                        self.collect_support_dependency_table_paths(
+                            package_root,
+                            table,
+                            workspace,
+                        )?;
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_support_dependency_table_paths(
+        &mut self,
+        package_root: &Path,
+        dependencies: &Table,
+        workspace: Option<&SupportWorkspace>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        for (alias, value) in dependencies {
+            let (value, manifest_dir) =
+                materialized_dependency_value_for_workspace(package_root, workspace, alias, value)?;
+            self.add_dependency_path(&value, &manifest_dir)?;
+        }
+        Ok(())
+    }
+
+    fn allocate_output_dir(&mut self, package_name: &str) -> PathBuf {
+        let base = sanitize_support_package_dir(package_name);
+        for index in 0.. {
+            let candidate = if index == 0 {
+                PathBuf::from(SUPPORT_PACKAGE_DIR).join(&base)
+            } else {
+                PathBuf::from(SUPPORT_PACKAGE_DIR).join(format!("{base}-{index}"))
+            };
+            if self.used_output_dirs.insert(candidate.clone()) {
+                return candidate;
+            }
+        }
+        unreachable!("unbounded support package output suffix search should return")
+    }
+}
+
+fn default_package_manifest_table() -> Table {
+    let mut manifest = Table::new();
+    manifest.insert("package".to_string(), default_package("package"));
+    manifest
+}
+
+fn read_toml_value(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
+    let text = fs::read_to_string(path)?;
+    Ok(text.parse::<Value>()?)
+}
+
+fn manifest_package_name(manifest: &Value) -> Option<String> {
+    manifest
+        .get("package")
+        .and_then(|package| package.get("name"))
+        .and_then(Value::as_str)
+        .map(str::to_string)
+}
+
+fn support_workspace_for_package(
+    package_root: &Path,
+) -> Result<Option<SupportWorkspace>, Box<dyn std::error::Error>> {
+    let package_root = package_root.canonicalize()?;
+    let mut cursor = Some(package_root.as_path());
+    while let Some(root) = cursor {
+        let manifest_path = root.join("Cargo.toml");
+        if manifest_path.is_file() {
+            let manifest = read_toml_value(&manifest_path)?;
+            if manifest
+                .get("workspace")
+                .and_then(Value::as_table)
+                .is_some()
+                && workspace_contains_package(root, &manifest, &package_root)
+            {
+                return Ok(Some(SupportWorkspace {
+                    root: root.to_path_buf(),
+                    manifest,
+                }));
+            }
+        }
+        cursor = root.parent();
+    }
+    Ok(None)
+}
+
+fn workspace_contains_package(
+    workspace_root: &Path,
+    manifest: &Value,
+    package_root: &Path,
+) -> bool {
+    if workspace_root == package_root {
+        return true;
+    }
+    let Some(members) = manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("members"))
+        .and_then(Value::as_array)
+    else {
+        return false;
+    };
+
+    members.iter().filter_map(Value::as_str).any(|member| {
+        if member.contains('*') {
+            let prefix = member.split('*').next().unwrap_or_default();
+            let prefix = workspace_root.join(prefix);
+            package_root.starts_with(normalize_path(&prefix))
+        } else {
+            workspace_root
+                .join(member)
+                .canonicalize()
+                .is_ok_and(|member_root| member_root == package_root)
+        }
+    }) || package_root.starts_with(workspace_root)
+}
+
+fn materialize_workspace_inherited_fields(
+    table: &mut Table,
+    workspace: Option<&SupportWorkspace>,
+    section_path: &[&str],
+) -> Result<(), Box<dyn std::error::Error>> {
+    let inherited_keys = table
+        .iter()
+        .filter(|(_, value)| value_uses_workspace_marker(value))
+        .map(|(key, _)| key.clone())
+        .collect::<Vec<_>>();
+    for key in inherited_keys {
+        let value = workspace_value(workspace, section_path, &key)?.clone();
+        table.insert(key, value);
+    }
+    Ok(())
+}
+
+fn materialize_workspace_lints(
+    manifest: &mut Table,
+    workspace: Option<&SupportWorkspace>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(lints) = manifest.get_mut("lints") else {
+        return Ok(());
+    };
+    if !value_uses_workspace_marker(lints) {
+        return Ok(());
+    }
+
+    let mut overlay = lints.as_table().cloned().unwrap_or_default();
+    overlay.remove("workspace");
+    let mut lints = workspace_value(workspace, &["lints"], "")?
+        .as_table()
+        .cloned()
+        .ok_or("workspace lints inheritance resolved to a non-table value")?;
+    lints.extend(overlay);
+    manifest.insert("lints".to_string(), Value::Table(lints));
+    Ok(())
+}
+
+fn workspace_value<'a>(
+    workspace: Option<&'a SupportWorkspace>,
+    section_path: &[&str],
+    key: &str,
+) -> Result<&'a Value, Box<dyn std::error::Error>> {
+    let workspace = workspace.ok_or("manifest uses workspace inheritance outside a workspace")?;
+    let mut value = workspace
+        .manifest
+        .get("workspace")
+        .ok_or("workspace manifest has no [workspace] table")?;
+    for section in section_path {
+        if !section.is_empty() {
+            value = value.get(*section).ok_or_else(|| {
+                format!(
+                    "workspace manifest {} has no workspace.{} table",
+                    workspace.root.display(),
+                    section_path.join(".")
+                )
+            })?;
+        }
+    }
+    if key.is_empty() {
+        return Ok(value);
+    }
+    value.get(key).ok_or_else(|| {
+        format!(
+            "workspace manifest {} has no inherited key {}.{}",
+            workspace.root.display(),
+            section_path.join("."),
+            key
+        )
+        .into()
+    })
+}
+
+fn value_uses_workspace_marker(value: &Value) -> bool {
+    value
+        .as_table()
+        .and_then(|table| table.get("workspace"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn materialized_support_dependency_value(
+    package: &SupportPackage,
+    alias: &str,
+    value: &Value,
+) -> Result<(Value, PathBuf), Box<dyn std::error::Error>> {
+    materialized_dependency_value_for_workspace(
+        &package.root,
+        package.workspace.as_ref(),
+        alias,
+        value,
+    )
+}
+
+fn materialized_dependency_value_for_workspace(
+    package_root: &Path,
+    workspace: Option<&SupportWorkspace>,
+    alias: &str,
+    value: &Value,
+) -> Result<(Value, PathBuf), Box<dyn std::error::Error>> {
+    if !dependency_uses_workspace(value) {
+        return Ok((value.clone(), package_root.to_path_buf()));
+    }
+
+    let workspace = workspace.ok_or_else(|| {
+        format!(
+            "dependency {alias} uses workspace inheritance outside a workspace at {}",
+            package_root.display()
+        )
+    })?;
+    let base = workspace
+        .manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(Value::as_table)
+        .and_then(|dependencies| dependencies.get(alias))
+        .ok_or_else(|| {
+            format!(
+                "workspace dependency {alias} is not defined in {}",
+                workspace.root.join("Cargo.toml").display()
+            )
+        })?;
+    Ok((
+        merge_workspace_dependency_value(base, value),
+        workspace.root.clone(),
+    ))
+}
+
+fn merge_workspace_dependency_value(base: &Value, overlay: &Value) -> Value {
+    let Some(overlay_table) = overlay.as_table() else {
+        return overlay.clone();
+    };
+    if !dependency_uses_workspace(overlay) {
+        return overlay.clone();
+    }
+
+    let mut table = dependency_value_as_table(base);
+    for (key, value) in overlay_table {
+        if key == "workspace" {
+            continue;
+        }
+        if key == "features" {
+            merge_feature_values(&mut table, value);
+        } else {
+            table.insert(key.clone(), value.clone());
+        }
+    }
+    Value::Table(table)
+}
+
+fn dependency_value_as_table(value: &Value) -> Table {
+    match value {
+        Value::Table(table) => table.clone(),
+        Value::String(version) => {
+            let mut table = Table::new();
+            table.insert("version".to_string(), Value::String(version.clone()));
+            table
+        }
+        _ => Table::new(),
+    }
+}
+
+fn merge_feature_values(table: &mut Table, value: &Value) {
+    let Some(new_features) = value.as_array() else {
+        table.insert("features".to_string(), value.clone());
+        return;
+    };
+    let mut features = table
+        .get("features")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default();
+    features.extend(new_features.iter().cloned());
+    features.sort_by_key(|value| value.as_str().unwrap_or_default().to_string());
+    features.dedup();
+    table.insert("features".to_string(), Value::Array(features));
+}
+
+fn rewrite_dependency_path_value(
+    value: &mut Value,
+    manifest_dir: &Path,
+    output_manifest_dir: &Path,
+    support_packages: &SupportPackagePlan,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(table) = value.as_table_mut() else {
+        return Ok(());
+    };
+    let Some(path_value) = table.get("path").and_then(Value::as_str) else {
+        return Ok(());
+    };
+    let path = PathBuf::from(path_value);
+    let source_root = if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    };
+    let source_root = source_root.canonicalize()?;
+    if let Some(output_root) = support_packages.support_output_for_root(&source_root) {
+        let relative = relative_path_between(output_manifest_dir, output_root);
+        table.insert("path".to_string(), Value::String(toml_path(&relative)));
+    } else {
+        table.insert("path".to_string(), Value::String(toml_path(&source_root)));
+    }
+    Ok(())
+}
+
+fn remove_workspace_dependency_marker(value: &mut Value) {
+    if let Some(table) = value.as_table_mut() {
+        table.remove("workspace");
+    }
+}
+
+fn workspace_resolved_dependency_value_with_dir<'a>(
+    project: &'a Project,
+    alias: &str,
+    value: &'a Value,
+    package_root: &'a Path,
+) -> (&'a Value, &'a Path) {
+    if !dependency_uses_workspace(value) {
+        return (value, package_root);
+    }
+    project
+        .workspace
+        .manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(Value::as_table)
+        .and_then(|dependencies| dependencies.get(alias))
+        .map(|value| (value, project.workspace.root.as_path()))
+        .unwrap_or((value, package_root))
+}
+
+fn dependency_path_root(
+    value: &Value,
+    manifest_dir: &Path,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
+    let Some(path) = value
+        .as_table()
+        .and_then(|table| table.get("path"))
+        .and_then(Value::as_str)
+    else {
+        return Ok(None);
+    };
+    let path = PathBuf::from(path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    };
+    let root = path.canonicalize()?;
+    if !root.join("Cargo.toml").is_file() {
+        return Err(format!(
+            "path dependency {} does not contain a Cargo.toml",
+            root.display()
+        )
+        .into());
+    }
+    Ok(Some(root))
+}
+
+fn sanitize_support_package_dir(package_name: &str) -> String {
+    let sanitized = package_name
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() || matches!(ch, '-' | '_') {
+                ch
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    if sanitized.is_empty() {
+        "package".to_string()
+    } else {
+        sanitized
+    }
+}
+
+fn copy_support_package_tree(
+    package_root: &Path,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let package_root = package_root.canonicalize()?;
+    let mut visited = BTreeSet::new();
+    copy_support_package_tree_inner(&package_root, &package_root, package_output, &mut visited)
+}
+
+fn copy_support_package_tree_inner(
+    package_root: &Path,
+    path: &Path,
+    package_output: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
+
+    let resolved = path.canonicalize()?;
+    if !resolved.starts_with(package_root) {
+        return Ok(0);
+    }
+
+    if metadata.is_dir() {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, ".git" | ".hg" | ".svn" | "target"))
+        {
+            return Ok(0);
+        }
+        if !visited.insert(resolved) {
+            return Ok(0);
+        }
+
+        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        let mut copied = 0;
+        for entry in entries {
+            copied += copy_support_package_tree_inner(
+                package_root,
+                &entry.path(),
+                package_output,
+                visited,
+            )?;
+        }
+        return Ok(copied);
+    }
+
+    if !metadata.is_file() {
+        return Ok(0);
+    }
+    let relative = path.strip_prefix(package_root)?;
+    let output_path = package_output.join(relative);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(path, output_path)?;
+    Ok(1)
+}
+
+fn relative_path_between(from_dir: &Path, target: &Path) -> PathBuf {
+    let from = normal_components(from_dir);
+    let target = normal_components(target);
+    let mut common = 0;
+    while common < from.len() && common < target.len() && from[common] == target[common] {
+        common += 1;
+    }
+
+    let mut relative = PathBuf::new();
+    for _ in common..from.len() {
+        relative.push("..");
+    }
+    for component in &target[common..] {
+        relative.push(component);
+    }
+    if relative.as_os_str().is_empty() {
+        relative.push(".");
+    }
+    relative
+}
+
+fn normal_components(path: &Path) -> Vec<String> {
+    path.components()
+        .filter_map(|component| match component {
+            Component::Normal(component) => Some(component.to_string_lossy().to_string()),
+            Component::CurDir => None,
+            Component::ParentDir => Some("..".to_string()),
+            Component::RootDir | Component::Prefix(_) => None,
+        })
+        .collect()
+}
+
+fn merge_transformed_patch_tables(
+    patches: &mut Table,
+    source_patches: &Table,
+    manifest_dir: &Path,
+    support_packages: &SupportPackagePlan,
+) {
+    for (source, value) in source_patches {
+        let Some(source_table) = value.as_table() else {
+            patches
+                .entry(source.clone())
+                .or_insert_with(|| value.clone());
+            continue;
+        };
+        let target = patches
+            .entry(source.clone())
+            .or_insert_with(|| Value::Table(Table::new()));
+        let Some(target_table) = target.as_table_mut() else {
+            continue;
+        };
+        for (name, dependency) in source_table {
+            target_table.entry(name.clone()).or_insert_with(|| {
+                support_packages.transformed_workspace_dependency_value(dependency, manifest_dir)
+            });
+        }
+    }
+}
+
+fn merge_transformed_replace_table(
+    replacements: &mut Table,
+    source_replacements: &Table,
+    manifest_dir: &Path,
+    support_packages: &SupportPackagePlan,
+) {
+    for (name, dependency) in source_replacements {
+        replacements.entry(name.clone()).or_insert_with(|| {
+            support_packages.transformed_workspace_dependency_value(dependency, manifest_dir)
+        });
+    }
 }
 
 fn package_should_preserve_source_tree(
@@ -1293,6 +2282,7 @@ fn write_workspace_manifest(
     reduced: &ReducedProject,
     output_root: &Path,
     package_usages: &HashMap<String, PackageSourceUsage>,
+    support_packages: &SupportPackagePlan,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let mut root = Table::new();
     let mut workspace = Table::new();
@@ -1307,6 +2297,18 @@ fn write_workspace_manifest(
                 .collect(),
         ),
     );
+    if !support_packages.packages.is_empty() {
+        workspace.insert(
+            "exclude".to_string(),
+            Value::Array(
+                support_packages
+                    .packages
+                    .values()
+                    .map(|package| Value::String(toml_path(&package.output_rel_dir)))
+                    .collect(),
+            ),
+        );
+    }
 
     if let Some(resolver) = project
         .workspace
@@ -1336,7 +2338,8 @@ fn write_workspace_manifest(
         workspace.insert("lints".to_string(), lints.clone());
     }
 
-    let workspace_dependencies = retained_workspace_dependencies(project, reduced, package_usages);
+    let workspace_dependencies =
+        retained_workspace_dependencies(project, reduced, package_usages, support_packages);
     if !workspace_dependencies.is_empty() {
         workspace.insert(
             "dependencies".to_string(),
@@ -1348,10 +2351,10 @@ fn write_workspace_manifest(
     if let Some(profile) = project.workspace.manifest.get("profile") {
         root.insert("profile".to_string(), profile.clone());
     }
-    if let Some(patch) = transformed_patch_tables(project) {
+    if let Some(patch) = support_packages.merged_patch_tables(project) {
         root.insert("patch".to_string(), patch);
     }
-    if let Some(replace) = transformed_replace_table(project) {
+    if let Some(replace) = support_packages.merged_replace_table(project) {
         root.insert("replace".to_string(), replace);
     }
     fs::write(
@@ -1361,47 +2364,13 @@ fn write_workspace_manifest(
     Ok(())
 }
 
-fn transformed_patch_tables(project: &Project) -> Option<Value> {
-    let source_patches = project.workspace.manifest.get("patch")?.as_table()?;
-    let mut patches = Table::new();
-    for (source, value) in source_patches {
-        let Some(source_table) = value.as_table() else {
-            patches.insert(source.clone(), value.clone());
-            continue;
-        };
-
-        let mut transformed = Table::new();
-        for (name, dependency) in source_table {
-            transformed.insert(
-                name.clone(),
-                dependency_value_with_resolved_path(dependency, &project.workspace.root),
-            );
-        }
-        patches.insert(source.clone(), Value::Table(transformed));
-    }
-
-    (!patches.is_empty()).then_some(Value::Table(patches))
-}
-
-fn transformed_replace_table(project: &Project) -> Option<Value> {
-    let source_replacements = project.workspace.manifest.get("replace")?.as_table()?;
-    let mut replacements = Table::new();
-    for (name, dependency) in source_replacements {
-        replacements.insert(
-            name.clone(),
-            dependency_value_with_resolved_path(dependency, &project.workspace.root),
-        );
-    }
-
-    (!replacements.is_empty()).then_some(Value::Table(replacements))
-}
-
 fn write_package_manifest(
     project: &Project,
     reduced: &ReducedProject,
     package_name: &str,
     output_path: &Path,
     package_usage: &PackageSourceUsage,
+    support_packages: &SupportPackagePlan,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let package = project
         .workspace
@@ -1446,6 +2415,7 @@ fn write_package_manifest(
         package_usage,
         &feature_required_aliases,
         &mut retained_dependency_aliases,
+        support_packages,
     )?;
     if !dependencies.is_empty() {
         manifest.insert("dependencies".to_string(), Value::Table(dependencies));
@@ -1462,6 +2432,7 @@ fn write_package_manifest(
             package_usage,
             &feature_required_aliases,
             &mut retained_dependency_aliases,
+            support_packages,
         )?;
         if !dev_dependencies.is_empty() {
             manifest.insert(
@@ -1482,6 +2453,7 @@ fn write_package_manifest(
             package_usage,
             &feature_required_aliases,
             &mut retained_dependency_aliases,
+            support_packages,
         )?;
         if !build_dependencies.is_empty() {
             manifest.insert(
@@ -1498,6 +2470,7 @@ fn write_package_manifest(
         package_usage,
         &feature_required_aliases,
         &mut retained_dependency_aliases,
+        support_packages,
     )? {
         manifest.insert("target".to_string(), Value::Table(target_dependencies));
     }
@@ -1667,6 +2640,7 @@ fn retained_workspace_dependencies(
     project: &Project,
     reduced: &ReducedProject,
     package_usages: &HashMap<String, PackageSourceUsage>,
+    support_packages: &SupportPackagePlan,
 ) -> Table {
     let Some(source_dependencies) = project
         .workspace
@@ -1718,7 +2692,10 @@ fn retained_workspace_dependencies(
                 if let Some(source) = source_dependencies.get(alias) {
                     dependencies.insert(
                         alias.clone(),
-                        dependency_value_with_resolved_path(source, &project.workspace.root),
+                        support_packages.transformed_workspace_dependency_value(
+                            source,
+                            &project.workspace.root,
+                        ),
                     );
                 }
             }
@@ -1752,6 +2729,7 @@ fn transformed_dependencies(
     package_usage: &PackageSourceUsage,
     feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
+    support_packages: &SupportPackagePlan,
 ) -> Result<Table, Box<dyn std::error::Error>> {
     let package = project
         .workspace
@@ -1784,7 +2762,11 @@ fn transformed_dependencies(
                 retained_aliases.insert(alias.clone());
                 dependencies.insert(
                     alias.clone(),
-                    dependency_value_with_resolved_path(value, &package.root),
+                    support_packages.transformed_dependency_value(
+                        value,
+                        &package.root,
+                        Path::new(package_name),
+                    ),
                 );
             }
             continue;
@@ -1804,7 +2786,11 @@ fn transformed_dependencies(
             retained_aliases.insert(alias.clone());
             dependencies.insert(
                 alias.clone(),
-                dependency_value_with_resolved_path(value, &package.root),
+                support_packages.transformed_dependency_value(
+                    value,
+                    &package.root,
+                    Path::new(package_name),
+                ),
             );
         }
     }
@@ -1819,6 +2805,7 @@ fn transformed_target_dependencies(
     package_usage: &PackageSourceUsage,
     feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
+    support_packages: &SupportPackagePlan,
 ) -> Result<Option<Table>, Box<dyn std::error::Error>> {
     let package = project
         .workspace
@@ -1861,6 +2848,7 @@ fn transformed_target_dependencies(
                 feature_required_aliases,
                 retained_aliases,
                 retain_for_copied_support_source,
+                support_packages,
             );
             rendered_dependencies.extend(dependencies);
         }
@@ -1882,6 +2870,7 @@ fn transformed_target_dependencies(
                 feature_required_aliases,
                 &mut promoted_retained_aliases,
                 retain_for_copied_support_source,
+                support_packages,
             );
             for (alias, value) in promoted_dependencies {
                 if package_usage.mentions_dependency_in_scope(
@@ -1921,6 +2910,7 @@ fn transformed_target_dependencies(
                     feature_required_aliases,
                     retained_aliases,
                     retain_for_copied_support_source,
+                    support_packages,
                 );
                 if !build_dependencies.is_empty() {
                     rendered_target.insert(
@@ -1949,6 +2939,7 @@ fn transformed_target_dependencies(
                     feature_required_aliases,
                     retained_aliases,
                     retain_for_copied_support_source,
+                    support_packages,
                 );
                 if !dev_dependencies.is_empty() {
                     rendered_target.insert(
@@ -1979,6 +2970,7 @@ fn transformed_dependency_table(
     feature_required_aliases: &BTreeSet<String>,
     retained_aliases: &mut BTreeSet<String>,
     retain_for_copied_support_source: bool,
+    support_packages: &SupportPackagePlan,
 ) -> Table {
     let Some(package) = project.workspace.packages.get(package_name) else {
         return Table::new();
@@ -2002,7 +2994,11 @@ fn transformed_dependency_table(
                 retained_aliases.insert(alias.clone());
                 dependencies.insert(
                     alias.clone(),
-                    dependency_value_with_resolved_path(value, &package.root),
+                    support_packages.transformed_dependency_value(
+                        value,
+                        &package.root,
+                        Path::new(package_name),
+                    ),
                 );
             }
             continue;
@@ -2024,7 +3020,13 @@ fn transformed_dependency_table(
                 .workspace
                 .packages
                 .get(package_name)
-                .map(|package| dependency_value_with_resolved_path(value, &package.root))
+                .map(|package| {
+                    support_packages.transformed_dependency_value(
+                        value,
+                        &package.root,
+                        Path::new(package_name),
+                    )
+                })
                 .unwrap_or_else(|| value.clone());
             dependencies.insert(alias.clone(), value);
         }
@@ -2572,26 +3574,6 @@ fn dependency_uses_workspace(value: &Value) -> bool {
         .and_then(|table| table.get("workspace"))
         .and_then(Value::as_bool)
         .unwrap_or(false)
-}
-
-fn dependency_value_with_resolved_path(value: &Value, manifest_dir: &Path) -> Value {
-    let Some(table) = value.as_table() else {
-        return value.clone();
-    };
-    let Some(path) = table.get("path").and_then(Value::as_str) else {
-        return value.clone();
-    };
-
-    let mut table = table.clone();
-    let path = PathBuf::from(path);
-    let path = if path.is_absolute() {
-        path
-    } else {
-        manifest_dir.join(path)
-    };
-    let path = path.canonicalize().unwrap_or(path);
-    table.insert("path".to_string(), Value::String(toml_path(&path)));
-    Value::Table(table)
 }
 
 fn toml_path(path: &Path) -> String {

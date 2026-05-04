@@ -43,7 +43,9 @@ non-default targets whose `required-features` are not activated by those
 arguments, preserves pinned Rust toolchain files, and adds Cargo `--locked` when
 the source checkout has a lockfile. Generated slices also preserve root
 `[profile.*]` policy and refuse to copy symlinked assets that resolve outside
-their package root. They also fail production on file includes with unresolved
+their package root. They copy retained non-workspace path packages into
+`support/` and rewrite copied package manifests so local path dependency
+closures stay self-contained. They also fail production on file includes with unresolved
 env paths, absolute paths, external paths, or `OUT_DIR` generated assets. Use
 `--deny-warnings` for production gates that require warning-free generated feedback. Each corpus row includes
 the slicer's authoritative validation verdict, production-readiness status,

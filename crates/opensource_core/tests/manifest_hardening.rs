@@ -2287,12 +2287,24 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
     let root_manifest = read(output.join("Cargo.toml"));
     let app_manifest = read(output.join("app/Cargo.toml"));
     let lockfile = read(output.join("Cargo.lock"));
+    let support_manifest = read(output.join("support/external-helper/Cargo.toml"));
+    let support_source = read(output.join("support/external-helper/src/lib.rs"));
     assert!(root_manifest.contains("external_helper"));
-    assert!(root_manifest.contains("path = \"/"));
+    assert!(root_manifest.contains("path = \"support/external-helper\""));
+    assert!(!root_manifest.contains("path = \"/"));
     assert!(!root_manifest.contains("path = \"../"));
     assert!(root_manifest.contains("[patch.crates-io.external-helper]"));
     assert!(app_manifest.contains("external_helper"));
+    assert!(support_manifest.contains("name = \"external-helper\""));
+    assert!(support_source.contains("pub fn decorate"));
     assert!(lockfile.contains("version = 3"));
+
+    let external_name = format!(
+        "{}-external-helper",
+        workspace.file_name().unwrap().to_string_lossy()
+    );
+    let external_root = workspace.parent().unwrap().join(external_name);
+    fs::rename(&external_root, external_root.with_extension("moved")).unwrap();
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -2309,6 +2321,118 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
         String::from_utf8_lossy(&cargo_check.stderr),
         root_manifest,
         app_manifest,
+    );
+}
+
+#[test]
+fn copies_direct_external_path_dependency_closure_into_generated_output() {
+    let workspace = temp_path("direct-external-path-dep-workspace");
+    let output = temp_path("direct-external-path-dep-output");
+    let target_dir = temp_path("direct-external-path-dep-target");
+    let helper = temp_path("direct-external-path-dep-helper");
+    let leaf = temp_path("direct-external-path-dep-leaf");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    external_helper::decorate(value)
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+external-leaf = {{ path = "{}" }}
+"#,
+            manifest_path(&leaf)
+        ),
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"pub fn decorate(value: &str) -> String {
+    format!("{value}{}", external_leaf::suffix())
+}
+"#,
+    );
+    write(
+        leaf.join("Cargo.toml"),
+        r#"[package]
+name = "external-leaf"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        leaf.join("src/lib.rs"),
+        r#"pub fn suffix() -> &'static str {
+    ":leaf"
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app_manifest = read(output.join("app/Cargo.toml"));
+    let helper_manifest = read(output.join("support/external-helper/Cargo.toml"));
+    let leaf_manifest = read(output.join("support/external-leaf/Cargo.toml"));
+    assert!(app_manifest.contains("path = \"../support/external-helper\""));
+    assert!(helper_manifest.contains("path = \"../external-leaf\""));
+    assert!(leaf_manifest.contains("name = \"external-leaf\""));
+    assert!(!app_manifest.contains(&manifest_path(&helper)));
+    assert!(!helper_manifest.contains(&manifest_path(&leaf)));
+
+    fs::rename(&helper, helper.with_extension("moved")).unwrap();
+    fs::rename(&leaf, leaf.with_extension("moved")).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated direct external dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\nhelper/Cargo.toml:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app_manifest,
+        helper_manifest,
     );
 }
 
@@ -2374,9 +2498,12 @@ edition = "2021"
     .expect("reduction should succeed");
 
     let root_manifest = read(output.join("Cargo.toml"));
+    let support_manifest = read(output.join("support/replace-helper/Cargo.toml"));
     assert!(root_manifest.contains("replace-helper:0.1.0"));
-    assert!(root_manifest.contains("path = \"/"));
+    assert!(root_manifest.contains("path = \"support/replace-helper\""));
+    assert!(!root_manifest.contains("path = \"/"));
     assert!(!root_manifest.contains("path = \"replace-helper\""));
+    assert!(support_manifest.contains("name = \"replace-helper\""));
 }
 
 #[test]

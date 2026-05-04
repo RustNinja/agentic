@@ -200,9 +200,11 @@ retained custom attribute and derive macros that may generate code outside the
 static parse tree, including macros hidden behind nested `cfg_attr`, and
 retained non-builtin macro invocations. Retained build scripts are also reported because
 they can generate source, link metadata, or asset requirements outside the
-static parse tree. Retained source references to path dependencies that are not
-workspace members are production-blocking, because the generated manifest would
-otherwise point back to the original checkout instead of a self-contained slice.
+static parse tree. Retained local path dependencies that are not workspace
+members are copied into `support/`, their own path dependency closures are
+rewritten to generated-local paths, and workspace-inherited package/dependency
+fields are materialized so generated manifests do not point back to the
+original checkout.
 Retained `cfg`/`cfg_attr` attributes are reported when a
 slice needs feature or target matrix validation beyond the current host/default
 configuration; selected roots behind non-test `cfg` or `cfg_attr` gates are
@@ -335,8 +337,8 @@ This proof intentionally uses a syntactic call graph instead of rustc name
 resolution. It is useful for controlled workspaces and for proving the slice
 pipeline, but it is not a full compiler frontend. It now handles direct trait
 method calls when the receiver type can be inferred locally, borrowed UFCS trait
-calls, workspace member globs, external dependencies, and local path crate
-pruning. It also scans retained macro bodies for direct local paths and prunes
+calls, workspace member globs, external dependencies, local path crate pruning,
+and copied non-workspace path support packages. It also scans retained macro bodies for direct local paths and prunes
 external dependencies whose crate alias is absent from the retained source.
 Complex function pointers, trait objects, broad `cfg` feature matrices, full
 macro expansion, build scripts, and rustc-level unused import analysis remain
