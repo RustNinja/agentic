@@ -2272,6 +2272,118 @@ fn resolves_arbitrary_untyped_closure_and_wrapper_trait_methods_without_name_all
 }
 
 #[test]
+fn resolves_generic_trait_bound_receiver_methods_without_name_only_fallback() {
+    let workspace = temp_path("generic-bound-method-workspace");
+    let output = temp_path("generic-bound-method-output");
+    let target_dir = temp_path("generic-bound-method-target");
+    write_basic_workspace(&workspace);
+    write_basic_app_manifest(&workspace);
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub trait Worker {
+    fn work(&self) -> usize;
+}
+
+pub trait Factory {
+    fn make(&self) -> Product;
+}
+
+pub struct Product;
+
+impl Product {
+    fn finish(&self) -> usize {
+        3
+    }
+
+    fn unused_finish(&self) -> usize {
+        30
+    }
+}
+
+pub struct Concrete;
+
+impl Worker for Concrete {
+    fn work(&self) -> usize {
+        concrete_work()
+    }
+}
+
+fn concrete_work() -> usize {
+    11
+}
+
+pub struct Decoy;
+
+impl Decoy {
+    fn work(&self) -> usize {
+        dead_work()
+    }
+
+    fn make(&self) -> Product {
+        Product
+    }
+}
+
+fn dead_work() -> usize {
+    99
+}
+
+#[opensourced]
+pub fn selected<T>(worker: T, other: impl Worker, factory: impl Factory) -> usize
+where
+    T: Worker,
+{
+    let rebound: T = worker;
+    rebound.work() + other.work() + factory.make().finish()
+}
+"#,
+    );
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(
+        !report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "syntactic_method_fallbacks"),
+        "generic trait-bound receiver calls should not use name-only fallback: {:?}",
+        report.production.hazards
+    );
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(source.contains("pub trait Worker"));
+    assert!(source.contains("pub trait Factory"));
+    assert!(source.contains("fn finish"));
+    assert!(!source.contains("struct Decoy"));
+    assert!(!source.contains("dead_work"));
+    assert!(!source.contains("unused_finish"));
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated generic-bound method slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn resolves_external_workspace_path_dependencies_from_original_root() {
     let workspace = temp_path("external-workspace-dep-workspace");
     let output = temp_path("external-workspace-dep-output");

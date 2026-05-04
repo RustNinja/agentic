@@ -18,7 +18,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Consts/statics | root fixture, `data_items.rs`, `component_matrix.rs`, `pattern_constants.rs`, `manifest_hardening.rs` | Constants/statics used in bodies, fields, associated const values, unqualified match patterns, and implicit `format!("{NAME}")` captures |
 | Inherent impl methods | all integration fixtures | Associated constructors, receiver calls, async methods, generic impl blocks |
 | Trait definitions | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Trait items retained when trait impl methods are reachable |
-| Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Receiver calls, explicit `<Type as Trait>::method`, `Trait::method(&receiver, ...)`, format-only `Display`, and `to_string()`-required `Display` impls |
+| Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Receiver calls, explicit `<Type as Trait>::method`, `Trait::method(&receiver, ...)`, generic trait-bound receiver calls, trait-bound method return chaining, format-only `Display`, and `to_string()`-required `Display` impls |
 | Trait impl peers | `component_matrix.rs` | Required peer methods and associated type/const items are retained so trait impls compile |
 | Dynamic dispatch boundaries | core production-readiness tests | Retained `dyn Trait` and `fn(...)` function pointer surfaces are production-blocking until semantic analysis can prove concrete dispatch/callback edges |
 | Associated types/consts | `component_matrix.rs` | Associated type and associated const dependencies are followed from retained impls |
@@ -61,7 +61,7 @@ These are tracked limitations, not silently claimed support:
 | --- | --- |
 | Full rustc name resolution | The reducer is syntactic and does not replace rustc or rust-analyzer name resolution |
 | Macro-expanded dependencies | The slicer does not run macro expansion; retained custom derives, custom attributes, module-boundary custom attributes, and non-builtin macro invocations are preserved verbatim, report structured package/module/file/line details, and require compiler feedback until an expansion-aware analyzer is available |
-| Generic trait receiver inference | Calls through generic bounds such as `value.trait_method()` are not fully resolved without a concrete receiver type |
+| Generic trait receiver inference | Local trait-bound receiver calls such as `value.trait_method()` are followed for named type parameters, `where` bounds, `impl Trait` parameters, explicit local bindings, and simple transparent wrappers; full rustc-equivalent inference for associated types, substitutions through arbitrary containers, and complex projection bounds still requires the semantic oracle |
 | Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed; retained `fn(...)` and `dyn Trait` surfaces remain production-blocking and report structured package/module/file/line details |
 | Build scripts and `include!` source | `build.rs` and referenced non-Rust assets are copied; generated Rust files under `OUT_DIR`, build-script side effects, and any retained `include!` Rust source are not semantically modeled, so they are production-blocking hazards |
 | Compile-time environment | `env!`/`option_env!` values outside Cargo package metadata are not modeled and are production-blocking |

@@ -270,6 +270,7 @@ impl Parser {
                         module_path: module_path.to_vec(),
                         span: source_span(file_path, method.span()),
                         item: method.clone(),
+                        impl_generics: item_impl.generics.clone(),
                         impl_items: item_impl.items.clone(),
                         trait_input_type_paths: trait_input_type_paths.clone(),
                         aliases: aliases.clone(),
