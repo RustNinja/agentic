@@ -68,11 +68,15 @@ assets, output safety, or product diagnostics by itself.
    - Load package/target/dependency shape from `cargo metadata --format-version=1`.
    - Preserve manual TOML rendering only for source manifest rewriting.
    - Record target kind, source path, features, dependency kind, cfg target, and package ID.
+   - Run Cargo from each checked manifest's parent directory and preserve
+     workspace `.cargo/config.toml` or `.cargo/config` in generated slices.
 
 3. Feedback widening:
    - Parse `cargo check --message-format=json`.
    - Classify missing item/module/import/dependency/feature failures.
    - Widen the retained graph with a bounded iteration cap.
+   - Apply only rustc `MachineApplicable` suggestions whose spans are inside
+     the generated output root.
    - Treat selected warnings, especially unreachable patterns, as semantic hazards.
 
 4. Semantic oracle:

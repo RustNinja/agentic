@@ -102,11 +102,17 @@ build-script paths. `--feedback` runs this preflight first and fails before
 `--feedback` runs `cargo check --message-format=json` against the generated
 workspace, prints prioritized compiler diagnostics, and writes
 `slice-feedback.json` under the slice output, including exit code, timeout
-state, duration, target directory, timeout, and extra cargo check arguments for
-reproducibility. `--feedback-loop <n>` repeats that compiler feedback pass up to
-`n` times, stops early when diagnostics repeat without progress, and fails with
-the JSON report path when the slice still does not compile. Feedback checks have
-a 600-second timeout by default; use
+state, duration, Cargo working directory, target directory, timeout, and extra
+cargo check arguments for reproducibility. Feedback and baseline Cargo commands
+run from the checked manifest's parent directory, and generated slices preserve
+workspace-level `.cargo/config.toml` or legacy `.cargo/config` files so
+validation sees the same Cargo cfg, target, registry, source-replacement, and
+rustflag context as the source workspace. `--feedback-loop <n>` repeats that
+compiler feedback pass up to `n` times, widens the generated slice from bounded
+compiler diagnostics when they map back to known project symbols, stops early
+when diagnostics repeat without progress, and fails with the JSON report path
+when the slice still does not compile. Feedback checks have a 600-second timeout
+by default; use
 `--feedback-timeout 0` to disable it or pass another second count.
 Use `--feedback-target-dir <path>` to reuse a Cargo target directory across
 repeated generated slices when dependency build time dominates validation.
@@ -114,19 +120,23 @@ Use repeated `--cargo-check-arg <arg>` flags to pass feature or target matrix
 arguments through to baseline and generated `cargo check` runs, for example
 `--cargo-check-arg --all-features` or `--cargo-check-arg --target
 --cargo-check-arg wasm32-unknown-unknown`.
-Feedback reports also classify unresolved compiler diagnostics into widening
+Feedback reports classify unresolved compiler diagnostics into widening
 candidates and production hazards, so missing paths, items, methods, crates,
 module files, timeouts, and manifest-shape failures can be triaged without
-reading raw `cargo check` output. Semantic drift warnings that can mean pruning
-changed behavior, such as unreachable patterns or missing-constant pattern
-bindings, are classified as feedback hazards too.
+reading raw `cargo check` output. Generation reports record
+`feedback_widened_roots` when compiler diagnostics caused a re-render. Semantic
+drift warnings that can mean pruning changed behavior, such as unreachable
+patterns or missing-constant pattern bindings, are classified as feedback
+hazards too.
 Use `--deny-warnings` when a production validation run should reject generated
 workspaces that compile with warnings.
 `--feedback-repair-loop <n>` runs bounded compiler feedback with conservative
 source repairs between attempts. The first repair tier only handles diagnostics
 that are safe to edit mechanically, such as `unused_imports`, item-level
 `dead_code`, and deferred dead-code allows for retained fields or enum variants.
-It stops on repeated diagnostics or no-progress rounds.
+It also applies rustc `MachineApplicable` suggestions when every edited span is
+inside the generated output root. It stops on repeated diagnostics,
+low-progress diagnostic shapes, or no-progress rounds.
 Validation runs write `slice-validation.json` by default. That report is the
 authoritative gate verdict: final status, rejection reason when present,
 baseline/preflight/feedback gate states, cargo check arguments, and per-attempt
@@ -152,7 +162,10 @@ enables baseline checking, preflight, `--feedback-repair-loop 3`, and
 `--deny-warnings`, and writes `slice-report.json` plus
 `slice-validation.json` by default, while still allowing explicit flags such as
 `--feedback-repair-loop 5`, `--feedback-timeout`, `--cargo-check-arg`, and
-target/report paths to override the preset where needed.
+target/report paths to override the preset where needed. Production mode fails
+closed on readiness error hazards before compiler feedback and records a final
+`production_ready` gate only after baseline, generation, preflight, target
+coverage, and compiler feedback have accepted the slice.
 
 This is the current production feedback layer: the slicer stays fast and
 syntactic, then rustc gives precise diagnostics for the generated slice. A
@@ -169,13 +182,15 @@ non-builtin macro invocations. Retained build scripts are also reported because
 they can generate source, link metadata, or asset requirements outside the
 static parse tree. Retained `cfg`/`cfg_attr` attributes are reported when a
 slice needs feature or target matrix validation beyond the current host/default
-configuration.
+configuration; selected roots behind non-test `cfg` or `cfg_attr` gates are
+production-blocking until the exact feature/target matrix is proven by
+validation arguments.
 
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
 mode/notes, production-readiness hazards, roots, packages, reachable
-callables/items, generated target metadata, files written, and a source map for
-parsed callables/items with file spans and reachability flags. It also records
-phase timings for analyzer
+callables/items, generated target metadata, feedback-widened roots, files
+written, and a source map for parsed callables/items with file spans and
+reachability flags. It also records phase timings for analyzer
 loading, manifest loading, parsing, reduction, rendering, and total generation
 time. That source map is the join point for semantic analyzer edges. The generic
 corpus runner carries the same production hazard fields into each JSONL row and
