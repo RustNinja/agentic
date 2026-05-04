@@ -179,18 +179,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         warning_count: None,
         semantic_warning_hazards: None,
     });
-    validation.gates.push(ValidationGateReport {
-        name: "production_readiness".to_string(),
-        status: report.production.status.clone(),
-        reason: format!(
-            "{} production hazard(s) reported before compiler feedback",
-            report.production.hazards.len()
-        ),
-        report_path: slice_report_path(&options),
-        error_count: None,
-        warning_count: None,
-        semantic_warning_hazards: None,
-    });
+    record_production_readiness_gate(
+        &options,
+        &mut validation,
+        &report.production,
+        "before compiler feedback",
+    );
     if production_readiness_blocks_validation(&options, &report.production.status) {
         let reason =
             "production readiness reported error hazards before compiler feedback".to_string();
@@ -1035,6 +1029,26 @@ fn record_feedback_gate(
     );
 }
 
+fn record_production_readiness_gate(
+    options: &CliOptions,
+    validation: &mut ValidationReport,
+    production: &opensource_core::ProductionReadinessReport,
+    phase: &str,
+) {
+    validation.gates.push(ValidationGateReport {
+        name: "production_readiness".to_string(),
+        status: production.status.clone(),
+        reason: format!(
+            "{} production hazard(s) reported {phase}",
+            production.hazards.len()
+        ),
+        report_path: slice_report_path(options),
+        error_count: None,
+        warning_count: None,
+        semantic_warning_hazards: None,
+    });
+}
+
 #[allow(clippy::too_many_arguments)]
 fn try_widen_from_feedback(
     options: &CliOptions,
@@ -1093,6 +1107,17 @@ fn try_widen_from_feedback(
     );
     if let Some(recorded) = validation.attempts.last_mut() {
         recorded.feedback_widened_roots = Some(widened_roots.len());
+    }
+    record_production_readiness_gate(
+        options,
+        validation,
+        &widened_report.production,
+        "after compiler feedback widening",
+    );
+    if production_readiness_blocks_validation(options, &widened_report.production.status) {
+        return Err(
+            "production readiness reported error hazards after compiler feedback widening".into(),
+        );
     }
 
     let preflight = run_preflight(options)?;
@@ -1660,7 +1685,18 @@ fn record_final_production_readiness(options: &CliOptions, validation: &mut Vali
         .find(|gate| matches!(gate.name.as_str(), "feedback-repair" | "feedback"))
         .map(|gate| gate.status.as_str())
         .unwrap_or("missing_feedback");
+    let production_readiness_status = validation
+        .gates
+        .iter()
+        .rev()
+        .find(|gate| gate.name == "production_readiness")
+        .map(|gate| gate.status.as_str())
+        .unwrap_or("missing_production_readiness");
     let (status, reason) = match feedback_status {
+        _ if production_readiness_status == "hazards_detected" => (
+            "failed",
+            "production readiness reported error hazards for the final generated slice",
+        ),
         "accepted" => (
             "accepted",
             "production preset passed baseline, generation, preflight, target coverage, and compiler feedback",
@@ -2534,6 +2570,9 @@ mod tests {
     fn production_preset_records_final_readiness_after_feedback_accepts() {
         let options = parse_options(["--production", "workspace", "out"]);
         let mut validation = ValidationReport::new(&options);
+        validation
+            .gates
+            .push(gate("production_readiness", "requires_feedback"));
         validation.gates.push(gate("feedback-repair", "accepted"));
 
         record_final_production_readiness(&options, &mut validation);
@@ -2544,6 +2583,25 @@ mod tests {
             .find(|gate| gate.name == "production_ready")
             .expect("production_ready gate should be recorded");
         assert_eq!(gate.status, "accepted");
+    }
+
+    #[test]
+    fn production_preset_final_readiness_fails_after_widened_error_hazards() {
+        let options = parse_options(["--production", "workspace", "out"]);
+        let mut validation = ValidationReport::new(&options);
+        validation.gates.push(gate("feedback-repair", "accepted"));
+        validation
+            .gates
+            .push(gate("production_readiness", "hazards_detected"));
+
+        record_final_production_readiness(&options, &mut validation);
+
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "production_ready")
+            .expect("production_ready gate should be recorded");
+        assert_eq!(gate.status, "failed");
     }
 
     #[test]
@@ -2796,6 +2854,77 @@ pub fn helper() -> usize {
         assert!(generated.contains("pub fn helper"));
         let report_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(slice_report).unwrap()).unwrap();
+        assert_eq!(report_json["feedback_widened_roots"][0], "app::helper");
+    }
+
+    #[test]
+    fn production_feedback_widening_rechecks_readiness_and_blocks_error_hazards() {
+        let source = temp_path("cli-feedback-widen-cfg-source");
+        let output = temp_path("cli-feedback-widen-cfg-output");
+        let slice_report = temp_path("cli-feedback-widen-cfg-report").join("slice-report.json");
+        let opensourced_path = repo_root().join("crates/opensourced");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nextra = []\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+
+#[cfg(feature = "extra")]
+pub fn helper() -> usize {
+    2
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            std::ffi::OsString::from("--production"),
+            std::ffi::OsString::from("--slice-report"),
+            slice_report.clone().into_os_string(),
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        let mut validation = ValidationReport::new(&options);
+        let mut state = FeedbackWideningState::default();
+        let mut missing_helper = diagnostic("E0425", "cannot find value `helper` in this scope");
+        missing_helper.package_id = Some("app 0.1.0 (path+file:///tmp/app)".to_string());
+        let feedback_report = report(false, vec![missing_helper]);
+
+        let error = try_widen_from_feedback(
+            &options,
+            &mut validation,
+            &mut state,
+            "feedback-repair",
+            1,
+            &feedback_report,
+            &output.join("slice-feedback.json"),
+            0,
+            0,
+        )
+        .expect_err("cfg-gated widened root should block production");
+
+        assert!(error
+            .to_string()
+            .contains("production readiness reported error hazards"));
+        assert!(validation.gates.iter().any(|gate| {
+            gate.name == "production_readiness" && gate.status == "hazards_detected"
+        }));
+        let report_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(slice_report).unwrap()).unwrap();
+        assert_eq!(report_json["production"]["status"], "hazards_detected");
         assert_eq!(report_json["feedback_widened_roots"][0], "app::helper");
     }
 
