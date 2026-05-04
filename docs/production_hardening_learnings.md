@@ -125,6 +125,10 @@ Generic source repair wins came from recognizing patterns, not projects:
   argument, match binding, or loop binding with the same visible name must not
   make a removed import look reachable, and a short inner shadow must not hide a
   later real import use.
+- Macro token scanning needs the same scope model. A single identifier inside a
+  retained macro invocation should be treated as a local value when a visible
+  local binding exists, while the local value's known receiver type can still
+  feed method dependencies used inside the macro tokens.
 - Once a local `use` target resolves to a removed callable or item, public-name
   and alias-name heuristics must not resurrect that import. Keep only imports
   whose resolved target is retained or whose target cannot be proven local and
@@ -148,6 +152,8 @@ The useful corpus pattern is:
 - pinned large real repositories with known-good source baselines;
 - strict mode with `--deny-warnings`, `--feedback`, repair loops, and explicit
   package/target Cargo args.
+- one tiny checked-in stress workspace for fast macro/use iteration, so common
+  graph and render regressions are caught before running a large repository.
 
 For Litter-like UniFFI/mobile crates, the most important acceptance checks are:
 

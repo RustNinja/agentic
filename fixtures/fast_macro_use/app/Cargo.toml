@@ -1,0 +1,11 @@
+[package]
+name = "fast_macro_app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+macro_helpers.workspace = true
+opensourced.workspace = true
+shared.workspace = true
+util.workspace = true

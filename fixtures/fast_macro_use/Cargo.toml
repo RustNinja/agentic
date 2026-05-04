@@ -1,0 +1,14 @@
+[workspace]
+members = ["app", "macro_helpers", "shared", "util"]
+resolver = "2"
+
+[workspace.package]
+edition = "2021"
+version = "0.1.0"
+license = "MIT"
+
+[workspace.dependencies]
+macro_helpers = { path = "macro_helpers" }
+opensourced = { path = "../../crates/opensourced" }
+shared = { path = "shared" }
+util = { path = "util" }
