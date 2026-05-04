@@ -237,6 +237,58 @@ pub fn selected() -> i32 {
 }
 
 #[test]
+fn preserves_workspace_profile_policy() {
+    let workspace = temp_path("profile-policy-workspace");
+    let output = temp_path("profile-policy-output");
+    write(
+        workspace.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[profile.dev]
+panic = "abort"
+overflow-checks = false
+"#,
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> i32 {
+    7
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let manifest = read(output.join("Cargo.toml"));
+    assert!(manifest.contains("[profile.dev]"));
+    assert!(manifest.contains("panic = \"abort\""));
+    assert!(manifest.contains("overflow-checks = false"));
+}
+
+#[test]
 fn slices_single_package_binary_crate_with_stub_main() {
     let workspace = temp_path("single-workspace");
     let output = temp_path("single-output");

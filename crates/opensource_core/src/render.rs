@@ -1237,6 +1237,9 @@ fn write_workspace_manifest(
     }
 
     root.insert("workspace".to_string(), Value::Table(workspace));
+    if let Some(profile) = project.workspace.manifest.get("profile") {
+        root.insert("profile".to_string(), profile.clone());
+    }
     if let Some(patch) = transformed_patch_tables(project) {
         root.insert("patch".to_string(), patch);
     }

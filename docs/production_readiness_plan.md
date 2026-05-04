@@ -75,6 +75,8 @@ assets, output safety, or product diagnostics by itself.
      workspace `.cargo/config.toml` or `.cargo/config` in generated slices.
    - Preserve root `rust-toolchain.toml` or `rust-toolchain` files so generated
      validation does not drift to the user's default Rust toolchain.
+   - Preserve root `[profile.*]` policy so generated validation keeps the
+     source workspace's Cargo profile semantics.
    - Validate production slices with Cargo `--locked` whenever the source
      workspace provides a lockfile.
 

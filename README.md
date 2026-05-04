@@ -109,7 +109,8 @@ workspace-level `.cargo/config.toml` or legacy `.cargo/config` files so
 validation sees the same Cargo cfg, target, registry, source-replacement, and
 rustflag context as the source workspace. Generated slices also preserve root
 `rust-toolchain.toml` or `rust-toolchain` files so Cargo validation uses the
-same pinned toolchain. `--feedback-loop <n>` repeats that
+same pinned toolchain, plus root `[profile.*]` policy so profile-sensitive
+checks do not fall back to Cargo defaults. `--feedback-loop <n>` repeats that
 compiler feedback pass up to `n` times, widens the generated slice from bounded
 compiler diagnostics when they map back to known project symbols, stops early
 when diagnostics repeat without progress, and fails with the JSON report path
