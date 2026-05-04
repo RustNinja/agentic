@@ -32,7 +32,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | External dependencies | `uniffi_mobile.rs`, `component_matrix.rs` | Used workspace dependencies such as `serde = { features = ["derive"] }` are preserved; unused external deps with no retained source reference are pruned |
 | Build dependencies | `manifest_hardening.rs`, `docs/real_rtk_slice_report.md` | `[build-dependencies]` are retained when `build.rs` is copied |
 | Target dependencies | `manifest_hardening.rs` | `[target.'cfg(...)'.dependencies]` tables are preserved when retained source references them |
-| Required target features | `manifest_hardening.rs`, CLI unit tests | `required-features` on retained example/test/bench/bin targets are reported and validation rejects Cargo argument sets that would skip the selected target |
+| Required target features | `manifest_hardening.rs`, CLI unit tests | `required-features` on retained example/test/bench/bin targets are reported and validation rejects Cargo argument sets that would skip the selected target or leave required bin features inactive |
 | Feature pruning | `manifest_hardening.rs` | Optional dependency feature entries are removed when the dependency is pruned |
 | Local path dependency pruning | `uniffi_mobile.rs`, `component_matrix.rs` | Unused local crates are omitted from manifests and source imports |
 | Macro definitions | `component_matrix.rs` | Used `macro_rules!` definitions are kept, unused macro definitions are pruned, and direct helper calls inside retained macro bodies are followed |

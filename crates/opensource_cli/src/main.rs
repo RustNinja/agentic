@@ -748,15 +748,19 @@ fn uncovered_validation_targets(
     targets
         .iter()
         .filter_map(|target| {
-            let target_kind = validation_target_kind(target)?;
-            if !validation_target_is_covered(target_kind, &target.name, cargo_args) {
-                return Some(format!(
-                    "{} {} {}",
-                    target.package, target_kind, target.name
-                ));
+            let coverage_kind = validation_target_kind(target);
+            if let Some(target_kind) = coverage_kind {
+                if !validation_target_is_covered(target_kind, &target.name, cargo_args) {
+                    return Some(format!(
+                        "{} {} {}",
+                        target.package, target_kind, target.name
+                    ));
+                }
             }
             let missing_features = uncovered_target_required_features(target, cargo_args);
+            let feature_kind = coverage_kind.or_else(|| required_feature_target_kind(target));
             (!missing_features.is_empty()).then(|| {
+                let target_kind = feature_kind.unwrap_or("target");
                 format!(
                     "{} {} {} requires feature(s): {}",
                     target.package,
@@ -771,6 +775,12 @@ fn uncovered_validation_targets(
 
 fn validation_target_kind(target: &GeneratedTargetReport) -> Option<&'static str> {
     ["example", "test", "bench"]
+        .into_iter()
+        .find(|kind| target.kind.iter().any(|target_kind| target_kind == *kind))
+}
+
+fn required_feature_target_kind(target: &GeneratedTargetReport) -> Option<&'static str> {
+    ["bin", "example", "test", "bench"]
         .into_iter()
         .find(|kind| target.kind.iter().any(|target_kind| target_kind == *kind))
 }
@@ -800,6 +810,7 @@ fn validation_target_is_covered(kind: &str, name: &str, cargo_args: &[String]) -
 
 fn target_kind_plural_flag(kind: &str) -> &'static str {
     match kind {
+        "bin" => "--bins",
         "example" => "--examples",
         "test" => "--tests",
         "bench" => "--benches",
@@ -2742,6 +2753,34 @@ mod tests {
                 &targets,
                 &["--example=demo".to_string(), "--all-features".to_string()]
             ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn required_feature_bin_targets_require_matching_validation_features() {
+        let targets = vec![GeneratedTargetReport {
+            package: "app".to_string(),
+            name: "cli".to_string(),
+            kind: vec!["bin".to_string()],
+            src_path: PathBuf::from("/workspace/app/src/bin/cli.rs"),
+            required_features: vec!["cli".to_string()],
+            default_features: Vec::new(),
+        }];
+
+        assert_eq!(
+            uncovered_validation_targets(&targets, &[]),
+            ["app bin cli requires feature(s): cli"]
+        );
+        assert_eq!(
+            uncovered_validation_targets(
+                &targets,
+                &["--features".to_string(), "app/cli".to_string()]
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            uncovered_validation_targets(&targets, &["--all-features".to_string()]),
             Vec::<String>::new()
         );
     }

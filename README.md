@@ -149,7 +149,8 @@ baseline/preflight/feedback gate states, cargo check arguments, and per-attempt
 feedback or repair outcomes.
 If the selected root lives in a non-default target such as an example, validation
 rejects runs whose cargo check arguments do not cover that target or its
-`required-features`; pass
+`required-features`; retained binary targets with `required-features` also
+require matching feature activation because Cargo can skip them otherwise. Pass
 `--cargo-check-arg --all-targets`, `--cargo-check-arg --examples`, or the
 matching `--cargo-check-arg --example --cargo-check-arg <name>`, plus
 `--cargo-check-arg --features --cargo-check-arg <feature-list>` or
