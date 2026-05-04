@@ -2799,9 +2799,18 @@ fn record_final_production_readiness(options: &CliOptions, validation: &mut Vali
             "baseline_limited",
             "production preset matched an allowed failing source baseline; generated workspace is not cleanly production-ready",
         ),
-        "accepted" if matches!(production_matrix_status, "accepted" | "not_required") => (
+        "accepted"
+            if production_readiness_status == "ready_for_feedback"
+                && matches!(production_matrix_status, "accepted" | "not_required") =>
+        {
+            (
             "accepted",
-            "production preset passed baseline, generation, preflight, target coverage, and compiler feedback",
+            "production preset passed baseline, generation, preflight, target coverage, compiler feedback, and production hazard checks",
+            )
+        }
+        "accepted" if matches!(production_matrix_status, "accepted" | "not_required") => (
+            "review_required",
+            "production preset passed compiler feedback, but remaining warning hazards require semantic review before production-ready acceptance",
         ),
         _ => (
             "failed",
@@ -4018,12 +4027,31 @@ mod tests {
     }
 
     #[test]
-    fn production_preset_records_final_readiness_after_feedback_accepts() {
+    fn production_preset_marks_warning_hazards_as_review_required_after_feedback_accepts() {
         let options = parse_options(["--production", "workspace", "out"]);
         let mut validation = ValidationReport::new(&options);
         validation
             .gates
             .push(gate("production_readiness", "requires_feedback"));
+        validation.gates.push(gate("feedback-repair", "accepted"));
+
+        record_final_production_readiness(&options, &mut validation);
+
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "production_ready")
+            .expect("production_ready gate should be recorded");
+        assert_eq!(gate.status, "review_required");
+    }
+
+    #[test]
+    fn production_preset_accepts_final_readiness_only_without_remaining_hazards() {
+        let options = parse_options(["--production", "workspace", "out"]);
+        let mut validation = ValidationReport::new(&options);
+        validation
+            .gates
+            .push(gate("production_readiness", "ready_for_feedback"));
         validation.gates.push(gate("feedback-repair", "accepted"));
 
         record_final_production_readiness(&options, &mut validation);
@@ -4103,7 +4131,7 @@ mod tests {
         let mut validation = ValidationReport::new(&options);
         validation
             .gates
-            .push(gate("production_readiness", "requires_feedback"));
+            .push(gate("production_readiness", "ready_for_feedback"));
         validation.gates.push(gate("feedback-repair", "accepted"));
         validation
             .gates

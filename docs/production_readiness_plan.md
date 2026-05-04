@@ -41,6 +41,10 @@ therefore relies on bounded RA semantics, guarded production
 proc-macro/build-script discovery, fast static fallback reduction, explicit
 production hazards, and
 `cargo check --message-format=json` feedback.
+The final `production_ready` validation gate is intentionally stricter than
+plain compiler feedback: warning-only production hazards now produce
+`review_required`, and only a slice with no remaining production hazards is
+marked `accepted`.
 
 The latest hardening milestone validated the pinned Litter UniFFI cases in
 strict repair mode with `--deny-warnings`: all three pinned roots reached zero
