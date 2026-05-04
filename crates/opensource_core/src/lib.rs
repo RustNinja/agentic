@@ -295,10 +295,17 @@ fn feedback_extra_roots(
             continue;
         };
         let symbols = diagnostic_symbols(diagnostic);
+        let package_hint = diagnostic_package_hint(diagnostic);
+        for root in
+            feedback_diagnostic_root_candidates(project, diagnostic, package_hint.as_deref())
+        {
+            if !root_is_marked(project, &root) && seen.insert(root.clone()) {
+                roots.push(root);
+            }
+        }
         if symbols.is_empty() {
             continue;
         }
-        let package_hint = diagnostic_package_hint(diagnostic);
         for symbol in symbols {
             let Some(name) = symbol_leaf_name(&symbol) else {
                 continue;
@@ -316,6 +323,19 @@ fn feedback_extra_roots(
     }
     roots.sort();
     roots
+}
+
+fn feedback_diagnostic_root_candidates(
+    project: &Project,
+    diagnostic: &feedback::CheckDiagnostic,
+    package_hint: Option<&str>,
+) -> Vec<RootId> {
+    match diagnostic.code.as_deref() {
+        Some("E0277") => {
+            conversion_impl_candidates_from_diagnostic(project, package_hint, diagnostic)
+        }
+        _ => Vec::new(),
+    }
 }
 
 fn feedback_root_candidates(
@@ -362,6 +382,110 @@ fn feedback_root_candidates(
     roots.sort();
     roots.dedup();
     roots
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+struct ConversionTraitBound {
+    target_type: String,
+    trait_name: String,
+    input_type: Option<String>,
+}
+
+fn conversion_impl_candidates_from_diagnostic(
+    project: &Project,
+    package_hint: Option<&str>,
+    diagnostic: &feedback::CheckDiagnostic,
+) -> Vec<RootId> {
+    let mut bounds = conversion_trait_bounds_from_text(&diagnostic.message);
+    if let Some(rendered) = &diagnostic.rendered {
+        bounds.extend(conversion_trait_bounds_from_text(rendered));
+    }
+    bounds.sort_by(|left, right| {
+        (&left.target_type, &left.trait_name, &left.input_type).cmp(&(
+            &right.target_type,
+            &right.trait_name,
+            &right.input_type,
+        ))
+    });
+    bounds.dedup();
+
+    let mut roots = Vec::new();
+    for bound in bounds {
+        let Some(method_name) = conversion_trait_method_name(&bound.trait_name) else {
+            continue;
+        };
+        roots.extend(project.methods.keys().filter_map(|callable| {
+            let CallableId::Method {
+                type_path,
+                trait_path: Some(trait_path),
+                trait_input_type_paths,
+                method,
+                ..
+            } = callable
+            else {
+                return None;
+            };
+            if !callable.package_matches(package_hint)
+                || method != method_name
+                || trait_path
+                    .last()
+                    .is_none_or(|candidate| candidate != &bound.trait_name)
+                || !path_leaf_matches(type_path, &bound.target_type)
+            {
+                return None;
+            }
+            if let Some(input_type) = &bound.input_type {
+                if !trait_input_type_paths
+                    .iter()
+                    .any(|path| path_leaf_matches(path, input_type))
+                {
+                    return None;
+                }
+            }
+            Some(RootId::Callable(callable.clone()))
+        }));
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn conversion_trait_bounds_from_text(text: &str) -> Vec<ConversionTraitBound> {
+    backticked_symbols(text)
+        .into_iter()
+        .filter_map(|symbol| {
+            let (target_type, trait_bound) = symbol.split_once(": ")?;
+            let trait_name = trait_bound.split_once('<')?.0.trim();
+            if !matches!(trait_name, "From" | "Into" | "TryFrom" | "TryInto") {
+                return None;
+            }
+            Some(ConversionTraitBound {
+                target_type: symbol_leaf_name(target_type)?.to_string(),
+                trait_name: trait_name.to_string(),
+                input_type: generic_argument_leaf(trait_bound),
+            })
+        })
+        .collect()
+}
+
+fn generic_argument_leaf(trait_bound: &str) -> Option<String> {
+    let (_, tail) = trait_bound.split_once('<')?;
+    let argument = tail.rsplit_once('>').map_or(tail, |(argument, _)| argument);
+    symbol_leaf_name(argument).map(ToString::to_string)
+}
+
+fn conversion_trait_method_name(trait_name: &str) -> Option<&'static str> {
+    match trait_name {
+        "From" => Some("from"),
+        "Into" => Some("into"),
+        "TryFrom" => Some("try_from"),
+        "TryInto" => Some("try_into"),
+        _ => None,
+    }
+}
+
+fn path_leaf_matches(path: &[String], expected_leaf: &str) -> bool {
+    path.last().is_some_and(|leaf| leaf == expected_leaf)
 }
 
 fn free_function_name_candidates(
@@ -479,10 +603,18 @@ fn diagnostic_package_hint(diagnostic: &feedback::CheckDiagnostic) -> Option<Str
         .package_id
         .as_deref()
         .and_then(package_name_from_diagnostic_package_id)
-        .or_else(|| diagnostic.target.as_ref().map(|target| target.name.clone()))
+        .or_else(|| {
+            diagnostic
+                .target
+                .as_ref()
+                .map(|target| target.name.replace('_', "-"))
+        })
 }
 
 fn package_name_from_diagnostic_package_id(package_id: &str) -> Option<String> {
+    if let Some(path_package) = path_package_name_from_diagnostic_package_id(package_id) {
+        return Some(path_package);
+    }
     if let Some(fragment) = package_id.split('#').next_back() {
         if let Some((name, _)) = fragment.split_once('@') {
             if !name.is_empty() {
@@ -495,6 +627,19 @@ fn package_name_from_diagnostic_package_id(package_id: &str) -> Option<String> {
         .next()
         .map(str::to_string)
         .filter(|name| !name.is_empty())
+}
+
+fn path_package_name_from_diagnostic_package_id(package_id: &str) -> Option<String> {
+    let without_fragment = package_id
+        .split_once('#')
+        .map_or(package_id, |(path, _)| path);
+    let path_marker = "path+file://";
+    let path_start = without_fragment.find(path_marker)?;
+    without_fragment[path_start + path_marker.len()..]
+        .trim_end_matches(['/', ')', ' ', '\t'])
+        .rsplit('/')
+        .find(|segment| !segment.is_empty())
+        .map(str::to_string)
 }
 
 fn root_is_marked(project: &Project, root: &RootId) -> bool {
@@ -4550,6 +4695,77 @@ pub fn helper() -> usize {
             .reachable
             .iter()
             .any(|callable| callable.to_string() == "app::helper"));
+    }
+
+    #[test]
+    fn feedback_diagnostics_widen_path_package_ids_and_conversion_impls() {
+        let root = temp_output("feedback-widen-conversion-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() {}
+
+pub struct Source;
+pub struct Target;
+
+impl From<Source> for Target {
+    fn from(_: Source) -> Self {
+        Target
+    }
+}
+"#,
+        );
+
+        let report = generate_with_analyzer_feedback(
+            GenerateOptions {
+                workspace_root: root.clone(),
+                output_root: temp_output("feedback-widen-conversion-output"),
+            },
+            AnalyzerMode::Syn,
+            &[CheckDiagnostic {
+                level: "error".to_string(),
+                message: "the trait bound `Target: From<Source>` is not satisfied".to_string(),
+                code: Some("E0277".to_string()),
+                package_id: Some(format!("path+file://{}#0.1.0", root.join("app").display())),
+                target: None,
+                rendered: None,
+                spans: Vec::new(),
+                suggestions: Vec::new(),
+            }],
+        )
+        .expect("feedback conversion widening should generate");
+
+        assert_eq!(
+            super::package_name_from_diagnostic_package_id(&format!(
+                "path+file://{}#0.1.0",
+                root.join("app").display()
+            ))
+            .as_deref(),
+            Some("app")
+        );
+        assert!(report.feedback_widened_roots.iter().any(|root| {
+            root.to_string()
+                .contains("app::<Target as From<Source>>::from")
+        }));
+        assert!(report.reachable.iter().any(|callable| {
+            callable
+                .to_string()
+                .contains("app::<Target as From<Source>>::from")
+        }));
     }
 
     #[test]

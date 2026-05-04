@@ -151,6 +151,74 @@ only:
 - `DesktopPendingRequest`
 - the 10 selected helper functions above
 
+## RA Feedback Large Module Smoke
+
+On 2026-05-04, the same fresh Litter clone was tested by marking one of the
+largest Rust modules in the project:
+
+```rust
+#[opensourced]
+pub mod reducer;
+```
+
+Target module:
+`codex-mobile-client/src/store/reducer.rs` (`5,368` original LOC).
+
+Command shape:
+
+```sh
+slicers \
+  --analyzer ra-feedback \
+  --preflight \
+  --check \
+  --feedback \
+  --feedback-repair-loop 6 \
+  --deny-warnings \
+  --cargo-check-arg -p \
+  --cargo-check-arg codex-mobile-client \
+  --cargo-check-arg --lib \
+  /tmp/litter-ra-feedback-big-module/shared/rust-bridge \
+  /tmp/litter-ra-feedback-big-module-slice-fixed
+```
+
+Initial RA pass:
+
+- RA feedback queried 597 callable owners.
+- RA feedback observed 766 outgoing call targets.
+- RA feedback mapped 662 project-local edges.
+- Preflight passed for 2 retained packages, 29 target Rust files, and 1 local
+  path dependency.
+
+The first compiler feedback check exposed three missing semantic edges:
+
+- `VoiceRealtimeThreadState::handle_item`
+- `From<codex_app_server_protocol::RateLimitSnapshot> for RateLimitSnapshot`
+- `From<codex_app_server_protocol::TurnPlanStepStatus> for AppPlanStepStatus`
+
+The slicer was hardened to treat path-form Cargo package IDs as package hints
+and to classify `E0277` conversion trait errors as feedback widening
+candidates. The rerun then widened those roots, exposed nested conversion impls,
+widened those too, and accepted the generated slice:
+
+| Attempt | Result | Errors | Warnings | Action |
+| --- | --- | ---: | ---: | --- |
+| 1 | widened | 3 | 5 | added 4 roots from compiler diagnostics |
+| 2 | widened | 8 | 5 | added 7 conversion/method roots total |
+| 3 | repaired | 0 | 5 | removed 5 unused imports |
+| 4 | accepted | 0 | 0 | final warning-clean compile |
+
+Final retained target surface:
+
+- `codex-mobile-client`
+- `codex-ipc`
+- 29 target Rust files
+- 241 reachable callables
+- 167 reachable items
+- 8,539 retained target Rust LOC
+- `store/reducer.rs` reduced from 5,368 LOC to 3,533 LOC
+
+Final validation status: `accepted` with `--deny-warnings`.
+
 ### `cloud_sync_export_snapshot`
 
 Retained package: `codex-mobile-client`

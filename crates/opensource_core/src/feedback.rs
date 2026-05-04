@@ -318,6 +318,17 @@ fn classify_widening_candidate(diagnostic: &CheckDiagnostic) -> Option<FeedbackW
             "medium",
             "widen receiver type impls, extension trait imports, inherent impls, or trait bounds needed by this call",
         ),
+        "E0277" if diagnostic.message.contains(": From<")
+            || diagnostic.message.contains(": Into<")
+            || diagnostic.message.contains(": TryFrom<")
+            || diagnostic.message.contains(": TryInto<") =>
+        {
+            (
+                "missing-conversion-trait-impl",
+                "medium",
+                "widen the retained conversion trait impl required by this .into(), .try_into(), or conversion call",
+            )
+        }
         _ => return None,
     };
     let primary = diagnostic.spans.iter().find(|span| span.is_primary);
@@ -357,7 +368,7 @@ fn classify_feedback_hazard(diagnostic: &CheckDiagnostic) -> Option<FeedbackHaza
         "cargo-stderr" => ("cargo-shape-failure", "blocker"),
         "E0463" => ("missing-crate", "blocker"),
         "E0583" => ("missing-module-file", "blocker"),
-        "E0432" | "E0433" | "E0405" | "E0412" | "E0422" | "E0425" | "E0599" => {
+        "E0277" | "E0432" | "E0433" | "E0405" | "E0412" | "E0422" | "E0425" | "E0599" => {
             ("needs-widening", "high")
         }
         _ if diagnostic.level == "error" => ("unclassified-compiler-error", "medium"),
@@ -773,6 +784,28 @@ mod tests {
             .hazards
             .iter()
             .any(|hazard| hazard.kind == "needs-widening"));
+    }
+
+    #[test]
+    fn classifies_missing_conversion_impls_as_widening_candidates() {
+        let diagnostics = vec![diagnostic(
+            "E0277",
+            "the trait bound `Target: From<Source>` is not satisfied",
+            "src/lib.rs",
+            17,
+        )];
+
+        let widening = classify_feedback(&diagnostics);
+
+        assert_eq!(widening.candidates.len(), 1);
+        assert_eq!(widening.candidates[0].kind, "missing-conversion-trait-impl");
+        assert_eq!(
+            widening.candidates[0].symbol.as_deref(),
+            Some("Target: From<Source>")
+        );
+        assert!(widening.hazards.iter().any(
+            |hazard| hazard.kind == "needs-widening" && hazard.code.as_deref() == Some("E0277")
+        ));
     }
 
     #[test]
