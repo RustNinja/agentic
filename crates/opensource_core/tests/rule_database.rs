@@ -390,6 +390,38 @@ fn retains_foreign_extern_static_symbols_called_by_selected_roots() {
 }
 
 #[test]
+fn reports_ffi_callback_inputs_as_direct_boundary_warnings() {
+    let workspace = temp_path("rule-ffi-callback-workspace");
+    let output = temp_path("rule-ffi-callback-output");
+    let target_dir = temp_path("rule-ffi-callback-target");
+    write_ffi_callback_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("ffi callback rule should reduce");
+
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "dynamic_callback_boundaries"
+            && hazard.severity == "warning"
+            && hazard
+                .details
+                .iter()
+                .any(|detail| detail.subject.contains("extern \"C\" fn"))
+    }));
+    assert!(!report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "function_pointer_surfaces" && hazard.severity == "error"));
+    let lib = read(output.join("ffi_callback_rule/src/lib.rs"));
+    assert!(lib.contains("extern \"C\" fn(*const c_char)"), "{lib}");
+    assert!(!lib.contains("dead_register"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_zero_arg_macro_invocations_that_generate_reachable_items() {
     let workspace = temp_path("rule-zero-arg-macro-workspace");
     let output = temp_path("rule-zero-arg-macro-output");
@@ -631,6 +663,95 @@ fn types_option_map_payload_closures_from_receiver_arguments() {
 }
 
 #[test]
+fn types_result_map_err_payload_closures_from_receiver_arguments() {
+    let workspace = temp_path("rule-result-map-err-workspace");
+    let output = temp_path("rule-result-map-err-output");
+    let target_dir = temp_path("rule-result-map-err-target");
+    write_result_map_err_payload_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("result map_err payload rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("result_map_err_rule/src/lib.rs"));
+    assert!(
+        lib.contains("fn maybe_payload() -> Result<u32, Payload>"),
+        "{lib}"
+    );
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn lets_local_map_methods_drive_closure_payload_types() {
+    let workspace = temp_path("rule-local-map-workspace");
+    let output = temp_path("rule-local-map-output");
+    let target_dir = temp_path("rule-local-map-target");
+    write_local_map_method_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("local map method rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("local_map_rule/src/lib.rs"));
+    assert!(lib.contains("pub struct Pipe<T>(T)"), "{lib}");
+    assert!(lib.contains("impl<T> Pipe<T>"), "{lib}");
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn types_is_some_and_payloads_from_local_option_bindings() {
+    let workspace = temp_path("rule-is-some-and-workspace");
+    let output = temp_path("rule-is-some-and-output");
+    let target_dir = temp_path("rule-is-some-and-target");
+    write_is_some_and_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("is_some_and rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("is_some_and_rule/src/lib.rs"));
+    assert!(lib.contains("let maybe: Option<Payload>"), "{lib}");
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_dependencies_from_rendered_trait_impl_surfaces() {
+    let workspace = temp_path("rule-trait-impl-surface-workspace");
+    let output = temp_path("rule-trait-impl-surface-output");
+    let target_dir = temp_path("rule-trait-impl-surface-target");
+    write_trait_impl_surface_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("trait impl surface rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("trait_impl_surface_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Marker"), "{lib}");
+    assert!(lib.contains("pub struct Payload"), "{lib}");
+    assert!(lib.contains("impl Marker for Api"), "{lib}");
+    assert!(!lib.contains("pub struct Dead"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn preserves_serde_flatten_contract_fields_while_pruning_dead_private_fields() {
     let workspace = temp_path("rule-serde-flatten-workspace");
     let output = temp_path("rule-serde-flatten-output");
@@ -651,6 +772,27 @@ fn preserves_serde_flatten_contract_fields_while_pruning_dead_private_fields() {
         "{lib}"
     );
     assert!(!lib.contains("dead: Option<String>"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_nested_serde_flatten_payload_types() {
+    let workspace = temp_path("rule-serde-flatten-nested-workspace");
+    let output = temp_path("rule-serde-flatten-nested-output");
+    let target_dir = temp_path("rule-serde-flatten-nested-target");
+    write_serde_flatten_nested_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde flatten nested rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_flatten_nested_rule/src/lib.rs"));
+    assert!(lib.contains("nested: Nested"), "{lib}");
+    assert!(lib.contains("pub struct Nested"), "{lib}");
+    assert!(!lib.contains("DeadNested"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -1148,6 +1290,29 @@ fn flags_retained_source_include_macros_as_production_blockers() {
         .any(|hazard| { hazard.code == "source_include_macros" && hazard.severity == "error" }));
     let lib = read(output.join("source_include_rule/src/lib.rs"));
     assert!(lib.contains("include!(\"generated_expr.rs\")"), "{lib}");
+    assert!(!lib.contains("dead_generated"), "{lib}");
+}
+
+#[test]
+fn flags_fallback_retained_inline_module_source_includes() {
+    let workspace = temp_path("rule-inline-source-include-workspace");
+    let output = temp_path("rule-inline-source-include-output");
+    write_inline_source_include_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("inline source include rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| { hazard.code == "source_include_macros" && hazard.severity == "error" }));
+    let lib = read(output.join("inline_source_include_rule/src/lib.rs"));
+    assert!(lib.contains("include!(\"generated_value.rs\")"), "{lib}");
     assert!(!lib.contains("dead_generated"), "{lib}");
 }
 
@@ -1665,6 +1830,26 @@ extern "C" {
 pub fn selected() -> i32 {
     unsafe { LIVE_FLAG as i32 }
 }
+"#,
+    );
+}
+
+fn write_ffi_callback_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "ffi_callback_rule",
+        r#"use std::os::raw::c_char;
+
+use opensourced::opensourced;
+
+#[opensourced]
+#[no_mangle]
+pub extern "C" fn register(cb: extern "C" fn(*const c_char), value: *const c_char) {
+    cb(value);
+}
+
+#[no_mangle]
+pub extern "C" fn dead_register(_cb: extern "C" fn(*const c_char)) {}
 "#,
     );
 }
@@ -2205,6 +2390,36 @@ pub fn dead_api() -> u32 {
     write(root.join("source_include_rule/src/dead_generated.rs"), "99");
 }
 
+fn write_inline_source_include_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "inline_source_include_rule",
+        r#"use opensourced::opensourced;
+
+pub mod generated {
+    include!("generated_value.rs");
+}
+
+pub mod dead_generated {
+    include!("dead_generated.rs");
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    generated::VALUE
+}
+"#,
+    );
+    write(
+        root.join("inline_source_include_rule/src/generated_value.rs"),
+        "pub const VALUE: u32 = 41;\n",
+    );
+    write(
+        root.join("inline_source_include_rule/src/dead_generated.rs"),
+        "pub const VALUE: u32 = 99;\n",
+    );
+}
+
 fn write_macro_alias_body_rule_fixture(root: &Path) {
     write(
         root.join("Cargo.toml"),
@@ -2717,6 +2932,147 @@ pub fn selected() -> Option<u32> {
     );
 }
 
+fn write_result_map_err_payload_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "result_map_err_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn live(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn live(&self) -> u32 {
+        2
+    }
+}
+
+fn maybe_payload() -> Result<u32, Payload> {
+    Err(Payload)
+}
+
+#[opensourced]
+pub fn selected() -> Result<u32, u32> {
+    maybe_payload().map_err(|payload| payload.live())
+}
+"#,
+    );
+}
+
+fn write_local_map_method_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "local_map_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn live(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn live(&self) -> u32 {
+        2
+    }
+}
+
+pub struct Pipe<T>(T);
+
+impl<T> Pipe<T> {
+    pub fn map<U>(self, f: impl FnOnce(T) -> U) -> U {
+        f(self.0)
+    }
+}
+
+fn pipe() -> Pipe<Payload> {
+    Pipe(Payload)
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    pipe().map(|payload| payload.live())
+}
+"#,
+    );
+}
+
+fn write_is_some_and_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "is_some_and_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn live(&self) -> bool {
+        true
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn live(&self) -> bool {
+        false
+    }
+}
+
+#[opensourced]
+pub fn selected() -> bool {
+    let maybe: Option<Payload> = Some(Payload);
+    maybe.is_some_and(|payload| payload.live())
+}
+"#,
+    );
+}
+
+fn write_trait_impl_surface_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "trait_impl_surface_rule",
+        r#"
+use opensourced::opensourced;
+
+pub trait Marker {
+    type Item;
+
+    fn marker(&self) -> Self::Item;
+}
+
+#[opensourced]
+pub struct Api;
+
+pub struct Payload;
+
+pub struct Dead;
+
+impl Marker for Api {
+    type Item = Payload;
+
+    fn marker(&self) -> Self::Item {
+        Payload
+    }
+}
+"#,
+    );
+}
+
 fn write_serde_flatten_rule_fixture(root: &Path) {
     write_workspace_with_dependencies(
         root,
@@ -2736,6 +3092,41 @@ pub struct Wire {
     #[serde(flatten)]
     extra: BTreeMap<String, serde_json::Value>,
     dead: Option<String>,
+}
+
+#[opensourced]
+pub fn selected(wire: Wire) -> String {
+    wire.id
+}
+"#,
+    );
+}
+
+fn write_serde_flatten_nested_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_flatten_nested_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+"#,
+        r#"
+use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+pub struct Wire {
+    pub id: String,
+    #[serde(flatten)]
+    nested: Nested,
+}
+
+#[derive(Deserialize)]
+pub struct Nested {
+    pub session_id: String,
+}
+
+#[derive(Deserialize)]
+pub struct DeadNested {
+    pub dead: String,
 }
 
 #[opensourced]

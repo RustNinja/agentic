@@ -62,6 +62,10 @@ not slicer failures.
 - The renamed-surface and default-trait hardening pass did not regress the pinned
   corpus: the same five-root batch still generated 116 files and reached
   `production_ready=accepted` with zero warnings under `--deny-warnings`.
+- The closure/trait-impl/hazard-scan pass also did not regress the pinned
+  corpus: the same five-root batch still generated 116 files, had zero preflight
+  errors, zero feedback errors, zero warnings, and reached
+  `production_ready=accepted` under `--deny-warnings`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around

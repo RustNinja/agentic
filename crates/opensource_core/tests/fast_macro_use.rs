@@ -24,14 +24,14 @@ fn slices_fast_macro_use_fixture_and_compiles() {
         report.packages,
         ["fast_macro_app", "macro_helpers", "shared", "util"]
     );
-    assert_eq!(report.production.status, "requires_feedback");
+    assert_eq!(report.production.status, "hazards_detected");
     assert!(
         report
             .production
             .hazards
             .iter()
-            .all(|hazard| hazard.severity != "error"),
-        "fast fixture should not carry hard production hazards: {:?}",
+            .any(|hazard| hazard.code == "source_include_macros" && hazard.severity == "error"),
+        "fast fixture should report retained generated source includes: {:?}",
         report.production.hazards
     );
     assert!(report.production.hazards.iter().any(|hazard| {

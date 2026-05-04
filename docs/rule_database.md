@@ -61,7 +61,13 @@ of planned generic combinations lives in
 | `closure.free_function_input_payload.001` | covered | Closures passed to resolved free functions inherit callable input payload types so methods inside closure bodies keep the correct impls |
 | `pattern.struct_match_receiver.001` | covered | Struct patterns in `match`/`if let` bind real struct field receiver types instead of only enum variant payloads |
 | `closure.option_result_payload_map.001` | covered | Common `Option`/`Result` closure combinators such as `map`, `and_then`, `map_err`, and inspectors bind payload/error types from receiver type arguments |
+| `closure.result_error_payload_primitive_ok.001` | covered | `Result::map_err` and error inspectors bind the real error payload even when the `Ok` type is primitive and absent from the local item graph |
+| `closure.local_generic_method_payload.001` | covered | Project-local generic methods that accept closures substitute impl generics from concrete receiver type arguments before walking closure bodies |
+| `closure.local_option_is_some_and.001` | covered | Local `Option<T>` bindings feed `is_some_and` closure payload typing without pretending the binding itself is `T` |
+| `ffi.callback_direct_input.001` | covered | Retained `extern "C" fn(...)` callback inputs are reported as direct API boundary warnings while preserving their signature imports |
+| `trait.rendered_impl_surface_dependencies.001` | covered | Trait impls rendered because both self type and public trait surface are reachable retain impl header, associated item, and method-body dependencies |
 | `serde.flatten_contract_field.001` | covered | Serde contract fields such as `#[serde(flatten)]` stay even when private and not read by live bodies, while unannotated dead private fields are pruned |
+| `serde.flatten_nested_payload.001` | covered | Nested serde-flatten payload structs stay when the retained DTO contract depends on them, while dead nested DTOs prune away |
 | `manifest.support_path_bundle.001` | covered | External support path dependency bundles rewrite absolute paths to generated relative support paths, copy dependency closure assets, and drop dead bins/examples/tests/benches/fixtures/orphan modules |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
@@ -76,6 +82,7 @@ of planned generic combinations lives in
 | `dyn.callback.option_arc_trait.001` | covered | Stored `Option<Arc<dyn Trait + Send + Sync>>` callback slots are hard dynamic-dispatch hazards |
 | `dyn.boundary.direct_inputs.001` | covered | Selected `&dyn Trait` and `fn(...)` callback inputs stay as feedback-dischargeable API boundary warnings |
 | `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
+| `include.source.inline_fallback_module.001` | covered | Fallback-retained inline modules run the full syntactic hazard scan, so plain source includes are reported even when the module was retained by path mention |
 | `macro.external_crate_alias_body.001` | covered | Dependency aliases used only inside retained macro bodies keep the aliased dependency edge |
 | `include.str.inline_module_tree.001` | covered | Inline module script bundles copy only live `include_str!` assets and prune dead sibling assets |
 | `manifest.support_library_module_closure.001` | covered | No-build support path packages copy only the library external-module graph plus live static assets, skipping `#[cfg(test)]` external modules and orphan Rust files |

@@ -602,6 +602,16 @@ fn reachable_trait_impl_surface_dependencies(
                 };
                 if trait_item_has_public_surface(project, &trait_item) {
                     dependencies.items.insert(trait_item);
+                    let impl_resolver = Resolver {
+                        project,
+                        package,
+                        module_path: &module_path,
+                        aliases: &aliases,
+                        self_type: Some(self_type),
+                    };
+                    let mut visitor = DependencyVisitor::new(impl_resolver);
+                    visitor.visit_item_impl(item_impl);
+                    dependencies.extend(visitor.dependencies);
                 }
             }
         }
@@ -2322,6 +2332,9 @@ struct DependencyVisitor<'a> {
     variable_associated_type_bindings: HashMap<String, HashMap<String, TypeRef>>,
     variables: HashMap<String, TypeRef>,
     variable_candidates: HashMap<String, Vec<TypeRef>>,
+    variable_type_arguments: HashMap<String, Vec<TypeRef>>,
+    variable_result_ok_types: HashMap<String, TypeRef>,
+    variable_result_error_types: HashMap<String, TypeRef>,
     local_value_scopes: Vec<BTreeSet<String>>,
     visible_packages: BTreeSet<String>,
     expected_parse_types: BTreeSet<TypeRef>,
@@ -2341,6 +2354,9 @@ impl<'a> DependencyVisitor<'a> {
             variable_associated_type_bindings: HashMap::new(),
             variables: HashMap::new(),
             variable_candidates: HashMap::new(),
+            variable_type_arguments: HashMap::new(),
+            variable_result_ok_types: HashMap::new(),
+            variable_result_error_types: HashMap::new(),
             local_value_scopes: vec![BTreeSet::new()],
             visible_packages,
             expected_parse_types: BTreeSet::new(),
@@ -2547,6 +2563,36 @@ impl<'a> DependencyVisitor<'a> {
         candidates.dedup();
         self.variables.insert(name.clone(), type_ref);
         self.variable_candidates.insert(name, candidates);
+    }
+
+    fn insert_variable_type_data_from_type(&mut self, name: String, ty: &Type) {
+        let type_arguments = self.resolver.type_argument_refs_in_type(ty);
+        if !type_arguments.is_empty() {
+            self.variable_type_arguments
+                .insert(name.clone(), type_arguments);
+        }
+        if let Some(ok_type) = self.resolver.result_ok_type(ty) {
+            self.variable_result_ok_types.insert(name.clone(), ok_type);
+        }
+        if let Some(error_type) = self.resolver.result_error_type(ty) {
+            self.variable_result_error_types
+                .insert(name.clone(), error_type);
+        }
+    }
+
+    fn insert_variable_type_data_from_expr(&mut self, name: String, expression: &Expr) {
+        let type_arguments = self.expression_type_arguments(expression);
+        if !type_arguments.is_empty() {
+            self.variable_type_arguments
+                .insert(name.clone(), type_arguments);
+        }
+        if let Some(ok_type) = self.expression_result_ok_type(expression) {
+            self.variable_result_ok_types.insert(name.clone(), ok_type);
+        }
+        if let Some(error_type) = self.expression_result_error_type(expression) {
+            self.variable_result_error_types
+                .insert(name.clone(), error_type);
+        }
     }
 
     fn insert_variable_trait_bounds(&mut self, name: String, mut trait_items: Vec<ItemId>) {
@@ -3974,6 +4020,13 @@ impl<'a> DependencyVisitor<'a> {
 
     fn expression_type_arguments(&self, expression: &Expr) -> Vec<TypeRef> {
         match expression {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first().unwrap().ident.to_string();
+                self.variable_type_arguments
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default()
+            }
             Expr::Call(call) => {
                 let Expr::Path(path) = call.func.as_ref() else {
                     return Vec::new();
@@ -4012,6 +4065,91 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn receiver_expression_type_arguments(&self, expression: &Expr) -> Vec<TypeRef> {
+        let mut type_arguments = self.expression_type_arguments(expression);
+        if let Some(receiver) = self.receiver_type(expression) {
+            let receiver_candidates = self.resolver.type_ref_candidates(&receiver);
+            type_arguments.retain(|type_ref| !receiver_candidates.contains(type_ref));
+        }
+        type_arguments
+    }
+
+    fn expression_result_ok_type(&self, expression: &Expr) -> Option<TypeRef> {
+        match expression {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first().unwrap().ident.to_string();
+                self.variable_result_ok_types.get(&name).cloned()
+            }
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return None;
+                };
+                let callables = if path.qself.is_some() {
+                    self.resolver.resolve_qself_call(path)
+                } else {
+                    self.resolver.resolve_call_path(&path.path)
+                };
+                callables
+                    .iter()
+                    .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
+            }
+            Expr::MethodCall(call) => self
+                .resolved_methods_for_call(call)
+                .iter()
+                .find_map(|callable| self.resolver.return_ok_type_from_callable(callable)),
+            Expr::Reference(reference) => self.expression_result_ok_type(&reference.expr),
+            Expr::Paren(paren) => self.expression_result_ok_type(&paren.expr),
+            _ => None,
+        }
+    }
+
+    fn expression_result_error_type(&self, expression: &Expr) -> Option<TypeRef> {
+        match expression {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first().unwrap().ident.to_string();
+                self.variable_result_error_types.get(&name).cloned()
+            }
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return None;
+                };
+                let callables = if path.qself.is_some() {
+                    self.resolver.resolve_qself_call(path)
+                } else {
+                    self.resolver.resolve_call_path(&path.path)
+                };
+                callables
+                    .iter()
+                    .find_map(|callable| self.resolver.return_error_type_from_callable(callable))
+            }
+            Expr::MethodCall(call) => self
+                .resolved_methods_for_call(call)
+                .iter()
+                .find_map(|callable| self.resolver.return_error_type_from_callable(callable)),
+            Expr::Reference(reference) => self.expression_result_error_type(&reference.expr),
+            Expr::Paren(paren) => self.expression_result_error_type(&paren.expr),
+            _ => None,
+        }
+    }
+
+    fn resolved_methods_for_call(&self, call: &ExprMethodCall) -> Vec<CallableId> {
+        let method = call.method.to_string();
+        let mut receivers = self.receiver_type_candidates(&call.receiver);
+        if let Some(receiver) = self.receiver_type(&call.receiver) {
+            receivers.push(receiver);
+        }
+        receivers.sort();
+        receivers.dedup();
+
+        let mut resolved_methods = receivers
+            .iter()
+            .flat_map(|receiver| self.resolver.resolve_methods(receiver, &method))
+            .collect::<Vec<_>>();
+        resolved_methods.sort();
+        resolved_methods.dedup();
+        resolved_methods
+    }
+
     fn add_closure_arg_dependencies(
         &mut self,
         call: &ExprMethodCall,
@@ -4030,6 +4168,25 @@ impl<'a> DependencyVisitor<'a> {
                 .collect::<BTreeSet<_>>()
                 .into_iter()
                 .collect::<Vec<_>>();
+            let receiver_type_arguments = self.receiver_expression_type_arguments(&call.receiver);
+            let receiver_input_types = resolved_methods
+                .iter()
+                .flat_map(|callable| {
+                    self.resolver
+                        .closure_argument_input_types_from_receiver_arguments(
+                            callable,
+                            arg_index,
+                            &receiver_type_arguments,
+                        )
+                })
+                .collect::<BTreeSet<_>>()
+                .into_iter()
+                .collect::<Vec<_>>();
+            let input_types = if receiver_input_types.is_empty() {
+                input_types
+            } else {
+                receiver_input_types
+            };
             if input_types.is_empty() {
                 continue;
             }
@@ -4071,12 +4228,18 @@ impl<'a> DependencyVisitor<'a> {
     ) {
         let variables = self.variables.clone();
         let variable_candidates = self.variable_candidates.clone();
+        let variable_type_arguments = self.variable_type_arguments.clone();
+        let variable_result_ok_types = self.variable_result_ok_types.clone();
+        let variable_result_error_types = self.variable_result_error_types.clone();
         for (pattern, type_ref) in closure.inputs.iter().zip(input_types.iter()) {
             self.bind_pattern_type(pattern, type_ref);
         }
         self.visit_expr(&closure.body);
         self.variables = variables;
         self.variable_candidates = variable_candidates;
+        self.variable_type_arguments = variable_type_arguments;
+        self.variable_result_ok_types = variable_result_ok_types;
+        self.variable_result_error_types = variable_result_error_types;
     }
 
     fn visit_fold_method_call(&mut self, call: &ExprMethodCall) -> bool {
@@ -4106,6 +4269,9 @@ impl<'a> DependencyVisitor<'a> {
 
         let variables = self.variables.clone();
         let variable_candidates = self.variable_candidates.clone();
+        let variable_type_arguments = self.variable_type_arguments.clone();
+        let variable_result_ok_types = self.variable_result_ok_types.clone();
+        let variable_result_error_types = self.variable_result_error_types.clone();
         self.bind_pattern_type(accumulator_pat, &accumulator_type);
         for input in closure.inputs.iter().skip(1) {
             self.visit_pat(input);
@@ -4113,11 +4279,17 @@ impl<'a> DependencyVisitor<'a> {
         self.visit_expr(&closure.body);
         self.variables = variables;
         self.variable_candidates = variable_candidates;
+        self.variable_type_arguments = variable_type_arguments;
+        self.variable_result_ok_types = variable_result_ok_types;
+        self.variable_result_error_types = variable_result_error_types;
         true
     }
 
     fn visit_single_payload_closure_method_call(&mut self, call: &ExprMethodCall) -> bool {
         if call.args.len() != 1 {
+            return false;
+        }
+        if !self.resolved_methods_for_call(call).is_empty() {
             return false;
         }
         let Some(payload_type) = self.single_payload_closure_method_type(call) else {
@@ -4133,27 +4305,32 @@ impl<'a> DependencyVisitor<'a> {
         self.visit_expr(&call.receiver);
         let variables = self.variables.clone();
         let variable_candidates = self.variable_candidates.clone();
+        let variable_type_arguments = self.variable_type_arguments.clone();
+        let variable_result_ok_types = self.variable_result_ok_types.clone();
+        let variable_result_error_types = self.variable_result_error_types.clone();
         self.bind_pattern_type(payload_pat, &payload_type);
         self.visit_expr(&closure.body);
         self.variables = variables;
         self.variable_candidates = variable_candidates;
+        self.variable_type_arguments = variable_type_arguments;
+        self.variable_result_ok_types = variable_result_ok_types;
+        self.variable_result_error_types = variable_result_error_types;
         true
     }
 
     fn single_payload_closure_method_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
         let method = call.method.to_string();
-        if matches!(method.as_str(), "is_some_and" | "is_ok_and" | "is_err_and") {
-            return self.receiver_type(&call.receiver).or_else(|| {
-                self.expression_type_arguments(&call.receiver)
-                    .into_iter()
-                    .next()
-            });
-        }
-
-        let type_arguments = self.expression_type_arguments(&call.receiver);
+        let type_arguments = self.receiver_expression_type_arguments(&call.receiver);
         match method.as_str() {
-            "map" | "and_then" | "filter" | "inspect" => type_arguments.first().cloned(),
-            "map_err" | "or_else" | "inspect_err" => type_arguments.get(1).cloned(),
+            "map" | "and_then" | "filter" | "inspect" | "is_some_and" | "is_ok_and" => self
+                .expression_result_ok_type(&call.receiver)
+                .or_else(|| type_arguments.first().cloned())
+                .or_else(|| self.receiver_type(&call.receiver)),
+            "map_err" | "or_else" | "inspect_err" | "is_err_and" => self
+                .expression_result_error_type(&call.receiver)
+                .or_else(|| type_arguments.get(1).cloned())
+                .or_else(|| type_arguments.last().cloned())
+                .or_else(|| self.receiver_type(&call.receiver)),
             _ => None,
         }
     }
@@ -4241,6 +4418,13 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         if let Some((name, trait_items)) = self.local_binding_trait_bounds(local) {
             self.insert_variable_trait_bounds(name, trait_items);
         }
+        if let Some((name, explicit_type)) = binding_name_and_type(&local.pat) {
+            if let Some(ty) = explicit_type {
+                self.insert_variable_type_data_from_type(name, ty);
+            } else if let Some(init) = &local.init {
+                self.insert_variable_type_data_from_expr(name, &init.expr);
+            }
+        }
         for (name, type_ref, candidates) in self.local_destructured_binding_types(local) {
             self.insert_variable_candidates(name, type_ref, candidates);
         }
@@ -4320,6 +4504,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         for arm in &expr_match.arms {
             let variables = self.variables.clone();
             let variable_candidates = self.variable_candidates.clone();
+            let variable_type_arguments = self.variable_type_arguments.clone();
+            let variable_result_ok_types = self.variable_result_ok_types.clone();
+            let variable_result_error_types = self.variable_result_error_types.clone();
             if let Some(ok_type) = &ok_type {
                 self.add_result_ok_binding_type(&arm.pat, ok_type);
             }
@@ -4336,12 +4523,18 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.pop_local_value_scope();
             self.variables = variables;
             self.variable_candidates = variable_candidates;
+            self.variable_type_arguments = variable_type_arguments;
+            self.variable_result_ok_types = variable_result_ok_types;
+            self.variable_result_error_types = variable_result_error_types;
         }
     }
 
     fn visit_expr_if(&mut self, expr_if: &'ast syn::ExprIf) {
         let outer_variables = self.variables.clone();
         let outer_variable_candidates = self.variable_candidates.clone();
+        let outer_variable_type_arguments = self.variable_type_arguments.clone();
+        let outer_variable_result_ok_types = self.variable_result_ok_types.clone();
+        let outer_variable_result_error_types = self.variable_result_error_types.clone();
         if let Expr::Let(expr_let) = expr_if.cond.as_ref() {
             let type_arguments = self.expression_type_arguments(&expr_let.expr);
             if let [type_ref] = type_arguments.as_slice() {
@@ -4366,12 +4559,18 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
         self.variables = outer_variables.clone();
         self.variable_candidates = outer_variable_candidates.clone();
+        self.variable_type_arguments = outer_variable_type_arguments.clone();
+        self.variable_result_ok_types = outer_variable_result_ok_types.clone();
+        self.variable_result_error_types = outer_variable_result_error_types.clone();
 
         if let Some((_, else_branch)) = &expr_if.else_branch {
             self.visit_expr(else_branch);
         }
         self.variables = outer_variables;
         self.variable_candidates = outer_variable_candidates;
+        self.variable_type_arguments = outer_variable_type_arguments;
+        self.variable_result_ok_types = outer_variable_result_ok_types;
+        self.variable_result_error_types = outer_variable_result_error_types;
     }
 
     fn visit_expr_while(&mut self, expr_while: &'ast syn::ExprWhile) {
@@ -5135,6 +5334,70 @@ impl Resolver<'_> {
         }
     }
 
+    fn return_ok_type_from_callable(&self, callable: &CallableId) -> Option<TypeRef> {
+        match callable {
+            CallableId::Free { .. } => {
+                let record = self.project.functions.get(callable)?;
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.ok_type_from_return_type(&record.item.sig.output)
+            }
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let record = self.project.methods.get(callable)?;
+                let resolver = Resolver {
+                    project: self.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(TypeRef {
+                        package: package.clone(),
+                        type_path: type_path.clone(),
+                    }),
+                };
+                resolver.ok_type_from_return_type(&record.item.sig.output)
+            }
+        }
+    }
+
+    fn return_error_type_from_callable(&self, callable: &CallableId) -> Option<TypeRef> {
+        match callable {
+            CallableId::Free { .. } => {
+                let record = self.project.functions.get(callable)?;
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.error_type_from_return_type(&record.item.sig.output)
+            }
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let record = self.project.methods.get(callable)?;
+                let resolver = Resolver {
+                    project: self.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(TypeRef {
+                        package: package.clone(),
+                        type_path: type_path.clone(),
+                    }),
+                };
+                resolver.error_type_from_return_type(&record.item.sig.output)
+            }
+        }
+    }
+
     fn closure_argument_input_types(
         &self,
         callable: &CallableId,
@@ -5145,6 +5408,63 @@ impl Resolver<'_> {
             return Vec::new();
         };
         resolver.closure_input_types_from_type(input_type)
+    }
+
+    fn closure_argument_input_types_from_receiver_arguments(
+        &self,
+        callable: &CallableId,
+        argument_index: usize,
+        receiver_type_arguments: &[TypeRef],
+    ) -> Vec<TypeRef> {
+        if receiver_type_arguments.is_empty() {
+            return Vec::new();
+        }
+        let Some((input_type, resolver)) = self.callable_typed_input(callable, argument_index)
+        else {
+            return Vec::new();
+        };
+        let generic_names = self.callable_impl_type_parameter_names(callable);
+        if generic_names.is_empty() {
+            return Vec::new();
+        }
+        let mut input_generic_names = Vec::new();
+        resolver.collect_closure_input_generic_names(
+            input_type,
+            &generic_names,
+            &mut input_generic_names,
+        );
+        input_generic_names
+            .iter()
+            .filter_map(|name| {
+                generic_names
+                    .iter()
+                    .position(|generic| generic == name)
+                    .and_then(|index| receiver_type_arguments.get(index))
+                    .cloned()
+            })
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
+    }
+
+    fn callable_impl_type_parameter_names(&self, callable: &CallableId) -> Vec<String> {
+        let CallableId::Method { .. } = callable else {
+            return Vec::new();
+        };
+        let Some(record) = self.project.methods.get(callable) else {
+            return Vec::new();
+        };
+        record
+            .impl_generics
+            .params
+            .iter()
+            .filter_map(|parameter| {
+                let syn::GenericParam::Type(type_parameter) = parameter else {
+                    return None;
+                };
+                Some(type_parameter.ident.to_string())
+            })
+            .collect()
     }
 
     fn callable_typed_input<'a>(
@@ -5274,6 +5594,125 @@ impl Resolver<'_> {
         }
     }
 
+    fn collect_closure_input_generic_names(
+        &self,
+        ty: &Type,
+        generic_names: &[String],
+        input_generic_names: &mut Vec<String>,
+    ) {
+        match ty {
+            Type::ImplTrait(impl_trait) => {
+                for bound in &impl_trait.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_closure_input_generic_names_from_path(
+                        &trait_bound.path,
+                        generic_names,
+                        input_generic_names,
+                    );
+                }
+            }
+            Type::TraitObject(trait_object) => {
+                for bound in &trait_object.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_closure_input_generic_names_from_path(
+                        &trait_bound.path,
+                        generic_names,
+                        input_generic_names,
+                    );
+                }
+            }
+            Type::Path(type_path) => {
+                self.collect_closure_input_generic_names_from_path(
+                    &type_path.path,
+                    generic_names,
+                    input_generic_names,
+                );
+                for segment in &type_path.path.segments {
+                    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                        continue;
+                    };
+                    for argument in &arguments.args {
+                        let GenericArgument::Type(ty) = argument else {
+                            continue;
+                        };
+                        self.collect_closure_input_generic_names(
+                            ty,
+                            generic_names,
+                            input_generic_names,
+                        );
+                    }
+                }
+            }
+            Type::Reference(reference) => self.collect_closure_input_generic_names(
+                &reference.elem,
+                generic_names,
+                input_generic_names,
+            ),
+            Type::Ptr(pointer) => self.collect_closure_input_generic_names(
+                &pointer.elem,
+                generic_names,
+                input_generic_names,
+            ),
+            Type::Slice(slice) => self.collect_closure_input_generic_names(
+                &slice.elem,
+                generic_names,
+                input_generic_names,
+            ),
+            Type::Array(array) => self.collect_closure_input_generic_names(
+                &array.elem,
+                generic_names,
+                input_generic_names,
+            ),
+            Type::Group(group) => self.collect_closure_input_generic_names(
+                &group.elem,
+                generic_names,
+                input_generic_names,
+            ),
+            Type::Paren(paren) => self.collect_closure_input_generic_names(
+                &paren.elem,
+                generic_names,
+                input_generic_names,
+            ),
+            Type::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    self.collect_closure_input_generic_names(
+                        elem,
+                        generic_names,
+                        input_generic_names,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_closure_input_generic_names_from_path(
+        &self,
+        path: &Path,
+        generic_names: &[String],
+        input_generic_names: &mut Vec<String>,
+    ) {
+        let Some(segment) = path.segments.last() else {
+            return;
+        };
+        if !matches!(
+            segment.ident.to_string().as_str(),
+            "Fn" | "FnMut" | "FnOnce"
+        ) {
+            return;
+        }
+        let PathArguments::Parenthesized(arguments) = &segment.arguments else {
+            return;
+        };
+        for input in &arguments.inputs {
+            collect_type_generic_names(input, generic_names, input_generic_names);
+        }
+    }
+
     fn type_from_return_type(&self, output: &ReturnType) -> Option<TypeRef> {
         let ReturnType::Type(_, ty) = output else {
             return None;
@@ -5281,11 +5720,63 @@ impl Resolver<'_> {
         self.resolve_receiver_type(ty)
     }
 
+    fn ok_type_from_return_type(&self, output: &ReturnType) -> Option<TypeRef> {
+        let ReturnType::Type(_, ty) = output else {
+            return None;
+        };
+        self.result_ok_type(ty)
+    }
+
     fn error_type_from_return_type(&self, output: &ReturnType) -> Option<TypeRef> {
         let ReturnType::Type(_, ty) = output else {
             return None;
         };
         self.result_error_type(ty)
+    }
+
+    fn result_ok_type(&self, ty: &Type) -> Option<TypeRef> {
+        match ty {
+            Type::Path(type_path) => {
+                if let Some(ok_type) = self.result_ok_type_from_path(&type_path.path) {
+                    return Some(ok_type);
+                }
+                let alias = self.resolve_type_path(&type_path.path)?;
+                let item = self.resolver_item_for_type(&alias)?;
+                let record = self.project.items.get(&item)?;
+                let Item::Type(type_alias) = &record.item else {
+                    return None;
+                };
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.result_ok_type(&type_alias.ty)
+            }
+            Type::Reference(reference) => self.result_ok_type(&reference.elem),
+            Type::Group(group) => self.result_ok_type(&group.elem),
+            Type::Paren(paren) => self.result_ok_type(&paren.elem),
+            _ => None,
+        }
+    }
+
+    fn result_ok_type_from_path(&self, path: &Path) -> Option<TypeRef> {
+        let last = path.segments.last()?;
+        if last.ident != "Result" {
+            return None;
+        }
+        let PathArguments::AngleBracketed(arguments) = &last.arguments else {
+            return None;
+        };
+        let ok_type = arguments.args.iter().find_map(|argument| {
+            let GenericArgument::Type(ty) = argument else {
+                return None;
+            };
+            Some(ty)
+        })?;
+        self.resolve_receiver_type(ok_type)
     }
 
     fn result_error_type(&self, ty: &Type) -> Option<TypeRef> {
@@ -6250,6 +6741,57 @@ fn generic_parameter_name_from_type(ty: &Type) -> Option<String> {
         Type::Group(group) => generic_parameter_name_from_type(&group.elem),
         Type::Paren(paren) => generic_parameter_name_from_type(&paren.elem),
         _ => None,
+    }
+}
+
+fn collect_type_generic_names(
+    ty: &Type,
+    generic_names: &[String],
+    input_generic_names: &mut Vec<String>,
+) {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(name) = single_segment_type_name(&type_path.path) {
+                if generic_names.contains(&name) {
+                    input_generic_names.push(name);
+                }
+            }
+            for segment in &type_path.path.segments {
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    continue;
+                };
+                for argument in &arguments.args {
+                    let GenericArgument::Type(ty) = argument else {
+                        continue;
+                    };
+                    collect_type_generic_names(ty, generic_names, input_generic_names);
+                }
+            }
+        }
+        Type::Reference(reference) => {
+            collect_type_generic_names(&reference.elem, generic_names, input_generic_names)
+        }
+        Type::Ptr(pointer) => {
+            collect_type_generic_names(&pointer.elem, generic_names, input_generic_names)
+        }
+        Type::Slice(slice) => {
+            collect_type_generic_names(&slice.elem, generic_names, input_generic_names)
+        }
+        Type::Array(array) => {
+            collect_type_generic_names(&array.elem, generic_names, input_generic_names)
+        }
+        Type::Group(group) => {
+            collect_type_generic_names(&group.elem, generic_names, input_generic_names)
+        }
+        Type::Paren(paren) => {
+            collect_type_generic_names(&paren.elem, generic_names, input_generic_names)
+        }
+        Type::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_type_generic_names(elem, generic_names, input_generic_names);
+            }
+        }
+        _ => {}
     }
 }
 

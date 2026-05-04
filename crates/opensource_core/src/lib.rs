@@ -2311,8 +2311,12 @@ fn collect_inline_out_dir_macro_hazards(
             &child_path,
         );
         for child in child_items {
-            if let Item::Macro(item_macro) = child {
-                count_inline_out_dir_macro(&mut visitor, item_macro);
+            if let Item::Mod(item_mod) = child {
+                for attribute in &item_mod.attrs {
+                    visitor.visit_attribute(attribute);
+                }
+            } else {
+                visitor.visit_item(child);
             }
         }
         counts.add(visitor.counts);
@@ -2406,29 +2410,6 @@ fn reduced_package_mentions_ident(
 
 fn path_has_prefix(path: &[String], prefix: &[String]) -> bool {
     path.len() >= prefix.len() && path.iter().zip(prefix).all(|(left, right)| left == right)
-}
-
-fn count_inline_out_dir_macro(visitor: &mut SyntacticHazardVisitor, item_macro: &syn::ItemMacro) {
-    if item_macro.ident.is_some() {
-        return;
-    }
-    let mac = &item_macro.mac;
-    if macro_path_ends_with(mac, "include") && macro_tokens_reference_out_dir(&mac.tokens) {
-        visitor.counts.out_dir_source_include_macros += 1;
-        visitor
-            .counts
-            .out_dir_source_include_details
-            .push(visitor.span_detail(mac));
-    } else if (macro_path_ends_with(mac, "include_str")
-        || macro_path_ends_with(mac, "include_bytes"))
-        && macro_tokens_reference_out_dir(&mac.tokens)
-    {
-        visitor.counts.out_dir_file_include_macros += 1;
-        visitor
-            .counts
-            .out_dir_file_include_details
-            .push(visitor.span_detail(mac));
-    }
 }
 
 fn retained_module_boundary_hazard_counts(

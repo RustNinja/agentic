@@ -373,6 +373,17 @@ impl methods plus their referenced fields, return types, callback traits,
 statics, and helper imports. This is generic UniFFI/object behavior, not a
 fixture-symbol allowlist.
 
+The next rule-database pass grew the executable fast set to 54 cases. It fixed
+three reducer graph gaps: `Result` error combinators now bind the real error
+payload even when the ok type is primitive; project-local generic methods that
+accept closures substitute impl generics from the concrete receiver before
+walking closure bodies; and trait impls rendered by public self-type/trait
+surface reachability now retain impl header, associated item, and body
+dependencies. The same pass tightened production reporting for fallback-retained
+inline modules by running the full syntactic hazard visitor there, so plain
+`include!`, file includes, and compile-time env macros cannot bypass the
+production gate.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
