@@ -2155,25 +2155,224 @@ fn cfg_gate_detail_is_covered_by_args(
     detail: &opensource_core::ProductionHazardDetail,
 ) -> bool {
     let required_features = enabled_cargo_features(&detail.suggested_cargo_args);
-    if required_features.is_empty() {
+    let feature_covered = required_features.is_empty()
+        || options
+            .cargo_check_args
+            .iter()
+            .any(|arg| arg == "--all-features")
+        || {
+            let enabled_features = enabled_cargo_features(&options.cargo_check_args);
+            let package = detail.package.as_deref();
+            required_features.iter().all(|feature| {
+                enabled_features.contains(feature)
+                    || package
+                        .map(|package| enabled_features.contains(&format!("{package}/{feature}")))
+                        .unwrap_or(false)
+            })
+        };
+    let Some(target_requirements) = detail
+        .cfg
+        .as_deref()
+        .and_then(simple_target_cfg_requirements)
+    else {
+        return !required_features.is_empty() && feature_covered;
+    };
+    let Some(target) = cargo_check_target(&options.cargo_check_args) else {
         return false;
-    }
-    if options
-        .cargo_check_args
-        .iter()
-        .any(|arg| arg == "--all-features")
-    {
-        return true;
-    }
+    };
+    feature_covered && target_requirements_match(&target_requirements, &target)
+}
 
-    let enabled_features = enabled_cargo_features(&options.cargo_check_args);
-    let package = detail.package.as_deref();
-    required_features.iter().all(|feature| {
-        enabled_features.contains(feature)
-            || package
-                .map(|package| enabled_features.contains(&format!("{package}/{feature}")))
-                .unwrap_or(false)
-    })
+#[derive(Default)]
+struct TargetCfgRequirements {
+    arch: BTreeSet<String>,
+    os: BTreeSet<String>,
+    family: BTreeSet<String>,
+    env: BTreeSet<String>,
+    vendor: BTreeSet<String>,
+    pointer_width: BTreeSet<String>,
+    endian: BTreeSet<String>,
+    flags: BTreeSet<String>,
+}
+
+impl TargetCfgRequirements {
+    fn is_empty(&self) -> bool {
+        self.arch.is_empty()
+            && self.os.is_empty()
+            && self.family.is_empty()
+            && self.env.is_empty()
+            && self.vendor.is_empty()
+            && self.pointer_width.is_empty()
+            && self.endian.is_empty()
+            && self.flags.is_empty()
+    }
+}
+
+fn simple_target_cfg_requirements(cfg: &str) -> Option<TargetCfgRequirements> {
+    let normalized = cfg
+        .chars()
+        .filter(|ch| !ch.is_whitespace())
+        .collect::<String>();
+    if normalized.contains("any(") || normalized.contains("not(") {
+        return None;
+    }
+    let mut requirements = TargetCfgRequirements {
+        arch: cfg_value_requirements(&normalized, "target_arch"),
+        os: cfg_value_requirements(&normalized, "target_os"),
+        family: cfg_value_requirements(&normalized, "target_family"),
+        env: cfg_value_requirements(&normalized, "target_env"),
+        vendor: cfg_value_requirements(&normalized, "target_vendor"),
+        pointer_width: cfg_value_requirements(&normalized, "target_pointer_width"),
+        endian: cfg_value_requirements(&normalized, "target_endian"),
+        flags: BTreeSet::new(),
+    };
+    for flag in ["unix", "windows"] {
+        if cfg_contains_flag(&normalized, flag) {
+            requirements.flags.insert(flag.to_string());
+        }
+    }
+    (!requirements.is_empty()).then_some(requirements)
+}
+
+fn cfg_value_requirements(cfg: &str, key: &str) -> BTreeSet<String> {
+    let pattern = format!("{key}=\"");
+    let mut values = BTreeSet::new();
+    let mut remaining = cfg;
+    while let Some(index) = remaining.find(&pattern) {
+        let value_start = index + pattern.len();
+        let Some(value_end) = remaining[value_start..].find('"') else {
+            break;
+        };
+        values.insert(remaining[value_start..value_start + value_end].to_string());
+        remaining = &remaining[value_start + value_end + 1..];
+    }
+    values
+}
+
+fn cfg_contains_flag(cfg: &str, flag: &str) -> bool {
+    let bytes = cfg.as_bytes();
+    let flag_bytes = flag.as_bytes();
+    bytes
+        .windows(flag_bytes.len())
+        .enumerate()
+        .any(|(index, window)| {
+            window == flag_bytes
+                && index
+                    .checked_sub(1)
+                    .and_then(|previous| bytes.get(previous))
+                    .is_none_or(|ch| matches!(ch, b'(' | b',' | b'['))
+                && bytes
+                    .get(index + flag_bytes.len())
+                    .is_none_or(|ch| matches!(ch, b')' | b',' | b']'))
+        })
+}
+
+fn cargo_check_target(cargo_args: &[String]) -> Option<String> {
+    let mut args = cargo_args.iter();
+    while let Some(arg) = args.next() {
+        if arg == "--target" {
+            return args.next().cloned();
+        }
+        if let Some(target) = arg.strip_prefix("--target=") {
+            return Some(target.to_string());
+        }
+    }
+    None
+}
+
+fn target_requirements_match(requirements: &TargetCfgRequirements, target: &str) -> bool {
+    requirement_matches(&requirements.arch, target_arch(target))
+        && requirement_matches(&requirements.os, target_os(target))
+        && requirement_matches(&requirements.family, target_family(target))
+        && requirement_matches(&requirements.env, target_env(target))
+        && requirement_matches(&requirements.vendor, target_vendor(target))
+        && requirement_matches(&requirements.pointer_width, target_pointer_width(target))
+        && requirement_matches(&requirements.endian, target_endian(target))
+        && requirements.flags.iter().all(|flag| {
+            (flag == "unix" && target_family(target) == Some("unix"))
+                || (flag == "windows" && target_family(target) == Some("windows"))
+        })
+}
+
+fn requirement_matches(requirements: &BTreeSet<String>, actual: Option<&str>) -> bool {
+    requirements.is_empty() || actual.is_some_and(|actual| requirements.contains(actual))
+}
+
+fn target_arch(target: &str) -> Option<&str> {
+    target.split('-').next()
+}
+
+fn target_vendor(target: &str) -> Option<&str> {
+    target.split('-').nth(1)
+}
+
+fn target_env(target: &str) -> Option<&str> {
+    ["msvc", "gnu", "musl", "sgx", "newlib", "uclibc", "wasi"]
+        .into_iter()
+        .find(|env| target.split('-').any(|segment| segment == *env))
+}
+
+fn target_os(target: &str) -> Option<&'static str> {
+    let segments = target.split('-').collect::<Vec<_>>();
+    if segments.contains(&"linux") {
+        Some("linux")
+    } else if segments.contains(&"darwin") {
+        Some("macos")
+    } else if segments.contains(&"windows") {
+        Some("windows")
+    } else if segments.contains(&"android") {
+        Some("android")
+    } else if segments.contains(&"ios") {
+        Some("ios")
+    } else if segments.contains(&"freebsd") {
+        Some("freebsd")
+    } else if segments.contains(&"netbsd") {
+        Some("netbsd")
+    } else if segments.contains(&"openbsd") {
+        Some("openbsd")
+    } else if segments.contains(&"unknown") {
+        Some("unknown")
+    } else {
+        None
+    }
+}
+
+fn target_family(target: &str) -> Option<&'static str> {
+    match target_os(target) {
+        Some("windows") => Some("windows"),
+        Some("linux" | "macos" | "android" | "ios" | "freebsd" | "netbsd" | "openbsd") => {
+            Some("unix")
+        }
+        _ => None,
+    }
+}
+
+fn target_pointer_width(target: &str) -> Option<&'static str> {
+    let arch = target_arch(target)?;
+    if arch.contains("64") || matches!(arch, "s390x") {
+        Some("64")
+    } else if arch.contains("32")
+        || matches!(
+            arch,
+            "x86" | "i386" | "i586" | "i686" | "arm" | "thumb" | "mips"
+        )
+    {
+        Some("32")
+    } else {
+        None
+    }
+}
+
+fn target_endian(target: &str) -> Option<&'static str> {
+    let arch = target_arch(target)?;
+    if matches!(
+        arch,
+        "s390x" | "powerpc" | "powerpc64" | "mips" | "mips64" | "sparc"
+    ) {
+        Some("big")
+    } else {
+        Some("little")
+    }
 }
 
 fn record_final_production_readiness(options: &CliOptions, validation: &mut ValidationReport) {
@@ -3149,6 +3348,45 @@ mod tests {
     }
 
     #[test]
+    fn production_preset_discharges_simple_target_cfg_root_hazards_with_matching_target() {
+        let production = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--target",
+            "--cargo-check-arg",
+            "wasm32-unknown-unknown",
+            "workspace",
+            "out",
+        ]);
+        let report = production_report(vec![target_cfg_root_hazard(
+            "app",
+            r#"#[cfg(all(target_arch = "wasm32", target_os = "unknown"))]"#,
+        )]);
+
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            &report
+        ));
+    }
+
+    #[test]
+    fn production_preset_keeps_mismatched_target_cfg_root_hazards_fail_closed() {
+        let production = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--target=x86_64-unknown-linux-gnu",
+            "workspace",
+            "out",
+        ]);
+        let report = production_report(vec![target_cfg_root_hazard(
+            "app",
+            r#"#[cfg(target_arch = "wasm32")]"#,
+        )]);
+
+        assert!(production_readiness_blocks_validation(&production, &report));
+    }
+
+    #[test]
     fn production_preset_keeps_uncovered_cfg_root_hazards_fail_closed() {
         let production = parse_options(["--production", "workspace", "out"]);
         let missing_args = production_report(vec![feature_cfg_root_hazard("app", "selected")]);
@@ -3822,6 +4060,23 @@ pub fn helper() -> usize {
                 start_line: None,
                 cfg: Some(format!("#[cfg(feature = \"{feature}\")]")),
                 suggested_cargo_args: vec!["--features".to_string(), feature.to_string()],
+            }],
+        }
+    }
+
+    fn target_cfg_root_hazard(package: &str, cfg: &str) -> opensource_core::ProductionHazardReport {
+        opensource_core::ProductionHazardReport {
+            code: "cfg_gated_roots".to_string(),
+            severity: "error".to_string(),
+            message: "root is cfg gated".to_string(),
+            details: vec![opensource_core::ProductionHazardDetail {
+                subject: format!("{package}::entry"),
+                package: Some(package.to_string()),
+                module_path: None,
+                file: None,
+                start_line: None,
+                cfg: Some(cfg.to_string()),
+                suggested_cargo_args: Vec::new(),
             }],
         }
     }
