@@ -685,7 +685,7 @@ fn retained_non_workspace_path_dependencies(
 
 fn package_dependency_tables(
     package: &crate::manifest::Package,
-) -> Vec<(&str, &toml::value::Table)> {
+) -> Vec<(String, &toml::value::Table)> {
     let mut tables = Vec::new();
     for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
         if let Some(table) = package
@@ -693,7 +693,30 @@ fn package_dependency_tables(
             .get(table_name)
             .and_then(toml::Value::as_table)
         {
-            tables.push((table_name, table));
+            tables.push((table_name.to_string(), table));
+        }
+    }
+    if let Some(targets) = package
+        .manifest
+        .get("target")
+        .and_then(toml::Value::as_table)
+    {
+        for (target_name, target) in targets {
+            let Some(target_table) = target.as_table() else {
+                continue;
+            };
+            for dependency_table_name in ["dependencies", "build-dependencies", "dev-dependencies"]
+            {
+                if let Some(table) = target_table
+                    .get(dependency_table_name)
+                    .and_then(toml::Value::as_table)
+                {
+                    tables.push((
+                        format!("target.{target_name}.{dependency_table_name}"),
+                        table,
+                    ));
+                }
+            }
         }
     }
     tables
@@ -2434,6 +2457,55 @@ pub fn entry() -> usize {
         let report = generate(GenerateOptions {
             workspace_root: root,
             output_root: temp_output("path-dependency-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert_eq!(report.production.status, "hazards_detected");
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "retained_non_workspace_path_dependencies"
+                && hazard.severity == "error"
+                && hazard.message.contains("app:external-helper")
+        }));
+    }
+
+    #[test]
+    fn reports_retained_target_non_workspace_path_dependency_hazards() {
+        let root = temp_output("target-path-dependency-hazard-source");
+        let external = temp_output("target-path-dependency-hazard-external");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n\n[target.'cfg(unix)'.dependencies]\nexternal-helper = {{ path = {:?} }}\n",
+                opensourced_path, external
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    external_helper::value()
+}
+"#,
+        );
+        write(
+            external.join("Cargo.toml"),
+            "[package]\nname = \"external-helper\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            external.join("src/lib.rs"),
+            "pub fn value() -> usize { 1 }\n",
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("target-path-dependency-hazard-output"),
         })
         .expect("reduction should succeed");
 
