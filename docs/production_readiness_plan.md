@@ -71,7 +71,9 @@ assets, output safety, or product diagnostics by itself.
   should be treated as test-only pruning. Retained non-test `cfg`/`cfg_attr`
   surfaces require compiler feedback for the selected matrix; selected roots
   behind non-test cfg gates still fail closed until validation explicitly covers
-  that matrix.
+  that matrix. Cfg-gated root hazards should carry root, module, source span,
+  cfg expression, and Cargo argument hints so a validation matrix planner can
+  discharge them intentionally instead of relying on free-text diagnostics.
 - Dependency aliases, workspace dependencies, optional dependency features, and
   target-specific dependencies need Cargo's resolver model.
 - Retained direct or target-specific path dependencies outside the workspace are

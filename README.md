@@ -213,10 +213,12 @@ validation arguments because the selected root itself may not exist under the
 default configuration.
 
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
-mode/notes, production-readiness hazards, roots, packages, reachable
-callables/items, generated target metadata, feedback-widened roots, files
-written, and a source map for parsed callables/items with file spans and
-reachability flags. It also records phase timings for analyzer
+mode/notes, production-readiness hazards and hazard details, roots, packages,
+reachable callables/items, generated target metadata, feedback-widened roots,
+files written, and a source map for parsed callables/items with file spans and
+reachability flags. Cfg-gated root hazards include the affected root, package,
+module path, source span, cfg expression, and feature-oriented Cargo argument
+hints where those can be derived. It also records phase timings for analyzer
 loading, manifest loading, parsing, reduction, rendering, and total generation
 time. That source map is the join point for semantic analyzer edges. The generic
 corpus runner carries the same production hazard fields into each JSONL row and

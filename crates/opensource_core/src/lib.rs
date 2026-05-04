@@ -89,6 +89,25 @@ pub struct ProductionHazardReport {
     pub code: String,
     pub severity: String,
     pub message: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub details: Vec<ProductionHazardDetail>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct ProductionHazardDetail {
+    pub subject: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub package: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub module_path: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub file: Option<PathBuf>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub start_line: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cfg: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub suggested_cargo_args: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -930,29 +949,57 @@ fn add_cfg_gated_root_production_hazards(
     reduced: &ReducedProject,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
-    let cfg_gated_roots = reduced
-        .roots
-        .iter()
-        .filter(|root| root_has_cfg_gate(project, root))
-        .count();
-    if cfg_gated_roots > 0 {
-        hazards.push(production_hazard(
+    let mut cfg_gated_roots = 0;
+    let mut details = Vec::new();
+    for root in &reduced.roots {
+        let root_details = cfg_gated_root_details(project, root);
+        if root_details.is_empty() {
+            continue;
+        }
+        cfg_gated_roots += 1;
+        details.extend(root_details);
+    }
+    if !details.is_empty() {
+        hazards.push(production_hazard_with_details(
             "cfg_gated_roots",
             "error",
             format!(
                 "{} selected root(s) are behind cfg/cfg_attr gates; production validation must prove the exact feature and target matrix before accepting the slice",
                 cfg_gated_roots
             ),
+            details,
         ));
     }
 }
 
-fn root_has_cfg_gate(project: &Project, root: &RootId) -> bool {
+fn cfg_gated_root_details(project: &Project, root: &RootId) -> Vec<ProductionHazardDetail> {
     let Some((package, module_path)) = root_module_location(project, root) else {
-        return false;
+        return Vec::new();
     };
-    root_direct_attrs(project, root).is_some_and(attrs_have_non_test_cfg_gate)
-        || module_path_has_cfg_gate(project, package, module_path)
+    let mut details = Vec::new();
+    for attribute in root_direct_attrs(project, root)
+        .unwrap_or_default()
+        .iter()
+        .filter(|attribute| attr_is_non_test_cfg_gate(attribute))
+    {
+        details.push(cfg_gate_detail(
+            project,
+            root,
+            package,
+            module_path,
+            attribute,
+        ));
+    }
+    for (gated_module_path, attribute) in module_path_cfg_gates(project, package, module_path) {
+        details.push(cfg_gate_detail(
+            project,
+            root,
+            package,
+            &gated_module_path,
+            attribute,
+        ));
+    }
+    details
 }
 
 fn root_module_location<'a>(
@@ -1011,16 +1058,25 @@ fn item_attrs(item: &Item) -> &[Attribute] {
     }
 }
 
-fn module_path_has_cfg_gate(project: &Project, package: &str, module_path: &[String]) -> bool {
+fn module_path_cfg_gates<'a>(
+    project: &'a Project,
+    package: &str,
+    module_path: &[String],
+) -> Vec<(Vec<String>, &'a Attribute)> {
+    let mut gates = Vec::new();
     for depth in 1..=module_path.len() {
         let Some(item_mod) = module_item_for_path(project, package, &module_path[..depth]) else {
             continue;
         };
-        if attrs_have_non_test_cfg_gate(&item_mod.attrs) {
-            return true;
-        }
+        gates.extend(
+            item_mod
+                .attrs
+                .iter()
+                .filter(|attribute| attr_is_non_test_cfg_gate(attribute))
+                .map(|attribute| (module_path[..depth].to_vec(), attribute)),
+        );
     }
-    false
+    gates
 }
 
 fn module_item_for_path<'a>(
@@ -1041,11 +1097,96 @@ fn module_item_for_path<'a>(
     })
 }
 
-fn attrs_have_non_test_cfg_gate(attrs: &[Attribute]) -> bool {
-    attrs.iter().any(|attribute| {
-        (attribute.path().is_ident("cfg") && !reduce::is_cfg_test_attr(attribute))
-            || attribute.path().is_ident("cfg_attr")
-    })
+fn attr_is_non_test_cfg_gate(attribute: &Attribute) -> bool {
+    (attribute.path().is_ident("cfg") && !reduce::is_cfg_test_attr(attribute))
+        || attribute.path().is_ident("cfg_attr")
+}
+
+fn cfg_gate_detail(
+    project: &Project,
+    root: &RootId,
+    package: &str,
+    module_path: &[String],
+    attribute: &Attribute,
+) -> ProductionHazardDetail {
+    let span = root_span(project, root);
+    ProductionHazardDetail {
+        subject: root.to_string(),
+        package: Some(package.to_string()),
+        module_path: (!module_path.is_empty()).then(|| module_path.join("::")),
+        file: span.as_ref().map(|span| span.file.clone()),
+        start_line: span.as_ref().map(|span| span.start_line),
+        cfg: Some(attribute.to_token_stream().to_string()),
+        suggested_cargo_args: cfg_gate_suggested_cargo_args(attribute),
+    }
+}
+
+fn root_span(project: &Project, root: &RootId) -> Option<SourceSpan> {
+    match root {
+        RootId::Callable(callable) => project
+            .functions
+            .get(callable)
+            .map(|record| record.span.clone())
+            .or_else(|| {
+                project
+                    .methods
+                    .get(callable)
+                    .map(|record| record.span.clone())
+            }),
+        RootId::Item(item) => project.items.get(item).map(|record| record.span.clone()),
+    }
+}
+
+fn cfg_gate_suggested_cargo_args(attribute: &Attribute) -> Vec<String> {
+    let mut features = cfg_gate_feature_names(attribute)
+        .into_iter()
+        .collect::<Vec<_>>();
+    features.sort();
+    if features.is_empty() {
+        Vec::new()
+    } else {
+        vec!["--features".to_string(), features.join(",")]
+    }
+}
+
+fn cfg_gate_feature_names(attribute: &Attribute) -> BTreeSet<String> {
+    let mut features = BTreeSet::new();
+    if attribute.path().is_ident("cfg") {
+        if let Ok(meta) = attribute.parse_args::<Meta>() {
+            collect_cfg_feature_names(&meta, &mut features);
+        }
+    } else if attribute.path().is_ident("cfg_attr") {
+        if let Ok(arguments) =
+            attribute.parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+        {
+            if let Some(predicate) = arguments.first() {
+                collect_cfg_feature_names(predicate, &mut features);
+            }
+        }
+    }
+    features
+}
+
+fn collect_cfg_feature_names(meta: &Meta, features: &mut BTreeSet<String>) {
+    match meta {
+        Meta::NameValue(name_value) if name_value.path.is_ident("feature") => {
+            if let syn::Expr::Lit(expr) = &name_value.value {
+                if let syn::Lit::Str(feature) = &expr.lit {
+                    features.insert(feature.value());
+                }
+            }
+        }
+        Meta::List(list) => {
+            if let Ok(arguments) =
+                Punctuated::<Meta, syn::Token![,]>::parse_terminated.parse2(list.tokens.clone())
+            {
+                for nested in arguments {
+                    collect_cfg_feature_names(&nested, features);
+                }
+            }
+        }
+        Meta::Path(_) | Meta::NameValue(_) => {}
+    }
 }
 
 fn package_build_script_path(package: &crate::manifest::Package) -> Option<PathBuf> {
@@ -1763,10 +1904,20 @@ fn production_hazard(
     severity: &str,
     message: impl Into<String>,
 ) -> ProductionHazardReport {
+    production_hazard_with_details(code, severity, message, Vec::new())
+}
+
+fn production_hazard_with_details(
+    code: &str,
+    severity: &str,
+    message: impl Into<String>,
+    details: Vec<ProductionHazardDetail>,
+) -> ProductionHazardReport {
     ProductionHazardReport {
         code: code.to_string(),
         severity: severity.to_string(),
         message: message.into(),
+        details,
     }
 }
 
@@ -3002,11 +3153,23 @@ pub fn entry() -> usize {
         .expect("reduction should succeed");
 
         assert_eq!(report.production.status, "hazards_detected");
-        assert!(report
+        let hazard = report
             .production
             .hazards
             .iter()
-            .any(|hazard| { hazard.code == "cfg_gated_roots" && hazard.severity == "error" }));
+            .find(|hazard| hazard.code == "cfg_gated_roots" && hazard.severity == "error")
+            .expect("cfg-gated root hazard should be reported");
+        assert_eq!(hazard.details.len(), 1);
+        let detail = &hazard.details[0];
+        assert_eq!(detail.subject, "app::entry");
+        assert_eq!(
+            detail.suggested_cargo_args,
+            vec!["--features".to_string(), "selected".to_string()]
+        );
+        assert!(detail
+            .cfg
+            .as_ref()
+            .is_some_and(|cfg| cfg.contains("selected")));
     }
 
     #[test]
@@ -3093,11 +3256,20 @@ pub fn entry() -> usize {
         .expect("reduction should succeed");
 
         assert_eq!(report.production.status, "hazards_detected");
-        assert!(report
+        let hazard = report
             .production
             .hazards
             .iter()
-            .any(|hazard| { hazard.code == "cfg_gated_roots" && hazard.severity == "error" }));
+            .find(|hazard| hazard.code == "cfg_gated_roots" && hazard.severity == "error")
+            .expect("cfg-gated module root hazard should be reported");
+        assert_eq!(hazard.details.len(), 1);
+        let detail = &hazard.details[0];
+        assert_eq!(detail.subject, "app::gated::entry");
+        assert_eq!(detail.module_path.as_deref(), Some("gated"));
+        assert_eq!(
+            detail.suggested_cargo_args,
+            vec!["--features".to_string(), "selected".to_string()]
+        );
     }
 
     #[test]

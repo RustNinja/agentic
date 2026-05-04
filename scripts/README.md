@@ -51,9 +51,10 @@ assets, while retained macros and non-root cfg surfaces are preserved and
 require compiler feedback. Use `--deny-warnings` for production gates that
 require warning-free generated feedback. Each corpus row includes
 the slicer's authoritative validation verdict, production-readiness status,
-production hazard codes, compiler feedback widening candidate/hazard kinds,
-feedback-widened root counts, compiler suggestion counts, and conservative
-repair totals including applied machine-applicable suggestions.
+production hazard codes and structured hazard details, compiler feedback
+widening candidate/hazard kinds, feedback-widened root counts, compiler
+suggestion counts, and conservative repair totals including applied
+machine-applicable suggestions.
 
 ## Litter Feedback Loop
 
