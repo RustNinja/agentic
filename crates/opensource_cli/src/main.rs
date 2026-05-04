@@ -2155,62 +2155,28 @@ fn cfg_gate_detail_is_covered_by_args(
     options: &CliOptions,
     detail: &opensource_core::ProductionHazardDetail,
 ) -> bool {
-    let required_features = enabled_cargo_features(&detail.suggested_cargo_args);
-    let feature_covered = required_features.is_empty()
-        || options
-            .cargo_check_args
-            .iter()
-            .any(|arg| arg == "--all-features")
-        || {
-            let enabled_features = enabled_cargo_features(&options.cargo_check_args);
-            let package = detail.package.as_deref();
-            required_features.iter().all(|feature| {
-                enabled_features.contains(feature)
-                    || package
-                        .map(|package| enabled_features.contains(&format!("{package}/{feature}")))
-                        .unwrap_or(false)
-            })
+    if let Some(expr) = detail.cfg.as_deref().and_then(cfg_attribute_expression) {
+        let Some(cfg_set) = selected_rustc_cfg_set(&options.cargo_check_args) else {
+            return false;
         };
-    let Some(target_requirements) = detail
-        .cfg
-        .as_deref()
-        .and_then(simple_target_cfg_requirements)
-    else {
-        return !required_features.is_empty() && feature_covered;
-    };
-    if !feature_covered {
-        return false;
+        let enabled_features = enabled_cargo_features(&options.cargo_check_args);
+        return evaluate_cfg_expr(
+            &expr,
+            &cfg_set,
+            &enabled_features,
+            detail.package.as_deref(),
+            cargo_args_enable_all_features(&options.cargo_check_args),
+        ) == CfgEval::True;
     }
-    if let Some(cfg_set) = selected_rustc_cfg_set(&options.cargo_check_args) {
-        return rustc_cfg_requirements_match(&target_requirements, &cfg_set);
-    }
-    cargo_check_target(&options.cargo_check_args)
-        .is_some_and(|target| target_requirements_match(&target_requirements, &target))
-}
 
-#[derive(Default)]
-struct TargetCfgRequirements {
-    arch: BTreeSet<String>,
-    os: BTreeSet<String>,
-    family: BTreeSet<String>,
-    env: BTreeSet<String>,
-    vendor: BTreeSet<String>,
-    pointer_width: BTreeSet<String>,
-    endian: BTreeSet<String>,
-    flags: BTreeSet<String>,
-}
-
-impl TargetCfgRequirements {
-    fn is_empty(&self) -> bool {
-        self.arch.is_empty()
-            && self.os.is_empty()
-            && self.family.is_empty()
-            && self.env.is_empty()
-            && self.vendor.is_empty()
-            && self.pointer_width.is_empty()
-            && self.endian.is_empty()
-            && self.flags.is_empty()
-    }
+    let required_features = enabled_cargo_features(&detail.suggested_cargo_args);
+    !required_features.is_empty()
+        && cargo_features_are_enabled(
+            &required_features,
+            detail.package.as_deref(),
+            &enabled_cargo_features(&options.cargo_check_args),
+            cargo_args_enable_all_features(&options.cargo_check_args),
+        )
 }
 
 #[derive(Clone, Debug, Default)]
@@ -2232,63 +2198,370 @@ impl RustcCfgSet {
     }
 }
 
-fn simple_target_cfg_requirements(cfg: &str) -> Option<TargetCfgRequirements> {
-    let normalized = cfg
-        .chars()
-        .filter(|ch| !ch.is_whitespace())
-        .collect::<String>();
-    if normalized.contains("any(") || normalized.contains("not(") {
-        return None;
-    }
-    let mut requirements = TargetCfgRequirements {
-        arch: cfg_value_requirements(&normalized, "target_arch"),
-        os: cfg_value_requirements(&normalized, "target_os"),
-        family: cfg_value_requirements(&normalized, "target_family"),
-        env: cfg_value_requirements(&normalized, "target_env"),
-        vendor: cfg_value_requirements(&normalized, "target_vendor"),
-        pointer_width: cfg_value_requirements(&normalized, "target_pointer_width"),
-        endian: cfg_value_requirements(&normalized, "target_endian"),
-        flags: BTreeSet::new(),
-    };
-    for flag in ["unix", "windows"] {
-        if cfg_contains_flag(&normalized, flag) {
-            requirements.flags.insert(flag.to_string());
+#[derive(Clone, Debug, Eq, PartialEq)]
+enum CfgExpr {
+    All(Vec<CfgExpr>),
+    Any(Vec<CfgExpr>),
+    Not(Box<CfgExpr>),
+    Flag(String),
+    KeyValue { key: String, value: String },
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum CfgEval {
+    True,
+    False,
+    Unknown,
+}
+
+impl CfgEval {
+    fn and(values: impl IntoIterator<Item = CfgEval>) -> Self {
+        let mut saw_unknown = false;
+        for value in values {
+            match value {
+                CfgEval::True => {}
+                CfgEval::False => return CfgEval::False,
+                CfgEval::Unknown => saw_unknown = true,
+            }
+        }
+        if saw_unknown {
+            CfgEval::Unknown
+        } else {
+            CfgEval::True
         }
     }
-    (!requirements.is_empty()).then_some(requirements)
-}
 
-fn cfg_value_requirements(cfg: &str, key: &str) -> BTreeSet<String> {
-    let pattern = format!("{key}=\"");
-    let mut values = BTreeSet::new();
-    let mut remaining = cfg;
-    while let Some(index) = remaining.find(&pattern) {
-        let value_start = index + pattern.len();
-        let Some(value_end) = remaining[value_start..].find('"') else {
-            break;
-        };
-        values.insert(remaining[value_start..value_start + value_end].to_string());
-        remaining = &remaining[value_start + value_end + 1..];
+    fn or(values: impl IntoIterator<Item = CfgEval>) -> Self {
+        let mut saw_unknown = false;
+        for value in values {
+            match value {
+                CfgEval::True => return CfgEval::True,
+                CfgEval::False => {}
+                CfgEval::Unknown => saw_unknown = true,
+            }
+        }
+        if saw_unknown {
+            CfgEval::Unknown
+        } else {
+            CfgEval::False
+        }
     }
-    values
+
+    fn not(self) -> Self {
+        match self {
+            CfgEval::True => CfgEval::False,
+            CfgEval::False => CfgEval::True,
+            CfgEval::Unknown => CfgEval::Unknown,
+        }
+    }
 }
 
-fn cfg_contains_flag(cfg: &str, flag: &str) -> bool {
-    let bytes = cfg.as_bytes();
-    let flag_bytes = flag.as_bytes();
-    bytes
-        .windows(flag_bytes.len())
-        .enumerate()
-        .any(|(index, window)| {
-            window == flag_bytes
-                && index
-                    .checked_sub(1)
-                    .and_then(|previous| bytes.get(previous))
-                    .is_none_or(|ch| matches!(ch, b'(' | b',' | b'['))
-                && bytes
-                    .get(index + flag_bytes.len())
-                    .is_none_or(|ch| matches!(ch, b')' | b',' | b']'))
+fn cfg_attribute_expression(cfg: &str) -> Option<CfgExpr> {
+    let normalized = compact_cfg_attribute(cfg);
+    if let Some(arguments) = cfg_call_arguments(&normalized, "cfg_attr") {
+        return cfg_first_top_level_argument(arguments).and_then(parse_cfg_expr);
+    }
+    if let Some(arguments) = cfg_call_arguments(&normalized, "cfg") {
+        return parse_cfg_expr(arguments);
+    }
+    None
+}
+
+fn compact_cfg_attribute(cfg: &str) -> String {
+    let mut normalized = String::new();
+    let mut in_string = false;
+    let mut escaped = false;
+    for ch in cfg.chars() {
+        if in_string {
+            normalized.push(ch);
+            if escaped {
+                escaped = false;
+            } else if ch == '\\' {
+                escaped = true;
+            } else if ch == '"' {
+                in_string = false;
+            }
+        } else if ch == '"' {
+            in_string = true;
+            normalized.push(ch);
+        } else if !ch.is_whitespace() {
+            normalized.push(ch);
+        }
+    }
+    normalized
+}
+
+fn cfg_call_arguments<'a>(cfg: &'a str, call: &str) -> Option<&'a str> {
+    let pattern = format!("{call}(");
+    let start = cfg.find(&pattern)? + pattern.len();
+    let end = matching_paren_index(cfg, start.checked_sub(1)?)?;
+    Some(&cfg[start..end])
+}
+
+fn matching_paren_index(text: &str, open_index: usize) -> Option<usize> {
+    let bytes = text.as_bytes();
+    let mut depth = 0usize;
+    let mut index = open_index;
+    let mut in_string = false;
+    let mut escaped = false;
+    while index < bytes.len() {
+        let byte = bytes[index];
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            depth = depth.checked_sub(1)?;
+            if depth == 0 {
+                return Some(index);
+            }
+        }
+        index += 1;
+    }
+    None
+}
+
+fn cfg_first_top_level_argument(arguments: &str) -> Option<&str> {
+    let mut depth = 0usize;
+    let mut in_string = false;
+    let mut escaped = false;
+    for (index, byte) in arguments.bytes().enumerate() {
+        if in_string {
+            if escaped {
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                in_string = false;
+            }
+        } else if byte == b'"' {
+            in_string = true;
+        } else if byte == b'(' {
+            depth += 1;
+        } else if byte == b')' {
+            depth = depth.checked_sub(1)?;
+        } else if byte == b',' && depth == 0 {
+            return Some(&arguments[..index]);
+        }
+    }
+    (!arguments.is_empty()).then_some(arguments)
+}
+
+fn parse_cfg_expr(text: &str) -> Option<CfgExpr> {
+    let mut parser = CfgParser::new(text);
+    let expr = parser.parse_expr()?;
+    parser.is_finished().then_some(expr)
+}
+
+struct CfgParser<'a> {
+    text: &'a str,
+    index: usize,
+}
+
+impl<'a> CfgParser<'a> {
+    fn new(text: &'a str) -> Self {
+        Self { text, index: 0 }
+    }
+
+    fn is_finished(&self) -> bool {
+        self.index == self.text.len()
+    }
+
+    fn parse_expr(&mut self) -> Option<CfgExpr> {
+        let ident = self.parse_ident()?;
+        if self.consume(b'(') {
+            let args = self.parse_expr_list()?;
+            return match ident.as_str() {
+                "all" => Some(CfgExpr::All(args)),
+                "any" => Some(CfgExpr::Any(args)),
+                "not" if args.len() == 1 => Some(CfgExpr::Not(Box::new(args.into_iter().next()?))),
+                _ => None,
+            };
+        }
+        if self.consume(b'=') {
+            let value = self.parse_string()?;
+            return Some(CfgExpr::KeyValue { key: ident, value });
+        }
+        Some(CfgExpr::Flag(ident))
+    }
+
+    fn parse_expr_list(&mut self) -> Option<Vec<CfgExpr>> {
+        if self.consume(b')') {
+            return Some(Vec::new());
+        }
+        let mut args = Vec::new();
+        loop {
+            args.push(self.parse_expr()?);
+            if self.consume(b')') {
+                return Some(args);
+            }
+            if !self.consume(b',') {
+                return None;
+            }
+        }
+    }
+
+    fn parse_ident(&mut self) -> Option<String> {
+        let start = self.index;
+        while let Some(byte) = self.peek() {
+            if byte.is_ascii_alphanumeric() || byte == b'_' {
+                self.index += 1;
+            } else {
+                break;
+            }
+        }
+        (self.index > start).then(|| self.text[start..self.index].to_string())
+    }
+
+    fn parse_string(&mut self) -> Option<String> {
+        if !self.consume(b'"') {
+            return None;
+        }
+        let mut value = String::new();
+        let mut escaped = false;
+        while let Some(byte) = self.peek() {
+            self.index += 1;
+            let ch = byte as char;
+            if escaped {
+                value.push(ch);
+                escaped = false;
+            } else if byte == b'\\' {
+                escaped = true;
+            } else if byte == b'"' {
+                return Some(value);
+            } else {
+                value.push(ch);
+            }
+        }
+        None
+    }
+
+    fn consume(&mut self, expected: u8) -> bool {
+        if self.peek() == Some(expected) {
+            self.index += 1;
+            true
+        } else {
+            false
+        }
+    }
+
+    fn peek(&self) -> Option<u8> {
+        self.text.as_bytes().get(self.index).copied()
+    }
+}
+
+fn evaluate_cfg_expr(
+    expr: &CfgExpr,
+    cfg_set: &RustcCfgSet,
+    enabled_features: &BTreeSet<String>,
+    package: Option<&str>,
+    all_features: bool,
+) -> CfgEval {
+    match expr {
+        CfgExpr::All(args) => {
+            CfgEval::and(args.iter().map(|arg| {
+                evaluate_cfg_expr(arg, cfg_set, enabled_features, package, all_features)
+            }))
+        }
+        CfgExpr::Any(args) => {
+            CfgEval::or(args.iter().map(|arg| {
+                evaluate_cfg_expr(arg, cfg_set, enabled_features, package, all_features)
+            }))
+        }
+        CfgExpr::Not(arg) => {
+            evaluate_cfg_expr(arg, cfg_set, enabled_features, package, all_features).not()
+        }
+        CfgExpr::Flag(flag) => evaluate_cfg_flag(flag, cfg_set),
+        CfgExpr::KeyValue { key, value } => {
+            evaluate_cfg_key_value(key, value, cfg_set, enabled_features, package, all_features)
+        }
+    }
+}
+
+fn evaluate_cfg_flag(flag: &str, cfg_set: &RustcCfgSet) -> CfgEval {
+    if cfg_set.flags.contains(flag) {
+        CfgEval::True
+    } else if known_rustc_boolean_cfg(flag) {
+        CfgEval::False
+    } else {
+        CfgEval::Unknown
+    }
+}
+
+fn known_rustc_boolean_cfg(flag: &str) -> bool {
+    matches!(
+        flag,
+        "debug_assertions" | "proc_macro" | "target_thread_local" | "unix" | "windows"
+    )
+}
+
+fn evaluate_cfg_key_value(
+    key: &str,
+    value: &str,
+    cfg_set: &RustcCfgSet,
+    enabled_features: &BTreeSet<String>,
+    package: Option<&str>,
+    all_features: bool,
+) -> CfgEval {
+    if key == "feature" {
+        return if cargo_feature_is_enabled(value, package, enabled_features, all_features) {
+            CfgEval::True
+        } else {
+            CfgEval::Unknown
+        };
+    }
+    if cfg_set
+        .values(key)
+        .is_some_and(|values| values.contains(value))
+    {
+        return CfgEval::True;
+    }
+    if known_rustc_value_cfg(key) {
+        CfgEval::False
+    } else {
+        CfgEval::Unknown
+    }
+}
+
+fn known_rustc_value_cfg(key: &str) -> bool {
+    key == "panic" || key.starts_with("target_")
+}
+
+fn cargo_features_are_enabled(
+    required_features: &BTreeSet<String>,
+    package: Option<&str>,
+    enabled_features: &BTreeSet<String>,
+    all_features: bool,
+) -> bool {
+    all_features
+        || required_features.iter().all(|feature| {
+            cargo_feature_is_enabled(feature, package, enabled_features, all_features)
         })
+}
+
+fn cargo_feature_is_enabled(
+    feature: &str,
+    package: Option<&str>,
+    enabled_features: &BTreeSet<String>,
+    all_features: bool,
+) -> bool {
+    all_features
+        || enabled_features.contains(feature)
+        || package
+            .map(|package| enabled_features.contains(&format!("{package}/{feature}")))
+            .unwrap_or(false)
+}
+
+fn cargo_args_enable_all_features(cargo_args: &[String]) -> bool {
+    cargo_args.iter().any(|arg| arg == "--all-features")
 }
 
 fn cargo_check_target(cargo_args: &[String]) -> Option<String> {
@@ -2306,7 +2579,7 @@ fn cargo_check_target(cargo_args: &[String]) -> Option<String> {
 
 fn selected_rustc_cfg_set(cargo_args: &[String]) -> Option<RustcCfgSet> {
     if let Some(target) = cargo_check_target(cargo_args) {
-        return rustc_print_cfg(Some(&target));
+        return rustc_print_cfg(Some(&target)).or_else(|| target_triple_cfg_set(&target));
     }
     host_rustc_cfg_set()
 }
@@ -2368,50 +2641,29 @@ fn host_const_cfg_set() -> Option<RustcCfgSet> {
     Some(set)
 }
 
-fn rustc_cfg_requirements_match(
-    requirements: &TargetCfgRequirements,
-    cfg_set: &RustcCfgSet,
-) -> bool {
-    rustc_cfg_values_match(&requirements.arch, cfg_set.values("target_arch"))
-        && rustc_cfg_values_match(&requirements.os, cfg_set.values("target_os"))
-        && rustc_cfg_values_match(&requirements.family, cfg_set.values("target_family"))
-        && rustc_cfg_values_match(&requirements.env, cfg_set.values("target_env"))
-        && rustc_cfg_values_match(&requirements.vendor, cfg_set.values("target_vendor"))
-        && rustc_cfg_values_match(
-            &requirements.pointer_width,
-            cfg_set.values("target_pointer_width"),
-        )
-        && rustc_cfg_values_match(&requirements.endian, cfg_set.values("target_endian"))
-        && requirements
-            .flags
-            .iter()
-            .all(|flag| cfg_set.flags.contains(flag))
-}
-
-fn rustc_cfg_values_match(
-    requirements: &BTreeSet<String>,
-    values: Option<&BTreeSet<String>>,
-) -> bool {
-    requirements.is_empty()
-        || values.is_some_and(|values| requirements.iter().all(|value| values.contains(value)))
-}
-
-fn target_requirements_match(requirements: &TargetCfgRequirements, target: &str) -> bool {
-    requirement_matches(&requirements.arch, target_arch(target))
-        && requirement_matches(&requirements.os, target_os(target))
-        && requirement_matches(&requirements.family, target_family(target))
-        && requirement_matches(&requirements.env, target_env(target))
-        && requirement_matches(&requirements.vendor, target_vendor(target))
-        && requirement_matches(&requirements.pointer_width, target_pointer_width(target))
-        && requirement_matches(&requirements.endian, target_endian(target))
-        && requirements.flags.iter().all(|flag| {
-            (flag == "unix" && target_family(target) == Some("unix"))
-                || (flag == "windows" && target_family(target) == Some("windows"))
-        })
-}
-
-fn requirement_matches(requirements: &BTreeSet<String>, actual: Option<&str>) -> bool {
-    requirements.is_empty() || actual.is_some_and(|actual| requirements.contains(actual))
+fn target_triple_cfg_set(target: &str) -> Option<RustcCfgSet> {
+    let mut set = RustcCfgSet::default();
+    set.insert_value("target_arch", target_arch(target)?);
+    if let Some(vendor) = target_vendor(target) {
+        set.insert_value("target_vendor", vendor);
+    }
+    if let Some(env) = target_env(target) {
+        set.insert_value("target_env", env);
+    }
+    if let Some(os) = target_os(target) {
+        set.insert_value("target_os", os);
+    }
+    if let Some(family) = target_family(target) {
+        set.insert_value("target_family", family);
+        set.flags.insert(family.to_string());
+    }
+    if let Some(pointer_width) = target_pointer_width(target) {
+        set.insert_value("target_pointer_width", pointer_width);
+    }
+    if let Some(endian) = target_endian(target) {
+        set.insert_value("target_endian", endian);
+    }
+    Some(set)
 }
 
 fn target_arch(target: &str) -> Option<&str> {
@@ -3502,6 +3754,76 @@ mod tests {
     }
 
     #[test]
+    fn production_preset_discharges_any_target_cfg_root_hazards_when_one_branch_matches() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let cfg = if cfg!(unix) {
+            "#[cfg(any(windows, unix))]"
+        } else {
+            "#[cfg(any(unix, windows))]"
+        };
+        let report = production_report(vec![target_cfg_root_hazard("app", cfg)]);
+
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            &report
+        ));
+    }
+
+    #[test]
+    fn production_preset_discharges_not_target_cfg_root_hazards_when_branch_is_false() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let cfg = if cfg!(unix) {
+            "#[cfg(not(windows))]"
+        } else {
+            "#[cfg(not(unix))]"
+        };
+        let report = production_report(vec![target_cfg_root_hazard("app", cfg)]);
+
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            &report
+        ));
+    }
+
+    #[test]
+    fn production_preset_discharges_all_feature_and_target_cfg_root_hazards() {
+        let production = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--features",
+            "--cargo-check-arg",
+            "selected",
+            "workspace",
+            "out",
+        ]);
+        let target_flag = if cfg!(unix) { "unix" } else { "windows" };
+        let report = production_report(vec![target_cfg_root_hazard(
+            "app",
+            &format!(r#"#[cfg(all(feature = "selected", {target_flag}))]"#),
+        )]);
+
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            &report
+        ));
+    }
+
+    #[test]
+    fn production_preset_discharges_any_feature_or_target_cfg_root_hazards() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let target_flag = if cfg!(unix) { "unix" } else { "windows" };
+        let report = production_report(vec![target_cfg_root_hazard(
+            "app",
+            &format!(r#"#[cfg(any(feature = "selected", {target_flag}))]"#),
+        )]);
+
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            &report
+        ));
+    }
+
+    #[test]
     fn production_preset_keeps_non_host_cfg_root_hazards_fail_closed() {
         let production = parse_options(["--production", "workspace", "out"]);
         let cfg = if cfg!(unix) {
@@ -3510,6 +3832,28 @@ mod tests {
             "#[cfg(unix)]"
         };
         let report = production_report(vec![target_cfg_root_hazard("app", cfg)]);
+
+        assert!(production_readiness_blocks_validation(&production, &report));
+    }
+
+    #[test]
+    fn production_preset_keeps_negated_custom_cfg_root_hazards_fail_closed() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let report = production_report(vec![target_cfg_root_hazard(
+            "app",
+            "#[cfg(not(custom_platform))]",
+        )]);
+
+        assert!(production_readiness_blocks_validation(&production, &report));
+    }
+
+    #[test]
+    fn production_preset_keeps_negated_unproven_feature_cfg_root_hazards_fail_closed() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let report = production_report(vec![target_cfg_root_hazard(
+            "app",
+            r#"#[cfg(not(feature = "selected"))]"#,
+        )]);
 
         assert!(production_readiness_blocks_validation(&production, &report));
     }

@@ -81,10 +81,12 @@ assets, output safety, or product diagnostics by itself.
   that matrix. Cfg-gated root hazards should carry root, module, source span,
   cfg expression, and Cargo argument hints so a validation matrix planner can
   discharge them intentionally instead of relying on free-text diagnostics. The
-  CLI now discharges the concrete Cargo feature subset when the user validates
-  with matching `--cargo-check-arg --features ...` values or
-  `--cargo-check-arg --all-features`; cfg gates without feature hints remain
-  production-blocking. Retained non-root cfg surfaces also report structured
+  CLI now discharges cfg-gated roots when their `cfg(...)` expression is proven
+  covered by matching `--cargo-check-arg --features ...` values,
+  `--cargo-check-arg --all-features`, and host/explicit-target
+  `rustc --print cfg` output, including recognized `all(...)`, `any(...)`, and
+  `not(...)` combinations; custom cfgs remain production-blocking. Retained
+  non-root cfg surfaces also report structured
   package/module/file/cfg details so corpus and matrix planners can validate the
   selected shape without scraping warning text. The first matrix planner is
   bounded to a concrete Cargo feature union derived from retained cfg details;
