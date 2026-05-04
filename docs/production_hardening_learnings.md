@@ -392,6 +392,14 @@ private serde `deserialize_with` wire DTOs, `skip_serializing_if =
 executable fixtures matters because they are common UniFFI/Litter-adjacent
 shapes and now stay in the fast loop.
 
+The next pass grew the executable set to 64 cases and fixed a production
+reporting false positive: syntactic hazard scanning now mirrors rendered
+private-field pruning for struct surfaces, so a private `Box<dyn Fn()>` field
+that is not present in the output cannot block production readiness. The same
+pass added module-scoped import liveness, private serde alias wire contracts,
+nested callback-store trait-object hazards, auto-trait object casts, and
+qualified `serde_json::json!` macro dependency coverage.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:

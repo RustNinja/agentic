@@ -2239,17 +2239,94 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
 
     for item in &reduced.reachable_items {
         if let Some(record) = project.items.get(item) {
+            let scan_item = item_for_syntactic_hazard_scan(project, reduced, item, &record.item);
             let mut visitor = syntactic_hazard_visitor_for_location(
                 project,
                 &record.package,
                 &record.module_path,
             );
-            visitor.visit_item(&record.item);
+            visitor.visit_item(&scan_item);
             counts.add(visitor.counts);
         }
     }
 
     counts
+}
+
+fn item_for_syntactic_hazard_scan(
+    project: &Project,
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+    item: &Item,
+) -> Item {
+    let Item::Struct(item_struct) = item else {
+        return item.clone();
+    };
+    if reduced
+        .roots
+        .iter()
+        .any(|root| matches!(root, RootId::Item(root_item) if root_item == item_id))
+    {
+        return item.clone();
+    }
+
+    if !matches!(item_struct.fields, syn::Fields::Named(_)) {
+        return item.clone();
+    }
+
+    let mut item_struct = item_struct.clone();
+    let original_struct = item_struct.clone();
+    if let syn::Fields::Named(fields) = &mut item_struct.fields {
+        fields.named = fields
+            .named
+            .iter()
+            .filter(|field| {
+                struct_field_should_scan_hazards(
+                    project,
+                    reduced,
+                    &item_id.package,
+                    &original_struct,
+                    field,
+                )
+            })
+            .cloned()
+            .collect();
+    }
+
+    Item::Struct(item_struct)
+}
+
+fn struct_field_should_scan_hazards(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    item_struct: &syn::ItemStruct,
+    field: &syn::Field,
+) -> bool {
+    if matches!(item_struct.vis, syn::Visibility::Public(_))
+        && matches!(field.vis, syn::Visibility::Public(_))
+    {
+        return true;
+    }
+    if item_struct.generics.type_params().any(|param| {
+        token_stream_mentions_ident(&field.to_token_stream(), &param.ident.to_string())
+    }) {
+        return true;
+    }
+    if field.attrs.iter().any(|attr| {
+        let path = attr.path();
+        !(path.is_ident("cfg")
+            || path.is_ident("allow")
+            || path.is_ident("deny")
+            || path.is_ident("doc")
+            || path.is_ident("deprecated"))
+    }) {
+        return true;
+    }
+    let Some(name) = field.ident.as_ref() else {
+        return true;
+    };
+    reduced_callables_mention_ident(project, reduced, package, &name.to_string())
 }
 
 fn retained_inline_out_dir_macro_hazard_counts(
@@ -2386,6 +2463,21 @@ fn reduced_package_mentions_ident(
     package: &str,
     ident: &str,
 ) -> bool {
+    reduced_callables_mention_ident(project, reduced, package, ident)
+        || reduced.reachable_items.iter().any(|item| {
+            item.package == package
+                && project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_ident(&record.item.to_token_stream(), ident)
+                })
+        })
+}
+
+fn reduced_callables_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
     reduced.reachable.iter().any(|callable| match callable {
         CallableId::Free {
             package: callable_package,
@@ -2400,11 +2492,6 @@ fn reduced_package_mentions_ident(
             token_stream_mentions_ident(&record.item.to_token_stream(), ident)
         }),
         _ => false,
-    }) || reduced.reachable_items.iter().any(|item| {
-        item.package == package
-            && project.items.get(item).is_some_and(|record| {
-                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
-            })
     })
 }
 

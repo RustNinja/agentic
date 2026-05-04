@@ -27,14 +27,22 @@ of planned generic combinations lives in
 `crates/opensource_core/tests/rule_catalog.rs` and is documented in
 `docs/rule_catalog.md`.
 
-## First Seed Rules
+## Covered Rule IDs
+
+This table includes the executable `rule_database.rs` cases plus promoted fast
+fixture and integration fixture coverage. The current standalone
+`rule_database.rs` executable subset is tracked in `docs/slice_coverage_matrix.md`;
+extra covered IDs below identify nearby shapes already exercised outside that
+file.
 
 | Rule | Status | Generic behavior |
 | --- | --- | --- |
 | `import.reexport.grouped.001` | covered | Grouped public reexports prune removed names while keeping live names |
 | `import.reexport.alias_removed.001` | covered | A removed public alias is pruned even when the alias text appears as a local binding |
 | `import.renamed_surface_alias.001` | covered | Renamed local type and trait imports used only by retained struct/impl surfaces keep their resolved target items and prune dead sibling aliases |
+| `import.module_scoped.dead_item_only.001` | covered | Module-local imports used only by pruned dead items are removed even when the same symbol is live in another module |
 | `dyn.owned.registry.001` | covered | Stored `Box<dyn Trait>` and callback aliases are hard production hazards |
+| `dyn.pruned_private_field.001` | covered | Dynamic hazards on private struct fields that are pruned from the rendered slice do not block production readiness |
 | `include.bytes.static.001` | covered | Retained `include_bytes!` assets are copied and dead sibling assets are not |
 | `build.rustc_env.001` | covered | Retained `env!` fed by build script state is production-blocking |
 | `trait.default_method_assoc_const.001` | covered | Receiver calls to trait default methods retain the trait item and the concrete impl associated const/type surface needed to compile |
@@ -70,6 +78,7 @@ of planned generic combinations lives in
 | `serde.flatten_contract_field.001` | covered | Serde contract fields such as `#[serde(flatten)]` stay even when private and not read by live bodies, while unannotated dead private fields are pruned |
 | `serde.flatten_nested_payload.001` | covered | Nested serde-flatten payload structs stay when the retained DTO contract depends on them, while dead nested DTOs prune away |
 | `serde.deserialize_with_private_wire.001` | covered | Private wire DTOs using `#[serde(deserialize_with = "helper")]` retain helper functions, deserializer trait imports, and the private DTO surface used by `serde_json::from_str::<T>` |
+| `serde.alias_private_wire.001` | covered | Private serde wire DTO fields with alias attrs remain as deserialization contract fields even when live code only reads normalized output |
 | `serde.skip_serializing_if_option_path.001` | covered | `#[serde(skip_serializing_if = "Option::is_none")]` fields stay as serialization contract fields without needing a local helper path |
 | `serde.untagged_enum_contract.001` | covered | `#[serde(untagged)]` public enum variants remain intact as data-contract variants while unrelated sibling enums prune away |
 | `manifest.support_path_bundle.001` | covered | External support path dependency bundles rewrite absolute paths to generated relative support paths, copy dependency closure assets, and drop dead bins/examples/tests/benches/fixtures/orphan modules |
@@ -84,10 +93,13 @@ of planned generic combinations lives in
 | `trait.associated_projection.001` | covered | Associated type/const projections retain the live impl and prune dead projection impls |
 | `trait.conversion.try_from_chain.001` | covered | `.try_into()` retains only the matching `TryFrom<Input> for Target` impl, not unrelated conversions for the same target |
 | `dyn.callback.option_arc_trait.001` | covered | Stored `Option<Arc<dyn Trait + Send + Sync>>` callback slots are hard dynamic-dispatch hazards |
+| `dyn.callback.nested_store_trait.001` | covered | Nested callback stores such as `Arc<RwLock<Option<Arc<dyn Trait + Send + Sync>>>>` are hard dynamic-dispatch hazards and keep only the live callback trait |
+| `dyn.auto_trait.cast_keepalive.001` | covered | Explicit casts to `Arc<dyn Send + Sync>` retain the concrete source type while reporting the type-erased surface as a hazard |
 | `dyn.boundary.direct_inputs.001` | covered | Selected `&dyn Trait` and `fn(...)` callback inputs stay as feedback-dischargeable API boundary warnings |
 | `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
 | `include.source.inline_fallback_module.001` | covered | Fallback-retained inline modules run the full syntactic hazard scan, so plain source includes are reported even when the module was retained by path mention |
 | `macro.external_crate_alias_body.001` | covered | Dependency aliases used only inside retained macro bodies keep the aliased dependency edge |
+| `macro.serde_json.qualified_json.001` | covered | Fully qualified `serde_json::json!` macro invocations retain the dependency without keeping dead imported `json` uses |
 | `include.str.inline_module_tree.001` | covered | Inline module script bundles copy only live `include_str!` assets and prune dead sibling assets |
 | `manifest.support_library_module_closure.001` | covered | No-build support path packages copy only the library external-module graph plus live static assets, skipping `#[cfg(test)]` external modules and orphan Rust files |
 | `manifest.support_build_script_hazard_parity.001` | covered | Copied support path packages report build-script, `OUT_DIR` source include, compile-time env, nonliteral include, absolute include, and package-external include hazards with generated support file details |

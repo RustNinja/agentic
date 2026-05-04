@@ -77,6 +77,28 @@ fn retains_renamed_local_type_and_trait_imports_used_only_by_surfaces() {
 }
 
 #[test]
+fn prunes_module_scoped_imports_used_only_by_dead_items() {
+    let workspace = temp_path("rule-module-import-liveness-workspace");
+    let output = temp_path("rule-module-import-liveness-output");
+    let target_dir = temp_path("rule-module-import-liveness-target");
+    write_module_scoped_import_liveness_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("module import liveness rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("module_import_liveness_rule/src/lib.rs"));
+    assert_eq!(lib.matches("use serde::Serialize").count(), 1, "{lib}");
+    assert!(lib.contains("#[derive(Serialize)]"), "{lib}");
+    assert!(lib.contains("pub fn live_client"), "{lib}");
+    assert!(!lib.contains("dead_client"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_trait_default_methods_and_impl_associated_consts() {
     let workspace = temp_path("rule-default-trait-workspace");
     let output = temp_path("rule-default-trait-output");
@@ -844,6 +866,29 @@ fn retains_serde_deserialize_with_private_wire_helpers() {
 }
 
 #[test]
+fn retains_serde_alias_private_wire_contract_fields() {
+    let workspace = temp_path("rule-serde-alias-wire-workspace");
+    let output = temp_path("rule-serde-alias-wire-output");
+    let target_dir = temp_path("rule-serde-alias-wire-target");
+    write_serde_alias_wire_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde alias wire rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_alias_wire_rule/src/lib.rs"));
+    assert!(lib.contains("struct PairPayload"), "{lib}");
+    assert!(lib.contains("alias = \"hostname\""), "{lib}");
+    assert!(lib.contains("alias = \"display_name\""), "{lib}");
+    assert!(lib.contains("host_name: Option<String>"), "{lib}");
+    assert!(!lib.contains("struct DeadPayload"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_serde_skip_serializing_if_contract_fields() {
     let workspace = temp_path("rule-serde-skip-serializing-workspace");
     let output = temp_path("rule-serde-skip-serializing-output");
@@ -1012,6 +1057,28 @@ fn reports_owned_dynamic_dispatch_surfaces_inside_retained_structs() {
     let lib = read(output.join("owned_dyn_rule/src/lib.rs"));
     assert!(lib.contains("Box<dyn Worker>"), "{lib}");
     assert!(lib.contains("pub type Callback = fn(u32) -> u32"), "{lib}");
+}
+
+#[test]
+fn ignores_dynamic_hazards_on_pruned_private_fields() {
+    let workspace = temp_path("rule-pruned-private-dyn-field-workspace");
+    let output = temp_path("rule-pruned-private-dyn-field-output");
+    let target_dir = temp_path("rule-pruned-private-dyn-field-target");
+    write_pruned_private_dyn_field_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("pruned private dyn field rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("pruned_private_dyn_field_rule/src/lib.rs"));
+    assert!(lib.contains("pub(crate) struct Api"), "{lib}");
+    assert!(lib.contains("pub id: u32"), "{lib}");
+    assert!(!lib.contains("callback"), "{lib}");
+    assert!(!lib.contains("dyn Fn"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
 }
 
 #[test]
@@ -1327,6 +1394,68 @@ fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
 }
 
 #[test]
+fn reports_nested_callback_store_trait_objects_as_dynamic_hazards() {
+    let workspace = temp_path("rule-nested-callback-store-workspace");
+    let output = temp_path("rule-nested-callback-store-output");
+    write_nested_callback_store_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("nested callback store rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    let trait_object = report
+        .production
+        .hazards
+        .iter()
+        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
+        .expect("nested callback store should be a hard production hazard");
+    assert!(trait_object.details.iter().any(|detail| {
+        detail.subject.contains("dyn ReconnectCallback")
+            && detail.subject.contains("Send")
+            && detail.subject.contains("Sync")
+    }));
+
+    let lib = read(output.join("nested_callback_store_rule/src/lib.rs"));
+    assert!(
+        lib.contains("Arc<RwLock<Option<Arc<dyn ReconnectCallback + Send + Sync>>>>"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadCallback"), "{lib}");
+}
+
+#[test]
+fn reports_trait_object_casts_while_retaining_concrete_sources() {
+    let workspace = temp_path("rule-trait-object-cast-workspace");
+    let output = temp_path("rule-trait-object-cast-output");
+    let target_dir = temp_path("rule-trait-object-cast-target");
+    write_trait_object_cast_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("trait object cast rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "trait_object_surfaces"
+            && hazard
+                .details
+                .iter()
+                .any(|detail| detail.subject.contains("dyn Send + Sync"))
+    }));
+    let lib = read(output.join("trait_object_cast_rule/src/lib.rs"));
+    assert!(lib.contains("pub struct Session"), "{lib}");
+    assert!(lib.contains("Session::new()"), "{lib}");
+    assert!(lib.contains("Arc<dyn Send + Sync>"), "{lib}");
+    assert!(!lib.contains("DeadSession"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_direct_callback_boundaries_as_feedback_warnings() {
     let workspace = temp_path("rule-direct-callback-boundary-workspace");
     let output = temp_path("rule-direct-callback-boundary-output");
@@ -1431,6 +1560,27 @@ fn retains_dependency_aliases_used_only_inside_macro_bodies() {
     assert!(support.contains("pub fn make_value"), "{support}");
     assert!(!support.contains("dead_value"), "{support}");
     assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
+fn retains_qualified_json_macro_dependency_without_dead_imports() {
+    let workspace = temp_path("rule-qualified-json-macro-workspace");
+    let output = temp_path("rule-qualified-json-macro-output");
+    let target_dir = temp_path("rule-qualified-json-macro-target");
+    write_qualified_json_macro_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("qualified json macro rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("qualified_json_macro_rule/src/lib.rs"));
+    assert!(lib.contains("serde_json::json!"), "{lib}");
+    assert!(!lib.contains("use serde_json::json"), "{lib}");
+    assert!(!lib.contains("dead_payload"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
 }
 
 #[test]
@@ -1548,6 +1698,45 @@ pub fn selected() -> ApiSurface {
 
 pub fn dead_api() -> DeadAlias {
     DeadAlias
+}
+"#,
+    );
+}
+
+fn write_module_scoped_import_liveness_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "module_import_liveness_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+"#,
+        r#"use opensourced::opensourced;
+
+mod client {
+    use serde::Serialize;
+
+    pub fn live_client() -> u32 {
+        7
+    }
+
+    pub fn dead_client<T: Serialize>(value: &T) -> usize {
+        core::mem::size_of_val(value)
+    }
+}
+
+mod wire {
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    pub struct LiveWire {
+        pub id: u32,
+    }
+}
+
+#[opensourced]
+pub fn selected() -> wire::LiveWire {
+    wire::LiveWire {
+        id: client::live_client(),
+    }
 }
 "#,
     );
@@ -2053,6 +2242,32 @@ pub fn selected(callback: Callback) -> Registry {
     );
 }
 
+fn write_pruned_private_dyn_field_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "pruned_private_dyn_field_rule",
+        r#"use opensourced::opensourced;
+
+pub(crate) struct Api {
+    pub id: u32,
+    callback: Box<dyn Fn() + Send + Sync>,
+}
+
+pub(crate) fn build() -> Api {
+    Api {
+        id: 7,
+        callback: Box::new(|| {}),
+    }
+}
+
+#[opensourced]
+pub(crate) fn selected(api: &Api) -> u32 {
+    api.id
+}
+"#,
+    );
+}
+
 fn write_include_bytes_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -2481,6 +2696,70 @@ pub fn selected(callback: Option<Arc<dyn Callback + Send + Sync>>) -> Manager {
     );
 }
 
+fn write_nested_callback_store_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "nested_callback_store_rule",
+        r#"use opensourced::opensourced;
+use std::sync::{Arc, RwLock};
+
+pub trait ReconnectCallback {
+    fn reconnect(&self, attempt: u32);
+}
+
+pub trait DeadCallback {
+    fn reconnect(&self);
+}
+
+pub struct ReconnectStore {
+    callback: Arc<RwLock<Option<Arc<dyn ReconnectCallback + Send + Sync>>>>,
+}
+
+impl ReconnectStore {
+    pub fn new() -> Self {
+        Self {
+            callback: Arc::new(RwLock::new(None)),
+        }
+    }
+
+    pub fn set(&self, callback: Arc<dyn ReconnectCallback + Send + Sync>) {
+        *self.callback.write().unwrap() = Some(callback);
+    }
+}
+
+#[opensourced]
+pub fn selected() -> ReconnectStore {
+    ReconnectStore::new()
+}
+"#,
+    );
+}
+
+fn write_trait_object_cast_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "trait_object_cast_rule",
+        r#"use opensourced::opensourced;
+use std::sync::Arc;
+
+pub struct Session;
+
+impl Session {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+pub struct DeadSession;
+
+#[opensourced]
+pub fn selected() -> Option<Arc<dyn Send + Sync>> {
+    Some(Arc::new(Session::new()) as Arc<dyn Send + Sync>)
+}
+"#,
+    );
+}
+
 fn write_direct_callback_boundary_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -2609,6 +2888,32 @@ edition = "2021"
 
 pub fn dead_value() -> u32 {
     99
+}
+"#,
+    );
+}
+
+fn write_qualified_json_macro_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "qualified_json_macro_rule",
+        r#"serde_json = "1"
+"#,
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> serde_json::Value {
+    serde_json::json!({
+        "kind": "live",
+        "value": 7,
+    })
+}
+
+pub fn dead_payload() -> serde_json::Value {
+    use serde_json::json;
+    json!({
+        "kind": "dead",
+    })
 }
 "#,
     );
@@ -3306,6 +3611,39 @@ pub fn selected(input: &str) -> usize {
         .and_then(|raw| raw.value)
         .unwrap_or_default()
         .len()
+}
+"#,
+    );
+}
+
+fn write_serde_alias_wire_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_alias_wire_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"
+use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct PairPayload {
+    id: String,
+    #[serde(default, alias = "hostname", alias = "display_name")]
+    host_name: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct DeadPayload {
+    dead: String,
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> Option<String> {
+    serde_json::from_str::<PairPayload>(input)
+        .ok()
+        .and_then(|payload| payload.host_name)
 }
 "#,
     );
