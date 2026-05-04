@@ -126,6 +126,12 @@ Use repeated `--cargo-check-arg <arg>` flags to pass feature or target matrix
 arguments through to baseline and generated `cargo check` runs, for example
 `--cargo-check-arg --all-features` or `--cargo-check-arg --target
 --cargo-check-arg wasm32-unknown-unknown`.
+In `--production` mode, selected roots behind concrete Cargo feature cfg gates
+remain reported in `slice-report.json`; when their structured
+`suggested_cargo_args` are covered by the supplied `--cargo-check-arg` values
+or by `--all-features`, the production gate downgrades them to compiler
+feedback instead of failing before validation. Unsupported cfg forms and other
+error hazards remain fail-closed.
 Feedback reports classify unresolved compiler diagnostics into widening
 candidates and production hazards, so missing paths, items, methods, crates,
 module files, timeouts, and manifest-shape failures can be triaged without

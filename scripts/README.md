@@ -48,7 +48,11 @@ their package root. They copy retained non-workspace path packages into
 closures stay self-contained. They also fail production on file includes with
 unresolved env paths, absolute paths, external paths, or `OUT_DIR` generated
 assets, while retained macros and non-root cfg surfaces are preserved and
-require compiler feedback. Use `--deny-warnings` for production gates that
+require compiler feedback. Selected roots behind concrete Cargo feature cfg
+gates are reported with structured details and can proceed to feedback when the
+same corpus run passes matching `--features` values or `--all-features`; cfg
+gates without feature hints still fail production before feedback. Use
+`--deny-warnings` for production gates that
 require warning-free generated feedback. Each corpus row includes
 the slicer's authoritative validation verdict, production-readiness status,
 production hazard codes and structured hazard details, compiler feedback

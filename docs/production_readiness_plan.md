@@ -73,7 +73,11 @@ assets, output safety, or product diagnostics by itself.
   behind non-test cfg gates still fail closed until validation explicitly covers
   that matrix. Cfg-gated root hazards should carry root, module, source span,
   cfg expression, and Cargo argument hints so a validation matrix planner can
-  discharge them intentionally instead of relying on free-text diagnostics.
+  discharge them intentionally instead of relying on free-text diagnostics. The
+  CLI now discharges the concrete Cargo feature subset when the user validates
+  with matching `--cargo-check-arg --features ...` values or
+  `--cargo-check-arg --all-features`; cfg gates without feature hints remain
+  production-blocking.
 - Dependency aliases, workspace dependencies, optional dependency features, and
   target-specific dependencies need Cargo's resolver model.
 - Retained direct or target-specific path dependencies outside the workspace are

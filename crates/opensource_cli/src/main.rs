@@ -185,7 +185,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &report.production,
         "before compiler feedback",
     );
-    if production_readiness_blocks_validation(&options, &report.production.status) {
+    if production_readiness_blocks_validation(&options, &report.production) {
         let reason =
             "production readiness reported error hazards before compiler feedback".to_string();
         finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
@@ -1046,16 +1046,43 @@ fn record_production_readiness_gate(
     production: &opensource_core::ProductionReadinessReport,
     phase: &str,
 ) {
-    validation.gates.push(ValidationGateReport {
-        name: "production_readiness".to_string(),
-        status: production.status.clone(),
-        reason: format!(
+    let status = production_readiness_gate_status(options, production);
+    let error_count = production
+        .hazards
+        .iter()
+        .filter(|hazard| hazard.severity == "error")
+        .count();
+    let warning_count = production
+        .hazards
+        .iter()
+        .filter(|hazard| hazard.severity == "warning")
+        .count();
+    let discharged_error_count = production
+        .hazards
+        .iter()
+        .filter(|hazard| {
+            hazard.severity == "error" && production_error_hazard_is_discharged(options, hazard)
+        })
+        .count();
+    let reason = if discharged_error_count > 0 {
+        format!(
+            "{} production hazard(s) reported {phase}; {} feature cfg error hazard(s) covered by validation cargo arguments",
+            production.hazards.len(),
+            discharged_error_count
+        )
+    } else {
+        format!(
             "{} production hazard(s) reported {phase}",
             production.hazards.len()
-        ),
+        )
+    };
+    validation.gates.push(ValidationGateReport {
+        name: "production_readiness".to_string(),
+        status,
+        reason,
         report_path: slice_report_path(options),
-        error_count: None,
-        warning_count: None,
+        error_count: Some(error_count),
+        warning_count: Some(warning_count),
         semantic_warning_hazards: None,
     });
 }
@@ -1125,7 +1152,7 @@ fn try_widen_from_feedback(
         &widened_report.production,
         "after compiler feedback widening",
     );
-    if production_readiness_blocks_validation(options, &widened_report.production.status) {
+    if production_readiness_blocks_validation(options, &widened_report.production) {
         return Err(
             "production readiness reported error hazards after compiler feedback widening".into(),
         );
@@ -1674,8 +1701,75 @@ fn feedback_target_dir(options: &CliOptions) -> PathBuf {
         .unwrap_or_else(|| options.output_root.join("target-feedback"))
 }
 
-fn production_readiness_blocks_validation(options: &CliOptions, status: &str) -> bool {
-    options.production_preset && status == "hazards_detected"
+fn production_readiness_gate_status(
+    options: &CliOptions,
+    production: &opensource_core::ProductionReadinessReport,
+) -> String {
+    if production.status == "hazards_detected"
+        && options.production_preset
+        && production_has_error_hazards(production)
+        && !production_readiness_blocks_validation(options, production)
+    {
+        "requires_feedback".to_string()
+    } else {
+        production.status.clone()
+    }
+}
+
+fn production_has_error_hazards(production: &opensource_core::ProductionReadinessReport) -> bool {
+    production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.severity == "error")
+}
+
+fn production_readiness_blocks_validation(
+    options: &CliOptions,
+    production: &opensource_core::ProductionReadinessReport,
+) -> bool {
+    options.production_preset
+        && production.status == "hazards_detected"
+        && production.hazards.iter().any(|hazard| {
+            hazard.severity == "error" && !production_error_hazard_is_discharged(options, hazard)
+        })
+}
+
+fn production_error_hazard_is_discharged(
+    options: &CliOptions,
+    hazard: &opensource_core::ProductionHazardReport,
+) -> bool {
+    hazard.code == "cfg_gated_roots"
+        && !hazard.details.is_empty()
+        && hazard
+            .details
+            .iter()
+            .all(|detail| cfg_gate_detail_is_covered_by_args(options, detail))
+}
+
+fn cfg_gate_detail_is_covered_by_args(
+    options: &CliOptions,
+    detail: &opensource_core::ProductionHazardDetail,
+) -> bool {
+    let required_features = enabled_cargo_features(&detail.suggested_cargo_args);
+    if required_features.is_empty() {
+        return false;
+    }
+    if options
+        .cargo_check_args
+        .iter()
+        .any(|arg| arg == "--all-features")
+    {
+        return true;
+    }
+
+    let enabled_features = enabled_cargo_features(&options.cargo_check_args);
+    let package = detail.package.as_deref();
+    required_features.iter().all(|feature| {
+        enabled_features.contains(feature)
+            || package
+                .map(|package| enabled_features.contains(&format!("{package}/{feature}")))
+                .unwrap_or(false)
+    })
 }
 
 fn record_final_production_readiness(options: &CliOptions, validation: &mut ValidationReport) {
@@ -2190,10 +2284,10 @@ mod tests {
         baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, parse_args_from,
         production_readiness_blocks_validation, record_final_production_readiness,
-        refresh_generated_lockfile_for_locked_validation, run_plain_check_gate,
-        semantic_hazard_warning_count, slice_report_path, try_widen_from_feedback,
-        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
-        ValidationGateReport, ValidationReport,
+        record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
+        run_plain_check_gate, semantic_hazard_warning_count, slice_report_path,
+        try_widen_from_feedback, uncovered_validation_targets, validation_report_path,
+        FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -2563,18 +2657,107 @@ mod tests {
     fn production_preset_fails_closed_on_error_readiness_hazards() {
         let production = parse_options(["--production", "workspace", "out"]);
         let feedback_only = parse_options(["--feedback", "workspace", "out"]);
+        let error_hazard = production_report(vec![production_hazard(
+            "function_pointer_surfaces",
+            "error",
+        )]);
+        let feedback_hazard = production_report(vec![production_hazard(
+            "custom_macro_invocations",
+            "warning",
+        )]);
 
         assert!(production_readiness_blocks_validation(
             &production,
-            "hazards_detected"
+            &error_hazard
         ));
         assert!(!production_readiness_blocks_validation(
             &production,
-            "requires_feedback"
+            &feedback_hazard
         ));
         assert!(!production_readiness_blocks_validation(
             &feedback_only,
-            "hazards_detected"
+            &error_hazard
+        ));
+    }
+
+    #[test]
+    fn production_preset_discharges_feature_cfg_root_hazards_when_args_cover_them() {
+        let production = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--features",
+            "--cargo-check-arg",
+            "selected",
+            "workspace",
+            "out",
+        ]);
+        let report = production_report(vec![feature_cfg_root_hazard("app", "selected")]);
+
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            &report
+        ));
+
+        let mut validation = ValidationReport::new(&production);
+        record_production_readiness_gate(
+            &production,
+            &mut validation,
+            &report,
+            "before compiler feedback",
+        );
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "production_readiness")
+            .expect("production readiness gate should be recorded");
+        assert_eq!(gate.status, "requires_feedback");
+        assert_eq!(gate.error_count, Some(1));
+        assert!(gate.reason.contains("feature cfg error hazard(s) covered"));
+    }
+
+    #[test]
+    fn production_preset_discharges_feature_cfg_root_hazards_with_all_features() {
+        let production = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--all-features",
+            "workspace",
+            "out",
+        ]);
+        let report = production_report(vec![feature_cfg_root_hazard("app", "selected")]);
+
+        assert!(!production_readiness_blocks_validation(
+            &production,
+            &report
+        ));
+    }
+
+    #[test]
+    fn production_preset_keeps_uncovered_cfg_root_hazards_fail_closed() {
+        let production = parse_options(["--production", "workspace", "out"]);
+        let missing_args = production_report(vec![feature_cfg_root_hazard("app", "selected")]);
+        let unsupported_cfg = production_report(vec![opensource_core::ProductionHazardReport {
+            code: "cfg_gated_roots".to_string(),
+            severity: "error".to_string(),
+            message: "root is cfg gated".to_string(),
+            details: vec![opensource_core::ProductionHazardDetail {
+                subject: "app::entry".to_string(),
+                package: Some("app".to_string()),
+                module_path: None,
+                file: None,
+                start_line: None,
+                cfg: Some("#[cfg(unix)]".to_string()),
+                suggested_cargo_args: Vec::new(),
+            }],
+        }]);
+
+        assert!(production_readiness_blocks_validation(
+            &production,
+            &missing_args
+        ));
+        assert!(production_readiness_blocks_validation(
+            &production,
+            &unsupported_cfg
         ));
     }
 
@@ -3077,6 +3260,51 @@ pub fn helper() -> usize {
             diagnostics,
             widening: FeedbackWideningReport::default(),
             stderr: String::new(),
+        }
+    }
+
+    fn production_report(
+        hazards: Vec<opensource_core::ProductionHazardReport>,
+    ) -> opensource_core::ProductionReadinessReport {
+        let status = if hazards.iter().any(|hazard| hazard.severity == "error") {
+            "hazards_detected"
+        } else if hazards.is_empty() {
+            "ready"
+        } else {
+            "requires_feedback"
+        };
+        opensource_core::ProductionReadinessReport {
+            status: status.to_string(),
+            hazards,
+        }
+    }
+
+    fn production_hazard(code: &str, severity: &str) -> opensource_core::ProductionHazardReport {
+        opensource_core::ProductionHazardReport {
+            code: code.to_string(),
+            severity: severity.to_string(),
+            message: format!("{code} hazard"),
+            details: Vec::new(),
+        }
+    }
+
+    fn feature_cfg_root_hazard(
+        package: &str,
+        feature: &str,
+    ) -> opensource_core::ProductionHazardReport {
+        opensource_core::ProductionHazardReport {
+            code: "cfg_gated_roots".to_string(),
+            severity: "error".to_string(),
+            message: "root is cfg gated".to_string(),
+            details: vec![opensource_core::ProductionHazardDetail {
+                subject: format!("{package}::entry"),
+                package: Some(package.to_string()),
+                module_path: None,
+                file: None,
+                start_line: None,
+                cfg: Some(format!("#[cfg(feature = \"{feature}\")]")),
+                suggested_cargo_args: vec!["--features".to_string(), feature.to_string()],
+            }],
         }
     }
 
