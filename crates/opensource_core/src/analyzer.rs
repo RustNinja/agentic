@@ -287,6 +287,23 @@ mod rust_analyzer {
             proc_macro_mode: ProcMacroExpansionMode,
             feedback_mode: RaFeedbackMode,
         ) -> Result<Self, Box<dyn std::error::Error>> {
+            if proc_macro_mode == ProcMacroExpansionMode::Enabled
+                && !proc_macro_dependency_loading_enabled()
+            {
+                let mut provider = Self::load_once(
+                    workspace_root,
+                    project,
+                    requested_mode,
+                    ProcMacroExpansionMode::Disabled,
+                    feedback_mode,
+                )?;
+                provider.report.notes.push(
+                    "proc macro expansion requested, but dependency artifact discovery is opt-in; skipped proc-macro load in bounded default mode and continued with HIR semantics"
+                        .to_string(),
+                );
+                return Ok(provider);
+            }
+
             match Self::load_once(
                 workspace_root,
                 project,
@@ -321,7 +338,7 @@ mod rust_analyzer {
         ) -> Result<Self, Box<dyn std::error::Error>> {
             let load_dependencies_for_proc_macros = proc_macro_mode
                 == ProcMacroExpansionMode::Enabled
-                && env_flag_is_enabled("OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS");
+                && proc_macro_dependency_loading_enabled();
             let cargo_config = CargoConfig {
                 set_test: true,
                 no_deps: !load_dependencies_for_proc_macros,
@@ -1434,6 +1451,10 @@ mod rust_analyzer {
             .unwrap_or(default)
     }
 
+    fn proc_macro_dependency_loading_enabled() -> bool {
+        env_flag_is_enabled("OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS")
+    }
+
     fn env_flag_is_enabled(name: &str) -> bool {
         std::env::var(name)
             .map(|value| {
@@ -1524,6 +1545,51 @@ mod tests {
         assert!(semantic.queried_paths >= semantic.resolved_paths);
         assert!(report.semantic_hints.total_edges() > 0);
         assert!(!report.semantic_hints.callable_edges.is_empty());
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
+    fn ra_hir_proc_macro_mode_skips_dependency_artifacts_by_default() {
+        if proc_macro_dependency_loading_enabled_for_test() {
+            return;
+        }
+
+        let workspace_root = workspace_root();
+        let workspace = crate::manifest::load_workspace(&workspace_root).unwrap();
+        let project = crate::parse::parse_workspace(workspace).unwrap();
+        let report = load_report_for_project(
+            &workspace_root,
+            AnalyzerMode::RustAnalyzerHirProcMacros,
+            &project,
+        )
+        .unwrap();
+
+        assert_eq!(report.mode, AnalyzerMode::RustAnalyzerHirProcMacros);
+        assert!(report.loaded);
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| { note.contains("skipped proc-macro load in bounded default mode") }));
+        assert!(
+            !report
+                .notes
+                .iter()
+                .any(|note| note.contains("workspace load panicked")),
+            "bounded default mode should not attempt the known incompatible proc-macro load path: {:?}",
+            report.notes
+        );
+    }
+
+    #[cfg(feature = "ra-hir")]
+    fn proc_macro_dependency_loading_enabled_for_test() -> bool {
+        std::env::var("OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS")
+            .map(|value| {
+                matches!(
+                    value.trim().to_ascii_lowercase().as_str(),
+                    "1" | "true" | "yes" | "on"
+                )
+            })
+            .unwrap_or(false)
     }
 
     fn workspace_root() -> PathBuf {

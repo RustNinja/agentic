@@ -71,6 +71,14 @@ The main missing RA work is deeper macro-expanded inventory, build-script
 generated source mapping, cfg-active module inventory, and rustc-equivalent
 trait/dynamic dispatch resolution.
 
+Production proc-macro mode is intentionally two-tiered. The default
+`ra-hir-proc-macros` analyzer keeps dependency artifacts excluded, so it now
+skips the proc-macro/build-script output load instead of first attempting a
+rust-analyzer configuration that can panic when dependency artifacts are absent.
+Set `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only for workspaces that can afford
+full Cargo artifact discovery; that path can reduce unresolved RA queries on
+small fixtures, but it was too expensive for pinned Litter runs.
+
 ## Macro Lessons
 
 Retained macro-bearing items must carry their macro contract:

@@ -29,10 +29,11 @@ base reducer and rustc feedback/repair as the production gate. The default
 `opensource_cli` feature set enables `ra-hir`, and the CLI defaults to
 `--analyzer ra-hir`; users can still pass `--analyzer syn` or build with
 `--no-default-features` for the fast syntactic fallback. The `--production`
-preset now defaults to `--analyzer ra-hir-proc-macros`, which asks
-rust-analyzer to run build-script output discovery and use the sysroot
-proc-macro server before collecting HIR semantics. The fast `ra-hir` path still
-keeps proc macros disabled and excludes dependency crates from the HIR load.
+preset now defaults to `--analyzer ra-hir-proc-macros`, but the bounded default
+keeps dependency artifacts excluded and therefore skips the proc-macro load
+request instead of attempting an incompatible rust-analyzer configuration. The
+fast `ra-hir` path also keeps proc macros disabled and excludes dependency
+crates from the HIR load.
 The `codex/slice-ra-feedback` proof-of-concept adds `--analyzer ra-feedback`,
 which keeps the bounded HIR inventory but also asks rust-analyzer outgoing call
 hierarchy for selected-root and syntactic-retained owner files, records those
@@ -41,7 +42,9 @@ existing `syn` renderer prune items outside the retained set.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that
-heavier analyzer pass. If rust-analyzer proc-macro loading panics or the active
+heavier analyzer pass. With that opt-in enabled, rust-analyzer runs build-script
+output discovery and requests the sysroot proc-macro server before collecting
+HIR semantics. If rust-analyzer proc-macro loading panics or the active
 toolchain does not provide a proc-macro server, the analyzer reports that
 expansion is not active and continues with bounded HIR. Both rust-analyzer paths
 map exact project-local method/path resolutions into generic `CallableId` /
