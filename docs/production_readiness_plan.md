@@ -43,6 +43,9 @@ assets, output safety, or product diagnostics by itself.
 
 - Compile success can still be semantically wrong. The Litter const-pattern
   failure showed that a slice can build while changing behavior.
+- Dynamic dispatch and function-pointer callback surfaces can also compile
+  while hiding concrete call edges; they must fail closed until semantic
+  resolution proves the retained implementation set.
 - Unknown macros should not be pruned silently. Either retain bounded source,
   query a semantic oracle, or fail with an unsupported-construct report.
 - Retained custom derives, custom attributes, and non-builtin macro invocations

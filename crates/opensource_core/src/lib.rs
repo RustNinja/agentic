@@ -1037,6 +1037,26 @@ fn add_syntactic_production_hazards(
             ),
         ));
     }
+    if counts.function_pointer_surfaces > 0 {
+        hazards.push(production_hazard(
+            "function_pointer_surfaces",
+            "error",
+            format!(
+                "{} retained function pointer type surface(s) may hide callback edges outside the static call graph",
+                counts.function_pointer_surfaces
+            ),
+        ));
+    }
+    if counts.trait_object_surfaces > 0 {
+        hazards.push(production_hazard(
+            "trait_object_surfaces",
+            "error",
+            format!(
+                "{} retained trait object surface(s) may hide dynamic dispatch edges outside the static call graph",
+                counts.trait_object_surfaces
+            ),
+        ));
+    }
     if counts.conditional_compilation_attrs > 0 {
         hazards.push(production_hazard(
             "conditional_compilation_attrs",
@@ -1087,6 +1107,8 @@ struct SyntacticHazardCounts {
     custom_attribute_macros: usize,
     custom_derive_macros: usize,
     custom_macro_invocations: usize,
+    function_pointer_surfaces: usize,
+    trait_object_surfaces: usize,
     conditional_compilation_attrs: usize,
 }
 
@@ -1101,6 +1123,8 @@ impl SyntacticHazardCounts {
         self.custom_attribute_macros += other.custom_attribute_macros;
         self.custom_derive_macros += other.custom_derive_macros;
         self.custom_macro_invocations += other.custom_macro_invocations;
+        self.function_pointer_surfaces += other.function_pointer_surfaces;
+        self.trait_object_surfaces += other.trait_object_surfaces;
         self.conditional_compilation_attrs += other.conditional_compilation_attrs;
     }
 }
@@ -1277,6 +1301,16 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
         }
 
         syn::visit::visit_macro(self, mac);
+    }
+
+    fn visit_type_bare_fn(&mut self, bare_fn: &'ast syn::TypeBareFn) {
+        self.counts.function_pointer_surfaces += 1;
+        syn::visit::visit_type_bare_fn(self, bare_fn);
+    }
+
+    fn visit_type_trait_object(&mut self, trait_object: &'ast syn::TypeTraitObject) {
+        self.counts.trait_object_surfaces += 1;
+        syn::visit::visit_type_trait_object(self, trait_object);
     }
 }
 
@@ -2207,6 +2241,61 @@ impl Worker {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "syntactic_method_fallbacks"));
+    }
+
+    #[test]
+    fn reports_function_pointer_and_trait_object_production_hazards() {
+        let root = temp_output("dynamic-dispatch-hazard-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub type Callback = fn() -> usize;
+
+pub trait Worker {
+    fn run(&self) -> usize;
+}
+
+pub struct Real;
+
+impl Worker for Real {
+    fn run(&self) -> usize {
+        7
+    }
+}
+
+#[opensourced]
+pub fn entry(callback: Callback) -> (Callback, Box<dyn Worker>) {
+    (callback, Box::new(Real))
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("dynamic-dispatch-hazard-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "function_pointer_surfaces" && hazard.severity == "error"
+        }));
+        assert!(report.production.hazards.iter().any(|hazard| {
+            hazard.code == "trait_object_surfaces" && hazard.severity == "error"
+        }));
+        assert_eq!(report.production.status, "hazards_detected");
     }
 
     #[test]

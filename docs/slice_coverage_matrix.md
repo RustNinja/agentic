@@ -20,6 +20,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Trait definitions | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs` | Trait items retained when trait impl methods are reachable |
 | Trait impl methods | root fixture, `trait_ufcs.rs`, `uniffi_mobile.rs`, `component_matrix.rs`, `manifest_hardening.rs` | Receiver calls, explicit `<Type as Trait>::method`, `Trait::method(&receiver, ...)`, format-only `Display`, and `to_string()`-required `Display` impls |
 | Trait impl peers | `component_matrix.rs` | Required peer methods and associated type/const items are retained so trait impls compile |
+| Dynamic dispatch boundaries | core production-readiness tests | Retained `dyn Trait` and `fn(...)` function pointer surfaces are production-blocking until semantic analysis can prove concrete callback/dispatch edges |
 | Associated types/consts | `component_matrix.rs` | Associated type and associated const dependencies are followed from retained impls |
 | External trait imports | `manifest_hardening.rs` | Extension traits such as `tokio::io::AsyncReadExt`, private std traits such as `std::io::Write`, and trait-method imports without an `Ext` suffix such as `base64::Engine` are retained |
 | External modules | `module_reexports.rs`, `component_matrix.rs` | `mod file;`, `mod/name/mod.rs`, nested modules, and empty dead module pruning |
@@ -60,7 +61,7 @@ These are tracked limitations, not silently claimed support:
 | Full rustc name resolution | The reducer is syntactic and does not replace rustc or rust-analyzer name resolution |
 | Macro-expanded dependencies | The slicer does not run macro expansion; retained custom derives, custom attributes, module-boundary custom attributes, and non-builtin macro invocations are production-blocking until an expansion-aware analyzer is available |
 | Generic trait receiver inference | Calls through generic bounds such as `value.trait_method()` are not fully resolved without a concrete receiver type |
-| Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed |
+| Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed; retained `fn(...)` and `dyn Trait` surfaces are production-blocking |
 | Build scripts and `include!` source | `build.rs` and referenced non-Rust assets are copied; generated Rust files under `OUT_DIR` and any retained `include!` Rust source are not semantically modeled, so they are production-blocking hazards |
 | Feature/platform cfg matrices | Only `#[cfg(test)]` is pruned as test-only; broader feature/platform matrix evaluation is conservative and retained non-test cfg roots/surfaces are production-blocking until validation proves the exact matrix |
 | External crate pruning | External dependencies are pruned when their crate alias is absent from retained source tokens; full rustc-level unused import analysis is not implemented |
