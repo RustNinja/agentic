@@ -202,7 +202,8 @@ pub fn generate_with_analyzer_feedback(
     reachable_items.sort();
     let targets = target_report(&project, &packages);
     let source_map = source_map_report(&project, &reduced);
-    let production = production_readiness_report(&analyzer, &project, &reduced);
+    let production =
+        production_readiness_report(&analyzer, &project, &reduced, &options.output_root);
 
     Ok(GenerateReport {
         analyzer,
@@ -689,9 +690,11 @@ fn production_readiness_report(
     analyzer: &AnalyzerReport,
     project: &Project,
     reduced: &ReducedProject,
+    output_root: &Path,
 ) -> ProductionReadinessReport {
     let mut hazards = Vec::new();
     add_workspace_production_hazards(project, reduced, &mut hazards);
+    add_generated_support_package_production_hazards(output_root, &mut hazards);
     add_cfg_gated_root_production_hazards(project, reduced, &mut hazards);
     add_syntactic_production_hazards(project, reduced, &mut hazards);
     add_reduction_evidence_production_hazards(reduced, &mut hazards);
@@ -1025,6 +1028,283 @@ fn add_workspace_production_hazards(
                     .join(", ")
             ),
             retained_workspace_patch_path_details,
+        ));
+    }
+}
+
+fn add_generated_support_package_production_hazards(
+    output_root: &Path,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    let support_root = output_root.join("support");
+    let Ok(support_packages) = generated_support_packages(&support_root) else {
+        return;
+    };
+    if support_packages.is_empty() {
+        return;
+    }
+
+    let retained_build_script_details = support_packages
+        .iter()
+        .filter_map(generated_support_build_script_detail)
+        .collect::<Vec<_>>();
+    if !retained_build_script_details.is_empty() {
+        hazards.push(production_hazard_with_details(
+            "retained_build_scripts",
+            "error",
+            format!(
+                "{} copied support package build script(s) may generate source, link metadata, env values, or asset dependencies outside the static parse tree",
+                retained_build_script_details.len()
+            ),
+            retained_build_script_details,
+        ));
+    }
+
+    let mut counts = SyntacticHazardCounts::default();
+    for package in &support_packages {
+        counts.add(generated_support_package_syntactic_hazard_counts(package));
+    }
+    add_generated_support_syntactic_hazards(counts, hazards);
+}
+
+struct GeneratedSupportPackage {
+    name: String,
+    root: PathBuf,
+    manifest: toml::Value,
+}
+
+fn generated_support_packages(
+    support_root: &Path,
+) -> Result<Vec<GeneratedSupportPackage>, Box<dyn std::error::Error>> {
+    if !support_root.is_dir() {
+        return Ok(Vec::new());
+    }
+    let mut packages = Vec::new();
+    let mut entries = fs::read_dir(support_root)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    for entry in entries {
+        let root = entry.path();
+        let manifest_path = root.join("Cargo.toml");
+        if !manifest_path.is_file() {
+            continue;
+        }
+        let text = match fs::read_to_string(&manifest_path) {
+            Ok(text) => text,
+            Err(_) => continue,
+        };
+        let Ok(manifest) = text.parse::<toml::Value>() else {
+            continue;
+        };
+        let name = manifest
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+            .map(str::to_string)
+            .or_else(|| {
+                root.file_name()
+                    .and_then(|name| name.to_str())
+                    .map(str::to_string)
+            })
+            .unwrap_or_else(|| "support".to_string());
+        packages.push(GeneratedSupportPackage {
+            name,
+            root,
+            manifest,
+        });
+    }
+    Ok(packages)
+}
+
+fn generated_support_build_script_detail(
+    package: &GeneratedSupportPackage,
+) -> Option<ProductionHazardDetail> {
+    let path = generated_support_build_script_path(package)?;
+    Some(ProductionHazardDetail {
+        subject: package.name.clone(),
+        package: Some(package.name.clone()),
+        module_path: None,
+        file: Some(path),
+        start_line: Some(1),
+        cfg: None,
+        suggested_cargo_args: Vec::new(),
+    })
+}
+
+fn generated_support_build_script_path(package: &GeneratedSupportPackage) -> Option<PathBuf> {
+    match package
+        .manifest
+        .get("package")
+        .and_then(toml::Value::as_table)
+        .and_then(|table| table.get("build"))
+    {
+        Some(toml::Value::Boolean(false)) => None,
+        Some(toml::Value::String(path)) => {
+            let path = package.root.join(path);
+            path.exists().then_some(path)
+        }
+        _ => {
+            let path = package.root.join("build.rs");
+            path.exists().then_some(path)
+        }
+    }
+}
+
+fn generated_support_package_syntactic_hazard_counts(
+    package: &GeneratedSupportPackage,
+) -> SyntacticHazardCounts {
+    let mut counts = SyntacticHazardCounts::default();
+    let Ok(rust_files) = generated_support_rust_files(&package.root) else {
+        return counts;
+    };
+    for path in rust_files {
+        let Ok(text) = fs::read_to_string(&path) else {
+            continue;
+        };
+        let Ok(syntax) = syn::parse_file(&text) else {
+            continue;
+        };
+        let mut visitor = SyntacticHazardVisitor {
+            counts: SyntacticHazardCounts::default(),
+            include_context: path.parent().map(|source_dir| IncludeContext {
+                package_root: package.root.clone(),
+                source_dir: source_dir.to_path_buf(),
+            }),
+            location: HazardLocation {
+                package: package.name.clone(),
+                module_path: Vec::new(),
+                file: Some(path),
+            },
+        };
+        visitor.visit_file(&syntax);
+        counts.add(visitor.counts.support_package_blocking_subset());
+    }
+    counts
+}
+
+fn generated_support_rust_files(root: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {
+    let root = root.canonicalize()?;
+    let mut files = Vec::new();
+    collect_generated_support_rust_files(&root, &root, &mut BTreeSet::new(), &mut files)?;
+    Ok(files)
+}
+
+fn collect_generated_support_rust_files(
+    root: &Path,
+    path: &Path,
+    visited: &mut BTreeSet<PathBuf>,
+    files: &mut Vec<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let metadata = fs::symlink_metadata(path)?;
+    if metadata.file_type().is_symlink() {
+        return Ok(());
+    }
+    let resolved = path.canonicalize()?;
+    if !resolved.starts_with(root) {
+        return Ok(());
+    }
+    if metadata.is_dir() {
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, ".git" | ".hg" | ".svn" | "target"))
+        {
+            return Ok(());
+        }
+        if !visited.insert(resolved) {
+            return Ok(());
+        }
+        let mut entries = fs::read_dir(path)?.collect::<Result<Vec<_>, _>>()?;
+        entries.sort_by_key(|entry| entry.file_name());
+        for entry in entries {
+            collect_generated_support_rust_files(root, &entry.path(), visited, files)?;
+        }
+        return Ok(());
+    }
+    if metadata.is_file() && path.extension().is_some_and(|extension| extension == "rs") {
+        files.push(path.to_path_buf());
+    }
+    Ok(())
+}
+
+fn add_generated_support_syntactic_hazards(
+    counts: SyntacticHazardCounts,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    if counts.source_include_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "source_include_macros",
+            "error",
+            format!(
+                "{} copied support include! macro(s) inject Rust source outside the static reachability graph",
+                counts.source_include_macros
+            ),
+            counts.source_include_details,
+        ));
+    }
+    if counts.out_dir_source_include_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "out_dir_source_include_macros",
+            "error",
+            format!(
+                "{} copied support include! macro(s) read generated Rust from OUT_DIR; production slicing cannot semantically model build-generated source",
+                counts.out_dir_source_include_macros
+            ),
+            counts.out_dir_source_include_details,
+        ));
+    }
+    if counts.nonliteral_file_include_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "nonliteral_file_include_macros",
+            "error",
+            format!(
+                "{} copied support include_str!/include_bytes! macro(s) use paths the slicer cannot statically resolve",
+                counts.nonliteral_file_include_macros
+            ),
+            counts.nonliteral_file_include_details,
+        ));
+    }
+    if counts.out_dir_file_include_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "out_dir_file_include_macros",
+            "error",
+            format!(
+                "{} copied support include_str!/include_bytes! macro(s) read generated files from OUT_DIR; production slicing cannot semantically model build-generated assets",
+                counts.out_dir_file_include_macros
+            ),
+            counts.out_dir_file_include_details,
+        ));
+    }
+    if counts.absolute_file_include_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "absolute_file_include_macros",
+            "error",
+            format!(
+                "{} copied support include_str!/include_bytes! macro(s) use absolute paths that would read outside the generated slice",
+                counts.absolute_file_include_macros
+            ),
+            counts.absolute_file_include_details,
+        ));
+    }
+    if counts.external_file_include_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "external_file_include_macros",
+            "error",
+            format!(
+                "{} copied support include_str!/include_bytes! macro(s) resolve outside their package root",
+                counts.external_file_include_macros
+            ),
+            counts.external_file_include_details,
+        ));
+    }
+    if counts.compile_env_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "compile_env_macros",
+            "error",
+            format!(
+                "{} copied support env!/option_env! macro(s) read compile-time environment outside the manifest model",
+                counts.compile_env_macros
+            ),
+            counts.compile_env_details,
         ));
     }
 }
@@ -1908,6 +2188,26 @@ impl SyntacticHazardCounts {
         self.conditional_compilation_details
             .extend(other.conditional_compilation_details);
     }
+
+    fn support_package_blocking_subset(self) -> Self {
+        Self {
+            source_include_macros: self.source_include_macros,
+            source_include_details: self.source_include_details,
+            out_dir_source_include_macros: self.out_dir_source_include_macros,
+            out_dir_source_include_details: self.out_dir_source_include_details,
+            nonliteral_file_include_macros: self.nonliteral_file_include_macros,
+            nonliteral_file_include_details: self.nonliteral_file_include_details,
+            out_dir_file_include_macros: self.out_dir_file_include_macros,
+            out_dir_file_include_details: self.out_dir_file_include_details,
+            absolute_file_include_macros: self.absolute_file_include_macros,
+            absolute_file_include_details: self.absolute_file_include_details,
+            external_file_include_macros: self.external_file_include_macros,
+            external_file_include_details: self.external_file_include_details,
+            compile_env_macros: self.compile_env_macros,
+            compile_env_details: self.compile_env_details,
+            ..Self::default()
+        }
+    }
 }
 
 fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
@@ -2295,6 +2595,13 @@ impl HazardLocation {
 }
 
 impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
+    fn visit_item_macro(&mut self, item_macro: &'ast syn::ItemMacro) {
+        for attribute in &item_macro.attrs {
+            self.visit_attribute(attribute);
+        }
+        self.visit_macro(&item_macro.mac);
+    }
+
     fn visit_fn_arg(&mut self, argument: &'ast syn::FnArg) {
         if let syn::FnArg::Typed(argument) = argument {
             if dynamic_callback_boundary_kind(&argument.ty).is_some() {
@@ -4298,6 +4605,117 @@ pub fn entry() -> &'static str {
 
         assert!(report.production.hazards.iter().any(|hazard| {
             hazard.code == "retained_build_scripts" && hazard.severity == "error"
+        }));
+        assert_eq!(report.production.status, "hazards_detected");
+    }
+
+    #[test]
+    fn reports_copied_support_package_build_and_generated_source_hazards() {
+        let root = temp_output("support-build-hazard-source");
+        let output = temp_output("support-build-hazard-output");
+        let external = temp_output("support-build-hazard-external");
+        let helper = external.join("external-helper");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nexternal-helper = {{ path = {:?} }}\n",
+                opensourced_path, helper
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    external_helper::value()
+}
+"#,
+        );
+        write(
+            helper.join("Cargo.toml"),
+            r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+build = "build.rs"
+"#,
+        );
+        write(
+            helper.join("build.rs"),
+            r#"use std::{env, fs, path::PathBuf};
+
+fn main() {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
+    fs::write(out_dir.join("generated.rs"), "pub fn generated() -> usize { 41 }\n").unwrap();
+    println!("cargo:rustc-env=SUPPORT_TOKEN=token");
+}
+"#,
+        );
+        write(
+            helper.join("src/lib.rs"),
+            r#"include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+
+pub fn value() -> usize {
+    generated() + env!("SUPPORT_TOKEN").len()
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        let build_script = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "retained_build_scripts" && hazard.severity == "error")
+            .expect("copied support build script should be a retained build script hazard");
+        assert!(build_script.details.iter().any(|detail| {
+            detail.subject == "external-helper"
+                && detail.package.as_deref() == Some("external-helper")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("support/external-helper/build.rs"))
+        }));
+
+        let out_dir_include = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| {
+                hazard.code == "out_dir_source_include_macros" && hazard.severity == "error"
+            })
+            .expect("copied support OUT_DIR include should be a source include hazard");
+        assert!(out_dir_include.details.iter().any(|detail| {
+            detail.subject == "external-helper"
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("support/external-helper/src/lib.rs"))
+        }));
+
+        let compile_env = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "compile_env_macros" && hazard.severity == "error")
+            .expect("copied support env! usage should be a compile env hazard");
+        assert!(compile_env.details.iter().any(|detail| {
+            detail.subject == "external-helper"
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("support/external-helper/src/lib.rs"))
         }));
         assert_eq!(report.production.status, "hazards_detected");
     }

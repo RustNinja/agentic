@@ -38,6 +38,10 @@ not slicer failures.
   pruning and support-package module-closure copying. The latest run emitted 116
   generated files and removed generic test/tool-only support files such as
   `src/*_tests.rs`, `src/*/tests.rs`, and support binary `main.rs`.
+- Support-package production hazard parity did not add blockers to the pinned
+  five-root codex-ipc run: copied support packages had no retained support
+  build-script/OUT_DIR/compile-env/file-include hazard debt, and the run stayed
+  zero-warning under `--deny-warnings`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
@@ -56,10 +60,10 @@ not slicer failures.
   modules and orphan Rust files, copy only static assets mentioned by copied
   modules, and fall back to broader copying only when the module graph cannot be
   parsed safely.
-- `manifest.support_build_script_hazard_parity.001`: copied support packages
-  with build scripts, `OUT_DIR`, compile-time env, or opaque include behavior
-  must be reported as production surfaces with the same fail-closed details as
-  retained workspace packages.
+- `manifest.support_build_script_hazard_parity.001`: covered for copied support
+  packages with build scripts, `OUT_DIR` source includes, and compile-time env
+  usage; extend with opaque nonliteral/absolute/external support include paths
+  as the next small fixture.
 - `protocol.enum_method.compact.001`: enum parser methods like `from_wire` should
   remain compact and keep only live variants/helpers.
 - `bridge.state_constructor.heavy.001`: constructor roots with broad private
