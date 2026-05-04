@@ -242,6 +242,14 @@ existing generic behavior for four more Litter-shaped surfaces: direct borrowed
 macro bodies are retained, and inline script-bundle modules copy only live
 `include_str!` assets.
 
+Five real Litter `codex-ipc` probes now pass production validation with compiler
+feedback: `project_conversation_state`, `Method::from_wire`,
+`PendingRequests::resolve`, `read_frame`, and `IpcBridge::new`. The compact
+roots generated 12-15 files, while the bridge/state roots generated 850+ files.
+That means correctness is improving, but support-package/path-dependency
+precision is now a high-priority production-size problem. See
+`docs/litter_probe_report.md` for the concrete run notes.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
