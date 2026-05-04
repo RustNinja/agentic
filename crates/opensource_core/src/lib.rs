@@ -1772,6 +1772,17 @@ fn add_syntactic_production_hazards(
             counts.trait_object_details,
         ));
     }
+    if counts.dynamic_callback_boundary_surfaces > 0 {
+        hazards.push(production_hazard_with_details(
+            "dynamic_callback_boundaries",
+            "warning",
+            format!(
+                "{} retained direct callback/dynamic-dispatch input boundary surface(s) were preserved as selected API inputs; compiler feedback validates the generated signature",
+                counts.dynamic_callback_boundary_surfaces
+            ),
+            counts.dynamic_callback_boundary_details,
+        ));
+    }
     if counts.conditional_compilation_attrs > 0 {
         hazards.push(production_hazard_with_details(
             "conditional_compilation_attrs",
@@ -1848,6 +1859,8 @@ struct SyntacticHazardCounts {
     function_pointer_details: Vec<ProductionHazardDetail>,
     trait_object_surfaces: usize,
     trait_object_details: Vec<ProductionHazardDetail>,
+    dynamic_callback_boundary_surfaces: usize,
+    dynamic_callback_boundary_details: Vec<ProductionHazardDetail>,
     conditional_compilation_attrs: usize,
     conditional_compilation_details: Vec<ProductionHazardDetail>,
 }
@@ -1888,6 +1901,9 @@ impl SyntacticHazardCounts {
             .extend(other.function_pointer_details);
         self.trait_object_surfaces += other.trait_object_surfaces;
         self.trait_object_details.extend(other.trait_object_details);
+        self.dynamic_callback_boundary_surfaces += other.dynamic_callback_boundary_surfaces;
+        self.dynamic_callback_boundary_details
+            .extend(other.dynamic_callback_boundary_details);
         self.conditional_compilation_attrs += other.conditional_compilation_attrs;
         self.conditional_compilation_details
             .extend(other.conditional_compilation_details);
@@ -2070,6 +2086,24 @@ impl HazardLocation {
 }
 
 impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
+    fn visit_fn_arg(&mut self, argument: &'ast syn::FnArg) {
+        if let syn::FnArg::Typed(argument) = argument {
+            if dynamic_callback_boundary_kind(&argument.ty).is_some() {
+                self.counts.dynamic_callback_boundary_surfaces += 1;
+                self.counts
+                    .dynamic_callback_boundary_details
+                    .push(self.type_surface_detail(&argument.ty));
+                for attribute in &argument.attrs {
+                    self.visit_attribute(attribute);
+                }
+                self.visit_pat(&argument.pat);
+                return;
+            }
+        }
+
+        syn::visit::visit_fn_arg(self, argument);
+    }
+
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
         if attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr") {
             self.counts.conditional_compilation_attrs += 1;
@@ -2242,6 +2276,34 @@ impl SyntacticHazardVisitor {
             self.counts
                 .external_file_include_details
                 .push(self.span_detail(mac));
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum DynamicCallbackBoundaryKind {
+    FunctionPointer,
+    TraitObject,
+}
+
+fn dynamic_callback_boundary_kind(ty: &syn::Type) -> Option<DynamicCallbackBoundaryKind> {
+    match peel_grouped_type(ty) {
+        syn::Type::BareFn(_) => Some(DynamicCallbackBoundaryKind::FunctionPointer),
+        syn::Type::Reference(reference) => matches!(
+            peel_grouped_type(&reference.elem),
+            syn::Type::TraitObject(_)
+        )
+        .then_some(DynamicCallbackBoundaryKind::TraitObject),
+        _ => None,
+    }
+}
+
+fn peel_grouped_type(mut ty: &syn::Type) -> &syn::Type {
+    loop {
+        match ty {
+            syn::Type::Group(group) => ty = &group.elem,
+            syn::Type::Paren(paren) => ty = &paren.elem,
+            _ => return ty,
         }
     }
 }
@@ -3807,7 +3869,12 @@ impl Worker for Real {
 }
 
 #[opensourced]
-pub fn entry(callback: Callback) -> (Callback, Box<dyn Worker>) {
+pub fn entry(
+    callback: Callback,
+    observer: &dyn Worker,
+    direct: fn() -> usize,
+) -> (Callback, Box<dyn Worker>) {
+    let _ = observer.run() + direct();
     (callback, Box::new(Real))
 }
 "#,
@@ -3847,7 +3914,31 @@ pub fn entry(callback: Callback) -> (Callback, Box<dyn Worker>) {
                     .file
                     .as_ref()
                     .is_some_and(|file| file.ends_with("app/src/lib.rs"))
-                && detail.start_line == Some(18)
+        }));
+        let callback_boundary = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| {
+                hazard.code == "dynamic_callback_boundaries" && hazard.severity == "warning"
+            })
+            .expect("direct callback boundary warning should be reported");
+        assert_eq!(callback_boundary.details.len(), 2);
+        assert!(callback_boundary.details.iter().any(|detail| {
+            detail.subject == "app: & dyn Worker"
+                && detail.package.as_deref() == Some("app")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+        }));
+        assert!(callback_boundary.details.iter().any(|detail| {
+            detail.subject == "app: fn () -> usize"
+                && detail.package.as_deref() == Some("app")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
         }));
         assert_eq!(report.production.status, "hazards_detected");
     }

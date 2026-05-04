@@ -185,6 +185,13 @@ Those patterns now have a lightweight replica in `fixtures/fast_macro_use` and
 should be exercised with `scripts/fast_fixture_loop.sh` before waiting on a
 large Litter build.
 
+The dynamic-dispatch rule is now split by ownership. Direct callback inputs on
+the selected API boundary, such as `fn(...)` parameters and borrowed
+`&dyn Trait` parameters, do not hide project-local implementation code and are
+allowed to proceed to compiler feedback. Owned, returned, stored, or aliased
+dynamic surfaces remain hard production hazards because they can hide concrete
+project-local behavior that the static call graph has not proven.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
@@ -193,8 +200,9 @@ These are intentional fail-closed areas:
   as first-class source;
 - build scripts and `OUT_DIR` generated Rust are copied/reported but not fully
   semantically modeled;
-- `dyn Trait`, function pointers, callback registries, and broad dynamic
-  dispatch are not proven callgraph edges;
+- owned/returned/stored `dyn Trait` values, local function-pointer type
+  surfaces, callback registries, and broad dynamic dispatch are not proven
+  callgraph edges;
 - complex/custom cfg inventories still need deeper rust-analyzer or rustc
   oracle coverage;
 - external dependency internals are trusted through Cargo/rustc validation

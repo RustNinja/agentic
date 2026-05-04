@@ -2250,6 +2250,7 @@ fn production_warning_hazard_is_discharged(
             | "custom_attribute_macros"
             | "custom_derive_macros"
             | "custom_macro_invocations"
+            | "dynamic_callback_boundaries"
             | "semantic_analyzer_unavailable"
             | "semantic_file_budget_exhausted"
             | "semantic_file_failures"

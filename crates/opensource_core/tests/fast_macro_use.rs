@@ -23,6 +23,19 @@ fn slices_fast_macro_use_fixture_and_compiles() {
         report.packages,
         ["fast_macro_app", "macro_helpers", "shared", "util"]
     );
+    assert_eq!(report.production.status, "requires_feedback");
+    assert!(
+        report
+            .production
+            .hazards
+            .iter()
+            .all(|hazard| hazard.severity != "error"),
+        "fast fixture should not carry hard production hazards: {:?}",
+        report.production.hazards
+    );
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "dynamic_callback_boundaries" && hazard.severity == "warning"
+    }));
 
     let app = read(output.join("fast_macro_app/src/lib.rs"));
     assert!(app.contains("pub fn open_macro_use_entry"));
