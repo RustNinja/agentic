@@ -287,6 +287,20 @@ semantic dispatch proves concrete callees. Foreign `extern "C"` blocks now prune
 dead sibling declarations by retained symbol name instead of keeping the whole
 foreign block whenever one native call is used.
 
+The seventh rule-database pass raised the executable fast rule set to 36 cases.
+The important fixes were generic graph improvements rather than symbol
+allowlists: zero-argument item macro invocations can be retained from the macro
+definition body when they generate names used by retained code; path dependency
+trait imports can be retained by reading source trait method names when the trait
+name does not predict the method; derive impl closure now descends into array,
+slice, and pointer field types; associated-type equality bounds propagate
+`Self::Assoc` method returns into later calls; tuple destructuring locals inherit
+return element types; and generated support package include paths compare
+canonical roots before reporting external-file hazards. The support bundle rule
+also verifies relative support manifest rewrites and dead support bins,
+examples, tests, benches, fixtures, and orphan modules stay pruned after the
+original external packages are moved away.
+
 Five real Litter `codex-ipc` probes now pass production validation with compiler
 feedback: `project_conversation_state`, `Method::from_wire`,
 `PendingRequests::resolve`, `read_frame`, and `IpcBridge::new`. The compact

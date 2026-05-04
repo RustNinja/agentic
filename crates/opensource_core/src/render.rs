@@ -5237,7 +5237,47 @@ fn macro_invocation_feeds_reachable_code(
     package: &str,
     item_macro: &syn::ItemMacro,
 ) -> bool {
-    macro_token_idents(&item_macro.mac.tokens)
+    let token_idents = macro_token_idents(&item_macro.mac.tokens);
+    if token_idents.iter().any(|ident| {
+        reachable_package_mentions_ident(project, reduced, package, ident)
+            || reachable_reduced_packages_mention_ident(project, reduced, ident)
+    }) {
+        return true;
+    }
+
+    if !token_idents.is_empty() {
+        return false;
+    }
+
+    macro_definition_tokens_feed_reachable_code(project, reduced, package, item_macro)
+}
+
+fn macro_definition_tokens_feed_reachable_code(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    item_macro: &syn::ItemMacro,
+) -> bool {
+    let Some(name) = item_macro
+        .mac
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+    else {
+        return false;
+    };
+    let macro_item = project.items.iter().find_map(|(item, record)| {
+        (item.package == package && item.kind == ItemKind::Macro && item.name == name)
+            .then_some(record)
+    });
+    let Some(record) = macro_item else {
+        return false;
+    };
+    let Item::Macro(definition) = &record.item else {
+        return false;
+    };
+    macro_token_idents(&definition.mac.tokens)
         .iter()
         .any(|ident| {
             reachable_package_mentions_ident(project, reduced, package, ident)
@@ -8234,6 +8274,16 @@ fn external_trait_import_should_remain(
     let Some(leaf) = target.last().map(String::as_str) else {
         return false;
     };
+    if source_trait_import_should_remain(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        target,
+    ) {
+        return true;
+    }
     if leaf.ends_with("Ext") {
         if is_public_use {
             return true;
@@ -8365,6 +8415,143 @@ fn external_trait_import_should_remain(
         .iter()
         .take(target.len().saturating_sub(1))
         .any(|segment| render_plan.package_mentions_ident(package, segment))
+}
+
+fn source_trait_import_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+) -> bool {
+    let Some((target_package, target_path)) =
+        resolve_use_target_path(project, package, module_path, target)
+    else {
+        return external_source_trait_import_should_remain(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            target,
+        );
+    };
+    let Some(item) = find_use_item(project, &target_package, &target_path) else {
+        return external_source_trait_import_should_remain(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            target,
+        );
+    };
+    item.kind == ItemKind::Trait
+        && local_trait_import_should_remain(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            &item,
+        )
+}
+
+fn external_source_trait_import_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+) -> bool {
+    external_dependency_trait_method_names(project, package, target)
+        .into_iter()
+        .any(|method| {
+            reachable_import_scope_has_method_call(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &method,
+            ) || render_plan.module_mentions_ident(package, module_path, &method)
+                || reachable_module_mentions_ident(project, reduced, package, module_path, &method)
+        })
+}
+
+fn external_dependency_trait_method_names(
+    project: &Project,
+    package: &str,
+    target: &[String],
+) -> BTreeSet<String> {
+    let Some(dependency_name) = target.first() else {
+        return BTreeSet::new();
+    };
+    let Some(trait_name) = target.last() else {
+        return BTreeSet::new();
+    };
+    let Some(package_record) = project.workspace.packages.get(package) else {
+        return BTreeSet::new();
+    };
+    for (_table_name, table) in package_dependency_tables(package_record) {
+        for (alias, value) in table {
+            if !dependency_value_name_matches(alias, value, dependency_name) {
+                continue;
+            }
+            let Ok(Some(root)) = dependency_path_root(value, &package_record.root) else {
+                continue;
+            };
+            if let Some(methods) = trait_method_names_from_package_root(&root, trait_name) {
+                return methods;
+            }
+        }
+    }
+    BTreeSet::new()
+}
+
+fn dependency_value_name_matches(alias: &str, value: &Value, name: &str) -> bool {
+    alias == name
+        || dependency_code_name(alias) == name
+        || value
+            .as_table()
+            .and_then(|table| table.get("package"))
+            .and_then(Value::as_str)
+            .is_some_and(|package| package == name || dependency_code_name(package) == name)
+}
+
+fn trait_method_names_from_package_root(root: &Path, trait_name: &str) -> Option<BTreeSet<String>> {
+    let manifest = read_toml_value(&root.join("Cargo.toml")).ok()?;
+    let lib_path = manifest
+        .get("lib")
+        .and_then(Value::as_table)
+        .and_then(|table| table.get("path"))
+        .and_then(Value::as_str)
+        .map(|path| root.join(path))
+        .unwrap_or_else(|| root.join("src/lib.rs"));
+    let source = fs::read_to_string(lib_path).ok()?;
+    let syntax = syn::parse_file(&source).ok()?;
+    syntax.items.iter().find_map(|item| {
+        let Item::Trait(item_trait) = item else {
+            return None;
+        };
+        if item_trait.ident != trait_name {
+            return None;
+        }
+        Some(
+            item_trait
+                .items
+                .iter()
+                .filter_map(|item| {
+                    let TraitItem::Fn(function) = item else {
+                        return None;
+                    };
+                    Some(function.sig.ident.to_string())
+                })
+                .collect(),
+        )
+    })
 }
 
 fn known_trait_receiver_idents(target: &[String], leaf: &str) -> Option<&'static [&'static str]> {

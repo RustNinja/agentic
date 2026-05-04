@@ -2811,14 +2811,15 @@ impl SyntacticHazardVisitor {
 
         let package_root_lexical = normalize_path_lexically(&context.package_root);
         let candidate_lexical = normalize_path_lexically(&candidate);
-        if !candidate_lexical.starts_with(&package_root_lexical)
-            || candidate.canonicalize().is_ok_and(|path| {
-                context
-                    .package_root
-                    .canonicalize()
-                    .is_ok_and(|package_root| !path.starts_with(package_root))
-            })
-        {
+        let lexical_outside = !candidate_lexical.starts_with(&package_root_lexical);
+        let canonical_outside = match (
+            candidate.canonicalize(),
+            context.package_root.canonicalize(),
+        ) {
+            (Ok(candidate), Ok(package_root)) => !candidate.starts_with(package_root),
+            _ => lexical_outside,
+        };
+        if canonical_outside {
             self.counts.external_file_include_macros += 1;
             self.counts
                 .external_file_include_details

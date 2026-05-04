@@ -320,6 +320,172 @@ fn retains_foreign_extern_functions_called_by_selected_roots() {
 }
 
 #[test]
+fn retains_zero_arg_macro_invocations_that_generate_reachable_items() {
+    let workspace = temp_path("rule-zero-arg-macro-workspace");
+    let output = temp_path("rule-zero-arg-macro-output");
+    let target_dir = temp_path("rule-zero-arg-macro-target");
+    write_zero_arg_macro_generated_item_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("zero-arg macro generated item rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("zero_arg_macro_rule/src/lib.rs"));
+    assert!(lib.contains("macro_rules! setup_runtime"), "{lib}");
+    assert!(lib.contains("setup_runtime!()"), "{lib}");
+    assert!(lib.contains("fn helper_value() -> u32"), "{lib}");
+    assert!(!lib.contains("setup_dead!()"), "{lib}");
+    assert!(!lib.contains("dead_generated"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_external_source_trait_imports_by_actual_trait_methods() {
+    let workspace = temp_path("rule-external-trait-import-workspace");
+    let output = temp_path("rule-external-trait-import-output");
+    let target_dir = temp_path("rule-external-trait-import-target");
+    let support = temp_path("rule-external-trait-import-support");
+    write_external_trait_import_rule_fixture(&workspace, &support);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("external trait import rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("external_trait_import_rule/src/lib.rs"));
+    assert!(lib.contains("use support_rng::{Fixed, Rng}"), "{lib}");
+    assert!(lib.contains("rng.gen()"), "{lib}");
+    assert!(!lib.contains("DeadRng"), "{lib}");
+    fs::rename(&support, support.with_extension("moved"))
+        .expect("original support package should move away");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_derive_trait_impls_for_array_field_types() {
+    let workspace = temp_path("rule-derive-array-workspace");
+    let output = temp_path("rule-derive-array-output");
+    let target_dir = temp_path("rule-derive-array-target");
+    write_derive_array_field_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("derive array field rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("derive_array_rule/src/lib.rs"));
+    assert!(lib.contains("#[derive(Clone)]"), "{lib}");
+    assert!(lib.contains("pub items: [Inner; 1]"), "{lib}");
+    assert!(lib.contains("impl Clone for Inner"), "{lib}");
+    assert!(!lib.contains("DeadInner"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn propagates_associated_type_equality_bounds_into_method_chains() {
+    let workspace = temp_path("rule-associated-equality-workspace");
+    let output = temp_path("rule-associated-equality-output");
+    let target_dir = temp_path("rule-associated-equality-target");
+    write_associated_type_equality_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("associated type equality rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("associated_equality_rule/src/lib.rs"));
+    assert!(lib.contains("type Item"), "{lib}");
+    assert!(lib.contains("Source<Item = Payload>"), "{lib}");
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn infers_tuple_destructuring_local_receiver_types() {
+    let workspace = temp_path("rule-tuple-destructure-workspace");
+    let output = temp_path("rule-tuple-destructure-output");
+    let target_dir = temp_path("rule-tuple-destructure-target");
+    write_tuple_destructure_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("tuple destructuring rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("tuple_destructure_rule/src/lib.rs"));
+    assert!(lib.contains("fn pair() -> (Payload, u32)"), "{lib}");
+    assert!(lib.contains("impl Payload"), "{lib}");
+    assert!(!lib.contains("pub struct Other"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
+    let workspace = temp_path("rule-support-path-bundle-workspace");
+    let output = temp_path("rule-support-path-bundle-output");
+    let target_dir = temp_path("rule-support-path-bundle-target");
+    let external = temp_path("rule-support-path-bundle-external");
+    let helper = external.join("external-helper");
+    let leaf = external.join("external-leaf");
+    write_support_path_bundle_rule_fixture(&workspace, &helper, &leaf);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("support path bundle rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app_manifest = read(output.join("support_path_app/Cargo.toml"));
+    let helper_manifest = read(output.join("support/external-helper/Cargo.toml"));
+    let leaf_manifest = read(output.join("support/external-leaf/Cargo.toml"));
+    assert!(app_manifest.contains("path = \"../support/external-helper\""));
+    assert!(helper_manifest.contains("path = \"../external-leaf\""));
+    assert!(leaf_manifest.contains("name = \"external-leaf\""));
+    assert!(!app_manifest.contains(&manifest_path(&helper)));
+    assert!(!helper_manifest.contains(&manifest_path(&leaf)));
+    assert!(!app_manifest.contains("path = \"/"), "{app_manifest}");
+    assert!(!helper_manifest.contains("path = \"/"), "{helper_manifest}");
+    assert!(output.join("support/external-helper/src/lib.rs").exists());
+    assert!(output.join("support/external-helper/src/live.rs").exists());
+    assert!(output.join("support/external-helper/src/live.txt").exists());
+    assert!(output.join("support/external-leaf/src/lib.rs").exists());
+    assert!(!output.join("support/external-helper/src/bin").exists());
+    assert!(!output.join("support/external-helper/examples").exists());
+    assert!(!output.join("support/external-helper/tests").exists());
+    assert!(!output.join("support/external-helper/benches").exists());
+    assert!(!output.join("support/external-helper/fixtures").exists());
+    assert!(!output
+        .join("support/external-helper/src/test_only.rs")
+        .exists());
+    assert!(!output.join("support/external-helper/src/test.txt").exists());
+    assert!(!output
+        .join("support/external-helper/src/orphan.rs")
+        .exists());
+    assert!(!output
+        .join("support/external-helper/src/orphan.txt")
+        .exists());
+    fs::rename(&helper, helper.with_extension("moved"))
+        .expect("original helper package should move away");
+    fs::rename(&leaf, leaf.with_extension("moved"))
+        .expect("original leaf package should move away");
+    let lib = read(output.join("support_path_app/src/lib.rs"));
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_owned_dynamic_dispatch_surfaces_inside_retained_structs() {
     let workspace = temp_path("rule-owned-dyn-workspace");
     let output = temp_path("rule-owned-dyn-output");
@@ -1782,6 +1948,316 @@ pub fn dead_api() -> &'static str {
     write(
         root.join("inline_include_tree_rule/src/scripts/dead.ps1"),
         "Write-Output dead",
+    );
+}
+
+fn write_zero_arg_macro_generated_item_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "zero_arg_macro_rule",
+        r#"
+use opensourced::opensourced;
+
+macro_rules! setup_runtime {
+    () => {
+        pub fn generated_value() -> u32 {
+            helper_value()
+        }
+    };
+}
+
+macro_rules! setup_dead {
+    () => {
+        pub fn dead_generated() -> u32 {
+            0
+        }
+    };
+}
+
+setup_runtime!();
+setup_dead!();
+
+fn helper_value() -> u32 {
+    7
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    generated_value()
+}
+"#,
+    );
+}
+
+fn write_external_trait_import_rule_fixture(root: &Path, support: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "external_trait_import_rule",
+        &format!(r#"support-rng = {{ path = "{}" }}"#, manifest_path(support)),
+        r#"
+use opensourced::opensourced;
+use support_rng::{Fixed, Rng};
+
+#[opensourced]
+pub fn selected(mut rng: Fixed) -> u32 {
+    rng.gen()
+}
+"#,
+    );
+    write(
+        support.join("Cargo.toml"),
+        r#"[package]
+name = "support-rng"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        support.join("src/lib.rs"),
+        r#"
+pub trait Rng {
+    fn gen(&mut self) -> u32;
+}
+
+pub trait DeadRng {
+    fn dead(&mut self) -> u32;
+}
+
+pub struct Fixed;
+
+impl Rng for Fixed {
+    fn gen(&mut self) -> u32 {
+        7
+    }
+}
+"#,
+    );
+}
+
+fn write_derive_array_field_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "derive_array_rule",
+        r#"
+use opensourced::opensourced;
+
+#[derive(Clone)]
+pub struct Api {
+    pub items: [Inner; 1],
+}
+
+pub struct Inner(u32);
+
+impl Clone for Inner {
+    fn clone(&self) -> Self {
+        Self(self.0)
+    }
+}
+
+pub struct DeadInner(u32);
+
+impl Clone for DeadInner {
+    fn clone(&self) -> Self {
+        Self(self.0)
+    }
+}
+
+#[opensourced]
+pub fn selected(api: Api) -> Api {
+    api.clone()
+}
+"#,
+    );
+}
+
+fn write_associated_type_equality_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "associated_equality_rule",
+        r#"
+use opensourced::opensourced;
+
+pub trait Source {
+    type Item;
+
+    fn item(&self) -> Self::Item;
+}
+
+pub struct Payload;
+
+impl Payload {
+    pub fn value(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn value(&self) -> u32 {
+        2
+    }
+}
+
+#[opensourced]
+pub fn selected<S: Source<Item = Payload>>(source: S) -> u32 {
+    source.item().value()
+}
+"#,
+    );
+}
+
+fn write_tuple_destructure_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "tuple_destructure_rule",
+        r#"
+use opensourced::opensourced;
+
+pub struct Payload;
+
+impl Payload {
+    pub fn score(&self) -> u32 {
+        1
+    }
+}
+
+pub struct Other;
+
+impl Other {
+    pub fn score(&self) -> u32 {
+        2
+    }
+}
+
+fn pair() -> (Payload, u32) {
+    (Payload, 0)
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let (payload, _) = pair();
+    payload.score()
+}
+"#,
+    );
+}
+
+fn write_support_path_bundle_rule_fixture(root: &Path, helper: &Path, leaf: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["support_path_app"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("support_path_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "support_path_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced")),
+            manifest_path(helper)
+        ),
+    );
+    write(
+        root.join("support_path_app/src/lib.rs"),
+        r#"
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    external_helper::decorate(value)
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+external-leaf = {{ path = "{}" }}
+"#,
+            manifest_path(leaf)
+        ),
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"
+mod live;
+
+#[cfg(test)]
+mod test_only;
+
+pub fn decorate(value: &str) -> String {
+    format!("{}{}", live::decorate(value), external_leaf::suffix())
+}
+"#,
+    );
+    write(
+        helper.join("src/live.rs"),
+        r#"
+const LABEL: &str = include_str!("live.txt");
+
+pub fn decorate(value: &str) -> String {
+    format!("{value}:{}", LABEL.trim())
+}
+"#,
+    );
+    write(
+        helper.join("src/test_only.rs"),
+        r#"
+const TEST_LABEL: &str = include_str!("test.txt");
+
+pub fn test_value() -> &'static str {
+    TEST_LABEL
+}
+"#,
+    );
+    write(
+        helper.join("src/orphan.rs"),
+        r#"
+const ORPHAN_LABEL: &str = include_str!("orphan.txt");
+
+pub fn orphan_value() -> &'static str {
+    ORPHAN_LABEL
+}
+"#,
+    );
+    write(helper.join("src/live.txt"), "live");
+    write(helper.join("src/test.txt"), "test");
+    write(helper.join("src/orphan.txt"), "orphan");
+    write(helper.join("src/bin/unused.rs"), "fn main() {}\n");
+    write(helper.join("examples/unused.rs"), "fn main() {}\n");
+    write(helper.join("tests/unused.rs"), "#[test]\nfn unused() {}\n");
+    write(helper.join("benches/unused.rs"), "fn main() {}\n");
+    write(helper.join("fixtures/dead.txt"), "dead");
+    write(
+        leaf.join("Cargo.toml"),
+        r#"[package]
+name = "external-leaf"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        leaf.join("src/lib.rs"),
+        r#"
+pub fn suffix() -> &'static str {
+    ":leaf"
+}
+"#,
     );
 }
 

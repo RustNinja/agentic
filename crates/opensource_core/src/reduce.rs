@@ -1485,7 +1485,52 @@ fn item_macro_feeds_reachable_code(
     package: &str,
     item_macro: &ItemMacro,
 ) -> bool {
-    macro_token_idents(&item_macro.mac.tokens)
+    let token_idents = macro_token_idents(&item_macro.mac.tokens);
+    if token_idents.iter().any(|ident| {
+        reachable_package_mentions_ident(project, reachable, reachable_items, package, ident)
+    }) {
+        return true;
+    }
+
+    if !token_idents.is_empty() {
+        return false;
+    }
+
+    macro_definition_tokens_feed_reachable_code(
+        project,
+        reachable,
+        reachable_items,
+        package,
+        item_macro,
+    )
+}
+
+fn macro_definition_tokens_feed_reachable_code(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    package: &str,
+    item_macro: &ItemMacro,
+) -> bool {
+    let Some(name) = item_macro
+        .mac
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+    else {
+        return false;
+    };
+    let Some(record) = project.items.iter().find_map(|(item, record)| {
+        (item.package == package && item.kind == ItemKind::Macro && item.name == name)
+            .then_some(record)
+    }) else {
+        return false;
+    };
+    let Item::Macro(definition) = &record.item else {
+        return false;
+    };
+    macro_token_idents(&definition.mac.tokens)
         .iter()
         .any(|ident| {
             reachable_package_mentions_ident(project, reachable, reachable_items, package, ident)
@@ -2272,7 +2317,9 @@ struct DependencyVisitor<'a> {
     resolver: Resolver<'a>,
     dependencies: DependencySet,
     generic_trait_bounds: HashMap<String, Vec<ItemId>>,
+    generic_associated_type_bindings: HashMap<String, HashMap<String, TypeRef>>,
     variable_trait_bounds: HashMap<String, Vec<ItemId>>,
+    variable_associated_type_bindings: HashMap<String, HashMap<String, TypeRef>>,
     variables: HashMap<String, TypeRef>,
     variable_candidates: HashMap<String, Vec<TypeRef>>,
     local_value_scopes: Vec<BTreeSet<String>>,
@@ -2289,7 +2336,9 @@ impl<'a> DependencyVisitor<'a> {
             resolver,
             dependencies: DependencySet::default(),
             generic_trait_bounds: HashMap::new(),
+            generic_associated_type_bindings: HashMap::new(),
             variable_trait_bounds: HashMap::new(),
+            variable_associated_type_bindings: HashMap::new(),
             variables: HashMap::new(),
             variable_candidates: HashMap::new(),
             local_value_scopes: vec![BTreeSet::new()],
@@ -2305,8 +2354,12 @@ impl<'a> DependencyVisitor<'a> {
             let syn::GenericParam::Type(type_parameter) = parameter else {
                 continue;
             };
+            let name = type_parameter.ident.to_string();
             let trait_items = self.trait_items_from_bounds(&type_parameter.bounds);
-            self.insert_generic_trait_bounds(type_parameter.ident.to_string(), trait_items);
+            let associated_type_bindings =
+                self.associated_type_bindings_from_bounds(&type_parameter.bounds);
+            self.insert_generic_trait_bounds(name.clone(), trait_items);
+            self.insert_generic_associated_type_bindings(name, associated_type_bindings);
         }
 
         let Some(where_clause) = &generics.where_clause else {
@@ -2320,7 +2373,10 @@ impl<'a> DependencyVisitor<'a> {
                 continue;
             };
             let trait_items = self.trait_items_from_bounds(&predicate.bounds);
-            self.insert_generic_trait_bounds(name, trait_items);
+            let associated_type_bindings =
+                self.associated_type_bindings_from_bounds(&predicate.bounds);
+            self.insert_generic_trait_bounds(name.clone(), trait_items);
+            self.insert_generic_associated_type_bindings(name, associated_type_bindings);
         }
     }
 
@@ -2332,6 +2388,47 @@ impl<'a> DependencyVisitor<'a> {
         bounds.append(&mut trait_items);
         bounds.sort();
         bounds.dedup();
+    }
+
+    fn insert_generic_associated_type_bindings(
+        &mut self,
+        name: String,
+        associated_type_bindings: HashMap<String, TypeRef>,
+    ) {
+        if associated_type_bindings.is_empty() {
+            return;
+        }
+        self.generic_associated_type_bindings
+            .entry(name)
+            .or_default()
+            .extend(associated_type_bindings);
+    }
+
+    fn associated_type_bindings_from_bounds(
+        &self,
+        bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
+    ) -> HashMap<String, TypeRef> {
+        let mut bindings = HashMap::new();
+        for bound in bounds {
+            let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                continue;
+            };
+            for segment in &trait_bound.path.segments {
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    continue;
+                };
+                for argument in &arguments.args {
+                    let GenericArgument::AssocType(associated_type) = argument else {
+                        continue;
+                    };
+                    if let Some(type_ref) = self.resolver.resolve_receiver_type(&associated_type.ty)
+                    {
+                        bindings.insert(associated_type.ident.to_string(), type_ref);
+                    }
+                }
+            }
+        }
+        bindings
     }
 
     fn trait_items_from_bounds(
@@ -2363,6 +2460,14 @@ impl<'a> DependencyVisitor<'a> {
             };
             let trait_items = self.trait_items_from_type(&input.ty);
             self.insert_variable_trait_bounds(ident.ident.to_string(), trait_items);
+            if let Some(name) = generic_parameter_name_from_type(&input.ty) {
+                if let Some(bindings) = self.generic_associated_type_bindings.get(&name) {
+                    self.insert_variable_associated_type_bindings(
+                        ident.ident.to_string(),
+                        bindings.clone(),
+                    );
+                }
+            }
             if let Some(type_ref) = self.resolver.resolve_receiver_type(&input.ty) {
                 let candidates = self.resolver.receiver_type_candidates_from_type(&input.ty);
                 self.insert_variable_candidates(ident.ident.to_string(), type_ref, candidates);
@@ -2449,6 +2554,20 @@ impl<'a> DependencyVisitor<'a> {
         bounds.append(&mut trait_items);
         bounds.sort();
         bounds.dedup();
+    }
+
+    fn insert_variable_associated_type_bindings(
+        &mut self,
+        name: String,
+        associated_type_bindings: HashMap<String, TypeRef>,
+    ) {
+        if associated_type_bindings.is_empty() {
+            return;
+        }
+        self.variable_associated_type_bindings
+            .entry(name)
+            .or_default()
+            .extend(associated_type_bindings);
     }
 
     fn trait_items_from_type(&self, ty: &Type) -> Vec<ItemId> {
@@ -2662,6 +2781,161 @@ impl<'a> DependencyVisitor<'a> {
         Some((name, type_ref, candidates))
     }
 
+    fn local_destructured_binding_types(
+        &self,
+        local: &Local,
+    ) -> Vec<(String, TypeRef, Vec<TypeRef>)> {
+        if binding_name_and_type(&local.pat).is_some() {
+            return Vec::new();
+        }
+
+        let mut bindings = Vec::new();
+        if let Pat::Type(pat_type) = &local.pat {
+            self.collect_pattern_type_bindings(
+                &pat_type.pat,
+                &pat_type.ty,
+                &self.resolver,
+                &mut bindings,
+            );
+            return bindings;
+        }
+
+        let Some(init) = &local.init else {
+            return bindings;
+        };
+        self.collect_pattern_bindings_from_expr(&local.pat, &init.expr, &mut bindings);
+        bindings.sort();
+        bindings.dedup();
+        bindings
+    }
+
+    fn collect_pattern_bindings_from_expr(
+        &self,
+        pattern: &Pat,
+        expression: &Expr,
+        bindings: &mut Vec<(String, TypeRef, Vec<TypeRef>)>,
+    ) {
+        match expression {
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return;
+                };
+                for callable in self.resolver.resolve_call_path(&path.path) {
+                    self.collect_pattern_bindings_from_callable_return(
+                        pattern, &callable, bindings,
+                    );
+                }
+            }
+            Expr::MethodCall(call) => {
+                for receiver in self.receiver_type_candidates(&call.receiver) {
+                    for callable in self
+                        .resolver
+                        .resolve_methods(&receiver, &call.method.to_string())
+                    {
+                        self.collect_pattern_bindings_from_callable_return(
+                            pattern, &callable, bindings,
+                        );
+                    }
+                }
+            }
+            Expr::Try(expr) => {
+                self.collect_pattern_bindings_from_expr(pattern, &expr.expr, bindings)
+            }
+            Expr::Reference(reference) => {
+                self.collect_pattern_bindings_from_expr(pattern, &reference.expr, bindings)
+            }
+            Expr::Paren(paren) => {
+                self.collect_pattern_bindings_from_expr(pattern, &paren.expr, bindings)
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_pattern_bindings_from_callable_return(
+        &self,
+        pattern: &Pat,
+        callable: &CallableId,
+        bindings: &mut Vec<(String, TypeRef, Vec<TypeRef>)>,
+    ) {
+        match callable {
+            CallableId::Free { .. } => {
+                let Some(record) = self.resolver.project.functions.get(callable) else {
+                    return;
+                };
+                let ReturnType::Type(_, ty) = &record.item.sig.output else {
+                    return;
+                };
+                let resolver = Resolver {
+                    project: self.resolver.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                self.collect_pattern_type_bindings(pattern, ty, &resolver, bindings);
+            }
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let Some(record) = self.resolver.project.methods.get(callable) else {
+                    return;
+                };
+                let ReturnType::Type(_, ty) = &record.item.sig.output else {
+                    return;
+                };
+                let resolver = Resolver {
+                    project: self.resolver.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(TypeRef {
+                        package: package.clone(),
+                        type_path: type_path.clone(),
+                    }),
+                };
+                self.collect_pattern_type_bindings(pattern, ty, &resolver, bindings);
+            }
+        }
+    }
+
+    fn collect_pattern_type_bindings(
+        &self,
+        pattern: &Pat,
+        ty: &Type,
+        resolver: &Resolver<'_>,
+        bindings: &mut Vec<(String, TypeRef, Vec<TypeRef>)>,
+    ) {
+        match (pattern, ty) {
+            (Pat::Ident(ident), _) => {
+                if let Some(type_ref) = resolver.resolve_receiver_type(ty) {
+                    bindings.push((
+                        ident.ident.to_string(),
+                        type_ref,
+                        resolver.receiver_type_candidates_from_type(ty),
+                    ));
+                }
+            }
+            (Pat::Type(pat_type), _) => {
+                self.collect_pattern_type_bindings(&pat_type.pat, &pat_type.ty, resolver, bindings);
+            }
+            (Pat::Reference(pattern), Type::Reference(ty)) => {
+                self.collect_pattern_type_bindings(&pattern.pat, &ty.elem, resolver, bindings);
+            }
+            (Pat::Tuple(pattern), Type::Tuple(ty)) => {
+                for (pattern, ty) in pattern.elems.iter().zip(&ty.elems) {
+                    self.collect_pattern_type_bindings(pattern, ty, resolver, bindings);
+                }
+            }
+            (_, Type::Group(group)) => {
+                self.collect_pattern_type_bindings(pattern, &group.elem, resolver, bindings);
+            }
+            (_, Type::Paren(paren)) => {
+                self.collect_pattern_type_bindings(pattern, &paren.elem, resolver, bindings);
+            }
+            _ => {}
+        }
+    }
+
     fn local_binding_trait_bounds(&self, local: &Local) -> Option<(String, Vec<ItemId>)> {
         let (name, explicit_type) = binding_name_and_type(&local.pat)?;
         let trait_items = explicit_type
@@ -2738,12 +3012,21 @@ impl<'a> DependencyVisitor<'a> {
         receiver: &Expr,
         method_name: &str,
     ) -> Option<TypeRef> {
+        let associated_type_bindings = self.receiver_associated_type_bindings(receiver);
         self.receiver_trait_bounds(receiver)
             .into_iter()
             .filter(|trait_item| {
                 trait_item_contains_method(self.resolver.project, trait_item, method_name)
             })
             .find_map(|trait_item| {
+                if let Some(associated_type) = self
+                    .resolver
+                    .trait_method_return_self_associated_name(&trait_item, method_name)
+                {
+                    if let Some(type_ref) = associated_type_bindings.get(&associated_type) {
+                        return Some(type_ref.clone());
+                    }
+                }
                 self.resolver
                     .trait_method_return_type(&trait_item, method_name)
             })
@@ -2799,6 +3082,21 @@ impl<'a> DependencyVisitor<'a> {
             }
             Expr::Paren(paren) => self.collect_receiver_trait_bounds(&paren.expr, trait_items),
             _ => {}
+        }
+    }
+
+    fn receiver_associated_type_bindings(&self, expression: &Expr) -> HashMap<String, TypeRef> {
+        match expression {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first().unwrap().ident.to_string();
+                self.variable_associated_type_bindings
+                    .get(&name)
+                    .cloned()
+                    .unwrap_or_default()
+            }
+            Expr::Reference(reference) => self.receiver_associated_type_bindings(&reference.expr),
+            Expr::Paren(paren) => self.receiver_associated_type_bindings(&paren.expr),
+            _ => HashMap::new(),
         }
     }
 
@@ -3835,6 +4133,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         if let Some((name, trait_items)) = self.local_binding_trait_bounds(local) {
             self.insert_variable_trait_bounds(name, trait_items);
         }
+        for (name, type_ref, candidates) in self.local_destructured_binding_types(local) {
+            self.insert_variable_candidates(name, type_ref, candidates);
+        }
         if let Some((name, type_ref, candidates)) = self.local_binding_type(local) {
             if binding_name_and_type(&local.pat)
                 .and_then(|(_, ty)| ty)
@@ -4579,6 +4880,24 @@ impl Resolver<'_> {
         resolver.type_from_return_type(&method.sig.output)
     }
 
+    fn trait_method_return_self_associated_name(
+        &self,
+        trait_item: &ItemId,
+        method_name: &str,
+    ) -> Option<String> {
+        let record = self.project.items.get(trait_item)?;
+        let Item::Trait(item_trait) = &record.item else {
+            return None;
+        };
+        let method = item_trait.items.iter().find_map(|trait_item| {
+            let syn::TraitItem::Fn(function) = trait_item else {
+                return None;
+            };
+            (function.sig.ident == method_name).then_some(function)
+        })?;
+        return_type_self_associated_name(&method.sig.output)
+    }
+
     fn type_from_associated_call(&self, path: &Path) -> Option<TypeRef> {
         if let Some(callable) = self.resolve_associated_method(path) {
             return match callable {
@@ -4999,6 +5318,9 @@ impl Resolver<'_> {
     fn collect_type_arguments(&self, ty: &Type, type_refs: &mut Vec<TypeRef>) {
         match ty {
             Type::Path(type_path) => {
+                if let Some(type_ref) = self.resolve_receiver_type(ty) {
+                    type_refs.push(type_ref);
+                }
                 for segment in &type_path.path.segments {
                     let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
                         continue;
@@ -5031,6 +5353,9 @@ impl Resolver<'_> {
                 }
             }
             Type::Reference(reference) => self.collect_type_arguments(&reference.elem, type_refs),
+            Type::Ptr(pointer) => self.collect_type_arguments(&pointer.elem, type_refs),
+            Type::Slice(slice) => self.collect_type_arguments(&slice.elem, type_refs),
+            Type::Array(array) => self.collect_type_arguments(&array.elem, type_refs),
             Type::Group(group) => self.collect_type_arguments(&group.elem, type_refs),
             Type::Paren(paren) => self.collect_type_arguments(&paren.elem, type_refs),
             Type::Tuple(tuple) => {
@@ -6198,6 +6523,54 @@ fn attrs_are_test(attrs: &[syn::Attribute]) -> bool {
     attrs
         .iter()
         .any(|attribute| is_cfg_test_attr(attribute) || is_test_attr(attribute.path()))
+}
+
+fn return_type_self_associated_name(output: &ReturnType) -> Option<String> {
+    let ReturnType::Type(_, ty) = output else {
+        return None;
+    };
+    type_self_associated_name(ty)
+}
+
+fn type_self_associated_name(ty: &Type) -> Option<String> {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(qself) = &type_path.qself {
+                if type_is_self(&qself.ty) {
+                    return type_path
+                        .path
+                        .segments
+                        .last()
+                        .map(|segment| segment.ident.to_string());
+                }
+                return None;
+            }
+            let mut segments = type_path.path.segments.iter();
+            let first = segments.next()?;
+            let second = segments.next()?;
+            if segments.next().is_none() && first.ident == "Self" {
+                return Some(second.ident.to_string());
+            }
+            None
+        }
+        Type::Reference(reference) => type_self_associated_name(&reference.elem),
+        Type::Group(group) => type_self_associated_name(&group.elem),
+        Type::Paren(paren) => type_self_associated_name(&paren.elem),
+        _ => None,
+    }
+}
+
+fn type_is_self(ty: &Type) -> bool {
+    let Type::Path(type_path) = ty else {
+        return false;
+    };
+    type_path.qself.is_none()
+        && type_path.path.segments.len() == 1
+        && type_path
+            .path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == "Self")
 }
 
 fn binding_name_and_type(pattern: &Pat) -> Option<(String, Option<&Type>)> {
