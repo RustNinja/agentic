@@ -82,6 +82,8 @@ Retained macro-bearing items must carry their macro contract:
 - keep macro definitions when retained macro invocations need them;
 - retain item macro invocations when their generated identifiers feed reachable
   code;
+- treat retained inline modules that contain macro-generated source as rendered
+  module targets when reachable code imports the module by name;
 - still require compiler feedback until expanded items can be mapped into the
   retained source graph.
 
@@ -119,10 +121,21 @@ Generic source repair wins came from recognizing patterns, not projects:
   `FromStr::from_str` or `Deserialize::deserialize`.
 - Parent imports can be consumed by child modules through `use super::*`; child
   retained code has to be considered before pruning the parent import.
+- Renamed imports need scoped local-binding checks. A local variable, closure
+  argument, match binding, or loop binding with the same visible name must not
+  make a removed import look reachable, and a short inner shadow must not hide a
+  later real import use.
+- Once a local `use` target resolves to a removed callable or item, public-name
+  and alias-name heuristics must not resurrect that import. Keep only imports
+  whose resolved target is retained or whose target cannot be proven local and
+  removed.
 - Compiler-reported unused imports should be repaired before accepting
   warning-clean production output.
 - Repeated malformed absolute path remnants such as `::Type` or `::::{...}` are
   structural repair signals, not reasons to special-case a source package.
+- Exact repeated diagnostics and repeated diagnostic shapes now stop feedback,
+  repair, and production-matrix loops early with structured reports. This keeps
+  repeated builds from consuming time when the graph has stopped changing.
 
 ## Real-Repo Corpus Lessons
 
@@ -173,8 +186,8 @@ precise:
    discovery and generated-file copying.
 4. Add a pinned real-repo CI matrix with Litter small, medium, and wide module
    targets plus RTK smoke targets.
-5. Add no-progress loop detection so feedback repair stops early with a useful
-   structured report instead of burning build time.
+5. Promote recurring low-progress reports into preflight graph rules so common
+   compiler failures are predicted before the first full build.
 
 The rule for future work: if a real-repo failure is fixed, add a generic
 fixture that proves the rule without naming that repo.

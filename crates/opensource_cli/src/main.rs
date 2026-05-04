@@ -1233,6 +1233,7 @@ fn run_feedback_loop(
         .clone()
         .unwrap_or_else(|| options.output_root.join("slice-feedback.json"));
     let mut seen_diagnostics = std::collections::BTreeSet::new();
+    let mut seen_diagnostic_shapes = std::collections::BTreeSet::new();
     let mut widening_state = FeedbackWideningState::default();
 
     for attempt in 1..=options.feedback_iterations {
@@ -1339,6 +1340,7 @@ fn run_feedback_loop(
             );
             return Err("feedback cargo check timed out".into());
         }
+
         if try_widen_from_feedback(
             options,
             validation,
@@ -1380,6 +1382,37 @@ fn run_feedback_loop(
             );
             return Err(format!(
                 "feedback made no diagnostic progress; report written to {}",
+                report_path.display()
+            )
+            .into());
+        }
+        let shape_signature = diagnostics_shape_signature(&report.diagnostics);
+        if !seen_diagnostic_shapes.insert(shape_signature) {
+            record_feedback_attempt(
+                validation,
+                "feedback",
+                attempt,
+                "low_progress",
+                "feedback repeated the same diagnostic shape",
+                &report,
+                report_path.clone(),
+                false,
+                semantic_warnings,
+                repairable_warning_count(&report.diagnostics),
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback",
+                "failed",
+                "feedback repeated the same diagnostic shape",
+                &report,
+                report_path.clone(),
+                semantic_warnings,
+            );
+            return Err(format!(
+                "feedback repeated the same diagnostic shape; report written to {}",
                 report_path.display()
             )
             .into());
@@ -1828,6 +1861,7 @@ fn run_production_validation_matrix(
         }
 
         let mut seen_diagnostics = BTreeSet::new();
+        let mut seen_diagnostic_shapes = BTreeSet::new();
         let mut widening_state = FeedbackWideningState::default();
         let mut accepted = false;
         let mut entry_baseline_limited = false;
@@ -1918,6 +1952,7 @@ fn run_production_validation_matrix(
                 )
                 .into());
             }
+
             if try_widen_from_feedback(
                 options,
                 validation,
@@ -1964,7 +1999,38 @@ fn run_production_validation_matrix(
                 )
                 .into());
             }
-
+            let shape_signature = diagnostics_shape_signature(&report.diagnostics);
+            if !seen_diagnostic_shapes.insert(shape_signature) {
+                record_feedback_attempt(
+                    validation,
+                    "production-matrix",
+                    attempt,
+                    "low_progress",
+                    "production matrix repeated the same diagnostic shape",
+                    &report,
+                    feedback_report_path.clone(),
+                    false,
+                    semantic_warnings,
+                    repairable_warnings,
+                    None,
+                    None,
+                );
+                record_feedback_gate(
+                    validation,
+                    "production_matrix",
+                    "failed",
+                    "production matrix repeated the same diagnostic shape",
+                    &report,
+                    feedback_report_path.clone(),
+                    semantic_warnings,
+                );
+                return Err(format!(
+                    "production matrix {} repeated the same diagnostic shape; report written to {}",
+                    entry.name,
+                    feedback_report_path.display()
+                )
+                .into());
+            }
             record_feedback_attempt(
                 validation,
                 "production-matrix",

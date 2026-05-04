@@ -186,8 +186,10 @@ that are safe to edit mechanically, such as `unused_imports`, item-level
 It also applies rustc `MachineApplicable` suggestions when every edited span is
 inside the generated output root, including whole-use unused-import removals
 reported as warning help. Repair mode does not accept a successful Cargo check
-until repairable warnings have been removed or exhausted. It stops on repeated
-diagnostics, low-progress diagnostic shapes, or no-progress rounds.
+until repairable warnings have been removed or exhausted. Plain feedback,
+repair, and production-matrix loops stop on repeated diagnostics, low-progress
+diagnostic shapes, or no-progress rounds instead of burning build time after
+the retained graph stops changing.
 Validation runs write `slice-validation.json` by default. That report is the
 authoritative gate verdict: final status, rejection reason when present,
 baseline/preflight/feedback gate states, cargo check arguments, and per-attempt
@@ -392,11 +394,13 @@ This branch uses a syntactic call graph as the default reducer and rustc
 feedback as the correctness gate; it is not yet a full compiler frontend. It
 now handles direct trait method calls when the receiver type can be inferred
 locally, borrowed UFCS trait calls, contextual `into`/`try_into` conversions,
-workspace member globs, external dependencies, local path crate pruning, copied
+workspace member globs, external dependencies, renamed-import pruning with
+scoped local shadowing, local path crate pruning, copied
 non-workspace path support packages, and compiler-driven unused-import cleanup
 in repair/production validation. It also scans retained macro bodies for direct
-local paths and prunes external dependencies whose crate alias is absent from
-the retained source. Complex function pointers, trait objects, custom proc
-macro expansion, `OUT_DIR` generated Rust, broad custom cfg inventories, and
+local paths, keeps inline macro-generated modules importable when retained code
+uses them, and prunes external dependencies whose crate alias is absent from
+the retained source. Complex function pointers, trait objects, custom proc macro
+expansion, `OUT_DIR` generated Rust, broad custom cfg inventories, and
 rustc-equivalent name resolution remain outside the current reducer and are
 reported as production hazards or feedback-required boundaries.
