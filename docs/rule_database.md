@@ -50,6 +50,7 @@ of planned generic combinations lives in
 | `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
 | `macro.external_crate_alias_body.001` | covered | Dependency aliases used only inside retained macro bodies keep the aliased dependency edge |
 | `include.str.inline_module_tree.001` | covered | Inline module script bundles copy only live `include_str!` assets and prune dead sibling assets |
+| `manifest.support_library_module_closure.001` | covered | No-build support path packages copy only the library external-module graph plus live static assets, skipping `#[cfg(test)]` external modules and orphan Rust files |
 
 ## Workflow
 
@@ -73,24 +74,46 @@ distinct failure mode.
 Read-only Litter exploration found these high-value non-cfg patterns:
 
 - UniFFI object roots with `#[derive(uniffi::Object)]`, exported impls,
-  constructors, async methods, and private inner state.
+  constructors, async methods, private inner state, and public facade reexports.
+- Private UniFFI object modules reexported through a public FFI facade.
+- Exported async UniFFI impl blocks on reexported objects.
 - Callback interface roots stored as `Option<Arc<dyn CallbackTrait>>`.
 - `async_trait` traits used through `Arc<dyn Trait>`.
 - Nested callback/future aliases like
   `Arc<dyn Fn() -> Pin<Box<dyn Future<...>>>>`.
+- Nested callback stores such as `Arc<RwLock<Option<Arc<dyn Trait>>>>`.
 - `macro_rules!` helper modules that `pub(crate) use` a macro and invoke it from
   exported methods.
 - Error enums combining `thiserror::Error` and `uniffi::Error`.
 - Static `include_str!` and `include_bytes!` asset groups.
 - Broad `pub use` hubs that need live-name pruning through reexport chains.
 - Serde/UniFFI helper attrs such as field defaults and skip helpers.
+- Split derive/helper attrs, including serde attrs between `derive(...)` and
+  UniFFI derives, `#[serde(transparent)]` records, default enum variants, and
+  tagged enums with payload variants.
 - Conversion-heavy boundary impls such as `TryFrom<Request> for Params`.
+- Adjacent bidirectional `From<A> for B` / `From<B> for A` impls across FFI and
+  internal types.
 - Macro bodies that call methods on metavariables, where the invocation argument
   type is the only generic way to retain the required method.
 - Direct callback API boundaries, source `include!` blockers, dependency aliases
   inside macro bodies, and inline script-bundle modules.
 - Support path dependencies that compile but over-copy examples, tests, benches,
   dev/build-only path packages, and fixture assets.
+- Support path dependencies with library test modules, orphan Rust files,
+  support binaries, support build scripts, and static assets referenced only by
+  copied support modules.
+- Exported free functions or object impls with cfg-split bodies, preserving cfg
+  attributes intact without expanding a broad custom cfg matrix.
+- Public async functions with boxed dyn callback args, generic connector
+  functions erased into boxed futures, and foreign trait impls with associated
+  errors plus return-position `impl Future`.
+- Public type aliases for `Box<dyn AsyncRead/AsyncWrite + Send + Unpin>`
+  reexported from module facades.
+- Generic async helper functions with `where` bounds over sink/stream traits and
+  associated error projections.
+- Root-level setup macros that appear after module declarations, exported
+  functions, and facade `pub use` statements.
 
 Cfg/custom-cfg matrix expansion is not expanded blindly. Catalog rules track
 cfg gates as move-intact/fail-closed work, and executable rules should be added

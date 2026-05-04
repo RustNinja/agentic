@@ -264,6 +264,15 @@ include assets instead of the whole package root, which removes dead examples,
 tests, benches, fixtures, and dev/build-only path packages without slicing the
 support package semantically yet.
 
+The next support-package precision fix made no-build support copying structural
+instead of directory-wide. The copier now walks the library external-module graph
+from `src/lib.rs`, skips `#[cfg(test)]` external modules and orphan Rust files,
+copies only static include assets referenced by copied support modules, and falls
+back to the broader source-tree copy only when the support module graph cannot be
+parsed safely. The pinned Litter codex-ipc five-root corpus run stayed
+warning-clean under feedback with `--deny-warnings` and dropped from 121 to 116
+generated files by removing generic support test/tool files.
+
 The next Litter codex-ipc five-root corpus probe exposed a more precise import
 bug: a module-local `use serde::Serialize` and a selected trait import survived
 only because other reduced items in the same package mentioned those symbols.
@@ -280,6 +289,10 @@ These are intentional fail-closed areas:
   as first-class source;
 - build scripts and `OUT_DIR` generated Rust are copied/reported but not fully
   semantically modeled;
+- copied support packages are still less visible to production hazard reporting
+  than first-class reduced workspace packages; support `build.rs`, `OUT_DIR`,
+  compile-time env, source includes, and opaque include assets should get parity
+  with workspace-package hazards before final production claims;
 - owned/returned/stored `dyn Trait` values, local function-pointer type
   surfaces, callback registries, and broad dynamic dispatch are not proven
   callgraph edges;
@@ -297,11 +310,14 @@ precise:
    owner files.
 2. Map macro-expanded item inventory into retained graph edges when RA provides
    stable spans.
-3. Model `OUT_DIR` generated Rust includes through build-script output
+3. Add production hazard parity for copied support packages, especially
+   support-package build scripts, `OUT_DIR`, compile-time env, and include
+   surfaces.
+4. Model `OUT_DIR` generated Rust includes through build-script output
    discovery and generated-file copying.
-4. Add a pinned real-repo CI matrix with Litter small, medium, and wide module
+5. Add a pinned real-repo CI matrix with Litter small, medium, and wide module
    targets plus RTK smoke targets.
-5. Promote recurring low-progress reports into preflight graph rules so common
+6. Promote recurring low-progress reports into preflight graph rules so common
    compiler failures are predicted before the first full build.
 
 The rule for future work: if a real-repo failure is fixed, add a generic

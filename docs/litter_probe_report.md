@@ -17,7 +17,7 @@ Cargo could load the Rust workspace. Probe runs used temp copies with one
 | `ipc-pending-resolve` | `codex-ipc::client::pending::PendingRequests::resolve` | production accepted | 15 | Compact async/channel-shaped support slice. Custom derive/attribute warnings were discharged. |
 | `ipc-read-frame` | `codex-ipc::transport::frame::read_frame` | production accepted | 13 | Generic async I/O function root. Custom macro and syntactic fallback warnings were discharged. |
 | `ipc-bridge-new` | `codex-ipc::bridge::IpcBridge::new` | production accepted | 862 | Heavy slice. Broad bridge/protocol state roots pull large support surfaces even when the selected item is small. |
-| `ipc-random5-mixed-surfaces` | `Method`, `RequestHandler`, `IpcClientConfig`, `PendingRequests`, `read_frame` | feedback accepted | 121 | Pinned five-root corpus case in `scripts/corpus_cases/litter_codex_ipc_random5.json`. First run produced two unused imports in `client/handle.rs`; generic render-plan import pruning fixed them, and the rerun had zero feedback warnings. |
+| `ipc-random5-mixed-surfaces` | `Method`, `RequestHandler`, `IpcClientConfig`, `PendingRequests`, `read_frame` | feedback accepted | 116 | Pinned five-root corpus case in `scripts/corpus_cases/litter_codex_ipc_random5.json`. First run produced two unused imports in `client/handle.rs`; generic render-plan import pruning fixed them. Support library module-closure copying then removed test/tool-only support Rust files, and the rerun had zero feedback warnings under `--deny-warnings`. |
 
 Two attempted `codex-mobile-client` probes did not reach slicer validation
 because the source workspace baseline failed before slicing in third-party
@@ -34,9 +34,10 @@ not slicer failures.
   validation but generated 850+ files because retained protocol/support path
   dependencies are copied broadly.
 - Support-package trimming is now measurably helping the feedback loop. The
-  pinned five-root codex-ipc corpus case reran in about 18 seconds with a warm
-  feedback target dir, emitted 121 generated files, and had zero warnings after
-  module-scoped import pruning and support `src/bin` exclusion.
+  pinned five-root codex-ipc corpus case reran warning-clean after both import
+  pruning and support-package module-closure copying. The latest run emitted 116
+  generated files and removed generic test/tool-only support files such as
+  `src/*_tests.rs`, `src/*/tests.rs`, and support binary `main.rs`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
@@ -50,6 +51,15 @@ not slicer failures.
 - `manifest.support_path_dependency.minimal.001`: retained source refers to one
   external path dependency type, but the copied support package should not bring
   unrelated files when only a narrow API is required.
+- `manifest.support_library_module_closure.001`: no-build copied support
+  packages should copy the library module graph, skip `#[cfg(test)]` external
+  modules and orphan Rust files, copy only static assets mentioned by copied
+  modules, and fall back to broader copying only when the module graph cannot be
+  parsed safely.
+- `manifest.support_build_script_hazard_parity.001`: copied support packages
+  with build scripts, `OUT_DIR`, compile-time env, or opaque include behavior
+  must be reported as production surfaces with the same fail-closed details as
+  retained workspace packages.
 - `protocol.enum_method.compact.001`: enum parser methods like `from_wire` should
   remain compact and keep only live variants/helpers.
 - `bridge.state_constructor.heavy.001`: constructor roots with broad private

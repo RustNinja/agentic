@@ -10,8 +10,8 @@ use quote::ToTokens;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    parse_quote, Field, GenericArgument, ImplItem, Item, PathArguments, TraitItem, Type, UseTree,
-    Variant,
+    parse_quote, Expr, Field, GenericArgument, ImplItem, Item, ItemMod, Lit, Meta, PathArguments,
+    TraitItem, Type, UseTree, Variant,
 };
 use toml::{value::Table, Value};
 
@@ -1467,6 +1467,13 @@ fn copy_support_package_library_source_tree(
     let Some(lib_path) = support_library_source_path(package) else {
         return Ok(copied);
     };
+    if let Some(source_files) = support_library_module_source_files(package)? {
+        for source_file in source_files {
+            copied += copy_support_package_file(&package_root, &source_file, package_output)?;
+        }
+        return Ok(copied);
+    }
+
     let src_dir = package_root.join("src");
     if lib_path.starts_with(&src_dir) {
         copied += copy_support_package_tree_inner(
@@ -1487,6 +1494,133 @@ fn copy_support_package_library_source_tree(
         &mut BTreeSet::new(),
     )?;
     Ok(copied)
+}
+
+fn support_library_module_source_files(
+    package: &SupportPackage,
+) -> Result<Option<BTreeSet<PathBuf>>, Box<dyn std::error::Error>> {
+    let Some(lib_path) = support_library_source_path(package) else {
+        return Ok(None);
+    };
+    let Ok(package_root) = package.root.canonicalize() else {
+        return Ok(None);
+    };
+    let Ok(lib_path) = lib_path.canonicalize() else {
+        return Ok(None);
+    };
+    if !lib_path.starts_with(&package_root) {
+        return Ok(None);
+    }
+
+    let mut sources = BTreeSet::new();
+    let module_dir = lib_path.parent().unwrap_or(&package_root).to_path_buf();
+    if !collect_support_library_module_sources(&package_root, &lib_path, &module_dir, &mut sources)?
+    {
+        return Ok(None);
+    }
+    Ok(Some(sources))
+}
+
+fn collect_support_library_module_sources(
+    package_root: &Path,
+    source_file: &Path,
+    module_dir: &Path,
+    sources: &mut BTreeSet<PathBuf>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let Ok(source_file) = source_file.canonicalize() else {
+        return Ok(false);
+    };
+    if !source_file.starts_with(package_root) {
+        return Ok(false);
+    }
+    if !sources.insert(source_file.clone()) {
+        return Ok(true);
+    }
+
+    let text = match fs::read_to_string(&source_file) {
+        Ok(text) => text,
+        Err(_) => return Ok(false),
+    };
+    let syntax = match syn::parse_file(&text) {
+        Ok(syntax) => syntax,
+        Err(_) => return Ok(false),
+    };
+
+    for item in syntax.items {
+        let Item::Mod(item_mod) = item else {
+            continue;
+        };
+        if item_mod.content.is_some() || attrs_are_test(&item_mod.attrs) {
+            continue;
+        }
+        let Some((child_file, child_dir)) =
+            support_external_module_source(package_root, module_dir, &item_mod)
+        else {
+            return Ok(false);
+        };
+        if !collect_support_library_module_sources(package_root, &child_file, &child_dir, sources)?
+        {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn support_external_module_source(
+    package_root: &Path,
+    module_dir: &Path,
+    item_mod: &ItemMod,
+) -> Option<(PathBuf, PathBuf)> {
+    let name = item_mod.ident.to_string();
+    let source_name = module_source_name(&name);
+    let path_attr = support_path_attr(item_mod);
+    let file_path = module_dir.join(format!("{source_name}.rs"));
+    let mod_path = module_dir.join(source_name).join("mod.rs");
+    let (source_file, child_module_dir) = if let Some(path_attr) = path_attr {
+        let source_file = if path_attr.is_absolute() {
+            path_attr
+        } else {
+            module_dir.join(path_attr)
+        };
+        let child_module_dir = source_file.parent().unwrap_or(module_dir).to_path_buf();
+        (source_file, child_module_dir)
+    } else if file_path.exists() {
+        (file_path, module_dir.join(source_name))
+    } else if mod_path.exists() {
+        (mod_path, module_dir.join(source_name))
+    } else {
+        return None;
+    };
+    let Ok(resolved) = source_file.canonicalize() else {
+        return None;
+    };
+    if !resolved.starts_with(package_root) {
+        return None;
+    }
+    Some((resolved, child_module_dir))
+}
+
+fn support_path_attr(item_mod: &ItemMod) -> Option<PathBuf> {
+    item_mod.attrs.iter().find_map(|attribute| {
+        if !attribute.path().is_ident("path") {
+            return None;
+        }
+        let Meta::NameValue(name_value) = &attribute.meta else {
+            return None;
+        };
+        let Expr::Lit(expr_lit) = &name_value.value else {
+            return None;
+        };
+        let Lit::Str(lit) = &expr_lit.lit else {
+            return None;
+        };
+        Some(PathBuf::from(lit.value()))
+    })
+}
+
+fn module_source_name(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
 }
 
 fn copy_support_package_file(
@@ -1606,8 +1740,15 @@ fn copy_support_include_assets(
         .unwrap_or(package_root.as_path())
         .canonicalize()?;
     let mut rust_files = Vec::new();
-    let mut visited = BTreeSet::new();
-    collect_support_rust_files(&package_root, &package_root, &mut visited, &mut rust_files)?;
+    if support_build_script_path(package).is_some() {
+        let mut visited = BTreeSet::new();
+        collect_support_rust_files(&package_root, &package_root, &mut visited, &mut rust_files)?;
+    } else if let Some(source_files) = support_library_module_source_files(package)? {
+        rust_files.extend(source_files);
+    } else {
+        let mut visited = BTreeSet::new();
+        collect_support_rust_files(&package_root, &package_root, &mut visited, &mut rust_files)?;
+    }
 
     let mut copied = 0;
     for source in rust_files {

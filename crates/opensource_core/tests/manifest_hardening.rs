@@ -3151,6 +3151,133 @@ edition = "2021"
 }
 
 #[test]
+fn copies_only_reachable_support_library_modules_and_static_assets() {
+    let workspace = temp_path("support-module-closure-workspace");
+    let output = temp_path("support-module-closure-output");
+    let target_dir = temp_path("support-module-closure-target");
+    let external = temp_path("support-module-closure-external");
+    let helper = external.join("external-helper");
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper),
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    external_helper::decorate(value)
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"mod live;
+
+#[cfg(test)]
+mod test_only;
+
+pub fn decorate(value: &str) -> String {
+    live::decorate(value)
+}
+"#,
+    );
+    write(
+        helper.join("src/live.rs"),
+        r#"const LABEL: &str = include_str!("live.txt");
+
+pub fn decorate(value: &str) -> String {
+    format!("{value}:{}", LABEL.trim())
+}
+"#,
+    );
+    write(
+        helper.join("src/test_only.rs"),
+        r#"const TEST_LABEL: &str = include_str!("test.txt");
+
+pub fn test_value() -> &'static str {
+    TEST_LABEL
+}
+"#,
+    );
+    write(
+        helper.join("src/orphan.rs"),
+        r#"const ORPHAN_LABEL: &str = include_str!("orphan.txt");
+
+pub fn orphan_value() -> &'static str {
+    ORPHAN_LABEL
+}
+"#,
+    );
+    write(helper.join("src/live.txt"), "live");
+    write(helper.join("src/test.txt"), "test");
+    write(helper.join("src/orphan.txt"), "orphan");
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output.join("support/external-helper/src/lib.rs").exists());
+    assert!(output.join("support/external-helper/src/live.rs").exists());
+    assert!(output.join("support/external-helper/src/live.txt").exists());
+    assert!(!output
+        .join("support/external-helper/src/test_only.rs")
+        .exists());
+    assert!(!output.join("support/external-helper/src/test.txt").exists());
+    assert!(!output
+        .join("support/external-helper/src/orphan.rs")
+        .exists());
+    assert!(!output
+        .join("support/external-helper/src/orphan.txt")
+        .exists());
+
+    fs::rename(&helper, helper.with_extension("moved")).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated support module closure slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+    );
+}
+
+#[test]
 fn preserves_replace_tables_with_resolved_paths() {
     let workspace = temp_path("replace-table-workspace");
     let output = temp_path("replace-table-output");
