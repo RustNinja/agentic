@@ -26,6 +26,7 @@ from typing import Any
 
 
 DEFAULT_OUTPUT_PREFIX = Path("/tmp/slicers-corpus")
+DEFAULT_MAX_BATCHES = 1
 DEFAULT_KINDS = ("fn", "mod", "trait", "struct", "enum")
 PARSE_TARGET_KINDS = {"lib", "proc-macro", "bin", "example", "test", "bench"}
 DEV_TARGET_KINDS = {"example", "test", "bench"}
@@ -134,7 +135,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--max-batches",
         type=int,
-        default=1,
+        default=DEFAULT_MAX_BATCHES,
         help="number of batches to run; use --continuous to run until interrupted",
     )
     parser.add_argument(
@@ -161,6 +162,14 @@ def parse_args() -> argparse.Namespace:
         help="only pick declarations whose item line starts with pub",
     )
     parser.add_argument("--seed", type=int, help="deterministic random seed")
+    parser.add_argument(
+        "--roots-file",
+        type=Path,
+        help=(
+            "JSON file with pinned batches; each batch contains roots with "
+            "path plus name/kind/line selectors"
+        ),
+    )
     parser.add_argument(
         "--analyzer",
         default="syn",
@@ -276,10 +285,14 @@ def main() -> int:
     cargo_source = resolve_cargo_source(source)
     if not opensourced_path.exists():
         raise SystemExit(f"missing opensourced crate at {opensourced_path}")
+    pinned_batches = load_pinned_batches(args.roots_file) if args.roots_file else []
+    args.pinned_batches = pinned_batches
 
     failures = 0
     successes = 0
     batch = args.start
+    if pinned_batches and max_batches == DEFAULT_MAX_BATCHES:
+        max_batches = len(pinned_batches)
     while max_batches is None or successes + failures < max_batches:
         row = run_batch(args, repo, cargo_source, opensourced_path, rng, batch)
         append_jsonl(args.report.resolve(), row)
@@ -315,6 +328,35 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.validation == "production":
         args.baseline_check = True
         args.deny_warnings = True
+
+
+def load_pinned_batches(path: Path) -> list[dict[str, Any]]:
+    data = json.loads(path.read_text())
+    batches = data.get("batches") if isinstance(data, dict) else data
+    if not isinstance(batches, list) or not batches:
+        raise SystemExit(f"{path} must contain a non-empty batches list")
+    for index, batch in enumerate(batches, start=1):
+        if not isinstance(batch, dict):
+            raise SystemExit(f"{path} batch {index} must be an object")
+        roots = batch.get("roots")
+        if not isinstance(roots, list) or not roots:
+            raise SystemExit(f"{path} batch {index} must contain non-empty roots")
+        for root_index, root in enumerate(roots, start=1):
+            if not isinstance(root, dict):
+                raise SystemExit(f"{path} batch {index} root {root_index} must be an object")
+            if not isinstance(root.get("path"), str) or not root["path"]:
+                raise SystemExit(f"{path} batch {index} root {root_index} needs path")
+            for key in ("name", "kind", "package", "target"):
+                if key in root and not isinstance(root[key], str):
+                    raise SystemExit(f"{path} batch {index} root {root_index} {key} must be a string")
+            if "line" in root and not isinstance(root["line"], int):
+                raise SystemExit(f"{path} batch {index} root {root_index} line must be an integer")
+        cargo_args = batch.get("cargo_check_args", [])
+        if not isinstance(cargo_args, list) or not all(
+            isinstance(arg, str) for arg in cargo_args
+        ):
+            raise SystemExit(f"{path} batch {index} cargo_check_args must be a string list")
+    return batches
 
 
 def resolve_cargo_source(source: Path) -> CargoSource:
@@ -461,8 +503,13 @@ def run_batch(
         packages = load_packages(cargo_source)
         candidates = discover_candidates(packages, args.public_only)
         candidate_counts = count_candidates(candidates)
-        roots = select_roots(candidates, args.kinds, args.roots_per_batch, rng)
-        cargo_check_args = validation_cargo_check_args(args, roots)
+        pinned_batch = pinned_batch_for_iteration(args, batch)
+        roots = (
+            select_pinned_roots(cargo_source.cargo_root, candidates, pinned_batch)
+            if pinned_batch
+            else select_roots(candidates, args.kinds, args.roots_per_batch, rng)
+        )
+        cargo_check_args = validation_cargo_check_args(args, roots, pinned_batch)
 
         if args.baseline_check:
             baseline = run_baseline_check(
@@ -718,6 +765,70 @@ def count_candidates(candidates: list[Candidate]) -> dict[str, int]:
     return counts
 
 
+def pinned_batch_for_iteration(args: argparse.Namespace, batch: int) -> dict[str, Any] | None:
+    pinned_batches = getattr(args, "pinned_batches", [])
+    if not pinned_batches:
+        return None
+    index = batch - args.start
+    if index < 0 or index >= len(pinned_batches):
+        raise RuntimeError(
+            f"no pinned roots-file batch for iteration {batch}; "
+            f"configured {len(pinned_batches)} batch(es) starting at {args.start}"
+        )
+    return pinned_batches[index]
+
+
+def select_pinned_roots(
+    cargo_root: Path,
+    candidates: list[Candidate],
+    batch: dict[str, Any],
+) -> list[Candidate]:
+    selected: list[Candidate] = []
+    used: set[tuple[Path, int]] = set()
+    for root in batch["roots"]:
+        candidate = resolve_pinned_root(cargo_root, candidates, root)
+        if candidate.key in used:
+            raise RuntimeError(f"duplicate pinned root: {candidate.display(cargo_root)}")
+        selected.append(candidate)
+        used.add(candidate.key)
+    return selected
+
+
+def resolve_pinned_root(
+    cargo_root: Path,
+    candidates: list[Candidate],
+    spec: dict[str, Any],
+) -> Candidate:
+    path = Path(spec["path"])
+    wanted_path = (path if path.is_absolute() else cargo_root / path).resolve()
+    matches = [candidate for candidate in candidates if candidate.path == wanted_path]
+    if "line" in spec:
+        matches = [candidate for candidate in matches if candidate.line == spec["line"]]
+    if "name" in spec:
+        matches = [candidate for candidate in matches if candidate.name == spec["name"]]
+    if "kind" in spec:
+        matches = [candidate for candidate in matches if candidate.kind == spec["kind"]]
+    if "package" in spec:
+        matches = [
+            candidate for candidate in matches if candidate.package.name == spec["package"]
+        ]
+    if "target" in spec:
+        matches = [
+            candidate for candidate in matches if candidate.package.target_name == spec["target"]
+        ]
+    if len(matches) == 1:
+        return matches[0]
+    candidates_at_path = [
+        candidate.display(cargo_root)
+        for candidate in candidates
+        if candidate.path == wanted_path
+    ][:12]
+    hint = "\n  ".join(candidates_at_path) or "no discovered candidates at that path"
+    raise RuntimeError(
+        f"pinned root selector matched {len(matches)} candidates for {spec!r}\n  {hint}"
+    )
+
+
 def select_roots(
     candidates: list[Candidate],
     preferred_kinds: list[str],
@@ -931,8 +1042,11 @@ def slicers_command(
 def validation_cargo_check_args(
     args: argparse.Namespace,
     roots: list[Candidate],
+    pinned_batch: dict[str, Any] | None = None,
 ) -> list[str]:
     cargo_args = list(args.cargo_check_arg)
+    if pinned_batch:
+        cargo_args.extend(pinned_batch.get("cargo_check_args", []))
     if args.validation == "preflight":
         return cargo_args
     selected_dev_kinds = selected_root_dev_kinds(roots)
@@ -1102,7 +1216,8 @@ def build_row(
     production_hazards = production.get("hazards") or []
     validation_status = (validation_report or {}).get("status")
     validation_gates = validation_gate_statuses(validation_report)
-    cargo_check_args = validation_cargo_check_args(args, roots)
+    pinned_batch = pinned_batch_for_iteration(args, batch)
+    cargo_check_args = validation_cargo_check_args(args, roots, pinned_batch)
     if validation_status == "rejected" and validation_gates.get("production_matrix") == "failed":
         classification = "slice_production_matrix_failed"
     passed = classification in {
@@ -1122,6 +1237,7 @@ def build_row(
         "cargo_root": str(cargo_source.cargo_root),
         "cargo_manifest": str(cargo_source.manifest_path),
         "source_git_head": git_head(cargo_source.cargo_root),
+        "case": (pinned_batch or {}).get("name"),
         "seed": args.seed,
         "validation": {
             "tier": args.validation,

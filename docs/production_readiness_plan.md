@@ -144,7 +144,7 @@ assets, output safety, or product diagnostics by itself.
    - Keep the syntactic reducer available for simple workspaces and offline runs.
 
 5. Corpus validation:
-   - Pin real repositories and root selections.
+   - Pin real repositories and root selections with repeatable corpus case files.
    - Run original baseline checks before slicing.
    - Generate slices, run feedback checks, and compare selected behavior probes.
    - Store retained/pruned inventories and failure reports.

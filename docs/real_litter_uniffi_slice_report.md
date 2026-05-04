@@ -204,12 +204,15 @@ Known remaining risks:
 - `build.rs` and referenced non-Rust assets are copied, but generated `OUT_DIR`
   Rust code is not semantically modeled.
 - Target-specific dependency tables are preserved when retained source
-  references them, but full platform cfg evaluation is not implemented.
+  references them. Selected cfg-gated roots can now be discharged for
+  recognized feature/target `all(...)`, `any(...)`, and `not(...)` expressions
+  proven by validation args and `rustc --print cfg`, but custom cfgs and
+  retained non-root platform matrices remain conservative.
 - Feature tables are rewritten for pruned optional dependencies, but full
   feature-resolution semantics are still conservative.
 - Proc macro expansion is not executed.
 - Glob imports/reexports are still conservative.
-- Full `cfg` matrix evaluation is not implemented.
+- Full rustc-equivalent `cfg` matrix inventory is not implemented.
 
 The real Litter slices exercised traits, impls, enums, structs, constants,
 statics, modules, UniFFI exports, UniFFI records/errors, match patterns, and

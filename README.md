@@ -126,15 +126,17 @@ Use repeated `--cargo-check-arg <arg>` flags to pass feature or target matrix
 arguments through to baseline and generated `cargo check` runs, for example
 `--cargo-check-arg --all-features` or `--cargo-check-arg --target
 --cargo-check-arg wasm32-unknown-unknown`.
-In `--production` mode, selected roots behind concrete Cargo feature cfg gates
-remain reported in `slice-report.json`; when their structured
-`suggested_cargo_args` are covered by the supplied `--cargo-check-arg` values
-or by `--all-features`, the production gate downgrades them to compiler
-feedback instead of failing before validation. Unsupported cfg forms and other
-error hazards remain fail-closed. Retained non-root feature cfg surfaces also
-feed a bounded production matrix pass: after the primary feedback loop, the CLI
-runs matching source and generated checks for uncovered concrete feature hints
-and writes `slice-baseline-matrix-N.json` plus `slice-feedback-matrix-N.json`.
+In `--production` mode, selected roots behind non-test cfg gates remain
+reported in `slice-report.json`; when their cfg expression is proven by the
+supplied `--cargo-check-arg` feature/target values, `--all-features`, and host
+or explicit target `rustc --print cfg`, the production gate downgrades them to
+compiler feedback instead of failing before validation. Recognized
+`all(...)`, `any(...)`, and `not(...)` expressions use fail-closed tri-state
+evaluation, while custom cfgs and other error hazards remain fail-closed.
+Retained non-root feature cfg surfaces also feed a bounded production matrix
+pass: after the primary feedback loop, the CLI runs matching source and
+generated checks for uncovered concrete feature hints and writes
+`slice-baseline-matrix-N.json` plus `slice-feedback-matrix-N.json`.
 Feedback reports classify unresolved compiler diagnostics into widening
 candidates and production hazards, so missing paths, items, methods, crates,
 module files, timeouts, and manifest-shape failures can be triaged without
@@ -252,6 +254,10 @@ The corpus runner discovers package targets through `cargo metadata --no-deps`,
 injects the local marker dependency only into packages selected for that batch,
 restores git-backed sources before and after mutation by default, preserves
 failed outputs for debugging, and appends one JSONL metrics row per batch.
+Use `--roots-file scripts/corpus_cases/litter_uniffi.json` to run pinned
+real-repo root selections instead of random batches; per-case
+`cargo_check_args` in that JSON are merged with repeated `--cargo-check-arg`
+values.
 Use `--validation preflight` for fast no-build corpus exploration, rerun
 interesting or suspicious cases with `--validation feedback`, and use
 `--validation repair` when a corpus batch should exercise the conservative

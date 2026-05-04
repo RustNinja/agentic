@@ -21,6 +21,23 @@ scripts/corpus_feedback_loop.py \
   --report reports/corpus_feedback.jsonl
 ```
 
+Use `--roots-file path/to/cases.json` for pinned real-repo batches instead of
+random roots. The JSON can contain `batches`, each with a `name`, optional
+`cargo_check_args`, and root selectors using `path` plus `name`, `kind`, `line`,
+`package`, or `target`. When `--roots-file` is provided without
+`--max-batches`, the runner executes all pinned batches. The checked-in Litter
+smoke set can be run against the pinned checkout like this:
+
+```sh
+scripts/corpus_feedback_loop.py \
+  --source /tmp/litter/shared/rust-bridge \
+  --roots-file scripts/corpus_cases/litter_uniffi.json \
+  --output-prefix /tmp/slicers-litter-pinned \
+  --validation production \
+  --feedback-target-dir /tmp/slicers-litter-target \
+  --report reports/litter_uniffi.jsonl
+```
+
 By default it restores and cleans git-backed sources before and after each
 batch, keeps failed outputs for debugging, removes generated `target-feedback`,
 and prunes older successful outputs. Use `--baseline-check` to separate source
@@ -57,7 +74,10 @@ with source and generated matrix reports recorded next to the primary feedback
 report, so corpus rows can distinguish primary feedback from feature-surface
 validation. Use
 `--deny-warnings` for production gates that
-require warning-free generated feedback. Each corpus row includes
+require warning-free generated feedback. Selected root cfg gates can now be
+discharged when recognized `all(...)`, `any(...)`, and `not(...)` feature/target
+expressions are proven by the validation args and host or explicit target
+`rustc --print cfg`; custom cfgs still fail closed. Each corpus row includes
 the slicer's authoritative validation verdict, production-readiness status,
 production hazard codes and structured hazard details, compiler feedback
 widening candidate/hazard kinds, feedback-widened root counts, compiler
