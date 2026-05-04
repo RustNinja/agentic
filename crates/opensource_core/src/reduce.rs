@@ -230,6 +230,24 @@ pub fn reduce_with_extra_roots_and_semantics(
                 item_queue.push_back(item);
             }
         }
+
+        let dependencies = reachable_trait_impl_surface_dependencies(
+            project,
+            &candidate_packages,
+            &reachable_items,
+        );
+        evidence.add(&dependencies.evidence);
+        for dependency in dependencies.callables {
+            if candidate_packages.contains(dependency.package()) && !reachable.contains(&dependency)
+            {
+                callable_queue.push_back(dependency);
+            }
+        }
+        for item in dependencies.items {
+            if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
+                item_queue.push_back(item);
+            }
+        }
     }
 
     let mut packages = reachable_packages(&roots, &reachable, &reachable_items);
@@ -533,6 +551,58 @@ fn retained_rendered_use_dependencies(
                     &path,
                     reachable_idents,
                 ));
+            }
+        }
+    }
+    dependencies
+}
+
+fn reachable_trait_impl_surface_dependencies(
+    project: &Project,
+    candidate_packages: &BTreeSet<String>,
+    reachable_items: &BTreeSet<ItemId>,
+) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    for package in candidate_packages {
+        for module_path in project_module_paths(project, package) {
+            let Some(items) = module_items_for_path(project, package, &module_path) else {
+                continue;
+            };
+            let aliases = project
+                .module_aliases
+                .get(&(package.clone(), module_path.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let resolver = Resolver {
+                project,
+                package,
+                module_path: &module_path,
+                aliases: &aliases,
+                self_type: None,
+            };
+            for item in items {
+                let Item::Impl(item_impl) = item else {
+                    continue;
+                };
+                if item_impl.trait_.is_none() {
+                    continue;
+                }
+                let Some(self_type) = resolver.resolve_receiver_type(&item_impl.self_ty) else {
+                    continue;
+                };
+                if !resolver
+                    .type_ref_candidates(&self_type)
+                    .iter()
+                    .any(|type_ref| type_ref_item_is_reachable(reachable_items, type_ref))
+                {
+                    continue;
+                }
+                let Some(trait_item) = trait_item_for_impl(&resolver, item_impl) else {
+                    continue;
+                };
+                if trait_item_has_public_surface(project, &trait_item) {
+                    dependencies.items.insert(trait_item);
+                }
             }
         }
     }
@@ -2694,6 +2764,20 @@ impl<'a> DependencyVisitor<'a> {
         true
     }
 
+    fn add_default_trait_method_dependencies(
+        &mut self,
+        receiver: &TypeRef,
+        method_name: &str,
+    ) -> bool {
+        let matching_traits =
+            default_trait_method_traits_for_receiver(self.resolver.project, receiver, method_name);
+        if matching_traits.is_empty() {
+            return false;
+        }
+        self.dependencies.items.extend(matching_traits);
+        true
+    }
+
     fn receiver_trait_bounds(&self, expression: &Expr) -> Vec<ItemId> {
         let mut trait_items = Vec::new();
         self.collect_receiver_trait_bounds(expression, &mut trait_items);
@@ -3996,11 +4080,20 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             }
             let has_trait_bound_method =
                 self.add_trait_bound_method_dependencies(&call.receiver, &method);
+            let mut has_default_trait_method = false;
+            let mut default_trait_receivers = receiver_candidates.clone();
+            default_trait_receivers.push(receiver.clone());
+            default_trait_receivers.sort();
+            default_trait_receivers.dedup();
+            for receiver in &default_trait_receivers {
+                has_default_trait_method |=
+                    self.add_default_trait_method_dependencies(receiver, &method);
+            }
             if has_resolved_method {
                 self.add_peer_trait_impls_for_resolved_methods(&resolved_methods);
                 self.add_closure_arg_dependencies(call, &resolved_methods);
             }
-            if !has_resolved_method && !has_trait_bound_method {
+            if !has_resolved_method && !has_trait_bound_method && !has_default_trait_method {
                 self.add_unresolved_method_candidates(&method, &receiver_candidates);
                 self.add_trait_impls_for_type_named(&receiver, "Deref");
                 self.add_trait_impls_for_type_named(&receiver, "DerefMut");
@@ -5916,6 +6009,103 @@ fn trait_item_contains_method(project: &Project, item: &ItemId, method_name: &st
         };
         function.sig.ident == method_name
     })
+}
+
+fn trait_item_contains_default_method(project: &Project, item: &ItemId, method_name: &str) -> bool {
+    let Some(record) = project.items.get(item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    item_trait.items.iter().any(|trait_item| {
+        let syn::TraitItem::Fn(function) = trait_item else {
+            return false;
+        };
+        function.sig.ident == method_name && function.default.is_some()
+    })
+}
+
+fn trait_item_has_public_surface(project: &Project, item: &ItemId) -> bool {
+    let Some(record) = project.items.get(item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    matches!(item_trait.vis, syn::Visibility::Public(_))
+}
+
+fn trait_item_for_impl(resolver: &Resolver<'_>, item_impl: &syn::ItemImpl) -> Option<ItemId> {
+    let (_, trait_path, _) = item_impl.trait_.as_ref()?;
+    let segments = resolver.apply_alias(path_segments(trait_path));
+    resolver.resolve_trait_item(&segments)
+}
+
+fn type_ref_item_is_reachable(reachable_items: &BTreeSet<ItemId>, type_ref: &TypeRef) -> bool {
+    let Some((name, module_path)) = type_ref.type_path.split_last() else {
+        return false;
+    };
+    type_like_kinds().iter().any(|kind| {
+        reachable_items.contains(&ItemId {
+            package: type_ref.package.clone(),
+            module_path: module_path.to_vec(),
+            name: name.clone(),
+            kind: *kind,
+        })
+    })
+}
+
+fn default_trait_method_traits_for_receiver(
+    project: &Project,
+    receiver: &TypeRef,
+    method_name: &str,
+) -> Vec<ItemId> {
+    let mut matching_traits = Vec::new();
+    for module_path in project_module_paths(project, &receiver.package) {
+        let Some(items) = module_items_for_path(project, &receiver.package, &module_path) else {
+            continue;
+        };
+        let aliases = project
+            .module_aliases
+            .get(&(receiver.package.clone(), module_path.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let resolver = Resolver {
+            project,
+            package: &receiver.package,
+            module_path: &module_path,
+            aliases: &aliases,
+            self_type: None,
+        };
+        for item in items {
+            let Item::Impl(item_impl) = item else {
+                continue;
+            };
+            if item_impl.trait_.is_none() {
+                continue;
+            }
+            let Some(self_type) = resolver.resolve_receiver_type(&item_impl.self_ty) else {
+                continue;
+            };
+            if !resolver
+                .type_ref_candidates(&self_type)
+                .iter()
+                .any(|candidate| candidate == receiver)
+            {
+                continue;
+            }
+            let Some(trait_item) = trait_item_for_impl(&resolver, item_impl) else {
+                continue;
+            };
+            if trait_item_contains_default_method(project, &trait_item, method_name) {
+                matching_traits.push(trait_item);
+            }
+        }
+    }
+    matching_traits.sort();
+    matching_traits.dedup();
+    matching_traits
 }
 
 fn impl_trait_return_bound_names(output: &ReturnType) -> BTreeSet<String> {

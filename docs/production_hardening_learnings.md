@@ -1,6 +1,6 @@
 # Production Hardening Learnings
 
-Last updated: 2026-05-04
+Last updated: 2026-05-05
 
 This document captures the implementation lessons from moving the slicer from a
 small proof-of-concept toward a production Rust workspace slicer. It is written
@@ -257,6 +257,16 @@ existing generic behavior for four more Litter-shaped surfaces: direct borrowed
 `include!` macros stay production-blocking, dependency aliases mentioned only in
 macro bodies are retained, and inline script-bundle modules copy only live
 `include_str!` assets.
+
+The fourth rule-database pass raised the executable fast rule set to 22 cases and
+fixed two graph/render gaps generically. Retained surfaces must expand renamed
+local aliases back to their resolved target item names before render planning;
+otherwise a struct field typed as `PublicAlias` can keep the alias text but prune
+the real `LongName` definition. Public local trait impls for reachable types are
+part of the retained type surface, and receiver calls to trait default methods
+must retain the trait item even when the concrete impl only supplies associated
+consts or types. Inline callback/future trait-object fields now share the same
+hard dynamic-dispatch hazard path as aliased callback/future signatures.
 
 Five real Litter `codex-ipc` probes now pass production validation with compiler
 feedback: `project_conversation_state`, `Method::from_wire`,

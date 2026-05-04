@@ -33,9 +33,12 @@ of planned generic combinations lives in
 | --- | --- | --- |
 | `import.reexport.grouped.001` | covered | Grouped public reexports prune removed names while keeping live names |
 | `import.reexport.alias_removed.001` | covered | A removed public alias is pruned even when the alias text appears as a local binding |
+| `import.renamed_surface_alias.001` | covered | Renamed local type and trait imports used only by retained struct/impl surfaces keep their resolved target items and prune dead sibling aliases |
 | `dyn.owned.registry.001` | covered | Stored `Box<dyn Trait>` and callback aliases are hard production hazards |
 | `include.bytes.static.001` | covered | Retained `include_bytes!` assets are copied and dead sibling assets are not |
 | `build.rustc_env.001` | covered | Retained `env!` fed by build script state is production-blocking |
+| `trait.default_method_assoc_const.001` | covered | Receiver calls to trait default methods retain the trait item and the concrete impl associated const/type surface needed to compile |
+| `dyn.callback.inline_future_field.001` | covered | Inline `Arc<dyn Fn(...) -> Pin<Box<dyn Future...>>>` callback fields report hard dynamic-dispatch hazards without requiring a type alias |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
 | `import.reexport.chain_hub.001` | covered | Reexport chains prune dead grouped names at each public hub |

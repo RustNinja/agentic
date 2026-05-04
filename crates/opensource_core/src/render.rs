@@ -157,9 +157,11 @@ impl ReachableMentionIndex {
             collect_callable_idents(callable, &mut idents);
             let module_path = if let Some(record) = project.functions.get(callable) {
                 collect_token_idents(&record.item.to_token_stream(), &mut idents);
+                expand_alias_surface_idents(&record.aliases, &mut idents);
                 record.module_path.as_slice()
             } else if let Some(record) = project.methods.get(callable) {
                 collect_token_idents(&record.item.to_token_stream(), &mut idents);
+                expand_alias_surface_idents(&record.aliases, &mut idents);
                 record.module_path.as_slice()
             } else {
                 callable_module_path(callable)
@@ -2032,6 +2034,7 @@ fn rendered_item_surface_idents(
         }
         _ => collect_token_idents(&record.item.to_token_stream(), &mut idents),
     }
+    expand_alias_surface_idents(&record.aliases, &mut idents);
     idents
 }
 
@@ -2126,9 +2129,11 @@ fn reachable_reduced_callable_ident_index(
         collect_callable_idents(callable, &mut idents);
         if let Some(record) = project.functions.get(callable) {
             collect_token_idents(&record.item.to_token_stream(), &mut idents);
+            expand_alias_surface_idents(&record.aliases, &mut idents);
         }
         if let Some(record) = project.methods.get(callable) {
             collect_token_idents(&record.item.to_token_stream(), &mut idents);
+            expand_alias_surface_idents(&record.aliases, &mut idents);
         }
         index.all.extend(idents.iter().cloned());
         index.by_package.entry(package).or_default().extend(idents);
@@ -2168,6 +2173,33 @@ fn collect_token_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
             TokenTree::Group(group) => collect_token_idents(&group.stream(), idents),
             TokenTree::Literal(literal) => collect_literal_format_captures(&literal, idents),
             TokenTree::Punct(_) => {}
+        }
+    }
+}
+
+fn expand_alias_surface_idents(
+    aliases: &HashMap<String, Vec<String>>,
+    idents: &mut BTreeSet<String>,
+) {
+    let mut pending = idents.iter().cloned().collect::<Vec<_>>();
+    let mut visited = BTreeSet::new();
+    while let Some(ident) = pending.pop() {
+        if !visited.insert(ident.clone()) {
+            continue;
+        }
+        let Some(target) = aliases.get(&ident) else {
+            continue;
+        };
+        let Some(target_ident) = target
+            .iter()
+            .rev()
+            .find(|segment| !matches!(segment.as_str(), "crate" | "self" | "super"))
+            .cloned()
+        else {
+            continue;
+        };
+        if idents.insert(target_ident.clone()) {
+            pending.push(target_ident);
         }
     }
 }
@@ -5713,6 +5745,10 @@ fn collect_retained_module_surface_idents(
                         &aliases,
                     )
                 {
+                    collect_impl_header_idents(item_impl, idents);
+                    for attr in &item_impl.attrs {
+                        collect_token_idents(&attr.to_token_stream(), idents);
+                    }
                     for impl_item in &item_impl.items {
                         if !impl_item_is_test(impl_item) {
                             collect_token_idents(&impl_item.to_token_stream(), idents);
@@ -5731,6 +5767,7 @@ fn collect_retained_module_surface_idents(
             _ => {}
         }
     }
+    expand_alias_surface_idents(&aliases, idents);
 }
 
 fn collect_impl_header_idents(item_impl: &syn::ItemImpl, idents: &mut BTreeSet<String>) {

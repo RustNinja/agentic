@@ -52,6 +52,93 @@ fn prunes_removed_public_reexport_alias_even_when_alias_name_is_used_locally() {
 }
 
 #[test]
+fn retains_renamed_local_type_and_trait_imports_used_only_by_surfaces() {
+    let workspace = temp_path("rule-renamed-surface-workspace");
+    let output = temp_path("rule-renamed-surface-output");
+    let target_dir = temp_path("rule-renamed-surface-target");
+    write_renamed_surface_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("renamed surface rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("renamed_surface_rule/src/lib.rs"));
+    assert!(lib.contains("LongName as PublicAlias"), "{lib}");
+    assert!(lib.contains("LongTrait as TraitAlias"), "{lib}");
+    assert!(lib.contains("pub struct LongName"), "{lib}");
+    assert!(lib.contains("pub trait LongTrait"), "{lib}");
+    assert!(lib.contains("impl TraitAlias for ApiSurface"), "{lib}");
+    assert!(!lib.contains("DeadName as DeadAlias"), "{lib}");
+    assert!(!lib.contains("pub struct DeadName"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_trait_default_methods_and_impl_associated_consts() {
+    let workspace = temp_path("rule-default-trait-workspace");
+    let output = temp_path("rule-default-trait-output");
+    let target_dir = temp_path("rule-default-trait-target");
+    write_default_trait_method_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("default trait method rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("default_trait_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Fragment"), "{lib}");
+    assert!(lib.contains("const KIND: &'static str"), "{lib}");
+    assert!(lib.contains("fn render(&self) -> &'static str"), "{lib}");
+    assert!(lib.contains("impl Fragment for EnvFragment"), "{lib}");
+    assert!(lib.contains("const KIND: &'static str = \"env\""), "{lib}");
+    assert!(!lib.contains("DeadFragment"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn reports_inline_callback_future_fields_as_dynamic_hazards() {
+    let workspace = temp_path("rule-inline-callback-future-workspace");
+    let output = temp_path("rule-inline-callback-future-output");
+    write_inline_callback_future_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("inline callback future rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    let trait_object = report
+        .production
+        .hazards
+        .iter()
+        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
+        .expect("inline callback future should report trait object hazards");
+    assert!(trait_object
+        .details
+        .iter()
+        .any(|detail| detail.subject.contains("dyn Fn")));
+    assert!(trait_object
+        .details
+        .iter()
+        .any(|detail| detail.subject.contains("dyn Future")));
+
+    let lib = read(output.join("inline_callback_future_rule/src/lib.rs"));
+    let compact_lib = lib.split_whitespace().collect::<String>();
+    assert!(
+        compact_lib.contains("Pin<Box<dynFuture<Output=bool>+Send>>"),
+        "{lib}"
+    );
+    assert!(compact_lib.contains("Arc<dynFn(&str)"), "{lib}");
+    assert!(!lib.contains("DeadInlineCallback"), "{lib}");
+}
+
+#[test]
 fn reports_owned_dynamic_dispatch_surfaces_inside_retained_structs() {
     let workspace = temp_path("rule-owned-dyn-workspace");
     let output = temp_path("rule-owned-dyn-output");
@@ -565,6 +652,111 @@ pub use dead::dead_fn as selected_value;
 pub fn selected() -> u32 {
     let selected_value = 7;
     selected_value
+}
+"#,
+    );
+}
+
+fn write_renamed_surface_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "renamed_surface_rule",
+        r#"use opensourced::opensourced;
+
+mod types {
+    pub struct LongName;
+
+    pub trait LongTrait {
+        fn mark(&self) -> u32;
+    }
+
+    pub struct DeadName;
+}
+
+use crate::types::{DeadName as DeadAlias, LongName as PublicAlias, LongTrait as TraitAlias};
+
+pub struct ApiSurface {
+    pub item: PublicAlias,
+}
+
+impl TraitAlias for ApiSurface {
+    fn mark(&self) -> u32 {
+        7
+    }
+}
+
+#[opensourced]
+pub fn selected() -> ApiSurface {
+    ApiSurface { item: PublicAlias }
+}
+
+pub fn dead_api() -> DeadAlias {
+    DeadAlias
+}
+"#,
+    );
+}
+
+fn write_default_trait_method_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "default_trait_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Fragment {
+    const KIND: &'static str;
+
+    fn render(&self) -> &'static str {
+        Self::KIND
+    }
+}
+
+pub struct EnvFragment;
+
+impl Fragment for EnvFragment {
+    const KIND: &'static str = "env";
+}
+
+pub struct DeadFragment;
+
+impl Fragment for DeadFragment {
+    const KIND: &'static str = "dead";
+}
+
+#[opensourced]
+pub fn selected(fragment: &EnvFragment) -> &'static str {
+    fragment.render()
+}
+"#,
+    );
+}
+
+fn write_inline_callback_future_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "inline_callback_future_rule",
+        r#"use opensourced::opensourced;
+use std::{future::Future, pin::Pin, sync::Arc};
+
+pub struct InlineRegistry {
+    callback: Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>,
+}
+
+impl InlineRegistry {
+    pub fn new(
+        callback: Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>,
+    ) -> Self {
+        Self { callback }
+    }
+}
+
+pub struct DeadInlineCallback;
+
+#[opensourced]
+pub fn selected(
+    callback: Arc<dyn Fn(&str) -> Pin<Box<dyn Future<Output = bool> + Send>> + Send + Sync>,
+) -> InlineRegistry {
+    InlineRegistry::new(callback)
 }
 "#,
     );

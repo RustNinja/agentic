@@ -17,7 +17,7 @@ Cargo could load the Rust workspace. Probe runs used temp copies with one
 | `ipc-pending-resolve` | `codex-ipc::client::pending::PendingRequests::resolve` | production accepted | 15 | Compact async/channel-shaped support slice. Custom derive/attribute warnings were discharged. |
 | `ipc-read-frame` | `codex-ipc::transport::frame::read_frame` | production accepted | 13 | Generic async I/O function root. Custom macro and syntactic fallback warnings were discharged. |
 | `ipc-bridge-new` | `codex-ipc::bridge::IpcBridge::new` | production accepted | 862 | Heavy slice. Broad bridge/protocol state roots pull large support surfaces even when the selected item is small. |
-| `ipc-random5-mixed-surfaces` | `Method`, `RequestHandler`, `IpcClientConfig`, `PendingRequests`, `read_frame` | feedback accepted | 116 | Pinned five-root corpus case in `scripts/corpus_cases/litter_codex_ipc_random5.json`. First run produced two unused imports in `client/handle.rs`; generic render-plan import pruning fixed them. Support library module-closure copying then removed test/tool-only support Rust files, and the rerun had zero feedback warnings under `--deny-warnings`. |
+| `ipc-random5-mixed-surfaces` | `Method`, `RequestHandler`, `IpcClientConfig`, `PendingRequests`, `read_frame` | production accepted | 116 | Pinned five-root corpus case in `scripts/corpus_cases/litter_codex_ipc_random5.json`. First run produced two unused imports in `client/handle.rs`; generic render-plan import pruning fixed them. Support library module-closure copying then removed test/tool-only support Rust files. The 2026-05-05 rerun after renamed-surface/default-trait hardening produced zero preflight errors, zero feedback errors, zero warnings, and `production_ready=accepted` under `--deny-warnings`. |
 
 Two attempted `codex-mobile-client` probes did not reach slicer validation
 because the source workspace baseline failed before slicing in third-party
@@ -59,6 +59,9 @@ not slicer failures.
   with known source baseline failures allowed. The generated slice remained at
   116 files, passed production validation, and produced zero feedback errors or
   warnings under `--deny-warnings`.
+- The renamed-surface and default-trait hardening pass did not regress the pinned
+  corpus: the same five-root batch still generated 116 files and reached
+  `production_ready=accepted` with zero warnings under `--deny-warnings`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
