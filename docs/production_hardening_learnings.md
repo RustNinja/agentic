@@ -218,6 +218,14 @@ attribute, and non-builtin macro invocation hazards now put the macro path in
 the hazard subject, so a macro-heavy Litter/UniFFI slice can be triaged without
 manually opening every retained source line.
 
+The rule database should grow as small named generic cases, not as one giant
+fixture or as project-specific allowlists. The first seed rules cover grouped
+public reexport pruning, removed alias pruning with local binding shadows,
+owned/stored dynamic dispatch hazards, retained `include_bytes!` assets,
+build-script `rustc-env`/`env!` blockers, nested callback/future aliases, and
+`pub(crate)` macro helper reexports. Litter examples should be converted into
+these generic groups before any slicer behavior is changed.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
