@@ -251,6 +251,27 @@ fn retains_const_to_const_dependencies_and_array_lengths() {
 }
 
 #[test]
+fn retains_format_capture_const_dependencies() {
+    let workspace = temp_path("rule-format-capture-const-workspace");
+    let output = temp_path("rule-format-capture-const-output");
+    let target_dir = temp_path("rule-format-capture-const-target");
+    write_format_capture_const_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("format capture const rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("format_capture_const_rule/src/lib.rs"));
+    assert!(lib.contains("LIVE_PREFIX"), "{lib}");
+    assert!(lib.contains("format!(\"{LIVE_PREFIX}:{value}\")"), "{lib}");
+    assert!(!lib.contains("DEAD_PREFIX"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_macro_metavariable_enum_variant_paths() {
     let workspace = temp_path("rule-macro-variant-workspace");
     let output = temp_path("rule-macro-variant-output");
@@ -889,6 +910,28 @@ fn retains_serde_alias_private_wire_contract_fields() {
 }
 
 #[test]
+fn retains_serde_transparent_contract_fields() {
+    let workspace = temp_path("rule-serde-transparent-workspace");
+    let output = temp_path("rule-serde-transparent-output");
+    let target_dir = temp_path("rule-serde-transparent-target");
+    write_serde_transparent_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde transparent rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_transparent_rule/src/lib.rs"));
+    assert!(lib.contains("#[serde(transparent)]"), "{lib}");
+    assert!(lib.contains("pub struct SessionId"), "{lib}");
+    assert!(lib.contains("pub id: SessionId"), "{lib}");
+    assert!(!lib.contains("DeadSessionId"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_serde_skip_serializing_if_contract_fields() {
     let workspace = temp_path("rule-serde-skip-serializing-workspace");
     let output = temp_path("rule-serde-skip-serializing-output");
@@ -931,6 +974,52 @@ fn retains_serde_untagged_enum_contract_variants() {
     assert!(lib.contains("Index(usize)"), "{lib}");
     assert!(lib.contains("Key(String)"), "{lib}");
     assert!(!lib.contains("DeadSegment"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_serde_tagged_enum_contract_variants() {
+    let workspace = temp_path("rule-serde-tagged-enum-workspace");
+    let output = temp_path("rule-serde-tagged-enum-output");
+    let target_dir = temp_path("rule-serde-tagged-enum-target");
+    write_serde_tagged_enum_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde tagged enum rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_tagged_enum_rule/src/lib.rs"));
+    assert!(lib.contains("#[serde(tag = \"type\")]"), "{lib}");
+    assert!(lib.contains("ApiKey"), "{lib}");
+    assert!(lib.contains("Chatgpt"), "{lib}");
+    assert!(lib.contains("api_key: String"), "{lib}");
+    assert!(!lib.contains("DeadLogin"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_serde_default_enum_variant_contracts() {
+    let workspace = temp_path("rule-serde-default-enum-workspace");
+    let output = temp_path("rule-serde-default-enum-output");
+    let target_dir = temp_path("rule-serde-default-enum-target");
+    write_serde_default_enum_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde default enum rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_default_enum_rule/src/lib.rs"));
+    assert!(lib.contains("#[derive(Deserialize, Default)]"), "{lib}");
+    assert!(lib.contains("#[default]"), "{lib}");
+    assert!(lib.contains("Auto"), "{lib}");
+    assert!(lib.contains("Manual"), "{lib}");
+    assert!(!lib.contains("DeadMode"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -1136,6 +1225,29 @@ fn flags_build_script_rustc_env_inputs_as_production_blockers() {
     assert!(lib.contains("env!(\"GENERATED_TOKEN\")"), "{lib}");
     assert!(output.join("rustc_env_rule/build.rs").exists());
     assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn flags_option_env_inputs_as_production_blockers() {
+    let workspace = temp_path("rule-option-env-workspace");
+    let output = temp_path("rule-option-env-output");
+    write_option_env_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("option_env rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "compile_env_macros" && hazard.severity == "error"));
+    let lib = read(output.join("option_env_rule/src/lib.rs"));
+    assert!(lib.contains("option_env!(\"LITTER_PROFILE\")"), "{lib}");
+    assert!(!lib.contains("DEAD_PROFILE"), "{lib}");
 }
 
 #[test]
@@ -1361,6 +1473,27 @@ fn retains_try_from_conversion_impls_for_boundary_types() {
 }
 
 #[test]
+fn retains_bidirectional_from_impl_pair_for_boundary_roundtrips() {
+    let workspace = temp_path("rule-bidirectional-from-workspace");
+    let output = temp_path("rule-bidirectional-from-output");
+    let target_dir = temp_path("rule-bidirectional-from-target");
+    write_bidirectional_from_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("bidirectional From rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("bidirectional_from_rule/src/lib.rs"));
+    assert!(lib.contains("impl From<Internal> for Wire"), "{lib}");
+    assert!(lib.contains("impl From<Wire> for Internal"), "{lib}");
+    assert!(!lib.contains("DeadWire"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
     let workspace = temp_path("rule-option-arc-callback-workspace");
     let output = temp_path("rule-option-arc-callback-output");
@@ -1489,6 +1622,55 @@ fn reports_direct_callback_boundaries_as_feedback_warnings() {
     assert!(lib.contains("handler: &dyn Callback"), "{lib}");
     assert!(lib.contains("callback: fn(u32) -> u32"), "{lib}");
     assert!(!lib.contains("DeadCallback"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn ignores_function_pointer_hazards_from_pruned_trait_surface_methods() {
+    let workspace = temp_path("rule-pruned-trait-method-hazard-workspace");
+    let output = temp_path("rule-pruned-trait-method-hazard-output");
+    let target_dir = temp_path("rule-pruned-trait-method-hazard-target");
+    write_pruned_trait_method_hazard_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("pruned trait method hazard rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("pruned_trait_method_hazard_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Callback"), "{lib}");
+    assert!(!lib.contains("dead_hook"), "{lib}");
+    assert!(!lib.contains("fn(u32) -> u32"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn reports_bare_dyn_alias_inside_once_lock_arc_as_dynamic_hazard() {
+    let workspace = temp_path("rule-bare-dyn-alias-once-lock-workspace");
+    let output = temp_path("rule-bare-dyn-alias-once-lock-output");
+    let target_dir = temp_path("rule-bare-dyn-alias-once-lock-target");
+    write_bare_dyn_alias_once_lock_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("bare dyn alias once lock rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "trait_object_surfaces"
+            && hazard
+                .details
+                .iter()
+                .any(|detail| detail.subject.contains("dyn Fn"))
+    }));
+    let lib = read(output.join("bare_dyn_alias_once_lock_rule/src/lib.rs"));
+    assert!(lib.contains("type Observer = dyn Fn"), "{lib}");
+    assert!(lib.contains("OnceLock<Arc<Observer>>"), "{lib}");
+    assert!(!lib.contains("DeadObserver"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -1918,6 +2100,23 @@ pub fn selected() -> u32 {
     );
 }
 
+fn write_format_capture_const_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "format_capture_const_rule",
+        r#"use opensourced::opensourced;
+
+pub const LIVE_PREFIX: &str = "live";
+pub const DEAD_PREFIX: &str = "dead";
+
+#[opensourced]
+pub fn selected(value: u32) -> String {
+    format!("{LIVE_PREFIX}:{value}")
+}
+"#,
+    );
+}
+
 fn write_macro_variant_path_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -2322,6 +2521,24 @@ pub fn selected() -> &'static str {
     );
 }
 
+fn write_option_env_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "option_env_rule",
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> Option<&'static str> {
+    option_env!("LITTER_PROFILE")
+}
+
+pub fn dead_profile() -> Option<&'static str> {
+    option_env!("DEAD_PROFILE")
+}
+"#,
+    );
+}
+
 fn write_callback_future_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -2657,6 +2874,58 @@ pub fn selected(request: RawRequest) -> Result<Params, &'static str> {
     );
 }
 
+fn write_bidirectional_from_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "bidirectional_from_rule",
+        r#"use opensourced::opensourced;
+
+pub struct Internal {
+    pub id: u32,
+}
+
+impl Internal {
+    pub fn new(id: u32) -> Self {
+        Self { id }
+    }
+}
+
+pub struct Wire {
+    pub id: u32,
+}
+
+impl From<Internal> for Wire {
+    fn from(value: Internal) -> Self {
+        Self { id: value.id }
+    }
+}
+
+impl From<Wire> for Internal {
+    fn from(value: Wire) -> Self {
+        Self { id: value.id }
+    }
+}
+
+pub struct DeadWire {
+    pub id: u32,
+}
+
+impl From<DeadWire> for Internal {
+    fn from(value: DeadWire) -> Self {
+        Self { id: value.id }
+    }
+}
+
+#[opensourced]
+pub fn selected(id: u32) -> u32 {
+    let wire: Wire = Internal::new(id).into();
+    let internal: Internal = wire.into();
+    internal.id
+}
+"#,
+    );
+}
+
 fn write_option_arc_callback_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -2777,6 +3046,54 @@ pub trait DeadCallback {
 #[opensourced]
 pub fn selected(handler: &dyn Callback, callback: fn(u32) -> u32) -> u32 {
     handler.handle(callback(7))
+}
+"#,
+    );
+}
+
+fn write_pruned_trait_method_hazard_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "pruned_trait_method_hazard_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Callback {
+    fn live(&self) -> u32;
+
+    fn dead_hook(&self, callback: fn(u32) -> u32) -> u32 {
+        callback(1)
+    }
+}
+
+#[opensourced]
+pub fn selected(_handler: &dyn Callback) -> u32 {
+    7
+}
+"#,
+    );
+}
+
+fn write_bare_dyn_alias_once_lock_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "bare_dyn_alias_once_lock_rule",
+        r#"use opensourced::opensourced;
+use std::sync::{Arc, OnceLock};
+
+pub enum Direction {
+    In,
+    Out,
+}
+
+pub type Observer = dyn Fn(Direction, &str) + Send + Sync + 'static;
+
+static OBSERVER: OnceLock<Arc<Observer>> = OnceLock::new();
+
+pub type DeadObserver = dyn Fn() + Send + Sync + 'static;
+
+#[opensourced]
+pub fn selected(observer: Arc<Observer>) -> bool {
+    OBSERVER.set(observer).is_ok()
 }
 "#,
     );
@@ -3649,6 +3966,40 @@ pub fn selected(input: &str) -> Option<String> {
     );
 }
 
+fn write_serde_transparent_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_transparent_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"
+use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct SessionId(String);
+
+#[derive(Serialize, Deserialize)]
+pub struct Request {
+    pub id: SessionId,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeadSessionId(String);
+
+#[opensourced]
+pub fn selected(input: &str) -> String {
+    serde_json::from_str::<Request>(input)
+        .ok()
+        .map(|request| request.id.0)
+        .unwrap_or_default()
+}
+"#,
+    );
+}
+
 fn write_serde_skip_serializing_rule_fixture(root: &Path) {
     write_workspace_with_dependencies(
         root,
@@ -3671,6 +4022,80 @@ pub struct Request {
 #[opensourced]
 pub fn selected(request: &Request) -> String {
     serde_json::to_string(request).unwrap_or_default()
+}
+"#,
+    );
+}
+
+fn write_serde_tagged_enum_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_tagged_enum_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"
+use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Login {
+    #[serde(rename = "apiKey", rename_all = "camelCase")]
+    ApiKey {
+        #[serde(rename = "apiKey")]
+        api_key: String,
+    },
+    Chatgpt,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum DeadLogin {
+    Dead,
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> bool {
+    serde_json::from_str::<Login>(input).is_ok()
+}
+"#,
+    );
+}
+
+fn write_serde_default_enum_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_default_enum_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"
+use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Mode {
+    #[default]
+    #[serde(rename = "auto")]
+    Auto,
+    Manual,
+}
+
+#[derive(Deserialize)]
+pub enum DeadMode {
+    Dead,
+}
+
+#[derive(Deserialize)]
+pub struct Config {
+    #[serde(default)]
+    pub mode: Mode,
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> bool {
+    serde_json::from_str::<Config>(input).is_ok()
 }
 "#,
     );

@@ -2259,19 +2259,33 @@ fn item_for_syntactic_hazard_scan(
     item_id: &ItemId,
     item: &Item,
 ) -> Item {
-    let Item::Struct(item_struct) = item else {
-        return item.clone();
-    };
+    match item {
+        Item::Struct(item_struct) => {
+            struct_item_for_syntactic_hazard_scan(project, reduced, item_id, item_struct)
+        }
+        Item::Trait(item_trait) => {
+            trait_item_for_syntactic_hazard_scan(project, reduced, item_id, item_trait)
+        }
+        _ => item.clone(),
+    }
+}
+
+fn struct_item_for_syntactic_hazard_scan(
+    project: &Project,
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+    item_struct: &syn::ItemStruct,
+) -> Item {
     if reduced
         .roots
         .iter()
         .any(|root| matches!(root, RootId::Item(root_item) if root_item == item_id))
     {
-        return item.clone();
+        return Item::Struct(item_struct.clone());
     }
 
     if !matches!(item_struct.fields, syn::Fields::Named(_)) {
-        return item.clone();
+        return Item::Struct(item_struct.clone());
     }
 
     let mut item_struct = item_struct.clone();
@@ -2296,6 +2310,65 @@ fn item_for_syntactic_hazard_scan(
     Item::Struct(item_struct)
 }
 
+fn trait_item_for_syntactic_hazard_scan(
+    project: &Project,
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+    item_trait: &syn::ItemTrait,
+) -> Item {
+    if reduced
+        .roots
+        .iter()
+        .any(|root| matches!(root, RootId::Item(root_item) if root_item == item_id))
+        || trait_has_reachable_impl_methods_for_hazard_scan(reduced, item_id)
+        || trait_items_are_referenced_by_reachable_callables(project, reduced, item_id, item_trait)
+    {
+        return Item::Trait(item_trait.clone());
+    }
+
+    let mut item_trait = item_trait.clone();
+    item_trait.items.clear();
+    item_trait.attrs.retain(attr_is_inert_type_surface);
+    Item::Trait(item_trait)
+}
+
+fn trait_has_reachable_impl_methods_for_hazard_scan(
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+) -> bool {
+    let mut trait_path = item_id.module_path.clone();
+    trait_path.push(item_id.name.clone());
+    reduced.reachable.iter().any(|callable| {
+        matches!(
+            callable,
+            CallableId::Method {
+                package,
+                trait_path: Some(callable_trait_path),
+                ..
+            } if package == &item_id.package && callable_trait_path == &trait_path
+        )
+    })
+}
+
+fn trait_items_are_referenced_by_reachable_callables(
+    project: &Project,
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+    item_trait: &syn::ItemTrait,
+) -> bool {
+    item_trait.items.iter().any(|item| {
+        let syn::TraitItem::Fn(method) = item else {
+            return false;
+        };
+        reduced_callables_mention_ident(
+            project,
+            reduced,
+            &item_id.package,
+            &method.sig.ident.to_string(),
+        )
+    })
+}
+
 fn struct_field_should_scan_hazards(
     project: &Project,
     reduced: &ReducedProject,
@@ -2313,20 +2386,26 @@ fn struct_field_should_scan_hazards(
     }) {
         return true;
     }
-    if field.attrs.iter().any(|attr| {
-        let path = attr.path();
-        !(path.is_ident("cfg")
-            || path.is_ident("allow")
-            || path.is_ident("deny")
-            || path.is_ident("doc")
-            || path.is_ident("deprecated"))
-    }) {
+    if field
+        .attrs
+        .iter()
+        .any(|attr| !attr_is_inert_type_surface(attr))
+    {
         return true;
     }
     let Some(name) = field.ident.as_ref() else {
         return true;
     };
     reduced_callables_mention_ident(project, reduced, package, &name.to_string())
+}
+
+fn attr_is_inert_type_surface(attr: &Attribute) -> bool {
+    let path = attr.path();
+    path.is_ident("cfg")
+        || path.is_ident("allow")
+        || path.is_ident("deny")
+        || path.is_ident("doc")
+        || path.is_ident("deprecated")
 }
 
 fn retained_inline_out_dir_macro_hazard_counts(

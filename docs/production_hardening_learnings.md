@@ -400,6 +400,14 @@ pass added module-scoped import liveness, private serde alias wire contracts,
 nested callback-store trait-object hazards, auto-trait object casts, and
 qualified `serde_json::json!` macro dependency coverage.
 
+The next executable-rule pass grew the set to 72 cases. It fixed the same
+render-vs-production mismatch for type-only trait surfaces: trait methods that
+the renderer prunes no longer create false function-pointer hazards. It also
+added Litter-shaped fast coverage for `option_env!` blockers, implicit
+`format!("{CONST}")` captures, bare `dyn Fn` aliases stored through
+`OnceLock<Arc<_>>`, serde transparent records, tagged/default enum contracts,
+and bidirectional `From` conversion roundtrips.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
