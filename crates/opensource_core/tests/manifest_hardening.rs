@@ -3054,6 +3054,7 @@ path = "benches/unused.rs"
 "#,
     );
     write(helper.join("examples/unused.rs"), "fn main() {}\n");
+    write(helper.join("src/bin/unused.rs"), "fn main() {}\n");
     write(helper.join("tests/unused.rs"), "#[test]\nfn unused() {}\n");
     write(helper.join("benches/unused.rs"), "fn main() {}\n");
     write(helper.join("fixtures/dead.txt"), "dead support fixture");
@@ -3111,6 +3112,7 @@ edition = "2021"
     assert!(!helper_manifest.contains("[[bench]]"));
     assert!(output.join("support/external-helper/src/lib.rs").exists());
     assert!(output.join("support/external-leaf/src/lib.rs").exists());
+    assert!(!output.join("support/external-helper/src/bin").exists());
     assert!(!output.join("support/external-helper/examples").exists());
     assert!(!output.join("support/external-helper/tests").exists());
     assert!(!output.join("support/external-helper/benches").exists());
@@ -3351,6 +3353,50 @@ fn prunes_unused_serde_derive_imports_after_dead_items_are_removed() {
     assert!(
         cargo_check.status.success(),
         "generated serde derive import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
+fn prunes_module_scoped_imports_used_only_by_dead_items() {
+    let workspace = temp_path("module-scoped-unused-import-workspace");
+    let output = temp_path("module-scoped-unused-import-output");
+    let target_dir = temp_path("module-scoped-unused-import-target");
+    write_module_scoped_unused_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("module_scoped_unused_imports/src/lib.rs"));
+    assert!(source.contains("pub trait Handler"));
+    assert!(source.contains("pub struct LiveDto"));
+    assert!(source.contains("pub struct ClientConfig"));
+    assert_eq!(
+        source.matches("use serde::Serialize").count(),
+        1,
+        "{source}"
+    );
+    assert!(!source.contains("use crate::api::Handler"), "{source}");
+    assert!(!source.contains("DeadDto"), "{source}");
+    assert!(!source.contains("pub fn dead"), "{source}");
+    assert!(!source.contains("#[opensourced]"), "{source}");
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated module-scoped import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
@@ -6267,6 +6313,72 @@ pub struct KeptWire {
 #[opensourced]
 pub fn selected(value: i32) -> KeptWire {
     KeptWire { value }
+}
+"#,
+    );
+}
+
+fn write_module_scoped_unused_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "module_scoped_unused_imports"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"pub mod api {
+    use opensourced::opensourced;
+
+    #[opensourced]
+    pub trait Handler {
+        fn handle(&self) -> String;
+    }
+}
+
+pub mod live {
+    use opensourced::opensourced;
+    use serde::Serialize;
+
+    #[derive(Serialize)]
+    #[opensourced]
+    pub struct LiveDto {
+        pub value: u8,
+    }
+}
+
+pub mod client {
+    use opensourced::opensourced;
+    use crate::api::Handler;
+    use serde::Serialize;
+
+    #[opensourced]
+    pub struct ClientConfig {
+        pub name: String,
+    }
+
+    #[derive(Serialize)]
+    struct DeadDto {
+        value: u8,
+    }
+
+    pub fn dead(handler: &dyn Handler) -> DeadDto {
+        let _ = handler.handle();
+        DeadDto { value: 7 }
+    }
 }
 "#,
     );

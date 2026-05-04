@@ -17,6 +17,7 @@ Cargo could load the Rust workspace. Probe runs used temp copies with one
 | `ipc-pending-resolve` | `codex-ipc::client::pending::PendingRequests::resolve` | production accepted | 15 | Compact async/channel-shaped support slice. Custom derive/attribute warnings were discharged. |
 | `ipc-read-frame` | `codex-ipc::transport::frame::read_frame` | production accepted | 13 | Generic async I/O function root. Custom macro and syntactic fallback warnings were discharged. |
 | `ipc-bridge-new` | `codex-ipc::bridge::IpcBridge::new` | production accepted | 862 | Heavy slice. Broad bridge/protocol state roots pull large support surfaces even when the selected item is small. |
+| `ipc-random5-mixed-surfaces` | `Method`, `RequestHandler`, `IpcClientConfig`, `PendingRequests`, `read_frame` | feedback accepted | 121 | Pinned five-root corpus case in `scripts/corpus_cases/litter_codex_ipc_random5.json`. First run produced two unused imports in `client/handle.rs`; generic render-plan import pruning fixed them, and the rerun had zero feedback warnings. |
 
 Two attempted `codex-mobile-client` probes did not reach slicer validation
 because the source workspace baseline failed before slicing in third-party
@@ -32,6 +33,10 @@ not slicer failures.
   `project_conversation_state` and `IpcBridge::new` both accepted production
   validation but generated 850+ files because retained protocol/support path
   dependencies are copied broadly.
+- Support-package trimming is now measurably helping the feedback loop. The
+  pinned five-root codex-ipc corpus case reran in about 18 seconds with a warm
+  feedback target dir, emitted 121 generated files, and had zero warnings after
+  module-scoped import pruning and support `src/bin` exclusion.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
@@ -51,3 +56,6 @@ not slicer failures.
   state should expose exactly which fields/types force large support closure.
 - `async_io.generic_root.001`: generic async I/O functions with `AsyncRead` /
   `AsyncWrite` bounds should stay compact and feedback-clean.
+- `import.module_scoped.dead_item_only.001`: imports used only by dead items in
+  a retained module must be pruned even when the same symbol is live in another
+  module in the package.

@@ -264,6 +264,14 @@ include assets instead of the whole package root, which removes dead examples,
 tests, benches, fixtures, and dev/build-only path packages without slicing the
 support package semantically yet.
 
+The next Litter codex-ipc five-root corpus probe exposed a more precise import
+bug: a module-local `use serde::Serialize` and a selected trait import survived
+only because other reduced items in the same package mentioned those symbols.
+The renderer now builds import liveness from the actual render plan, not every
+reduced-but-unrendered item, and local trait imports are retained only when the
+module still uses the trait name or calls a method that needs the trait in
+scope. The rerun produced zero feedback warnings.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:

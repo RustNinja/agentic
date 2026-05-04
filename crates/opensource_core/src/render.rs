@@ -81,9 +81,9 @@ impl RenderPlan {
         }
 
         Self {
+            mentions: ReachableMentionIndex::build(project, reduced, &reachable_items),
             reachable_items,
             callable_idents_by_package: callable_idents.by_package,
-            mentions: ReachableMentionIndex::build(project, reduced),
             import_scope_mentions: RefCell::new(BTreeMap::new()),
         }
     }
@@ -145,7 +145,11 @@ struct ReachableMentionIndex {
 }
 
 impl ReachableMentionIndex {
-    fn build(project: &Project, reduced: &ReducedProject) -> Self {
+    fn build(
+        project: &Project,
+        reduced: &ReducedProject,
+        rendered_items: &BTreeSet<ItemId>,
+    ) -> Self {
         let mut index = Self::default();
         for callable in &reduced.reachable {
             let package = callable.package();
@@ -164,7 +168,7 @@ impl ReachableMentionIndex {
             index.add_module_idents(package, module_path, idents);
         }
 
-        for item in &reduced.reachable_items {
+        for item in rendered_items {
             let idents = rendered_item_surface_idents(project, reduced, item);
             index.add_package_idents(&item.package, idents.iter().cloned());
             index.add_module_idents(&item.package, &item.module_path, idents);
@@ -1441,7 +1445,13 @@ fn copy_support_package_tree_broad(
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let package_root = package_root.canonicalize()?;
     let mut visited = BTreeSet::new();
-    copy_support_package_tree_inner(&package_root, &package_root, package_output, &mut visited)
+    copy_support_package_tree_inner(
+        &package_root,
+        &package_root,
+        package_output,
+        false,
+        &mut visited,
+    )
 }
 
 fn copy_support_package_library_source_tree(
@@ -1463,6 +1473,7 @@ fn copy_support_package_library_source_tree(
             &package_root,
             &src_dir,
             package_output,
+            true,
             &mut BTreeSet::new(),
         )?;
         return Ok(copied);
@@ -1472,6 +1483,7 @@ fn copy_support_package_library_source_tree(
         &package_root,
         source_root,
         package_output,
+        true,
         &mut BTreeSet::new(),
     )?;
     Ok(copied)
@@ -1506,6 +1518,7 @@ fn copy_support_package_tree_inner(
     package_root: &Path,
     path: &Path,
     package_output: &Path,
+    skip_auto_targets: bool,
     visited: &mut BTreeSet<PathBuf>,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     let metadata = fs::symlink_metadata(path)?;
@@ -1519,6 +1532,9 @@ fn copy_support_package_tree_inner(
     }
 
     if metadata.is_dir() {
+        if skip_auto_targets && is_support_auto_target_dir(package_root, path) {
+            return Ok(0);
+        }
         if path
             .file_name()
             .and_then(|name| name.to_str())
@@ -1538,6 +1554,7 @@ fn copy_support_package_tree_inner(
                 package_root,
                 &entry.path(),
                 package_output,
+                skip_auto_targets,
                 visited,
             )?;
         }
@@ -1554,6 +1571,26 @@ fn copy_support_package_tree_inner(
     }
     fs::copy(path, output_path)?;
     Ok(1)
+}
+
+fn is_support_auto_target_dir(package_root: &Path, path: &Path) -> bool {
+    let Ok(relative) = path.strip_prefix(package_root) else {
+        return false;
+    };
+    let components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(component) => component.to_str(),
+            Component::CurDir
+            | Component::ParentDir
+            | Component::RootDir
+            | Component::Prefix(_) => None,
+        })
+        .collect::<Vec<_>>();
+    matches!(
+        components.as_slice(),
+        ["examples" | "tests" | "benches", ..] | ["src", "bin", ..]
+    )
 }
 
 fn copy_support_include_assets(
@@ -5257,6 +5294,12 @@ fn collect_retained_module_surface_idents(
     source: &SourceFile,
     idents: &mut BTreeSet<String>,
 ) {
+    let retained_macro_definitions = retained_macro_definitions_for_generated_items(
+        project,
+        reduced,
+        &source.package,
+        &source.syntax.items,
+    );
     let aliases = project
         .module_aliases
         .get(&(source.package.clone(), source.module_path.clone()))
@@ -5300,6 +5343,11 @@ fn collect_retained_module_surface_idents(
                         }
                     }
                 }
+            }
+            Item::Macro(item_macro)
+                if macro_definition_should_remain(item_macro, &retained_macro_definitions) =>
+            {
+                collect_token_idents(&item_macro.mac.tokens, idents);
             }
             Item::Macro(item_macro) if item_macro.ident.is_none() => {
                 collect_token_idents(&item_macro.mac.tokens, idents);
@@ -6752,6 +6800,21 @@ fn use_target_resolves_to_removed_symbol(
         return false;
     };
 
+    if let Some(item) = find_use_item(project, &target_package, &target_path) {
+        if item.kind == ItemKind::Trait
+            && local_trait_import_should_remain(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &item,
+            )
+        {
+            return false;
+        }
+    }
+
     local_use_target_resolves_to_removed_symbol(
         project,
         reduced,
@@ -6854,7 +6917,11 @@ fn use_target_should_drop(
     target: &[String],
     is_public_use: bool,
 ) -> bool {
-    if known_macro_dependency_target_should_remain(project, reduced, package, target) {
+    if known_macro_dependency_target_should_remain(project, reduced, package, target)
+        && !target
+            .last()
+            .is_some_and(|leaf| is_derive_only_external_trait_import(leaf))
+    {
         return false;
     }
 
@@ -6919,6 +6986,16 @@ fn use_target_should_drop(
         return !reduced.reachable.contains(&callable);
     }
     if let Some(item) = find_use_item(project, &target_package, &target_path) {
+        if !is_public_use && item.kind == ItemKind::Trait && !leaf_is_used_in_module {
+            return !local_trait_import_should_remain(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &item,
+            );
+        }
         if !is_public_use && item.kind != ItemKind::Trait && !leaf_is_used_in_module {
             return true;
         }
@@ -6937,6 +7014,16 @@ fn use_target_should_drop(
             return !reduced.reachable.contains(&callable);
         }
         if let Some(item) = find_use_item(project, &alias_package, &alias_path) {
+            if !is_public_use && item.kind == ItemKind::Trait && !leaf_is_used_in_module {
+                return !local_trait_import_should_remain(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    &item,
+                );
+            }
             if !is_public_use && item.kind != ItemKind::Trait && !leaf_is_used_in_module {
                 return true;
             }
@@ -6974,6 +7061,37 @@ fn use_target_should_drop(
                 leaf,
             )
         }
+    })
+}
+
+fn local_trait_import_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    trait_item: &ItemId,
+) -> bool {
+    let Some(record) = project.items.get(trait_item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    item_trait.items.iter().any(|item| {
+        let TraitItem::Fn(function) = item else {
+            return false;
+        };
+        let method = function.sig.ident.to_string();
+        reachable_import_scope_has_method_call(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            &method,
+        ) || render_plan.module_mentions_ident(package, module_path, &method)
+            || reachable_module_mentions_ident(project, reduced, package, module_path, &method)
     })
 }
 
@@ -7071,14 +7189,16 @@ fn external_use_target_should_drop(
         );
     }
 
-    if target.first().is_some_and(|first| {
-        known_macro_dependency_package_mentions(
-            project,
-            reduced,
-            _package,
-            &dependency_code_name(first),
-        )
-    }) {
+    if !is_derive_only_external_trait_import(leaf)
+        && target.first().is_some_and(|first| {
+            known_macro_dependency_package_mentions(
+                project,
+                reduced,
+                _package,
+                &dependency_code_name(first),
+            )
+        })
+    {
         return false;
     }
 
@@ -7269,9 +7389,7 @@ fn external_trait_import_should_remain(
         return false;
     }
     if is_derive_only_external_trait_import(leaf) {
-        if render_plan.module_mentions_ident(package, module_path, leaf)
-            || reachable_module_mentions_ident(project, reduced, package, module_path, leaf)
-        {
+        if render_plan.module_mentions_ident(package, module_path, leaf) {
             return true;
         }
         let Some(functions) = known_trait_associated_function_idents(target, leaf) else {

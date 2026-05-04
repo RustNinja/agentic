@@ -1,0 +1,42 @@
+{
+  "name": "dnakov-litter-codex-ipc-random5",
+  "repository": "https://github.com/dnakov/litter",
+  "source": "shared/rust-bridge",
+  "batches": [
+    {
+      "name": "codex-ipc-public-mixed-surfaces",
+      "roots": [
+        {
+          "package": "codex-ipc",
+          "path": "codex-ipc/src/protocol/method.rs",
+          "kind": "enum",
+          "name": "Method"
+        },
+        {
+          "package": "codex-ipc",
+          "path": "codex-ipc/src/handler.rs",
+          "kind": "trait",
+          "name": "RequestHandler"
+        },
+        {
+          "package": "codex-ipc",
+          "path": "codex-ipc/src/client/handle.rs",
+          "kind": "struct",
+          "name": "IpcClientConfig"
+        },
+        {
+          "package": "codex-ipc",
+          "path": "codex-ipc/src/client/pending.rs",
+          "kind": "struct",
+          "name": "PendingRequests"
+        },
+        {
+          "package": "codex-ipc",
+          "path": "codex-ipc/src/transport/frame.rs",
+          "kind": "fn",
+          "name": "read_frame"
+        }
+      ]
+    }
+  ]
+}
