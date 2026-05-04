@@ -1960,8 +1960,132 @@ fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
     };
     let mut visitor = DependencyVisitor::new(resolver);
     visitor.visit_item(&record.item);
-    visitor.dependencies.items.remove(item);
-    visitor.dependencies
+    let mut dependencies = visitor.dependencies;
+    if item_has_opensourced_attr(&record.item) {
+        dependencies.extend(item_root_macro_impl_dependencies(project, item));
+    }
+    dependencies.items.remove(item);
+    dependencies
+}
+
+fn item_root_macro_impl_dependencies(project: &Project, item: &ItemId) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    let item_path = path_from_item(item);
+
+    for source in project
+        .files
+        .values()
+        .filter(|source| source.package == item.package)
+    {
+        let aliases = project
+            .module_aliases
+            .get(&(source.package.clone(), source.module_path.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let resolver = Resolver {
+            project,
+            package: &source.package,
+            module_path: &source.module_path,
+            aliases: &aliases,
+            self_type: None,
+        };
+
+        for source_item in &source.syntax.items {
+            let Item::Impl(item_impl) = source_item else {
+                continue;
+            };
+            if item_impl.trait_.is_some() || !impl_surface_has_macro_contract_attrs(item_impl) {
+                continue;
+            }
+            let Some(self_type) = resolver.resolve_type(&item_impl.self_ty) else {
+                continue;
+            };
+            if self_type.package != item.package || self_type.type_path != item_path {
+                continue;
+            }
+
+            let impl_resolver = Resolver {
+                project,
+                package: &source.package,
+                module_path: &source.module_path,
+                aliases: &aliases,
+                self_type: Some(self_type),
+            };
+            let mut visitor = DependencyVisitor::new(impl_resolver);
+            visitor.add_generic_trait_bounds(&item_impl.generics);
+            for attr in &item_impl.attrs {
+                visitor.visit_attribute(attr);
+            }
+            for impl_item in &item_impl.items {
+                if root_macro_impl_item_should_render(item_impl, impl_item) {
+                    visitor.visit_impl_item(impl_item);
+                }
+            }
+            dependencies.extend(visitor.dependencies);
+        }
+    }
+
+    dependencies
+}
+
+fn impl_surface_has_macro_contract_attrs(item_impl: &syn::ItemImpl) -> bool {
+    item_impl
+        .attrs
+        .iter()
+        .any(attr_requires_impl_surface_retention)
+        || item_impl.items.iter().any(|item| match item {
+            ImplItem::Const(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+            ImplItem::Fn(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+            ImplItem::Macro(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+            ImplItem::Type(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+            ImplItem::Verbatim(_) => false,
+            _ => false,
+        })
+}
+
+fn root_macro_impl_item_should_render(item_impl: &syn::ItemImpl, impl_item: &ImplItem) -> bool {
+    if item_impl
+        .attrs
+        .iter()
+        .any(attr_requires_impl_surface_retention)
+    {
+        return true;
+    }
+
+    match impl_item {
+        ImplItem::Const(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Fn(item) => {
+            matches!(item.vis, syn::Visibility::Public(_))
+                || item.attrs.iter().any(attr_requires_impl_surface_retention)
+        }
+        ImplItem::Macro(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Type(item) => item.attrs.iter().any(attr_requires_impl_surface_retention),
+        ImplItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn attr_requires_impl_surface_retention(attribute: &syn::Attribute) -> bool {
+    let Some(first) = attribute.path().segments.first() else {
+        return false;
+    };
+    !matches!(
+        first.ident.to_string().as_str(),
+        "allow"
+            | "automatically_derived"
+            | "cfg"
+            | "cfg_attr"
+            | "cold"
+            | "deny"
+            | "deprecated"
+            | "doc"
+            | "forbid"
+            | "inline"
+            | "must_use"
+            | "repr"
+            | "test"
+            | "warn"
+    )
 }
 
 fn module_root_dependencies(project: &Project, item: &ItemId) -> DependencySet {

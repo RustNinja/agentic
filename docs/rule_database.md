@@ -52,6 +52,11 @@ of planned generic combinations lives in
 | `include.str.inline_module_tree.001` | covered | Inline module script bundles copy only live `include_str!` assets and prune dead sibling assets |
 | `manifest.support_library_module_closure.001` | covered | No-build support path packages copy only the library external-module graph plus live static assets, skipping `#[cfg(test)]` external modules and orphan Rust files |
 | `manifest.support_build_script_hazard_parity.001` | covered | Copied support path packages report build-script, `OUT_DIR` source include, compile-time env, nonliteral include, absolute include, and package-external include hazards with generated support file details |
+| `macro.path_qualified_derive.001` | covered | Path-qualified derive macros such as `macro_helpers::FixtureRecord` keep the proc-macro package but do not retain unused simple `use` imports |
+| `macro.root_item_impl_surface.001` | covered | Selected item roots with macro-bearing inherent impls keep exported constructors/methods plus their signature/body dependencies |
+| `dyn.callback.registry_object.001` | covered | Selected object roots with stored `Arc<dyn Trait + Send + Sync>` callback fields keep the callback trait method surface and report hard dynamic-dispatch hazards |
+| `dyn.callback.future_static.001` | covered | Selected callback APIs using `Arc<dyn Fn(...) -> Pin<Box<dyn Future...>>>` aliases and static registries keep aliases/statics while reporting hard dynamic hazards |
+| `include.bytes.fast_fixture.001` | covered | The fast fixture now exercises `include_bytes!` beside `include_str!` literal and `concat!` assets |
 
 ## Workflow
 
@@ -81,7 +86,8 @@ Read-only Litter exploration found these high-value non-cfg patterns:
 - Callback interface roots stored as `Option<Arc<dyn CallbackTrait>>`.
 - `async_trait` traits used through `Arc<dyn Trait>`.
 - Nested callback/future aliases like
-  `Arc<dyn Fn() -> Pin<Box<dyn Future<...>>>>`.
+  `Arc<dyn Fn() -> Pin<Box<dyn Future<...>>>>`, including static callback
+  registries.
 - Nested callback stores such as `Arc<RwLock<Option<Arc<dyn Trait>>>>`.
 - `macro_rules!` helper modules that `pub(crate) use` a macro and invoke it from
   exported methods.
@@ -90,8 +96,8 @@ Read-only Litter exploration found these high-value non-cfg patterns:
 - Broad `pub use` hubs that need live-name pruning through reexport chains.
 - Serde/UniFFI helper attrs such as field defaults and skip helpers.
 - Split derive/helper attrs, including serde attrs between `derive(...)` and
-  UniFFI derives, `#[serde(transparent)]` records, default enum variants, and
-  tagged enums with payload variants.
+  UniFFI derives, path-qualified derive macros, `#[serde(transparent)]`
+  records, default enum variants, and tagged enums with payload variants.
 - Conversion-heavy boundary impls such as `TryFrom<Request> for Params`.
 - Adjacent bidirectional `From<A> for B` / `From<B> for A` impls across FFI and
   internal types.

@@ -195,15 +195,21 @@ large Litter build.
 
 The fast fixture should keep growing as a matrix, not as one monolithic
 all-roots check. Current slice angles include macro-heavy root only, async root
-only, callback root only, data-item root only, trait-item root only, trait-edge
-root only, cfg/asset root only, associated-codec trait item root only, combined
-macro+async roots, and combined macro+trait+cfg roots. That caught two
-important issues: when a trait is selected as a root item, its method
-declarations and their imports are part of the public slice and must be
-preserved; and retained inline modules that contain `include!(concat!(env!(
+only, callback root only, data-item root only, enum root only, trait-item root
+only, macro-exported object root only, path-qualified derive record root,
+derive-helper error enum root, Arc-returning object root, stored callback
+registry object root, callback-registry function root, future-callback alias
+root, trait-edge root only, cfg/asset root only, associated-codec trait item
+root only, combined macro+async roots, and combined macro+trait+cfg roots. That
+caught several important issues: when a trait is selected as a root item, its
+method declarations and their imports are part of the public slice and must be
+preserved; retained inline modules that contain `include!(concat!(env!(
 "OUT_DIR"), ...))` must still raise an OUT_DIR generated-source production
 hazard even when the inline module is retained only because reachable code
-mentions the module path.
+mentions the module path; selected item roots with macro-bearing inherent impls
+must retain exported constructors/methods and the dependencies from those impl
+signatures and bodies; and path-qualified proc macro derives should not keep
+unused simple imports only because the derive leaf appears in a qualified path.
 
 The dynamic-dispatch rule is now split by ownership. Direct callback inputs on
 the selected API boundary, such as `fn(...)` parameters and borrowed
@@ -289,6 +295,16 @@ The renderer now builds import liveness from the actual render plan, not every
 reduced-but-unrendered item, and local trait imports are retained only when the
 module still uses the trait name or calls a method that needs the trait in
 scope. The rerun produced zero feedback warnings.
+
+The fast macro/use fixture then exposed the same class in a proc-macro-shaped
+form. A path-qualified derive such as `macro_helpers::FixtureRecord` should keep
+the proc-macro crate but not retain `use macro_helpers::FixtureRecord`; import
+pruning now distinguishes unqualified import uses from qualified paths. The
+same pass added item-root macro impl closure: when a selected struct/object has
+a retained macro-bearing inherent impl, the reducer and renderer include the
+impl methods plus their referenced fields, return types, callback traits,
+statics, and helper imports. This is generic UniFFI/object behavior, not a
+fixture-symbol allowlist.
 
 ## Current Production Boundaries
 

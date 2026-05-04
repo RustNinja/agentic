@@ -3,7 +3,13 @@ use macro_helpers::{
     FixtureObject, FixtureRecord,
 };
 use opensourced::opensourced;
-use std::{fmt, str::FromStr};
+use std::{
+    fmt,
+    future::Future,
+    pin::Pin,
+    str::FromStr,
+    sync::{Arc, Mutex, OnceLock},
+};
 use shared::{
     fixture_value as selected_value,
     prelude::{exported_nested, SharedAlias, SharedMode, FEATURE_FLAG},
@@ -149,11 +155,12 @@ declare_macro_pair!(MacroPair, macro_pair);
 const CORE_GUIDE: &str = include_str!("guidelines/core.md");
 const EXTRA_GUIDE: &str = include_str!("../assets/extra.txt");
 const CONCAT_GUIDE: &str = include_str!(concat!("guidelines/", "concat.md"));
+const BINARY_GUIDE: &[u8] = include_bytes!("guidelines/binary.bin");
 const DEAD_GUIDE: &str = include_str!("guidelines/dead.md");
 const LOCAL_PATTERN_TAG: SharedAlias = 29;
 
 fn asset_score() -> SharedAlias {
-    (CORE_GUIDE.len() + EXTRA_GUIDE.len() + CONCAT_GUIDE.len()) as SharedAlias
+    (CORE_GUIDE.len() + EXTRA_GUIDE.len() + CONCAT_GUIDE.len() + BINARY_GUIDE.len()) as SharedAlias
 }
 
 fn pattern_score(value: SharedAlias) -> SharedAlias {
@@ -216,6 +223,7 @@ impl WireKind {
 
 #[derive(Clone, FixtureEnum)]
 #[fixture_serde(tag = "type", rename_all = "snake_case")]
+#[opensourced]
 pub enum WireEvent {
     Record { dto: WireDto },
     Failed(WireError),
@@ -286,7 +294,32 @@ impl EdgeCodec<WireDto> for WireCodec {
     }
 }
 
+#[derive(Clone)]
+#[derive(macro_helpers::FixtureRecord)]
+#[fixture_serde(rename_all = "snake_case")]
+#[opensourced]
+pub struct SplitRecord {
+    pub value: SharedAlias,
+}
+
+#[derive(Debug, FixtureError)]
+#[fixture_error(display = "client error")]
+#[opensourced]
+pub enum ClientError {
+    #[fixture_error(display = "wire")]
+    Wire { code: SharedAlias },
+    #[fixture_error(display = "missing")]
+    Missing,
+}
+
+impl From<WireError> for ClientError {
+    fn from(error: WireError) -> Self {
+        Self::Wire { code: error.code() }
+    }
+}
+
 #[derive(FixtureObject)]
+#[opensourced]
 pub struct BridgeObject {
     dto: RootDto,
 }
@@ -310,6 +343,60 @@ impl BridgeObject {
 pub trait BridgeCallback {
     fn adjust(&self, value: SharedAlias) -> SharedAlias;
 }
+
+#[derive(FixtureObject)]
+#[opensourced]
+pub struct RemotePathObject {
+    path: String,
+}
+
+#[fixture_export]
+impl RemotePathObject {
+    #[fixture_constructor]
+    pub fn new(path: String) -> Arc<Self> {
+        Arc::new(Self { path })
+    }
+
+    pub fn path_len(&self) -> SharedAlias {
+        self.path.len() as SharedAlias
+    }
+}
+
+#[fixture_export(callback_interface)]
+pub trait ReconnectCallback {
+    fn reconnect(&self, label: String) -> SharedAlias;
+}
+
+#[derive(FixtureObject)]
+pub struct CallbackRegistry {
+    callback: Arc<dyn ReconnectCallback + Send + Sync>,
+    decisions: Mutex<Vec<SharedAlias>>,
+}
+
+#[fixture_export]
+impl CallbackRegistry {
+    #[fixture_constructor]
+    pub fn new(callback: Box<dyn ReconnectCallback + Send + Sync>) -> Arc<Self> {
+        Arc::new(Self {
+            callback: Arc::from(callback),
+            decisions: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn record(&self, label: String) -> SharedAlias {
+        let value = self.callback.reconnect(label);
+        self.decisions
+            .lock()
+            .expect("fixture mutex should lock")
+            .push(value);
+        value
+    }
+}
+
+pub type BoxDecisionFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
+pub type DecisionCallback = Arc<dyn Fn(&str) -> BoxDecisionFuture + Send + Sync>;
+
+static DECISION_CALLBACK: OnceLock<DecisionCallback> = OnceLock::new();
 
 #[fixture_export(shared::helper_marker)]
 pub fn exported_bridge(dto: WireDto, kind: WireKind) -> SharedAlias {
@@ -346,6 +433,15 @@ fn trait_edge_score(input: SharedAlias, wire: WireDto) -> SharedAlias {
         + parsed_via_trait.describe_value().len() as SharedAlias
         + <UtilValue as DescribeValue>::LABEL.len() as SharedAlias
         + display.score()
+}
+
+fn registry_bridge_score(
+    callback: Box<dyn ReconnectCallback + Send + Sync>,
+    label: String,
+) -> SharedAlias {
+    let registry = CallbackRegistry::new(callback);
+    let remote = RemotePathObject::new(label.clone());
+    registry.record(label) + remote.path_len()
 }
 
 #[allow(dead_code)]
@@ -462,6 +558,24 @@ pub fn open_trait_edges(input: SharedAlias) -> SharedAlias {
 #[opensourced]
 pub fn open_cfg_asset_bridge(input: SharedAlias) -> SharedAlias {
     cfg_matrix::cfg_value() + asset_score() + pattern_score(input)
+}
+
+pub fn open_registry_bridge(
+    callback: Box<dyn ReconnectCallback + Send + Sync>,
+    label: String,
+) -> SharedAlias {
+    registry_bridge_score(callback, label)
+}
+
+pub fn open_decision_callback(callback: DecisionCallback, label: &str) -> SharedAlias {
+    let _ = DECISION_CALLBACK.set(callback.clone());
+    let future = callback(label);
+    drop(future);
+    if DECISION_CALLBACK.get().is_some() {
+        1
+    } else {
+        0
+    }
 }
 
 #[fixture_export(async_runtime = "fixture")]

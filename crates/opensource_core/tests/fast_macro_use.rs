@@ -74,10 +74,14 @@ fn slices_fast_macro_use_fixture_and_compiles() {
     assert!(app.contains("MacroPair"));
     assert!(app.contains("macro_pair"));
     assert!(app.contains("include_str!(\"guidelines/core.md\")"));
+    assert!(app.contains("include_bytes!(\"guidelines/binary.bin\")"));
     assert!(app.contains("include_str!(\"../assets/extra.txt\")"));
     assert!(app.contains("include_str!(concat!(\"guidelines/\", \"concat.md\"))"));
     assert!(app.contains("mod cfg_matrix"));
     assert!(app.contains("LOCAL_PATTERN_TAG"));
+    assert!(app.contains("pub struct SplitRecord"));
+    assert!(app.contains("macro_helpers::FixtureRecord"));
+    assert!(app.contains("pub enum ClientError"));
     assert!(app.contains("pub fn open_trait_edges"));
     assert!(app.contains("pub fn open_cfg_asset_bridge"));
     assert!(app.contains("pub struct DisplayToken"));
@@ -85,8 +89,12 @@ fn slices_fast_macro_use_fixture_and_compiles() {
     assert!(app.contains("pub trait EdgeCodec"));
     assert!(app.contains("impl EdgeCodec<WireDto> for WireCodec"));
     assert!(app.contains("pub struct BridgeObject"));
+    assert!(app.contains("pub struct RemotePathObject"));
     assert!(app.contains("pub trait BridgeCallback"));
     assert!(app.contains("fn async_bridge_value"));
+    assert!(!app.contains("pub struct CallbackRegistry"));
+    assert!(!app.contains("pub fn open_decision_callback"));
+    assert!(!app.contains("pub fn open_registry_bridge"));
     assert!(!app.contains("dead_fn as selected_shadow"));
     assert!(!app.contains("dead_grouped as local_shadow"));
     assert!(!app.contains("dead_reexport"));
@@ -150,6 +158,7 @@ fn slices_fast_fixture_from_multiple_root_angles() {
                 "declare_macro_pair",
                 "macro_pair",
                 "include_str!(\"guidelines/core.md\")",
+                "include_bytes!(\"guidelines/binary.bin\")",
                 "mod cfg_matrix",
                 "pub struct BridgeObject",
             ],
@@ -227,6 +236,32 @@ fn slices_fast_fixture_from_multiple_root_angles() {
             ],
         },
         SliceAngle {
+            label: "event-enum-root",
+            roots: &["WireEvent"],
+            present: &[
+                "pub enum WireEvent",
+                "Record { dto: WireDto }",
+                "Failed(WireError)",
+                "pub struct WireDto",
+                "declare_wire_error",
+                "FixtureEnum",
+                "FixtureRecord",
+                "FixtureError",
+            ],
+            absent: &[
+                "pub fn open_macro_use_entry",
+                "pub fn open_trait_edges",
+                "pub fn open_cfg_asset_bridge",
+                "pub async fn open_async_macro_use",
+                "pub fn open_callback_bridge",
+                "declare_macro_pair",
+                "include_str!(\"guidelines/core.md\")",
+                "include!(\"generated.rs\")",
+                "pub struct BridgeObject",
+                "pub trait EdgeCodec",
+            ],
+        },
+        SliceAngle {
             label: "trait-item-root",
             roots: &["BridgeCallback"],
             present: &["pub trait BridgeCallback", "fn adjust"],
@@ -238,6 +273,160 @@ fn slices_fast_fixture_from_multiple_root_angles() {
                 "include_str!(\"guidelines/core.md\")",
                 "include!(\"generated.rs\")",
                 "pub struct BridgeObject",
+            ],
+        },
+        SliceAngle {
+            label: "object-item-root",
+            roots: &["BridgeObject"],
+            present: &[
+                "pub struct BridgeObject",
+                "FixtureObject",
+                "fixture_export",
+                "fixture_constructor",
+                "pub fn new",
+                "pub fn value",
+                "pub struct RootDto",
+            ],
+            absent: &[
+                "pub fn open_macro_use_entry",
+                "pub fn open_trait_edges",
+                "pub fn open_cfg_asset_bridge",
+                "pub async fn open_async_macro_use",
+                "pub fn open_callback_bridge",
+                "pub enum WireEvent",
+                "declare_wire_error",
+                "declare_macro_pair",
+                "include_str!(\"guidelines/core.md\")",
+                "include!(\"generated.rs\")",
+                "pub trait EdgeCodec",
+                "pub trait BridgeCallback",
+            ],
+        },
+        SliceAngle {
+            label: "split-record-root",
+            roots: &["SplitRecord"],
+            present: &[
+                "pub struct SplitRecord",
+                "macro_helpers::FixtureRecord",
+                "fixture_serde",
+                "SharedAlias",
+            ],
+            absent: &[
+                "use macro_helpers::FixtureRecord",
+                "pub fn open_macro_use_entry",
+                "pub enum ClientError",
+                "pub struct RemotePathObject",
+                "pub struct CallbackRegistry",
+                "pub enum WireEvent",
+                "declare_wire_error",
+                "include_str!(\"guidelines/core.md\")",
+            ],
+        },
+        SliceAngle {
+            label: "client-error-root",
+            roots: &["ClientError"],
+            present: &[
+                "pub enum ClientError",
+                "FixtureError",
+                "fixture_error",
+                "Wire { code: SharedAlias }",
+                "Missing",
+            ],
+            absent: &[
+                "pub fn open_macro_use_entry",
+                "pub struct SplitRecord",
+                "pub struct RemotePathObject",
+                "pub struct CallbackRegistry",
+                "pub enum WireEvent",
+                "declare_wire_error",
+                "include_str!(\"guidelines/core.md\")",
+            ],
+        },
+        SliceAngle {
+            label: "remote-object-root",
+            roots: &["RemotePathObject"],
+            present: &[
+                "pub struct RemotePathObject",
+                "FixtureObject",
+                "fixture_export",
+                "fixture_constructor",
+                "pub fn new",
+                "Arc<Self>",
+                "pub fn path_len",
+            ],
+            absent: &[
+                "pub fn open_macro_use_entry",
+                "pub struct BridgeObject",
+                "pub struct CallbackRegistry",
+                "pub trait ReconnectCallback",
+                "pub enum WireEvent",
+                "declare_wire_error",
+                "include_str!(\"guidelines/core.md\")",
+            ],
+        },
+        SliceAngle {
+            label: "registry-object-root",
+            roots: &["CallbackRegistry"],
+            present: &[
+                "pub struct CallbackRegistry",
+                "pub trait ReconnectCallback",
+                "fn reconnect",
+                "Arc<dyn ReconnectCallback",
+                "Mutex<Vec<SharedAlias>>",
+                "fixture_constructor",
+                "pub fn record",
+            ],
+            absent: &[
+                "pub fn open_registry_bridge",
+                "pub struct RemotePathObject",
+                "pub fn open_macro_use_entry",
+                "pub struct BridgeObject",
+                "pub enum WireEvent",
+                "include_str!(\"guidelines/core.md\")",
+            ],
+        },
+        SliceAngle {
+            label: "registry-bridge-root",
+            roots: &["open_registry_bridge"],
+            present: &[
+                "pub fn open_registry_bridge",
+                "fn registry_bridge_score",
+                "pub struct CallbackRegistry",
+                "pub trait ReconnectCallback",
+                "pub struct RemotePathObject",
+                "Arc<dyn ReconnectCallback",
+                "fixture_constructor",
+                "pub fn path_len",
+            ],
+            absent: &[
+                "pub fn open_macro_use_entry",
+                "pub fn open_decision_callback",
+                "pub struct BridgeObject",
+                "pub enum WireEvent",
+                "declare_wire_error",
+                "include_str!(\"guidelines/core.md\")",
+            ],
+        },
+        SliceAngle {
+            label: "decision-callback-root",
+            roots: &["open_decision_callback"],
+            present: &[
+                "pub fn open_decision_callback",
+                "pub type BoxDecisionFuture",
+                "pub type DecisionCallback",
+                "static DECISION_CALLBACK",
+                "dyn Future<Output = bool>",
+                "dyn Fn",
+                "OnceLock",
+            ],
+            absent: &[
+                "pub fn open_registry_bridge",
+                "pub struct CallbackRegistry",
+                "pub struct RemotePathObject",
+                "pub fn open_macro_use_entry",
+                "pub struct BridgeObject",
+                "pub enum WireEvent",
+                "include_str!(\"guidelines/core.md\")",
             ],
         },
         SliceAngle {
@@ -272,6 +461,7 @@ fn slices_fast_fixture_from_multiple_root_angles() {
                 "pub fn open_cfg_asset_bridge",
                 "mod cfg_matrix",
                 "include_str!(\"guidelines/core.md\")",
+                "include_bytes!(\"guidelines/binary.bin\")",
                 "include_str!(\"../assets/extra.txt\")",
                 "include_str!(concat!(\"guidelines/\", \"concat.md\"))",
                 "LOCAL_PATTERN_TAG",
@@ -459,6 +649,9 @@ fn assert_include_assets(output: &Path, app: &str) {
         assert!(output
             .join("fast_macro_app/src/guidelines/concat.md")
             .exists());
+        assert!(output
+            .join("fast_macro_app/src/guidelines/binary.bin")
+            .exists());
         assert!(output.join("fast_macro_app/assets/extra.txt").exists());
         assert!(
             !output
@@ -555,18 +748,15 @@ fn rewrite_copied_fixture_manifest(fixture: &Path) {
 fn rewrite_root_markers(lib: &Path, selected_roots: &[&str]) {
     let selected_roots = selected_roots.iter().copied().collect::<BTreeSet<_>>();
     let mut rewritten = String::new();
-    let mut pending_marker = false;
 
     for line in read(lib).lines() {
         if line.trim() == "#[opensourced]" {
-            pending_marker = true;
             continue;
         }
         if let Some(name) = declared_item_name(line) {
-            if pending_marker && selected_roots.contains(name.as_str()) {
+            if selected_roots.contains(name.as_str()) {
                 rewritten.push_str("#[opensourced]\n");
             }
-            pending_marker = false;
         }
         rewritten.push_str(line);
         rewritten.push('\n');

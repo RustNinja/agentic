@@ -42,6 +42,17 @@ not slicer failures.
   five-root codex-ipc run: copied support packages had no retained support
   build-script/OUT_DIR/compile-env/file-include hazard debt, and the run stayed
   zero-warning under `--deny-warnings`.
+- A follow-up read-only scan of `codex-mobile-client` added lightweight fixture
+  coverage for the UniFFI/object shapes that make full Litter runs expensive:
+  path-qualified derives, split helper attrs, error enums, Arc-returning object
+  constructors, stored callback registries, callback/future aliases, and static
+  `include_bytes!` assets. The generic fixes from that fixture are now in the
+  reducer/import renderer rather than Litter-specific branches.
+- After those generic fixes, the pinned five-root `codex-ipc` batch was rerun
+  from `/Users/mykyta/Documents/New project 6/litter-analysis/shared/rust-bridge`
+  with known source baseline failures allowed. The generated slice remained at
+  116 files, passed production validation, and produced zero feedback errors or
+  warnings under `--deny-warnings`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
