@@ -3120,6 +3120,59 @@ pub fn entry(service: Service) -> u32 {
     }
 
     #[test]
+    #[cfg(feature = "ra-hir")]
+    fn ra_feedback_records_outgoing_call_closure_edges() {
+        let root = temp_output("ra-feedback-source");
+        let output = temp_output("ra-feedback-reduction");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"
+use opensourced::opensourced;
+
+pub fn helper() -> u32 {
+    1
+}
+
+#[opensourced]
+pub fn entry() -> u32 {
+    helper()
+}
+"#,
+        );
+        let report = generate_with_analyzer(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output,
+            },
+            AnalyzerMode::RustAnalyzerFeedback,
+        )
+        .expect("RA feedback generation should succeed");
+
+        assert!(report
+            .analyzer
+            .notes
+            .iter()
+            .any(|note| note.contains("RA feedback closure:")));
+        assert!(report.analyzer.semantic_hints.total_edges() > 0);
+        assert!(report
+            .reachable
+            .iter()
+            .any(|callable| callable.to_string() == "app::helper"));
+    }
+
+    #[test]
     fn reports_reachable_include_macro_production_hazards() {
         let root = temp_output("include-hazard-source");
         let opensourced_path = workspace_root().join("crates/opensourced");

@@ -11,6 +11,8 @@ appends one JSONL metrics row per batch.
 The runner defaults to `--analyzer ra-hir`, which builds the CLI with the
 default rust-analyzer HIR feature and records semantic inventory. Pass
 `--analyzer syn` for the fast syntactic fallback, or
+`--analyzer ra-feedback` for the proof-of-concept rust-analyzer outgoing-call
+closure that records project-local call hierarchy edges before reduction, or
 `--analyzer ra-hir-proc-macros` when a corpus run should exercise
 rust-analyzer build-script output discovery and the sysroot proc-macro server.
 RA exact project-local method/path resolutions are part of the default corpus

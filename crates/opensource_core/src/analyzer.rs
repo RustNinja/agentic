@@ -6,6 +6,7 @@ use crate::model::{Project, SemanticReductionHints};
 pub enum AnalyzerMode {
     Syn,
     RustAnalyzerHir,
+    RustAnalyzerFeedback,
     RustAnalyzerHirProcMacros,
 }
 
@@ -14,6 +15,7 @@ impl AnalyzerMode {
         match self {
             Self::Syn => "syn",
             Self::RustAnalyzerHir => "ra-hir",
+            Self::RustAnalyzerFeedback => "ra-feedback",
             Self::RustAnalyzerHirProcMacros => "ra-hir-proc-macros",
         }
     }
@@ -54,12 +56,15 @@ impl std::str::FromStr for AnalyzerMode {
         match value {
             "syn" => Ok(Self::Syn),
             "ra" | "ra-hir" | "rust-analyzer" | "rust-analyzer-hir" => Ok(Self::RustAnalyzerHir),
+            "ra-feedback"
+            | "rust-analyzer-feedback"
+            | "rust-analyzer-hir-feedback" => Ok(Self::RustAnalyzerFeedback),
             "ra-hir-proc-macros"
             | "ra-proc-macros"
             | "rust-analyzer-proc-macros"
             | "rust-analyzer-hir-proc-macros" => Ok(Self::RustAnalyzerHirProcMacros),
             _ => Err(format!(
-                "unknown analyzer {value:?}; expected syn, ra-hir, or ra-hir-proc-macros"
+                "unknown analyzer {value:?}; expected syn, ra-hir, ra-feedback, or ra-hir-proc-macros"
             )),
         }
     }
@@ -202,12 +207,21 @@ fn load_report_with_project(
             project,
             AnalyzerMode::RustAnalyzerHir,
             rust_analyzer::ProcMacroExpansionMode::Disabled,
+            rust_analyzer::RaFeedbackMode::Disabled,
+        ),
+        AnalyzerMode::RustAnalyzerFeedback => rust_analyzer::load_report(
+            workspace_root,
+            project,
+            AnalyzerMode::RustAnalyzerFeedback,
+            rust_analyzer::ProcMacroExpansionMode::Disabled,
+            rust_analyzer::RaFeedbackMode::Enabled,
         ),
         AnalyzerMode::RustAnalyzerHirProcMacros => rust_analyzer::load_report(
             workspace_root,
             project,
             AnalyzerMode::RustAnalyzerHirProcMacros,
             rust_analyzer::ProcMacroExpansionMode::Enabled,
+            rust_analyzer::RaFeedbackMode::Disabled,
         ),
     }
 }
@@ -254,6 +268,12 @@ mod rust_analyzer {
         Enabled,
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum RaFeedbackMode {
+        Disabled,
+        Enabled,
+    }
+
     pub struct RustAnalyzerSemanticProvider {
         report: AnalyzerReport,
         _database: ra_ap_ide::RootDatabase,
@@ -265,8 +285,15 @@ mod rust_analyzer {
             project: Option<&Project>,
             requested_mode: AnalyzerMode,
             proc_macro_mode: ProcMacroExpansionMode,
+            feedback_mode: RaFeedbackMode,
         ) -> Result<Self, Box<dyn std::error::Error>> {
-            match Self::load_once(workspace_root, project, requested_mode, proc_macro_mode) {
+            match Self::load_once(
+                workspace_root,
+                project,
+                requested_mode,
+                proc_macro_mode,
+                feedback_mode,
+            ) {
                 Ok(provider) => Ok(provider),
                 Err(error) if proc_macro_mode == ProcMacroExpansionMode::Enabled => {
                     let mut provider = Self::load_once(
@@ -274,6 +301,7 @@ mod rust_analyzer {
                         project,
                         requested_mode,
                         ProcMacroExpansionMode::Disabled,
+                        feedback_mode,
                     )?;
                     provider.report.notes.push(format!(
                         "proc macro semantic load failed; fell back to bounded HIR without proc macro expansion: {error}"
@@ -289,6 +317,7 @@ mod rust_analyzer {
             project: Option<&Project>,
             requested_mode: AnalyzerMode,
             proc_macro_mode: ProcMacroExpansionMode,
+            feedback_mode: RaFeedbackMode,
         ) -> Result<Self, Box<dyn std::error::Error>> {
             let load_dependencies_for_proc_macros = proc_macro_mode
                 == ProcMacroExpansionMode::Enabled
@@ -342,7 +371,8 @@ mod rust_analyzer {
             let loaded = loaded.map_err(|_| "rust-analyzer workspace load panicked")?;
             let (database, vfs, proc_macro_client) = loaded?;
 
-            let semantic = collect_semantic_report(&database, &vfs, workspace_root, project);
+            let semantic =
+                collect_semantic_report(&database, &vfs, workspace_root, project, feedback_mode);
             let mut notes = vec![
                 "rust-analyzer RootDatabase loaded".to_string(),
                 "HIR Semantics initialized".to_string(),
@@ -426,6 +456,15 @@ mod rust_analyzer {
                 semantic.hints.unqueried_queries,
                 semantic.hints.unmapped_targets
             ));
+            if let Some(feedback) = semantic.ra_feedback {
+                notes.push(format!(
+                    "RA feedback closure: {} callable owner(s) queried, {} outgoing call target(s), {} project-local edge(s) observed, {} unmapped target(s)",
+                    feedback.queried_callables,
+                    feedback.outgoing_calls,
+                    feedback.edges,
+                    feedback.unmapped_targets
+                ));
+            }
             notes.push(format!(
                 "HIR semantic budgets: files={}, method_calls={}, paths={}",
                 semantic.report.file_budget,
@@ -464,12 +503,14 @@ mod rust_analyzer {
         project: Option<&Project>,
         requested_mode: AnalyzerMode,
         proc_macro_mode: ProcMacroExpansionMode,
+        feedback_mode: RaFeedbackMode,
     ) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
         let provider = RustAnalyzerSemanticProvider::load(
             workspace_root,
             project,
             requested_mode,
             proc_macro_mode,
+            feedback_mode,
         )?;
         Ok(provider.report().clone())
     }
@@ -479,15 +520,25 @@ mod rust_analyzer {
         vfs: &ra_ap_vfs::Vfs,
         workspace_root: &Path,
         project: Option<&Project>,
+        feedback_mode: RaFeedbackMode,
     ) -> SemanticCollection {
         ra_ap_hir::attach_db(database, || {
-            collect_semantic_report_attached(database, vfs, workspace_root, project)
+            collect_semantic_report_attached(database, vfs, workspace_root, project, feedback_mode)
         })
     }
 
     struct SemanticCollection {
         report: SemanticReport,
         hints: SemanticReductionHints,
+        ra_feedback: Option<RaFeedbackReport>,
+    }
+
+    #[derive(Debug, Clone, Copy, Default)]
+    struct RaFeedbackReport {
+        queried_callables: usize,
+        outgoing_calls: usize,
+        edges: usize,
+        unmapped_targets: usize,
     }
 
     struct FileSemanticContext<'a> {
@@ -504,6 +555,7 @@ mod rust_analyzer {
         vfs: &ra_ap_vfs::Vfs,
         workspace_root: &Path,
         project: Option<&Project>,
+        feedback_mode: RaFeedbackMode,
     ) -> SemanticCollection {
         let canonical_workspace_root = workspace_root
             .canonicalize()
@@ -648,7 +700,92 @@ mod rust_analyzer {
         report.unresolved_paths = report.queried_paths.saturating_sub(report.resolved_paths);
         hints.unresolved_queries = report.unresolved_method_calls + report.unresolved_paths;
         hints.unqueried_queries = report.unqueried_method_calls + report.unqueried_paths;
-        SemanticCollection { report, hints }
+        let ra_feedback = if feedback_mode == RaFeedbackMode::Enabled {
+            project
+                .zip(semantic_index.as_ref())
+                .map(|(project, index)| {
+                    collect_ra_feedback_edges(database, vfs, project, index, &mut hints)
+                })
+        } else {
+            None
+        };
+        SemanticCollection {
+            report,
+            hints,
+            ra_feedback,
+        }
+    }
+
+    fn collect_ra_feedback_edges(
+        database: &ra_ap_ide::RootDatabase,
+        vfs: &ra_ap_vfs::Vfs,
+        project: &Project,
+        index: &ProjectSemanticIndex,
+        hints: &mut SemanticReductionHints,
+    ) -> RaFeedbackReport {
+        let analysis = ra_ap_ide::AnalysisHost::with_database(database.clone()).analysis();
+        let file_ids = vfs_file_ids(vfs);
+        let config = ra_ap_ide::CallHierarchyConfig {
+            exclude_tests: true,
+            ra_fixture: ra_ap_ide::RaFixtureConfig::default(),
+        };
+        let mut report = RaFeedbackReport::default();
+        let mut callables = project
+            .functions
+            .keys()
+            .chain(project.methods.keys())
+            .collect::<Vec<_>>();
+        callables.sort();
+
+        for callable in callables {
+            let Some((path, offset)) = index.callable_focus_offset(callable) else {
+                continue;
+            };
+            if !index.is_feedback_owner_path(&path) {
+                continue;
+            }
+            let Some(file_id) = file_ids.get(&path).copied() else {
+                continue;
+            };
+            report.queried_callables += 1;
+            let position = ra_ap_ide::FilePosition { file_id, offset };
+            let Ok(Some(outgoing)) = analysis.outgoing_calls(&config, position) else {
+                continue;
+            };
+            for call in outgoing {
+                report.outgoing_calls += 1;
+                let target_vfs_path = vfs.file_path(call.target.file_id);
+                let target_offset = call
+                    .target
+                    .focus_range
+                    .unwrap_or(call.target.full_range)
+                    .start();
+                match index.callable_at_vfs_offset(target_vfs_path, target_offset) {
+                    Some(dependency) if dependency != *callable => {
+                        report.edges += 1;
+                        hints.add_callable_edge(
+                            SemanticOwnerId::Callable(callable.clone()),
+                            dependency,
+                        );
+                    }
+                    Some(_) => {}
+                    None if index.contains_vfs_path(target_vfs_path) => {
+                        report.unmapped_targets += 1;
+                    }
+                    None => {}
+                }
+            }
+        }
+
+        report
+    }
+
+    fn vfs_file_ids(vfs: &ra_ap_vfs::Vfs) -> HashMap<PathBuf, ra_ap_ide::FileId> {
+        vfs.iter()
+            .filter_map(|(file_id, vfs_path)| {
+                normalize_vfs_path(vfs_path).map(|path| (path, file_id))
+            })
+            .collect()
     }
 
     fn collect_file_semantics(
@@ -1003,6 +1140,10 @@ mod rust_analyzer {
             normalize_vfs_path(vfs_path).is_some_and(|path| self.root_files.contains(&path))
         }
 
+        fn is_feedback_owner_path(&self, path: &Path) -> bool {
+            self.root_files.contains(path) || self.retained_files.contains(path)
+        }
+
         fn owner_at_vfs_offset(
             &self,
             vfs_path: &ra_ap_vfs::VfsPath,
@@ -1052,9 +1193,38 @@ mod rust_analyzer {
                 .map(|item| item.id.clone())
         }
 
+        fn callable_focus_offset(&self, callable: &CallableId) -> Option<(PathBuf, TextSize)> {
+            let name = callable_name(callable);
+            for (path, file) in &self.files {
+                let Some(indexed) = file
+                    .callables
+                    .iter()
+                    .find(|indexed| indexed.id == *callable)
+                else {
+                    continue;
+                };
+                let start = file.byte_offset(indexed.span.start_line, indexed.span.start_column);
+                let end = file.byte_offset(indexed.span.end_line, indexed.span.end_column);
+                let range = file.text.get(start..end).unwrap_or_default();
+                let offset = range
+                    .find(name)
+                    .map(|relative| start + relative)
+                    .unwrap_or(start);
+                return Some((path.clone(), TextSize::new(offset as u32)));
+            }
+            None
+        }
+
         fn indexed_file(&self, vfs_path: &ra_ap_vfs::VfsPath) -> Option<&IndexedSourceFile> {
             let path = normalize_vfs_path(vfs_path)?;
             self.files.get(&path)
+        }
+    }
+
+    fn callable_name(callable: &CallableId) -> &str {
+        match callable {
+            CallableId::Free { name, .. } => name,
+            CallableId::Method { method, .. } => method,
         }
     }
 
@@ -1125,6 +1295,25 @@ mod rust_analyzer {
                 }
             }
             (line, offset.saturating_sub(line_start))
+        }
+
+        fn byte_offset(&self, line: usize, column: usize) -> usize {
+            let mut current_line = 1;
+            let mut line_start = 0;
+            for (index, ch) in self.text.char_indices() {
+                if current_line == line {
+                    return (line_start + column).min(self.text.len());
+                }
+                if ch == '\n' {
+                    current_line += 1;
+                    line_start = index + 1;
+                }
+            }
+            if current_line == line {
+                (line_start + column).min(self.text.len())
+            } else {
+                self.text.len()
+            }
         }
     }
 
@@ -1277,6 +1466,10 @@ mod tests {
             AnalyzerMode::RustAnalyzerHir
         );
         assert_eq!(
+            "ra-feedback".parse::<AnalyzerMode>().unwrap(),
+            AnalyzerMode::RustAnalyzerFeedback
+        );
+        assert_eq!(
             "ra-hir-proc-macros".parse::<AnalyzerMode>().unwrap(),
             AnalyzerMode::RustAnalyzerHirProcMacros
         );
@@ -1356,11 +1549,18 @@ mod rust_analyzer {
         Enabled,
     }
 
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    pub enum RaFeedbackMode {
+        Disabled,
+        Enabled,
+    }
+
     pub fn load_report(
         _workspace_root: &Path,
         _project: Option<&Project>,
         _requested_mode: AnalyzerMode,
         _proc_macro_mode: ProcMacroExpansionMode,
+        _feedback_mode: RaFeedbackMode,
     ) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
         Err(
             "ra-hir analyzer requested, but opensource_core was built without the ra-hir feature"

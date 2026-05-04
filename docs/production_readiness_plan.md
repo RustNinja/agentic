@@ -27,6 +27,11 @@ preset now defaults to `--analyzer ra-hir-proc-macros`, which asks
 rust-analyzer to run build-script output discovery and use the sysroot
 proc-macro server before collecting HIR semantics. The fast `ra-hir` path still
 keeps proc macros disabled and excludes dependency crates from the HIR load.
+The `codex/slice-ra-feedback` proof-of-concept adds `--analyzer ra-feedback`,
+which keeps the bounded HIR inventory but also asks rust-analyzer outgoing call
+hierarchy for selected-root and syntactic-retained owner files, records those
+project-local edges into the same additive reduction hint map, then lets the
+existing `syn` renderer prune items outside the retained set.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that

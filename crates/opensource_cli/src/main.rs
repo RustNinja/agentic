@@ -481,7 +481,7 @@ where
         } else if arg == OsStr::new("--analyzer") {
             let value = args
                 .next()
-                .ok_or("--analyzer requires a following value: syn or ra-hir")?;
+                .ok_or("--analyzer requires a following value: syn, ra-hir, ra-feedback, or ra-hir-proc-macros")?;
             let value = value
                 .to_str()
                 .ok_or("--analyzer value must be valid UTF-8")?;
@@ -3348,7 +3348,7 @@ fn format_duration_ms(duration_ms: u64) -> String {
 
 fn usage() -> String {
     concat!(
-        "usage: slicers [--analyzer <syn|ra-hir|ra-hir-proc-macros>] [--production] [--check] [--preflight] [--feedback] ",
+        "usage: slicers [--analyzer <syn|ra-hir|ra-feedback|ra-hir-proc-macros>] [--production] [--check] [--preflight] [--feedback] ",
         "[--feedback-loop <n>] [--feedback-repair-loop <n>] [--feedback-limit <n>] ",
         "[--feedback-timeout <seconds>] [--deny-warnings] [--feedback-report <path>] ",
         "[--feedback-target-dir <path>] [--cargo-check-arg <arg>] [--repair-report <path>] ",
@@ -3357,6 +3357,7 @@ fn usage() -> String {
         "[--preflight-report <path>] ",
         "<workspace-root-or-Cargo.toml> <output-root>\n",
         "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn; ",
+        "ra-feedback enables the proof-of-concept RA outgoing-call closure; ",
         "--production defaults to ra-hir-proc-macros when available"
     )
     .to_string()
@@ -3712,6 +3713,13 @@ mod tests {
         let options = parse_options(["--analyzer", "syn", "workspace", "out"]);
 
         assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
+    }
+
+    #[test]
+    fn explicit_ra_feedback_analyzer_is_accepted() {
+        let options = parse_options(["--analyzer", "ra-feedback", "workspace", "out"]);
+
+        assert_eq!(options.analyzer_mode, AnalyzerMode::RustAnalyzerFeedback);
     }
 
     #[test]

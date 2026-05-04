@@ -261,6 +261,11 @@ counts. The
 reducer still keeps the syntactic closure as fallback and does not yet use RA as
 the authoritative oracle for trait impl lookup, macro-expanded item retention,
 generated source, dynamic dispatch, or every cfg-active reachability decision.
+The `codex/slice-ra-feedback` branch adds an isolated `ra-feedback` analyzer
+mode to test the next architecture: copy enough source first, ask
+rust-analyzer outgoing call hierarchy for selected-root and syntactic-retained
+owner files, then prune with the existing `syn` renderer from the RA-backed
+keep set.
 
 Known remaining risks:
 

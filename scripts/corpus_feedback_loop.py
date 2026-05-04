@@ -173,7 +173,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--analyzer",
         default="ra-hir",
-        choices=("syn", "ra-hir", "ra-hir-proc-macros"),
+        choices=("syn", "ra-hir", "ra-feedback", "ra-hir-proc-macros"),
         help="slicers analyzer backend; default uses bounded rust-analyzer HIR inventory",
     )
     parser.add_argument(
@@ -955,7 +955,7 @@ def slicers_command(
     cargo_check_args: list[str],
 ) -> list[str]:
     features = list(args.features)
-    if args.analyzer in ("ra-hir", "ra-hir-proc-macros") and "ra-hir" not in features:
+    if args.analyzer in ("ra-hir", "ra-feedback", "ra-hir-proc-macros") and "ra-hir" not in features:
         features.append("ra-hir")
 
     command = ["cargo", "run", "-p", "opensource_cli", "--bin", "slicers"]
