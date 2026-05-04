@@ -1120,6 +1120,7 @@ fn try_widen_from_feedback(
         );
     }
 
+    refresh_generated_lockfile_for_locked_validation(options, validation)?;
     let preflight = run_preflight(options)?;
     if !preflight.success {
         return Err("feedback widening produced a structurally invalid generated workspace".into());
@@ -2855,6 +2856,74 @@ pub fn helper() -> usize {
         let report_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(slice_report).unwrap()).unwrap();
         assert_eq!(report_json["feedback_widened_roots"][0], "app::helper");
+    }
+
+    #[test]
+    fn feedback_widening_reconciles_lockfile_before_next_locked_check() {
+        let source = temp_path("cli-feedback-widen-lock-source");
+        let output = temp_path("cli-feedback-widen-lock-output");
+        let slice_report = temp_path("cli-feedback-widen-lock-report").join("slice-report.json");
+        let opensourced_path = repo_root().join("crates/opensourced");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(source.join("Cargo.lock"), stale_generated_lockfile());
+        write(
+            source.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+
+pub fn helper() -> usize {
+    2
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            std::ffi::OsString::from("--production"),
+            std::ffi::OsString::from("--slice-report"),
+            slice_report.into_os_string(),
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        let mut validation = ValidationReport::new(&options);
+        let mut state = FeedbackWideningState::default();
+        let mut missing_helper = diagnostic("E0425", "cannot find value `helper` in this scope");
+        missing_helper.package_id = Some("app 0.1.0 (path+file:///tmp/app)".to_string());
+        let feedback_report = report(false, vec![missing_helper]);
+
+        let widened = try_widen_from_feedback(
+            &options,
+            &mut validation,
+            &mut state,
+            "feedback",
+            1,
+            &feedback_report,
+            &output.join("slice-feedback.json"),
+            0,
+            0,
+        )
+        .expect("feedback widening should reconcile lockfile");
+
+        assert!(widened);
+        let lockfile = fs::read_to_string(output.join("Cargo.lock")).unwrap();
+        assert!(!lockfile.contains("dead-helper"));
+        assert!(validation
+            .gates
+            .iter()
+            .any(|gate| gate.name == "lockfile" && gate.status == "passed"));
     }
 
     #[test]

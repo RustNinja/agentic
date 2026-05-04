@@ -172,7 +172,9 @@ enables baseline checking, preflight, `--feedback-repair-loop 3`, and
 the source workspace has a `Cargo.lock` and the caller did not already pass
 `--locked` or `--frozen`, and writes
 `slice-report.json` plus
-`slice-validation.json` by default, while still allowing explicit flags such as
+`slice-validation.json` by default. If compiler feedback widens and re-renders
+the slice, production mode reconciles the generated lockfile again before the
+next locked check. Production mode still allows explicit flags such as
 `--feedback-repair-loop 5`, `--feedback-timeout`, `--cargo-check-arg`, and
 target/report paths to override the preset where needed. Production mode fails
 closed on readiness error hazards before compiler feedback and records a final

@@ -86,7 +86,8 @@ assets, output safety, or product diagnostics by itself.
    - Copy source/include/build assets only after resolving symlinks inside the
      package root; never copy a symlink target that escapes the package.
    - Validate production slices with Cargo `--locked` whenever the source
-     workspace provides a lockfile.
+     workspace provides a lockfile, including after every compiler-feedback
+     widening re-render.
 
 3. Feedback widening:
    - Parse `cargo check --message-format=json`.
