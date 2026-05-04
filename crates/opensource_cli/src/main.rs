@@ -733,8 +733,22 @@ fn uncovered_validation_targets(
         .iter()
         .filter_map(|target| {
             let target_kind = validation_target_kind(target)?;
-            (!validation_target_is_covered(target_kind, &target.name, cargo_args))
-                .then(|| format!("{} {} {}", target.package, target_kind, target.name))
+            if !validation_target_is_covered(target_kind, &target.name, cargo_args) {
+                return Some(format!(
+                    "{} {} {}",
+                    target.package, target_kind, target.name
+                ));
+            }
+            let missing_features = uncovered_target_required_features(target, cargo_args);
+            (!missing_features.is_empty()).then(|| {
+                format!(
+                    "{} {} {} requires feature(s): {}",
+                    target.package,
+                    target_kind,
+                    target.name,
+                    missing_features.join(", ")
+                )
+            })
         })
         .collect()
 }
@@ -775,6 +789,70 @@ fn target_kind_plural_flag(kind: &str) -> &'static str {
         "bench" => "--benches",
         _ => "--all-targets",
     }
+}
+
+fn uncovered_target_required_features(
+    target: &GeneratedTargetReport,
+    cargo_args: &[String],
+) -> Vec<String> {
+    if target.required_features.is_empty() || cargo_args.iter().any(|arg| arg == "--all-features") {
+        return Vec::new();
+    }
+
+    let explicitly_enabled = enabled_cargo_features(cargo_args);
+    let default_enabled = !cargo_args.iter().any(|arg| arg == "--no-default-features");
+    target
+        .required_features
+        .iter()
+        .filter(|feature| {
+            !feature_is_enabled_for_target(
+                feature,
+                &target.package,
+                &explicitly_enabled,
+                default_enabled.then_some(target.default_features.as_slice()),
+            )
+        })
+        .cloned()
+        .collect()
+}
+
+fn enabled_cargo_features(cargo_args: &[String]) -> BTreeSet<String> {
+    let mut features = BTreeSet::new();
+    let mut index = 0;
+    while index < cargo_args.len() {
+        let arg = &cargo_args[index];
+        if arg == "--features" {
+            if let Some(value) = cargo_args.get(index + 1) {
+                collect_feature_arg(value, &mut features);
+                index += 2;
+                continue;
+            }
+        } else if let Some(value) = arg.strip_prefix("--features=") {
+            collect_feature_arg(value, &mut features);
+        }
+        index += 1;
+    }
+    features
+}
+
+fn collect_feature_arg(value: &str, features: &mut BTreeSet<String>) {
+    for feature in value.split([',', ' ']).map(str::trim) {
+        if !feature.is_empty() {
+            features.insert(feature.to_string());
+        }
+    }
+}
+
+fn feature_is_enabled_for_target(
+    feature: &str,
+    package: &str,
+    explicitly_enabled: &BTreeSet<String>,
+    default_features: Option<&[String]>,
+) -> bool {
+    explicitly_enabled.contains(feature)
+        || explicitly_enabled.contains(&format!("{package}/{feature}"))
+        || default_features
+            .is_some_and(|features| features.iter().any(|enabled| enabled == feature))
 }
 
 fn finish_validation(
@@ -2355,18 +2433,24 @@ mod tests {
                 name: "demo".to_string(),
                 kind: vec!["example".to_string()],
                 src_path: PathBuf::from("/workspace/app/examples/demo.rs"),
+                required_features: Vec::new(),
+                default_features: Vec::new(),
             },
             GeneratedTargetReport {
                 package: "app".to_string(),
                 name: "behavior".to_string(),
                 kind: vec!["test".to_string()],
                 src_path: PathBuf::from("/workspace/app/tests/behavior.rs"),
+                required_features: Vec::new(),
+                default_features: Vec::new(),
             },
             GeneratedTargetReport {
                 package: "app".to_string(),
                 name: "throughput".to_string(),
                 kind: vec!["bench".to_string()],
                 src_path: PathBuf::from("/workspace/app/benches/throughput.rs"),
+                required_features: Vec::new(),
+                default_features: Vec::new(),
             },
         ];
 
@@ -2389,6 +2473,68 @@ mod tests {
             ]
         )
         .is_empty());
+    }
+
+    #[test]
+    fn required_feature_targets_require_matching_validation_features() {
+        let targets = vec![GeneratedTargetReport {
+            package: "app".to_string(),
+            name: "demo".to_string(),
+            kind: vec!["example".to_string()],
+            src_path: PathBuf::from("/workspace/app/examples/demo.rs"),
+            required_features: vec!["demo-ui".to_string(), "sqlite".to_string()],
+            default_features: Vec::new(),
+        }];
+
+        assert_eq!(
+            uncovered_validation_targets(&targets, &["--all-targets".to_string()]),
+            ["app example demo requires feature(s): demo-ui, sqlite"]
+        );
+        assert_eq!(
+            uncovered_validation_targets(
+                &targets,
+                &[
+                    "--all-targets".to_string(),
+                    "--features".to_string(),
+                    "demo-ui,app/sqlite".to_string(),
+                ]
+            ),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            uncovered_validation_targets(
+                &targets,
+                &["--example=demo".to_string(), "--all-features".to_string()]
+            ),
+            Vec::<String>::new()
+        );
+    }
+
+    #[test]
+    fn target_default_features_cover_required_features_unless_disabled() {
+        let targets = vec![GeneratedTargetReport {
+            package: "app".to_string(),
+            name: "demo".to_string(),
+            kind: vec!["example".to_string()],
+            src_path: PathBuf::from("/workspace/app/examples/demo.rs"),
+            required_features: vec!["demo-ui".to_string()],
+            default_features: vec!["demo-ui".to_string()],
+        }];
+
+        assert_eq!(
+            uncovered_validation_targets(&targets, &["--all-targets".to_string()]),
+            Vec::<String>::new()
+        );
+        assert_eq!(
+            uncovered_validation_targets(
+                &targets,
+                &[
+                    "--all-targets".to_string(),
+                    "--no-default-features".to_string()
+                ]
+            ),
+            ["app example demo requires feature(s): demo-ui"]
+        );
     }
 
     #[test]

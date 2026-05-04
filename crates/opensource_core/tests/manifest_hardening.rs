@@ -282,10 +282,18 @@ fn slices_marked_example_target_and_preserves_manifest_entry() {
     .expect("reduction should succeed");
 
     assert_eq!(report.packages, ["app", "lib_support", "support"]);
+    let app_target = report
+        .targets
+        .iter()
+        .find(|target| target.package == "app")
+        .expect("app target should be reported");
+    assert_eq!(app_target.required_features, ["demo-mode"]);
+    assert_eq!(app_target.default_features, ["demo-mode"]);
     let manifest = read(output.join("app/Cargo.toml"));
     assert!(manifest.contains("[[example]]"));
     assert!(manifest.contains("name = \"demo\""));
     assert!(manifest.contains("path = \"examples/demo.rs\""));
+    assert!(manifest.contains("required-features = [\"demo-mode\"]"));
     assert!(manifest.contains("[dependencies.lib_support]"));
     assert!(manifest.contains("[dev-dependencies.support]"));
 
@@ -3033,6 +3041,11 @@ edition = "2021"
 [[example]]
 name = "demo"
 path = "examples/demo.rs"
+required-features = ["demo-mode"]
+
+[features]
+default = ["demo-mode"]
+demo-mode = []
 
 [dependencies]
 lib_support = {{ path = "../lib_support" }}

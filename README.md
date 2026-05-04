@@ -142,9 +142,12 @@ authoritative gate verdict: final status, rejection reason when present,
 baseline/preflight/feedback gate states, cargo check arguments, and per-attempt
 feedback or repair outcomes.
 If the selected root lives in a non-default target such as an example, validation
-rejects runs whose cargo check arguments do not cover that target; pass
+rejects runs whose cargo check arguments do not cover that target or its
+`required-features`; pass
 `--cargo-check-arg --all-targets`, `--cargo-check-arg --examples`, or the
-matching `--cargo-check-arg --example --cargo-check-arg <name>`.
+matching `--cargo-check-arg --example --cargo-check-arg <name>`, plus
+`--cargo-check-arg --features --cargo-check-arg <feature-list>` or
+`--cargo-check-arg --all-features` when Cargo would otherwise skip the target.
 
 `--baseline-check` runs `cargo check --message-format=json` against the source
 workspace before slicing and writes `slice-baseline.json`. By default a failing

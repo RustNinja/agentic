@@ -38,8 +38,10 @@ predicted generated shape without compiling dependencies. Use
 `--feedback-target-dir` on feedback, repair, or production corpus runs to reuse
 dependency builds across generated outputs. Use repeated `--cargo-check-arg`
 values to validate feature or target matrix cases such as `--all-features` or
-`--target wasm32-unknown-unknown`. Use `--deny-warnings` for production gates
-that require warning-free generated feedback. Each corpus row includes
+`--target wasm32-unknown-unknown`; production validation also rejects
+non-default targets whose `required-features` are not activated by those
+arguments. Use `--deny-warnings` for production gates that require warning-free
+generated feedback. Each corpus row includes
 the slicer's authoritative validation verdict, production-readiness status,
 production hazard codes, compiler feedback widening candidate/hazard kinds,
 feedback-widened root counts, compiler suggestion counts, and conservative

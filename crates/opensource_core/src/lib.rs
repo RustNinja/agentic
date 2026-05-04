@@ -60,6 +60,8 @@ pub struct GeneratedTargetReport {
     pub name: String,
     pub kind: Vec<String>,
     pub src_path: PathBuf,
+    pub required_features: Vec<String>,
+    pub default_features: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -190,9 +192,53 @@ fn target_report(project: &Project, packages: &[String]) -> Vec<GeneratedTargetR
                 name: package.entry_target.name.clone(),
                 kind: package.entry_target.kind.clone(),
                 src_path: package.entry_target.src_path.clone(),
+                required_features: package.entry_target.required_features.clone(),
+                default_features: default_feature_closure(&package.manifest),
             })
         })
         .collect()
+}
+
+fn default_feature_closure(manifest: &toml::Value) -> Vec<String> {
+    let Some(features) = manifest.get("features").and_then(toml::Value::as_table) else {
+        return Vec::new();
+    };
+    let mut retained = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    let mut pending = vec!["default".to_string()];
+
+    while let Some(feature) = pending.pop() {
+        if !visited.insert(feature.clone()) {
+            continue;
+        }
+        let Some(values) = features.get(&feature).and_then(toml::Value::as_array) else {
+            continue;
+        };
+        for value in values {
+            let Some(item) = value.as_str() else {
+                continue;
+            };
+            let Some(feature_name) = package_feature_reference(item) else {
+                continue;
+            };
+            if retained.insert(feature_name.to_string()) {
+                pending.push(feature_name.to_string());
+            }
+        }
+    }
+
+    retained.into_iter().collect()
+}
+
+fn package_feature_reference(item: &str) -> Option<&str> {
+    let feature = item.strip_prefix("dep:").unwrap_or(item);
+    let feature = feature
+        .split_once('/')
+        .map(|(dependency, _)| dependency)
+        .or_else(|| feature.split_once("?/").map(|(dependency, _)| dependency))
+        .unwrap_or(feature);
+    let feature = feature.strip_suffix('?').unwrap_or(feature);
+    (!feature.is_empty()).then_some(feature)
 }
 
 const FEEDBACK_WIDENING_ROOT_MATCH_LIMIT: usize = 24;
@@ -1214,6 +1260,8 @@ struct GeneratedTargetReportJson {
     name: String,
     kind: Vec<String>,
     src_path: PathBuf,
+    required_features: Vec<String>,
+    default_features: Vec<String>,
 }
 
 impl GeneratedTargetReportJson {
@@ -1223,6 +1271,8 @@ impl GeneratedTargetReportJson {
             name: report.name.clone(),
             kind: report.kind.clone(),
             src_path: report.src_path.clone(),
+            required_features: report.required_features.clone(),
+            default_features: report.default_features.clone(),
         }
     }
 }
@@ -1390,9 +1440,9 @@ mod tests {
     };
 
     use super::{
-        add_semantic_inventory_hazard, generate, generate_with_analyzer_feedback,
-        write_generate_report, AnalyzerMode, AnalyzerReport, CheckDiagnostic, GenerateOptions,
-        SemanticReport,
+        add_semantic_inventory_hazard, default_feature_closure, generate,
+        generate_with_analyzer_feedback, write_generate_report, AnalyzerMode, AnalyzerReport,
+        CheckDiagnostic, GenerateOptions, SemanticReport,
     };
 
     #[test]
@@ -1496,6 +1546,28 @@ mod tests {
         assert!(a_source.contains("pub fn open_source_entry"));
         assert!(!a_source.contains("#[opensourced]"));
         assert!(!a_source.contains("internal_entry"));
+    }
+
+    #[test]
+    fn default_feature_closure_follows_nested_package_features() {
+        let manifest = r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[features]
+default = ["demo-ui", "storage"]
+demo-ui = ["theme"]
+storage = ["dep:rusqlite", "serde?/derive"]
+theme = []
+"#
+        .parse::<toml::Value>()
+        .expect("manifest should parse");
+
+        assert_eq!(
+            default_feature_closure(&manifest),
+            ["demo-ui", "rusqlite", "serde", "storage", "theme"]
+        );
     }
 
     #[test]

@@ -31,6 +31,7 @@ pub struct PackageTarget {
     pub name: String,
     pub kind: Vec<String>,
     pub src_path: PathBuf,
+    pub required_features: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -143,11 +144,11 @@ fn entry_target(
     targets: &[MetadataTarget],
 ) -> Result<PackageTarget, Box<dyn std::error::Error>> {
     if let Some(target) = metadata_marker_target(targets)? {
-        return Ok(target.into());
+        return Ok(package_target_from_metadata(package_root, manifest, target));
     }
 
     if let Some(target) = metadata_entry_target(package_root, targets) {
-        return Ok(target.into());
+        return Ok(package_target_from_metadata(package_root, manifest, target));
     }
 
     if let Some(path) = manifest
@@ -159,6 +160,7 @@ fn entry_target(
             name: package_name_from_manifest(manifest),
             kind: vec!["lib".to_string()],
             src_path: package_root.join(path),
+            required_features: Vec::new(),
         });
     }
 
@@ -168,6 +170,7 @@ fn entry_target(
             name: package_name_from_manifest(manifest),
             kind: vec!["lib".to_string()],
             src_path: default_lib,
+            required_features: Vec::new(),
         });
     }
 
@@ -175,7 +178,128 @@ fn entry_target(
         name: package_name_from_manifest(manifest),
         kind: vec!["bin".to_string()],
         src_path: package_root.join("src/main.rs"),
+        required_features: Vec::new(),
     })
+}
+
+fn package_target_from_metadata(
+    package_root: &Path,
+    manifest: &Value,
+    target: MetadataTarget,
+) -> PackageTarget {
+    let mut package_target: PackageTarget = target.into();
+    if package_target.required_features.is_empty() {
+        package_target.required_features =
+            manifest_required_features_for_target(package_root, manifest, &package_target);
+    }
+    package_target
+}
+
+fn manifest_required_features_for_target(
+    package_root: &Path,
+    manifest: &Value,
+    target: &PackageTarget,
+) -> Vec<String> {
+    target_manifest_tables(&target.kind)
+        .into_iter()
+        .find_map(|target_table| {
+            manifest_required_features_from_table(
+                package_root,
+                manifest,
+                target_table,
+                &target.name,
+                &target.src_path,
+            )
+        })
+        .unwrap_or_default()
+}
+
+fn target_manifest_tables(kind: &[String]) -> Vec<&'static str> {
+    let mut tables = Vec::new();
+    for target_table in ["lib", "bin", "example", "test", "bench"] {
+        if kind
+            .iter()
+            .any(|kind| kind == target_table || (target_table == "lib" && kind == "proc-macro"))
+        {
+            tables.push(target_table);
+        }
+    }
+    tables
+}
+
+fn manifest_required_features_from_table(
+    package_root: &Path,
+    manifest: &Value,
+    target_table: &str,
+    target_name: &str,
+    entry_source: &Path,
+) -> Option<Vec<String>> {
+    let value = manifest.get(target_table)?;
+    if target_table == "lib" {
+        return value
+            .as_table()
+            .and_then(required_features_from_target_table);
+    }
+
+    value.as_array()?.iter().find_map(|target| {
+        named_manifest_target_matches_source(
+            package_root,
+            target_table,
+            target,
+            target_name,
+            entry_source,
+        )
+        .then(|| {
+            target
+                .as_table()
+                .and_then(required_features_from_target_table)
+                .unwrap_or_default()
+        })
+    })
+}
+
+fn named_manifest_target_matches_source(
+    package_root: &Path,
+    target_table: &str,
+    target: &Value,
+    target_name: &str,
+    entry_source: &Path,
+) -> bool {
+    let Some(table) = target.as_table() else {
+        return false;
+    };
+
+    if let Some(path) = table.get("path").and_then(Value::as_str) {
+        return package_root
+            .join(path)
+            .canonicalize()
+            .is_ok_and(|path| path == entry_source);
+    }
+
+    let name = table
+        .get("name")
+        .and_then(Value::as_str)
+        .unwrap_or(target_name);
+
+    default_named_target_paths(package_root, target_table, name)
+        .into_iter()
+        .filter_map(|path| path.canonicalize().ok())
+        .any(|path| path == entry_source)
+}
+
+fn required_features_from_target_table(
+    table: &toml::map::Map<String, Value>,
+) -> Option<Vec<String>> {
+    let mut features = table
+        .get("required-features")?
+        .as_array()?
+        .iter()
+        .filter_map(Value::as_str)
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    features.sort();
+    features.dedup();
+    Some(features)
 }
 
 fn package_name_from_manifest(manifest: &Value) -> String {
@@ -435,6 +559,29 @@ fn metadata_entry_target(
         .cloned()
 }
 
+fn default_named_target_paths(package_root: &Path, target_table: &str, name: &str) -> Vec<PathBuf> {
+    match target_table {
+        "bin" => vec![
+            package_root.join("src/main.rs"),
+            package_root.join("src/bin").join(format!("{name}.rs")),
+            package_root.join("src/bin").join(name).join("main.rs"),
+        ],
+        "example" => vec![
+            package_root.join("examples").join(format!("{name}.rs")),
+            package_root.join("examples").join(name).join("main.rs"),
+        ],
+        "test" => vec![
+            package_root.join("tests").join(format!("{name}.rs")),
+            package_root.join("tests").join(name).join("main.rs"),
+        ],
+        "bench" => vec![
+            package_root.join("benches").join(format!("{name}.rs")),
+            package_root.join("benches").join(name).join("main.rs"),
+        ],
+        _ => Vec::new(),
+    }
+}
+
 fn metadata_dependencies(
     metadata_dependencies: &[MetadataDependency],
     entry_target: &PackageTarget,
@@ -495,6 +642,8 @@ struct MetadataTarget {
     name: String,
     kind: Vec<String>,
     src_path: PathBuf,
+    #[serde(default)]
+    required_features: Vec<String>,
 }
 
 impl From<MetadataTarget> for PackageTarget {
@@ -503,6 +652,7 @@ impl From<MetadataTarget> for PackageTarget {
             name: target.name,
             kind: target.kind,
             src_path: target.src_path,
+            required_features: target.required_features,
         }
     }
 }
