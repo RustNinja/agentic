@@ -4,6 +4,7 @@ pub const FEATURE_FLAG: SharedAlias = 11;
 
 pub static SHARED_STATIC: SharedAlias = 13;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct SharedRecord {
     pub value: SharedAlias,
 }
@@ -14,6 +15,7 @@ impl SharedRecord {
     }
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum SharedMode {
     Fast(SharedAlias),
     Slow,

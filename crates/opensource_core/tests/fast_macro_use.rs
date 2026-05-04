@@ -26,11 +26,19 @@ fn slices_fast_macro_use_fixture_and_compiles() {
 
     let app = read(output.join("fast_macro_app/src/lib.rs"));
     assert!(app.contains("pub fn open_macro_use_entry"));
+    assert!(app.contains("pub async fn open_async_macro_use"));
+    assert!(app.contains("pub fn open_callback_bridge"));
     assert!(app.contains("FixtureDerive"));
+    assert!(app.contains("FixtureRecord"));
+    assert!(app.contains("FixtureEnum"));
+    assert!(app.contains("FixtureObject"));
     assert!(app.contains("fixture_attr"));
+    assert!(app.contains("fixture_export"));
+    assert!(app.contains("fixture_constructor"));
     assert!(app.contains("use crate::generated_types"));
     assert!(app.contains("include!(\"generated.rs\")"));
     assert!(app.contains("mod inline_child"));
+    assert!(app.contains("mod platform_bridge"));
     assert!(app.contains("mod reexports"));
     assert!(app.contains("reexported_nested"));
     assert!(app.contains("SharedMode"));
@@ -38,9 +46,17 @@ fn slices_fast_macro_use_fixture_and_compiles() {
     assert!(app.contains("FEATURE_FLAG"));
     assert!(app.contains("SHARED_STATIC"));
     assert!(app.contains("UtilValue::BONUS"));
+    assert!(app.contains("impl From"));
+    assert!(app.contains("for RootDto"));
+    assert!(app.contains("pub struct WireDto"));
+    assert!(app.contains("pub enum WireKind"));
+    assert!(app.contains("pub struct BridgeObject"));
+    assert!(app.contains("pub trait BridgeCallback"));
+    assert!(app.contains("fn async_bridge_value"));
     assert!(!app.contains("dead_fn as selected_shadow"));
     assert!(!app.contains("dead_grouped as local_shadow"));
     assert!(!app.contains("dead_reexport"));
+    assert!(!app.contains("dead_platform"));
     assert!(!app.contains("unused_macro"));
     assert!(!app.contains("dead_public_api"));
 
@@ -63,6 +79,12 @@ fn slices_fast_macro_use_fixture_and_compiles() {
     assert!(util.contains("const BONUS"));
     assert!(util.contains("pub fn make_util"));
     assert!(!util.contains("dead_util"));
+
+    let macro_helpers = read(output.join("macro_helpers/src/lib.rs"));
+    assert!(macro_helpers.contains("proc_macro_derive(FixtureRecord"));
+    assert!(macro_helpers.contains("proc_macro_derive(FixtureEnum"));
+    assert!(macro_helpers.contains("proc_macro_derive(FixtureObject"));
+    assert!(macro_helpers.contains("pub fn fixture_export"));
 
     let cargo_check = Command::new("cargo")
         .arg("check")

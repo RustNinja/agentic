@@ -18,8 +18,9 @@ workspace instead of the full source tree.
 - `crates/opensource_cli`: command-line wrapper around `opensource_core`.
   The primary binary is `slicers`.
 - `fixtures/a` through `fixtures/e`: five crates used as the proof workspace.
-- `fixtures/fast_macro_use`: a standalone fast stress workspace for macro,
-  import, derive, include, trait-import, and dead-pruning iteration.
+- `fixtures/fast_macro_use`: a standalone fast stress workspace for Litter-like
+  macro, import, derive/helper-attribute, UniFFI-shaped export, async,
+  callback, cfg, include, trait-import, and dead-pruning iteration.
 
 The fixture dependency graph is:
 

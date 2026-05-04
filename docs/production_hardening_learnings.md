@@ -167,6 +167,24 @@ For Litter-like UniFFI/mobile crates, the most important acceptance checks are:
   them;
 - baseline failures are separated from generated-slice regressions.
 
+The 2026-05-04 Litter scan found eight recurring edge classes worth keeping in
+the short feedback corpus before running wider Litter checks:
+
+- UniFFI-shaped derives and export attributes on records, enums, objects,
+  constructors, and async methods;
+- serde helper attributes on retained DTO fields and tagged/renamed enums;
+- async/channel-heavy entrypoints whose selected root pulls support methods;
+- platform `cfg` and `cfg_attr` module boundaries;
+- `From`/`TryFrom` conversion chains between wire and domain types;
+- reexport barrels, renamed imports, and local shadows;
+- macro/include surfaces that must keep generated source and macro definitions;
+- callback/function-pointer signatures that compile but remain production
+  hazards unless concrete dispatch is proven.
+
+Those patterns now have a lightweight replica in `fixtures/fast_macro_use` and
+should be exercised with `scripts/fast_fixture_loop.sh` before waiting on a
+large Litter build.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:

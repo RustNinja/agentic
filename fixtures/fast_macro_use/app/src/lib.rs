@@ -1,4 +1,7 @@
-use macro_helpers::{fixture_attr, FixtureDerive};
+use macro_helpers::{
+    fixture_attr, fixture_constructor, fixture_export, FixtureDerive, FixtureEnum, FixtureObject,
+    FixtureRecord,
+};
 use opensourced::opensourced;
 use shared::{
     fixture_value as selected_value,
@@ -53,6 +56,18 @@ mod inline_child {
     }
 }
 
+#[cfg_attr(any(unix, windows), fixture_attr(shared::helper_marker))]
+mod platform_bridge {
+    pub fn platform_value() -> u32 {
+        17
+    }
+
+    #[allow(dead_code)]
+    pub fn dead_platform() -> u32 {
+        99
+    }
+}
+
 macro_rules! local_sum {
     ($left:expr, $right:expr) => {
         $left + $right
@@ -77,6 +92,77 @@ impl RootDto {
     }
 }
 
+impl From<SharedRecord> for RootDto {
+    fn from(record: SharedRecord) -> Self {
+        Self::new(record.value)
+    }
+}
+
+#[derive(Clone, FixtureRecord)]
+#[fixture_serde(rename_all = "camelCase")]
+pub struct WireDto {
+    #[fixture_serde(default, skip_serializing_if = "Option::is_none")]
+    pub label: Option<String>,
+    pub mode: SharedMode,
+}
+
+impl WireDto {
+    pub fn score(&self) -> SharedAlias {
+        let label_len = self.label.as_ref().map(|value| value.len()).unwrap_or(0) as u32;
+        self.mode.score() + label_len
+    }
+}
+
+#[derive(Clone, Copy, FixtureEnum)]
+#[fixture_serde(rename_all = "kebab-case")]
+pub enum WireKind {
+    Created,
+    Updated,
+}
+
+impl WireKind {
+    pub fn weight(self) -> SharedAlias {
+        match self {
+            WireKind::Created => 1,
+            WireKind::Updated => 2,
+        }
+    }
+}
+
+#[derive(FixtureObject)]
+pub struct BridgeObject {
+    dto: RootDto,
+}
+
+#[fixture_export]
+impl BridgeObject {
+    #[fixture_constructor]
+    pub fn new(value: u32) -> Self {
+        Self {
+            dto: RootDto::new(value),
+        }
+    }
+
+    pub fn value(&self) -> SharedAlias {
+        self.dto.value
+    }
+}
+
+#[fixture_export(callback_interface)]
+pub trait BridgeCallback {
+    fn adjust(&self, value: SharedAlias) -> SharedAlias;
+}
+
+#[fixture_export(shared::helper_marker)]
+pub fn exported_bridge(dto: WireDto, kind: WireKind) -> SharedAlias {
+    dto.score() + kind.weight()
+}
+
+async fn async_bridge_value(input: SharedAlias) -> SharedAlias {
+    let dto = RootDto::from(SharedRecord::new(input));
+    dto.value + platform_bridge::platform_value()
+}
+
 #[fixture_attr(shared::helper_marker)]
 #[opensourced]
 pub fn open_macro_use_entry(input: u32) -> u32 {
@@ -98,10 +184,15 @@ pub fn open_macro_use_entry(input: u32) -> u32 {
     let generated = generated_bridge::generated();
     let util: util::UtilValue = make_util(input);
     let record = SharedRecord::new(selected_value());
-    let dto = RootDto::new(record.value);
+    let dto = RootDto::from(record);
     let mode = SharedMode::Fast(record.value);
     let alias_value: SharedAlias = selected_value();
     let const_mix = FEATURE_FLAG + SHARED_STATIC + exported_nested() + reexported_nested();
+    let wire = WireDto {
+        label: Some(format!("feature-{FEATURE_FLAG}")),
+        mode,
+    };
+    let bridge_object = BridgeObject::new(input);
 
     local_sum!(
         shared::shared_macro!(dto.value)
@@ -109,7 +200,8 @@ pub fn open_macro_use_entry(input: u32) -> u32 {
             + util.useful()
             + UtilValue::BONUS
             + mode.score()
-            + inline_child::child_score(&dto),
+            + inline_child::child_score(&dto)
+            + exported_bridge(wire, WireKind::Created),
         generated.value()
             + selected_shadow
             + local_shadow
@@ -118,7 +210,29 @@ pub fn open_macro_use_entry(input: u32) -> u32 {
             + via_loop
             + alias_value
             + const_mix
+            + bridge_object.value()
     )
+}
+
+#[fixture_export(async_runtime = "fixture")]
+#[opensourced]
+pub async fn open_async_macro_use(input: u32) -> u32 {
+    async_bridge_value(input).await + exported_bridge(
+        WireDto {
+            label: None,
+            mode: SharedMode::Fast(input),
+        },
+        WireKind::Updated,
+    )
+}
+
+#[opensourced]
+pub fn open_callback_bridge(
+    callback: &dyn BridgeCallback,
+    adjust: fn(SharedAlias) -> SharedAlias,
+    value: SharedAlias,
+) -> SharedAlias {
+    callback.adjust(value) + adjust(value) + platform_bridge::platform_value()
 }
 
 pub fn dead_public_api() -> u32 {
