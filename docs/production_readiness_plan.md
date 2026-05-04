@@ -77,7 +77,9 @@ assets, output safety, or product diagnostics by itself.
   CLI now discharges the concrete Cargo feature subset when the user validates
   with matching `--cargo-check-arg --features ...` values or
   `--cargo-check-arg --all-features`; cfg gates without feature hints remain
-  production-blocking.
+  production-blocking. Retained non-root cfg surfaces also report structured
+  package/module/file/cfg details so corpus and matrix planners can validate the
+  selected shape without scraping warning text.
 - Dependency aliases, workspace dependencies, optional dependency features, and
   target-specific dependencies need Cargo's resolver model.
 - Retained direct or target-specific path dependencies outside the workspace are

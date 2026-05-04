@@ -21,7 +21,10 @@ use model::{Project, ReducedProject};
 use proc_macro2::TokenStream;
 use quote::ToTokens;
 use serde::Serialize;
-use syn::{parse::Parser, punctuated::Punctuated, visit::Visit, Attribute, Item, Macro, Meta};
+use syn::{
+    parse::Parser, punctuated::Punctuated, spanned::Spanned, visit::Visit, Attribute, Item, Macro,
+    Meta,
+};
 
 pub use analyzer::{AnalyzerMode, AnalyzerReport, SemanticReport};
 pub use feedback::{
@@ -1334,13 +1337,14 @@ fn add_syntactic_production_hazards(
         ));
     }
     if counts.conditional_compilation_attrs > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "conditional_compilation_attrs",
             "warning",
             format!(
                 "{} retained cfg/cfg_attr attribute(s) require compiler feedback for the selected feature and target matrix before production acceptance",
                 counts.conditional_compilation_attrs
             ),
+            counts.conditional_compilation_details,
         ));
     }
 }
@@ -1387,6 +1391,7 @@ struct SyntacticHazardCounts {
     function_pointer_surfaces: usize,
     trait_object_surfaces: usize,
     conditional_compilation_attrs: usize,
+    conditional_compilation_details: Vec<ProductionHazardDetail>,
 }
 
 impl SyntacticHazardCounts {
@@ -1404,6 +1409,8 @@ impl SyntacticHazardCounts {
         self.function_pointer_surfaces += other.function_pointer_surfaces;
         self.trait_object_surfaces += other.trait_object_surfaces;
         self.conditional_compilation_attrs += other.conditional_compilation_attrs;
+        self.conditional_compilation_details
+            .extend(other.conditional_compilation_details);
     }
 }
 
@@ -1483,9 +1490,20 @@ fn retained_module_boundary_hazard_counts(
         let Some(item_mod) = module_item_for_path(project, &package, &module_path) else {
             continue;
         };
+        let file = module_path
+            .split_last()
+            .and_then(|(_, parent_module_path)| {
+                source_for_module(project, &package, parent_module_path)
+            })
+            .map(|source| source.path.clone());
         let mut visitor = SyntacticHazardVisitor {
             counts: SyntacticHazardCounts::default(),
             include_context: None,
+            location: HazardLocation {
+                package,
+                module_path,
+                file,
+            },
         };
         for attribute in &item_mod.attrs {
             visitor.visit_attribute(attribute);
@@ -1513,9 +1531,10 @@ fn syntactic_hazard_visitor_for_location(
     package: &str,
     module_path: &[String],
 ) -> SyntacticHazardVisitor {
+    let file = source_for_module(project, package, module_path).map(|source| source.path.clone());
     let include_context = project.workspace.packages.get(package).and_then(|package| {
-        source_for_module(project, &package.name, module_path).and_then(|source| {
-            source.path.parent().map(|source_dir| IncludeContext {
+        file.as_ref().and_then(|source_path| {
+            source_path.parent().map(|source_dir| IncludeContext {
                 package_root: package.root.clone(),
                 source_dir: source_dir.to_path_buf(),
             })
@@ -1524,6 +1543,11 @@ fn syntactic_hazard_visitor_for_location(
     SyntacticHazardVisitor {
         counts: SyntacticHazardCounts::default(),
         include_context,
+        location: HazardLocation {
+            package: package.to_string(),
+            module_path: module_path.to_vec(),
+            file,
+        },
     }
 }
 
@@ -1541,6 +1565,7 @@ fn source_for_module<'a>(
 struct SyntacticHazardVisitor {
     counts: SyntacticHazardCounts,
     include_context: Option<IncludeContext>,
+    location: HazardLocation,
 }
 
 struct IncludeContext {
@@ -1548,10 +1573,29 @@ struct IncludeContext {
     source_dir: PathBuf,
 }
 
+struct HazardLocation {
+    package: String,
+    module_path: Vec<String>,
+    file: Option<PathBuf>,
+}
+
+impl HazardLocation {
+    fn subject(&self) -> String {
+        if self.module_path.is_empty() {
+            self.package.clone()
+        } else {
+            format!("{}::{}", self.package, self.module_path.join("::"))
+        }
+    }
+}
+
 impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
     fn visit_attribute(&mut self, attribute: &'ast Attribute) {
         if attribute.path().is_ident("cfg") || attribute.path().is_ident("cfg_attr") {
             self.counts.conditional_compilation_attrs += 1;
+            self.counts
+                .conditional_compilation_details
+                .push(self.cfg_attr_detail(attribute));
         }
         self.counts.custom_derive_macros += custom_derive_macro_count(attribute);
         if attribute_requires_macro_expansion(attribute) {
@@ -1591,6 +1635,21 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
     fn visit_type_trait_object(&mut self, trait_object: &'ast syn::TypeTraitObject) {
         self.counts.trait_object_surfaces += 1;
         syn::visit::visit_type_trait_object(self, trait_object);
+    }
+}
+
+impl SyntacticHazardVisitor {
+    fn cfg_attr_detail(&self, attribute: &Attribute) -> ProductionHazardDetail {
+        ProductionHazardDetail {
+            subject: self.location.subject(),
+            package: Some(self.location.package.clone()),
+            module_path: (!self.location.module_path.is_empty())
+                .then(|| self.location.module_path.join("::")),
+            file: self.location.file.clone(),
+            start_line: Some(attribute.span().start().line),
+            cfg: Some(attribute.to_token_stream().to_string()),
+            suggested_cargo_args: cfg_gate_suggested_cargo_args(attribute),
+        }
     }
 }
 
@@ -2998,12 +3057,24 @@ pub fn entry() -> i32 {
                 .any(|hazard| hazard.code == "custom_attribute_macros"
                     && hazard.severity == "warning")
         );
-        assert!(report
+        let cfg_hazard = report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "conditional_compilation_attrs"
-                && hazard.severity == "warning"));
+            .find(|hazard| {
+                hazard.code == "conditional_compilation_attrs" && hazard.severity == "warning"
+            })
+            .expect("module boundary cfg_attr should be reported");
+        assert!(cfg_hazard.details.iter().any(|detail| {
+            detail.subject == "app::api"
+                && detail.module_path.as_deref() == Some("api")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.cfg.as_ref().is_some_and(|cfg| cfg.contains("ffi"))
+                && detail.suggested_cargo_args == vec!["--features".to_string(), "ffi".to_string()]
+        }));
         assert!(report
             .production
             .hazards
@@ -3053,8 +3124,24 @@ pub struct Extra;
         })
         .expect("reduction should succeed");
 
-        assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "conditional_compilation_attrs" && hazard.severity == "warning"
+        let hazard = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| {
+                hazard.code == "conditional_compilation_attrs" && hazard.severity == "warning"
+            })
+            .expect("retained cfg surfaces should be reported");
+        assert!(hazard.details.iter().any(|detail| {
+            detail.subject == "app"
+                && detail.package.as_deref() == Some("app")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.cfg.as_ref().is_some_and(|cfg| cfg.contains("extra"))
+                && detail.suggested_cargo_args
+                    == vec!["--features".to_string(), "extra".to_string()]
         }));
         assert_eq!(report.production.status, "requires_feedback");
     }
