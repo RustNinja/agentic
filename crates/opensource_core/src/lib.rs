@@ -1600,7 +1600,7 @@ mod tests {
     use super::{
         add_semantic_inventory_hazard, default_feature_closure, generate,
         generate_with_analyzer_feedback, write_generate_report, AnalyzerMode, AnalyzerReport,
-        CheckDiagnostic, GenerateOptions, SemanticReport,
+        CallableId, CheckDiagnostic, GenerateOptions, SemanticReport,
     };
 
     #[test]
@@ -2169,6 +2169,51 @@ pub fn entry() -> usize {
             .hazards
             .iter()
             .any(|hazard| { hazard.code == "cfg_gated_roots" && hazard.severity == "error" }));
+    }
+
+    #[test]
+    fn runtime_benchmark_feature_cfg_root_is_reported_not_pruned() {
+        let root = temp_output("cfg-runtime-benchmark-root-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[features]\nruntime-benchmarks = []\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[cfg(feature = "runtime-benchmarks")]
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("cfg-runtime-benchmark-root-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report.reachable.iter().any(|callable| matches!(
+            callable,
+            CallableId::Free { package, name, .. } if package == "app" && name == "entry"
+        )));
+        assert_eq!(report.production.status, "hazards_detected");
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "cfg_gated_roots" && hazard.severity == "error"));
     }
 
     #[test]

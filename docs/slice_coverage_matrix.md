@@ -45,6 +45,7 @@ dead functions, items, modules, tests, and local crates are absent.
 | Toolchain context | `manifest_hardening.rs` | Root `rust-toolchain.toml` / `rust-toolchain` files are copied so generated validation uses the source workspace's pinned Rust toolchain |
 | Async functions | `component_matrix.rs` | Async root and async impl method slices build |
 | Unit tests | all generated fixtures | `#[test]` functions and `#[cfg(test)]` modules are dropped |
+| Non-test cfg roots | core production-readiness tests | Selected roots behind feature/platform cfgs, including `runtime-benchmarks`, are retained in the graph and reported as production-blocking cfg-gated roots instead of being pruned as tests |
 | UniFFI-shaped API | `uniffi_mobile.rs`, `uniffi_setup.rs` | FFI-facing records/enums, inactive `cfg_attr(..., uniffi::...)`, retained `uniffi::setup_scaffolding!()`, serde DTOs, and mobile bridge shape |
 | Real UniFFI project | `docs/real_litter_uniffi_slice_report.md` | Litter `codex-mobile-client` cloud sync and preferences slices build after pruning |
 | Real high-star Rust project | `docs/real_rtk_slice_report.md` | RTK `find_corrections` and `filter_json_string` slices build after binary, automod, macro, and build-script hardening |
@@ -60,7 +61,7 @@ These are tracked limitations, not silently claimed support:
 | Generic trait receiver inference | Calls through generic bounds such as `value.trait_method()` are not fully resolved without a concrete receiver type |
 | Function pointers and dynamic dispatch | Function pointer calls, trait-object calls, and callback registries are not followed |
 | Build scripts | `build.rs` and referenced non-Rust assets are copied; generated Rust files under `OUT_DIR` are not semantically modeled, and retained `include!(concat!(env!("OUT_DIR"), ...))` roots are production-blocking hazards |
-| Feature/platform cfg matrices | `#[cfg(test)]` is pruned and target dependency tables are preserved; broader feature/platform matrix evaluation is still conservative |
+| Feature/platform cfg matrices | Only `#[cfg(test)]` is pruned as test-only; broader feature/platform matrix evaluation is conservative and selected non-test cfg roots are production-blocking until validation proves the exact matrix |
 | External crate pruning | External dependencies are pruned when their crate alias is absent from retained source tokens; full rustc-level unused import analysis is not implemented |
 
 ## Verification Commands

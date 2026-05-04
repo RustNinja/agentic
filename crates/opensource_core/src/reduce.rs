@@ -302,26 +302,7 @@ pub fn is_cfg_test_attr(attribute: &syn::Attribute) -> bool {
 }
 
 fn cfg_meta_is_excluded(meta: &Meta) -> bool {
-    match meta {
-        Meta::Path(path) => path.is_ident("test"),
-        Meta::NameValue(name_value) => {
-            name_value.path.is_ident("feature")
-                && matches!(
-                    &name_value.value,
-                    Expr::Lit(expr_lit)
-                        if matches!(&expr_lit.lit, syn::Lit::Str(lit) if lit.value() == "runtime-benchmarks")
-                )
-        }
-        Meta::List(list) => {
-            if list.path.is_ident("not") {
-                return false;
-            }
-            let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
-            parser
-                .parse2(list.tokens.clone())
-                .is_ok_and(|nested| nested.iter().any(cfg_meta_is_excluded))
-        }
-    }
+    matches!(meta, Meta::Path(path) if path.is_ident("test"))
 }
 
 fn package_closure(project: &Project, root: &str) -> BTreeSet<String> {

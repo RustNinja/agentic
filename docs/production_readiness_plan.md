@@ -55,7 +55,8 @@ assets, output safety, or product diagnostics by itself.
   paths; unknown env paths, absolute paths, external paths, and `OUT_DIR`
   generated assets are production-blocking.
 - Feature and platform cfgs form a matrix, not a boolean. A slice should report
-  the feature/platform configuration it was generated for.
+  the feature/platform configuration it was generated for, and only `cfg(test)`
+  should be treated as test-only pruning.
 - Dependency aliases, workspace dependencies, optional dependency features, and
   target-specific dependencies need Cargo's resolver model.
 - Whole-crate fallback must be explicit and reported with size impact.
