@@ -61,11 +61,18 @@ liveness independently. Unknown semantic availability warnings are reported as
 unknowns but no longer globally block every unrelated unused item. Scoped
 macro/include/dyn/callback hazards promote only explicitly mentioned symbols
 into a pre-render retained closure. In rust-analyzer modes, the analyzer also
-records whether syn-indexed callables/items mapped back to RA definitions;
-graph-unreachable candidates that cannot be mapped are retained as
-`blocked_by_unknown` rather than pruned. The production invariant is
-fail-closed: remove only prunable source, and keep/report anything blocked by
-unknown until compiler feedback or deeper semantics discharges it.
+records whether syn-indexed callables/items mapped back to RA definitions and
+runs RA reference search for mapped source symbols. Unknown retention is a
+fixed-point pass over the current retained slice: graph-unreachable candidates
+are promoted into `blocked_by_unknown` when they cannot be mapped, when
+reference search fails, or when RA finds a retained callable/item reference to
+them. File-level unowned references are recorded for diagnostics but do not
+grant retention by themselves, because impl headers for dead sibling types can
+otherwise over-retain whole same-file item sets. Only mapped graph-unreachable
+candidates with no retained reference
+evidence are treated as prunable. The production invariant is fail-closed:
+remove only prunable source, and keep/report anything blocked by unknown until
+compiler feedback or deeper semantics discharges it.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that
@@ -76,8 +83,9 @@ toolchain does not provide a proc-macro server, the analyzer reports that
 expansion is not active and continues with bounded HIR. Both rust-analyzer paths
 map exact project-local method/path resolutions into generic `CallableId` /
 `ItemId` reduction hints and apply those hints as additive retained-graph
-edges. RA definition-mapping coverage is reported separately from reachability
-so missing semantic coverage becomes an explicit unknown-retention signal
+edges. RA definition-mapping and reference-search coverage are reported
+separately from reachability so missing semantic coverage, failed reference
+queries, and retained RA references become explicit unknown-retention signals
 instead of silently becoming deletion permission. Files containing selected
 `#[opensourced]` roots are analyzed first so
 bounded semantic budgets prioritize the active slice. The analyzer now records

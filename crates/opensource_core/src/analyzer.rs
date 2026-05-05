@@ -1,9 +1,9 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
 };
 
-use crate::model::{CallableId, ItemId, Project, SemanticReductionHints};
+use crate::model::{CallableId, ItemId, Project, SemanticOwnerId, SemanticReductionHints};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AnalyzerMode {
@@ -153,8 +153,20 @@ pub struct SemanticUsageReport {
     pub mapped_items: usize,
     pub unmapped_callables: usize,
     pub unmapped_items: usize,
+    pub reference_queries: usize,
+    pub reference_query_failures: usize,
+    pub referenced_callables: usize,
+    pub referenced_items: usize,
     pub mapped_callable_ids: BTreeSet<CallableId>,
     pub mapped_item_ids: BTreeSet<ItemId>,
+    pub failed_callable_reference_ids: BTreeSet<CallableId>,
+    pub failed_item_reference_ids: BTreeSet<ItemId>,
+    pub referenced_callable_ids: BTreeSet<CallableId>,
+    pub referenced_item_ids: BTreeSet<ItemId>,
+    pub callable_reference_owners: BTreeMap<CallableId, BTreeSet<SemanticOwnerId>>,
+    pub item_reference_owners: BTreeMap<ItemId, BTreeSet<SemanticOwnerId>>,
+    pub callable_unowned_reference_files: BTreeMap<CallableId, BTreeSet<PathBuf>>,
+    pub item_unowned_reference_files: BTreeMap<ItemId, BTreeSet<PathBuf>>,
 }
 
 impl SemanticUsageReport {
@@ -166,8 +178,55 @@ impl SemanticUsageReport {
         self.mapped_item_ids.contains(item)
     }
 
+    pub fn callable_reference_query_failed(&self, callable: &CallableId) -> bool {
+        self.failed_callable_reference_ids.contains(callable)
+    }
+
+    pub fn item_reference_query_failed(&self, item: &ItemId) -> bool {
+        self.failed_item_reference_ids.contains(item)
+    }
+
+    pub fn callable_has_retained_reference(
+        &self,
+        callable: &CallableId,
+        retained_callables: &BTreeSet<CallableId>,
+        retained_items: &BTreeSet<ItemId>,
+    ) -> bool {
+        self.callable_reference_owners
+            .get(callable)
+            .is_some_and(|owners| {
+                owners.iter().any(|owner| {
+                    semantic_owner_is_retained(owner, retained_callables, retained_items)
+                })
+            })
+    }
+
+    pub fn item_has_retained_reference(
+        &self,
+        item: &ItemId,
+        retained_callables: &BTreeSet<CallableId>,
+        retained_items: &BTreeSet<ItemId>,
+    ) -> bool {
+        self.item_reference_owners.get(item).is_some_and(|owners| {
+            owners
+                .iter()
+                .any(|owner| semantic_owner_is_retained(owner, retained_callables, retained_items))
+        })
+    }
+
     pub fn unmapped_total(&self) -> usize {
         self.unmapped_callables + self.unmapped_items
+    }
+}
+
+fn semantic_owner_is_retained(
+    owner: &SemanticOwnerId,
+    retained_callables: &BTreeSet<CallableId>,
+    retained_items: &BTreeSet<ItemId>,
+) -> bool {
+    match owner {
+        SemanticOwnerId::Callable(callable) => retained_callables.contains(callable),
+        SemanticOwnerId::Item(item) => retained_items.contains(item),
     }
 }
 
@@ -507,12 +566,16 @@ mod rust_analyzer {
             ));
             if let Some(usage) = &semantic.usage {
                 notes.push(format!(
-                    "HIR usage mapping: {}/{} callable(s) and {}/{} item(s) mapped to rust-analyzer definitions; {} unmapped",
+                    "HIR usage mapping: {}/{} callable(s) and {}/{} item(s) mapped to rust-analyzer definitions; {} unmapped; {} reference query/queries, {} failure(s), {} referenced callable(s), {} referenced item(s)",
                     usage.mapped_callables,
                     usage.indexed_callables,
                     usage.mapped_items,
                     usage.indexed_items,
-                    usage.unmapped_total()
+                    usage.unmapped_total(),
+                    usage.reference_queries,
+                    usage.reference_query_failures,
+                    usage.referenced_callables,
+                    usage.referenced_items
                 ));
             }
             if let Some(feedback) = semantic.ra_feedback {
@@ -763,7 +826,9 @@ mod rust_analyzer {
         hints.unqueried_queries = report.unqueried_method_calls + report.unqueried_paths;
         let usage = project
             .zip(semantic_index.as_ref())
-            .map(|(project, index)| collect_semantic_usage_report(&semantics, vfs, project, index));
+            .map(|(project, index)| {
+                collect_semantic_usage_report(database, &semantics, vfs, project, index)
+            });
         let ra_feedback = if feedback_mode == RaFeedbackMode::Enabled {
             project
                 .zip(semantic_index.as_ref())
@@ -782,6 +847,7 @@ mod rust_analyzer {
     }
 
     fn collect_semantic_usage_report(
+        database: &ra_ap_ide::RootDatabase,
         semantics: &ra_ap_ide::Semantics<'_, ra_ap_ide::RootDatabase>,
         vfs: &ra_ap_vfs::Vfs,
         project: &Project,
@@ -830,7 +896,175 @@ mod rust_analyzer {
             .indexed_callables
             .saturating_sub(report.mapped_callables);
         report.unmapped_items = report.indexed_items.saturating_sub(report.mapped_items);
+        collect_semantic_reference_report(database, vfs, project, index, &mut report);
         report
+    }
+
+    fn collect_semantic_reference_report(
+        database: &ra_ap_ide::RootDatabase,
+        vfs: &ra_ap_vfs::Vfs,
+        project: &Project,
+        index: &ProjectSemanticIndex,
+        report: &mut SemanticUsageReport,
+    ) {
+        let analysis = ra_ap_ide::AnalysisHost::with_database(database.clone()).analysis();
+        let file_ids = vfs_file_ids(vfs);
+        let config = ra_ap_ide::FindAllRefsConfig {
+            search_scope: None,
+            ra_fixture: ra_ap_ide::RaFixtureConfig::default(),
+            exclude_imports: false,
+            exclude_tests: true,
+        };
+
+        let mut callables = project
+            .functions
+            .keys()
+            .chain(project.methods.keys())
+            .collect::<Vec<_>>();
+        callables.sort();
+        for callable in callables {
+            if !report.is_callable_mapped(callable) {
+                continue;
+            }
+            report.reference_queries += 1;
+            let Some((path, offset)) = index.callable_focus_offset(callable) else {
+                record_callable_reference_query_failure(report, callable);
+                continue;
+            };
+            let Some(file_id) = file_ids.get(&path).copied() else {
+                record_callable_reference_query_failure(report, callable);
+                continue;
+            };
+            let position = ra_ap_ide::FilePosition { file_id, offset };
+            match analysis.find_all_refs(position, &config) {
+                Ok(Some(results)) => {
+                    collect_callable_reference_results(vfs, index, callable, results, report);
+                }
+                Ok(None) | Err(_) => record_callable_reference_query_failure(report, callable),
+            }
+        }
+
+        let mut items = project.items.keys().collect::<Vec<_>>();
+        items.sort();
+        for item in items {
+            if item.kind == ItemKind::Mod || !report.is_item_mapped(item) {
+                continue;
+            }
+            report.reference_queries += 1;
+            let Some((path, offset)) = index.item_focus_offset(item) else {
+                record_item_reference_query_failure(report, item);
+                continue;
+            };
+            let Some(file_id) = file_ids.get(&path).copied() else {
+                record_item_reference_query_failure(report, item);
+                continue;
+            };
+            let position = ra_ap_ide::FilePosition { file_id, offset };
+            match analysis.find_all_refs(position, &config) {
+                Ok(Some(results)) => {
+                    collect_item_reference_results(vfs, index, item, results, report);
+                }
+                Ok(None) | Err(_) => record_item_reference_query_failure(report, item),
+            }
+        }
+
+        report.reference_query_failures =
+            report.failed_callable_reference_ids.len() + report.failed_item_reference_ids.len();
+        report.referenced_callables = report.referenced_callable_ids.len();
+        report.referenced_items = report.referenced_item_ids.len();
+    }
+
+    fn collect_callable_reference_results(
+        vfs: &ra_ap_vfs::Vfs,
+        index: &ProjectSemanticIndex,
+        target: &CallableId,
+        results: Vec<ra_ap_ide::ReferenceSearchResult>,
+        report: &mut SemanticUsageReport,
+    ) {
+        for result in results {
+            for (file_id, references) in result.references {
+                let vfs_path = vfs.file_path(file_id);
+                if !index.contains_vfs_path(vfs_path) {
+                    continue;
+                }
+                for (range, _) in references {
+                    match index.owner_at_vfs_offset(vfs_path, range.start()) {
+                        Some(SemanticOwnerId::Callable(owner)) if owner == *target => {}
+                        Some(owner) => {
+                            report
+                                .callable_reference_owners
+                                .entry(target.clone())
+                                .or_default()
+                                .insert(owner);
+                            report.referenced_callable_ids.insert(target.clone());
+                        }
+                        None => {
+                            if let Some(path) = normalize_vfs_path(vfs_path) {
+                                report
+                                    .callable_unowned_reference_files
+                                    .entry(target.clone())
+                                    .or_default()
+                                    .insert(path);
+                                report.referenced_callable_ids.insert(target.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn collect_item_reference_results(
+        vfs: &ra_ap_vfs::Vfs,
+        index: &ProjectSemanticIndex,
+        target: &ItemId,
+        results: Vec<ra_ap_ide::ReferenceSearchResult>,
+        report: &mut SemanticUsageReport,
+    ) {
+        for result in results {
+            for (file_id, references) in result.references {
+                let vfs_path = vfs.file_path(file_id);
+                if !index.contains_vfs_path(vfs_path) {
+                    continue;
+                }
+                for (range, _) in references {
+                    match index.owner_at_vfs_offset(vfs_path, range.start()) {
+                        Some(SemanticOwnerId::Item(owner)) if owner == *target => {}
+                        Some(owner) => {
+                            report
+                                .item_reference_owners
+                                .entry(target.clone())
+                                .or_default()
+                                .insert(owner);
+                            report.referenced_item_ids.insert(target.clone());
+                        }
+                        None => {
+                            if let Some(path) = normalize_vfs_path(vfs_path) {
+                                report
+                                    .item_unowned_reference_files
+                                    .entry(target.clone())
+                                    .or_default()
+                                    .insert(path);
+                                report.referenced_item_ids.insert(target.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn record_callable_reference_query_failure(
+        report: &mut SemanticUsageReport,
+        callable: &CallableId,
+    ) {
+        report
+            .failed_callable_reference_ids
+            .insert(callable.clone());
+    }
+
+    fn record_item_reference_query_failure(report: &mut SemanticUsageReport, item: &ItemId) {
+        report.failed_item_reference_ids.insert(item.clone());
     }
 
     fn mapped_item_at_node(
@@ -1399,6 +1633,24 @@ mod rust_analyzer {
                     .iter()
                     .find(|indexed| indexed.id == *callable)
                 else {
+                    continue;
+                };
+                let start = file.byte_offset(indexed.span.start_line, indexed.span.start_column);
+                let end = file.byte_offset(indexed.span.end_line, indexed.span.end_column);
+                let range = file.text.get(start..end).unwrap_or_default();
+                let offset = range
+                    .find(name)
+                    .map(|relative| start + relative)
+                    .unwrap_or(start);
+                return Some((path.clone(), TextSize::new(offset as u32)));
+            }
+            None
+        }
+
+        fn item_focus_offset(&self, item: &ItemId) -> Option<(PathBuf, TextSize)> {
+            let name = &item.name;
+            for (path, file) in &self.files {
+                let Some(indexed) = file.items.iter().find(|indexed| indexed.id == *item) else {
                     continue;
                 };
                 let start = file.byte_offset(indexed.span.start_line, indexed.span.start_column);

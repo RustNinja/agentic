@@ -268,7 +268,7 @@ impl SlicePlan {
         pre_render_production: &ProductionReadinessReport,
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let unknown_retention =
-            UnknownRetentionPlan::build(project, root_reduced, analyzer, pre_render_production);
+            UnknownRetentionPlan::build(project, root_reduced, analyzer, pre_render_production)?;
         let mut render_reduced = if unknown_retention.roots.is_empty() {
             root_reduced.clone()
         } else if analyzer.semantic_hints.is_empty() {
@@ -303,15 +303,35 @@ impl UnknownRetentionPlan {
         reduced: &ReducedProject,
         analyzer: &AnalyzerReport,
         pre_render_production: &ProductionReadinessReport,
-    ) -> Self {
+    ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut roots = deletion_blocked_extra_roots(project, reduced, pre_render_production);
-        roots.extend(semantic_usage_unmapped_extra_roots(
-            project, reduced, analyzer,
-        ));
-        roots.sort();
-        roots.dedup();
 
-        Self { roots }
+        for _ in 0..8 {
+            roots.sort();
+            roots.dedup();
+            let current = if roots.is_empty() {
+                reduced.clone()
+            } else if analyzer.semantic_hints.is_empty() {
+                reduce::reduce_with_extra_roots(project, &roots)?
+            } else {
+                reduce::reduce_with_extra_roots_and_semantics(
+                    project,
+                    &roots,
+                    &analyzer.semantic_hints,
+                )?
+            };
+            let before = roots.len();
+            roots.extend(semantic_usage_unknown_extra_roots(
+                project, &current, analyzer,
+            ));
+            roots.sort();
+            roots.dedup();
+            if roots.len() == before {
+                break;
+            }
+        }
+
+        Ok(Self { roots })
     }
 }
 
@@ -1129,7 +1149,7 @@ fn deletion_blocked_extra_roots(
     roots
 }
 
-fn semantic_usage_unmapped_extra_roots(
+fn semantic_usage_unknown_extra_roots(
     project: &Project,
     reduced: &ReducedProject,
     analyzer: &AnalyzerReport,
@@ -1143,34 +1163,57 @@ fn semantic_usage_unmapped_extra_roots(
         if reduced.reachable.contains(id)
             || !reduced.packages.contains(id.package())
             || callable_record_is_test(&record.item.attrs)
-            || usage.is_callable_mapped(id)
         {
             return None;
         }
-        Some(RootId::Callable(id.clone()))
+        semantic_usage_blocks_callable_pruning(id, usage, reduced)
+            .then(|| RootId::Callable(id.clone()))
     }));
     roots.extend(project.methods.iter().filter_map(|(id, record)| {
         if reduced.reachable.contains(id)
             || !reduced.packages.contains(id.package())
             || callable_record_is_test(&record.item.attrs)
-            || usage.is_callable_mapped(id)
         {
             return None;
         }
-        Some(RootId::Callable(id.clone()))
+        semantic_usage_blocks_callable_pruning(id, usage, reduced)
+            .then(|| RootId::Callable(id.clone()))
     }));
     roots.extend(project.items.iter().filter_map(|(id, record)| {
         if reduced.reachable_items.contains(id)
             || !reduced.packages.contains(&id.package)
             || id.kind == model::ItemKind::Mod
             || item_record_is_test(&record.item)
-            || usage.is_item_mapped(id)
         {
             return None;
         }
-        Some(RootId::Item(id.clone()))
+        semantic_usage_blocks_item_pruning(id, usage, reduced).then(|| RootId::Item(id.clone()))
     }));
     roots
+}
+
+fn semantic_usage_blocks_callable_pruning(
+    callable: &CallableId,
+    usage: &SemanticUsageReport,
+    retained: &ReducedProject,
+) -> bool {
+    !usage.is_callable_mapped(callable)
+        || usage.callable_reference_query_failed(callable)
+        || usage.callable_has_retained_reference(
+            callable,
+            &retained.reachable,
+            &retained.reachable_items,
+        )
+}
+
+fn semantic_usage_blocks_item_pruning(
+    item: &ItemId,
+    usage: &SemanticUsageReport,
+    retained: &ReducedProject,
+) -> bool {
+    !usage.is_item_mapped(item)
+        || usage.item_reference_query_failed(item)
+        || usage.item_has_retained_reference(item, &retained.reachable, &retained.reachable_items)
 }
 
 fn callable_record_is_test(attrs: &[Attribute]) -> bool {
@@ -1551,6 +1594,7 @@ fn production_readiness_report_inner(
     };
     add_semantic_query_hazards(semantic, project, reduced, &mut hazards);
     add_semantic_usage_mapping_hazard(analyzer, project, reduced, &mut hazards);
+    add_semantic_usage_reference_hazard(analyzer, project, &mut hazards);
 
     production_readiness_status(hazards)
 }
@@ -1616,6 +1660,64 @@ fn add_semantic_usage_mapping_hazard(
         "semantic_usage_mapping_incomplete",
         "warning",
         "retained source contains items or callables that were not mapped to rust-analyzer definitions; compiler feedback is required before treating removal proof as complete",
+        details,
+    ));
+}
+
+fn add_semantic_usage_reference_hazard(
+    analyzer: &AnalyzerReport,
+    project: &Project,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    let Some(usage) = &analyzer.semantic_usage else {
+        return;
+    };
+    if usage.reference_query_failures == 0 {
+        return;
+    }
+
+    let mut details = Vec::new();
+    for callable in &usage.failed_callable_reference_ids {
+        if let Some(record) = project.functions.get(callable) {
+            details.push(ProductionHazardDetail {
+                subject: callable.to_string(),
+                package: Some(callable.package().to_string()),
+                module_path: callable_detail_module_path(callable),
+                file: Some(record.span.file.clone()),
+                start_line: Some(record.span.start_line),
+                cfg: None,
+                suggested_cargo_args: Vec::new(),
+            });
+        } else if let Some(record) = project.methods.get(callable) {
+            details.push(ProductionHazardDetail {
+                subject: callable.to_string(),
+                package: Some(callable.package().to_string()),
+                module_path: callable_detail_module_path(callable),
+                file: Some(record.span.file.clone()),
+                start_line: Some(record.span.start_line),
+                cfg: None,
+                suggested_cargo_args: Vec::new(),
+            });
+        }
+    }
+    for item in &usage.failed_item_reference_ids {
+        if let Some(record) = project.items.get(item) {
+            details.push(ProductionHazardDetail {
+                subject: item.to_string(),
+                package: Some(item.package.clone()),
+                module_path: Some(item.module_path.join("::")),
+                file: Some(record.span.file.clone()),
+                start_line: Some(record.span.start_line),
+                cfg: None,
+                suggested_cargo_args: Vec::new(),
+            });
+        }
+    }
+
+    hazards.push(production_hazard_with_details(
+        "semantic_usage_reference_incomplete",
+        "warning",
+        "rust-analyzer reference search failed for one or more mapped items; those candidates are retained as unknown until compiler feedback or a later semantic pass proves they are removable",
         details,
     ));
 }
@@ -4806,7 +4908,7 @@ impl SemanticFileReportJson {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::BTreeSet,
+        collections::{BTreeMap, BTreeSet},
         fs,
         path::{Path, PathBuf},
         process::Command,
@@ -4821,8 +4923,8 @@ mod tests {
         production_readiness_status, semantic_hazard_metrics, usage_classification_report,
         usage_evidence_reason, usage_guarded_render_reduction, write_generate_report, AnalyzerMode,
         AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions, ProductionHazardDetail,
-        SemanticFileReport, SemanticHazardScope, SemanticReductionHints, SemanticReport,
-        SemanticUsageReport,
+        SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
+        SemanticReport, SemanticUsageReport,
     };
     use super::{manifest, parse, reduce, render};
 
@@ -5348,6 +5450,115 @@ pub fn mapped_dead_code() -> i32 {
     }
 
     #[test]
+    fn semantic_usage_references_from_retained_code_block_pruning() {
+        let root = temp_output("semantic-usage-reference-source");
+        let output = temp_output("semantic-usage-reference-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+
+pub fn semantically_referenced_dead_code() -> i32 {
+    private_leaf()
+}
+
+fn private_leaf() -> i32 {
+    2
+}
+
+pub fn clean_dead_code() -> i32 {
+    3
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let referenced_dead = project_callable_named(&project, "semantically_referenced_dead_code");
+        let private_leaf = project_callable_named(&project, "private_leaf");
+        let clean_dead = project_callable_named(&project, "clean_dead_code");
+        let mapped_callable_ids = BTreeSet::from([
+            entry.clone(),
+            referenced_dead.clone(),
+            private_leaf.clone(),
+            clean_dead.clone(),
+        ]);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: mapped_callable_ids.len(),
+            unmapped_callables: project
+                .functions
+                .len()
+                .saturating_sub(mapped_callable_ids.len()),
+            referenced_callables: 1,
+            referenced_callable_ids: BTreeSet::from([referenced_dead.clone()]),
+            callable_reference_owners: BTreeMap::from([(
+                referenced_dead.clone(),
+                BTreeSet::from([SemanticOwnerId::Callable(entry.clone())]),
+            )]),
+            mapped_callable_ids,
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerHir,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
+            .expect("render should succeed");
+        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
+
+        assert!(
+            usage
+                .blocked_by_unknown
+                .callables
+                .contains(&referenced_dead),
+            "graph-unused callables referenced by retained RA evidence must stay blocked_by_unknown",
+        );
+        assert!(
+            usage.blocked_by_unknown.callables.contains(&private_leaf),
+            "dependencies of a semantically blocked callable should also be retained",
+        );
+        assert!(
+            usage.prunable.callables.contains(&clean_dead),
+            "mapped graph-unused callables with no retained references should remain prunable",
+        );
+        let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(generated.contains("pub fn semantically_referenced_dead_code"));
+        assert!(generated.contains("fn private_leaf"));
+        assert!(!generated.contains("pub fn clean_dead_code"));
+    }
+
+    #[test]
     fn default_feature_closure_follows_nested_package_features() {
         let manifest = r#"[package]
 name = "app"
@@ -5663,6 +5874,10 @@ pub fn entry(service: Service) -> u32 {
             .expect("RA-backed generation should report semantic usage mapping");
         assert_eq!(semantic_usage.indexed_callables, 3);
         assert!(semantic_usage.mapped_callables > 0);
+        assert!(
+            semantic_usage.reference_queries > 0,
+            "RA-backed usage reports should collect reference-search evidence"
+        );
         assert!(report
             .analyzer
             .notes

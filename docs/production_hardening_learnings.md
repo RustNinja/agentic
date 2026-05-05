@@ -496,8 +496,9 @@ the final render reduction and the `UsageDecisionIndex` together, so the report
 and renderer share the same used/blocked/prunable decision object. Unknown
 retention is explicit input to that plan: scoped macro/include/dyn/callback
 hazards add named unreachable symbols as blocked roots, and rust-analyzer
-definition-mapping gaps now block otherwise prunable candidates instead of
-silently deleting code the semantic oracle failed to map.
+definition-mapping gaps, failed reference searches, and retained RA references
+now block otherwise prunable candidates instead of silently deleting code the
+semantic oracle failed to prove removable.
 
 ## Current Production Boundaries
 
@@ -652,3 +653,18 @@ dead reconnect/alleycat siblings. The expected behavior is strict barrel
 pruning: keep the selected object, subscription, update record, `VecDeque`
 state, and exact live `pub use`; remove unrelated sibling exports and dead
 object methods.
+
+The usage-classification pass now uses RA reference evidence as a first-class
+guard instead of treating RA definition mapping as deletion permission by
+itself. The analyzer maps syn-indexed functions/items to RA definitions, runs
+`find_all_refs` for mapped non-module symbols, and stores reference owners as
+callables, items, or unowned file-level references. Unknown retention is then a
+fixed-point over the retained slice: unmapped graph-unreachable symbols,
+symbols whose reference query failed, and symbols referenced by retained source
+are promoted to `blocked_by_unknown` before rendering so their dependencies are
+closed normally. This keeps dead-to-dead references removable while preventing
+retained macro/import/semantic surfaces from losing a target that syn failed to
+connect. Unowned file-level references are intentionally diagnostic-only for
+retention: RA reports dead impl headers such as `impl DeadType` as references
+with no callable/item owner, and treating those as retained-file references kept
+unrelated same-file siblings.
