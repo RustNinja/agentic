@@ -1101,13 +1101,30 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     assert!(!helper_manifest.contains("path = \"/"), "{helper_manifest}");
     assert!(output.join("support/external-helper/src/lib.rs").exists());
     assert!(output.join("support/external-helper/src/live.rs").exists());
+    assert!(output
+        .join("support/external-helper/src/facade.rs")
+        .exists());
     assert!(output.join("support/external-helper/src/live.txt").exists());
     assert!(output.join("support/external-leaf/src/lib.rs").exists());
     assert!(!output.join("support/dead-leaf").exists());
     let helper_lib = read(output.join("support/external-helper/src/lib.rs"));
+    let helper_live = read(output.join("support/external-helper/src/live.rs"));
+    let helper_facade = read(output.join("support/external-helper/src/facade.rs"));
     assert!(helper_lib.contains("pub fn decorate"), "{helper_lib}");
+    assert!(helper_lib.contains("facade_decorate"), "{helper_lib}");
     assert!(!helper_lib.contains("dead_decorate"), "{helper_lib}");
     assert!(!helper_lib.contains("dead_leaf"), "{helper_lib}");
+    assert!(!helper_lib.contains("FacadeDead"), "{helper_lib}");
+    assert!(helper_live.contains("pub fn decorate"), "{helper_live}");
+    assert!(!helper_live.contains("dead_child"), "{helper_live}");
+    assert!(!helper_live.contains("dead_leaf"), "{helper_live}");
+    assert!(
+        helper_facade.contains("pub fn facade_decorate"),
+        "{helper_facade}"
+    );
+    assert!(!helper_facade.contains("dead_facade"), "{helper_facade}");
+    assert!(!helper_facade.contains("FacadeDead"), "{helper_facade}");
+    assert!(!helper_facade.contains("dead_leaf"), "{helper_facade}");
     assert!(!output.join("support/external-helper/src/bin").exists());
     assert!(!output.join("support/external-helper/examples").exists());
     assert!(!output.join("support/external-helper/tests").exists());
@@ -4536,7 +4553,11 @@ use opensourced::opensourced;
 
 #[opensourced]
 pub fn selected(value: &str) -> String {
-    external_helper::decorate(value)
+    format!(
+        "{}:{}",
+        external_helper::decorate(value),
+        external_helper::facade_decorate(value)
+    )
 }
 "#,
     );
@@ -4559,7 +4580,9 @@ dead-leaf = {{ path = "{}" }}
     write(
         helper.join("src/lib.rs"),
         r#"
+mod facade;
 mod live;
+pub use facade::{facade_decorate, FacadeDead, FacadeLive};
 
 #[cfg(test)]
 mod test_only;
@@ -4574,12 +4597,36 @@ pub fn dead_decorate(value: &str) -> String {
 "#,
     );
     write(
+        helper.join("src/facade.rs"),
+        r#"
+pub fn facade_decorate(value: &str) -> String {
+    format!("{value}:facade")
+}
+
+pub struct FacadeLive {
+    pub value: String,
+}
+
+pub struct FacadeDead {
+    pub value: String,
+}
+
+pub fn dead_facade(value: &str) -> String {
+    format!("{value}{}", dead_leaf::suffix())
+}
+"#,
+    );
+    write(
         helper.join("src/live.rs"),
         r#"
 const LABEL: &str = include_str!("live.txt");
 
 pub fn decorate(value: &str) -> String {
     format!("{value}:{}", LABEL.trim())
+}
+
+pub fn dead_child(value: &str) -> String {
+    format!("{value}{}", dead_leaf::suffix())
 }
 "#,
     );

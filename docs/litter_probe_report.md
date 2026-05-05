@@ -91,6 +91,14 @@ not slicer failures.
   dependencies used only by those dead support items are no longer copied. The
   pinned batch still generated 116 files with zero preflight errors, zero
   feedback errors, zero warnings, and `production_ready=accepted`.
+- The follow-up support pruning pass extended the same generic rule into child
+  modules and simple public facade reexports: qualified `mod_name::item_name`
+  edges seed live child items, retained `pub use module::{...}` leaves are
+  narrowed to required public names, include assets are scanned from transformed
+  support sources, and dead child/facade dependency uses disappear before
+  support manifest dependency closure is computed. The pinned random-five batch
+  still generated 116 files with zero preflight errors, zero feedback errors,
+  zero warnings, and `production_ready=accepted`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
@@ -113,9 +121,9 @@ not slicer failures.
   packages with build scripts, `OUT_DIR` source includes, compile-time env,
   nonliteral includes, absolute includes, and package-external support include
   paths.
-- `manifest.support_facade_export_pruning.001`: copied support facades should
-  keep only the DTO/constant/reexport used by retained source and prune sibling
-  schema/protocol/exporter modules.
+- `manifest.support_facade_export_pruning.001`: covered for simple copied
+  support facades that reexport concrete child-module leaves; remaining work is
+  transitive facade chains and glob facades, which still fall back broad.
 - `manifest.support_monolith_item_pruning.001`: support crates with large
   protocol files should not retain unrelated request/notification siblings when
   one symbol is referenced.

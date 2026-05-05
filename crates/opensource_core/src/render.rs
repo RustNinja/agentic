@@ -1658,35 +1658,11 @@ fn build_support_source_plan(
         Ok(syntax) => syntax,
         Err(_) => return Ok(SupportSourcePlan::default()),
     };
-    let Some(transformed_root) = prune_support_root_file(&syntax, required_names) else {
-        return Ok(SupportSourcePlan::default());
-    };
-
-    let Some(source_files) = support_library_module_source_files_from_root_syntax(
-        &package_root,
-        &lib_path,
-        &transformed_root,
-    )?
+    let Some(transformed_sources) =
+        build_restricted_support_sources(&package_root, &lib_path, &syntax, required_names)?
     else {
         return Ok(SupportSourcePlan::default());
     };
-
-    let mut transformed_sources = BTreeMap::new();
-    transformed_sources.insert(lib_path.clone(), transformed_root);
-    for source_file in source_files {
-        if source_file == lib_path {
-            continue;
-        }
-        let text = match fs::read_to_string(&source_file) {
-            Ok(text) => text,
-            Err(_) => return Ok(SupportSourcePlan::default()),
-        };
-        let syntax = match syn::parse_file(&text) {
-            Ok(syntax) => syntax,
-            Err(_) => return Ok(SupportSourcePlan::default()),
-        };
-        transformed_sources.insert(source_file, syntax);
-    }
 
     let mut usage = TokenUsage::default();
     for syntax in transformed_sources.values() {
@@ -1699,53 +1675,638 @@ fn build_support_source_plan(
     })
 }
 
-fn prune_support_root_file(
+#[derive(Clone)]
+struct SupportModuleSource {
+    module_dir: PathBuf,
+    syntax: syn::File,
+}
+
+#[derive(Clone, Default)]
+struct SupportLiveSet {
+    item_names: BTreeSet<String>,
+    public_exports: BTreeSet<String>,
+}
+
+struct SupportUseNeeds<'a> {
+    live_idents: &'a BTreeSet<String>,
+    live_exports: &'a BTreeSet<String>,
+}
+
+fn build_restricted_support_sources(
+    package_root: &Path,
+    lib_path: &Path,
     syntax: &syn::File,
     required_names: &BTreeSet<String>,
-) -> Option<syn::File> {
-    let named_items = support_named_item_names(&syntax.items);
-    if !required_names
-        .iter()
-        .all(|name| named_items.contains_key(name))
-    {
-        return None;
+) -> Result<Option<BTreeMap<PathBuf, syn::File>>, Box<dyn std::error::Error>> {
+    let mut modules = BTreeMap::new();
+    let root_module_dir = lib_path.parent().unwrap_or(package_root).to_path_buf();
+    if !collect_support_module_sources_with_syntax(
+        package_root,
+        lib_path,
+        &root_module_dir,
+        syntax.clone(),
+        &mut modules,
+    )? {
+        return Ok(None);
     }
 
-    let mut live_names = required_names.clone();
+    let mut live = BTreeMap::<PathBuf, SupportLiveSet>::new();
+    let root_file = lib_path.to_path_buf();
+    for required_name in required_names {
+        if !seed_support_required_name(&modules, &root_file, required_name, &mut live) {
+            return Ok(None);
+        }
+    }
+
     let mut changed = true;
     while changed {
         changed = false;
-        for name in live_names.clone() {
-            let Some(item) = named_items.get(&name) else {
-                continue;
+        for (source_file, live_set) in live.clone() {
+            let Some(module) = modules.get(&source_file) else {
+                return Ok(None);
             };
-            let tokens = item.to_token_stream();
-            for candidate in named_items.keys() {
-                if live_names.contains(candidate) {
-                    continue;
-                }
-                if token_stream_mentions_ident(&tokens, candidate)
-                    || token_path_candidates(&tokens)
-                        .iter()
-                        .any(|segments| segments.first().is_some_and(|first| first == candidate))
+            let named_items = support_named_item_names(&module.syntax.items);
+            let mut live_usage = TokenUsage::default();
+
+            for name in &live_set.item_names {
+                let Some(item) = named_items.get(name) else {
+                    return Ok(None);
+                };
+                let tokens = item.to_token_stream();
+                if token_path_candidates(&tokens)
+                    .iter()
+                    .any(|segments| segments.first().is_some_and(|first| first == "super"))
                 {
-                    changed |= live_names.insert(candidate.clone());
+                    return Ok(None);
                 }
+                collect_token_usage(&tokens, &mut live_usage);
+
+                for candidate in named_items.keys() {
+                    if live
+                        .get(&source_file)
+                        .is_some_and(|live_set| live_set.item_names.contains(candidate))
+                    {
+                        continue;
+                    }
+                    let Some(candidate_item) = named_items.get(candidate) else {
+                        continue;
+                    };
+                    if matches!(candidate_item, Item::Mod(item_mod) if item_mod.content.is_none()) {
+                        continue;
+                    }
+                    if token_stream_mentions_ident(&tokens, candidate)
+                        || token_path_candidates(&tokens).iter().any(|segments| {
+                            segments.first().is_some_and(|first| first == candidate)
+                        })
+                    {
+                        changed |= live
+                            .entry(source_file.clone())
+                            .or_default()
+                            .item_names
+                            .insert(candidate.clone());
+                    }
+                }
+
+                for segments in token_path_candidates(&tokens) {
+                    let Some(inserted) = mark_support_path_target(
+                        &modules,
+                        &root_file,
+                        &source_file,
+                        &segments,
+                        &mut live,
+                    ) else {
+                        return Ok(None);
+                    };
+                    changed |= inserted;
+                }
+            }
+
+            if support_live_local_glob_import_is_ambiguous(
+                &modules,
+                &source_file,
+                &module.syntax,
+                &live_usage.idents,
+            ) {
+                return Ok(None);
+            }
+
+            for item in &module.syntax.items {
+                let Item::Use(item_use) = item else {
+                    continue;
+                };
+                let Some(inserted) = mark_support_live_use_imports(
+                    &modules,
+                    &root_file,
+                    &source_file,
+                    &item_use.tree,
+                    Vec::new(),
+                    SupportUseNeeds {
+                        live_idents: &live_usage.idents,
+                        live_exports: &live_set.public_exports,
+                    },
+                    &mut live,
+                ) else {
+                    return Ok(None);
+                };
+                changed |= inserted;
             }
         }
     }
 
+    for (source_file, live_set) in &live {
+        let Some(module) = modules.get(source_file) else {
+            return Ok(None);
+        };
+        for item_name in &live_set.item_names {
+            let Some(Item::Mod(item_mod)) = module
+                .syntax
+                .items
+                .iter()
+                .find(|item| support_item_name(item).as_ref() == Some(item_name))
+            else {
+                continue;
+            };
+            if item_mod.content.is_none()
+                && support_external_module_source(package_root, &module.module_dir, item_mod)
+                    .is_some_and(|(child_file, _)| !live.contains_key(&child_file))
+            {
+                return Ok(None);
+            }
+        }
+    }
+
+    let mut transformed_sources = BTreeMap::new();
+    for (source_file, module) in modules {
+        if source_file != root_file && !live.contains_key(&source_file) {
+            continue;
+        }
+        let live_set = live.get(&source_file).cloned().unwrap_or_default();
+        transformed_sources.insert(
+            source_file.clone(),
+            transform_restricted_support_file(&module.syntax, &live_set),
+        );
+    }
+
+    Ok(Some(transformed_sources))
+}
+
+fn collect_support_module_sources_with_syntax(
+    package_root: &Path,
+    source_file: &Path,
+    module_dir: &Path,
+    syntax: syn::File,
+    modules: &mut BTreeMap<PathBuf, SupportModuleSource>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let Ok(source_file) = source_file.canonicalize() else {
+        return Ok(false);
+    };
+    if !source_file.starts_with(package_root) {
+        return Ok(false);
+    }
+    if modules.contains_key(&source_file) {
+        return Ok(true);
+    }
+    modules.insert(
+        source_file.clone(),
+        SupportModuleSource {
+            module_dir: module_dir.to_path_buf(),
+            syntax: syntax.clone(),
+        },
+    );
+
+    for item in &syntax.items {
+        let Item::Mod(item_mod) = item else {
+            continue;
+        };
+        if item_mod.content.is_some() || attrs_are_test(&item_mod.attrs) {
+            continue;
+        }
+        let Some((child_file, child_dir)) =
+            support_external_module_source(package_root, module_dir, item_mod)
+        else {
+            return Ok(false);
+        };
+        let text = match fs::read_to_string(&child_file) {
+            Ok(text) => text,
+            Err(_) => return Ok(false),
+        };
+        let child_syntax = match syn::parse_file(&text) {
+            Ok(syntax) => syntax,
+            Err(_) => return Ok(false),
+        };
+        if !collect_support_module_sources_with_syntax(
+            package_root,
+            &child_file,
+            &child_dir,
+            child_syntax,
+            modules,
+        )? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn seed_support_required_name(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    root_file: &Path,
+    required_name: &str,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> bool {
+    let Some(root_module) = modules.get(root_file) else {
+        return false;
+    };
+    let named_items = support_named_item_names(&root_module.syntax.items);
+    if named_items.contains_key(required_name) {
+        live.entry(root_file.to_path_buf())
+            .or_default()
+            .item_names
+            .insert(required_name.to_string());
+        return true;
+    }
+
+    for item in &root_module.syntax.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        if !use_is_reexport(&item_use.vis) {
+            continue;
+        }
+        if mark_support_required_reexport(
+            modules,
+            root_file,
+            root_file,
+            &item_use.tree,
+            Vec::new(),
+            required_name,
+            live,
+        ) {
+            live.entry(root_file.to_path_buf())
+                .or_default()
+                .public_exports
+                .insert(required_name.to_string());
+            return true;
+        }
+    }
+
+    false
+}
+
+fn mark_support_required_reexport(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    root_file: &Path,
+    source_file: &Path,
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    required_name: &str,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> bool {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            mark_support_required_reexport(
+                modules,
+                root_file,
+                source_file,
+                &path.tree,
+                prefix,
+                required_name,
+                live,
+            )
+        }
+        UseTree::Name(name) => {
+            if name.ident != required_name {
+                return false;
+            }
+            mark_support_use_target(
+                modules,
+                root_file,
+                source_file,
+                &prefix,
+                required_name,
+                live,
+            )
+            .is_some()
+        }
+        UseTree::Rename(rename) => {
+            if rename.rename != required_name {
+                return false;
+            }
+            mark_support_use_target(
+                modules,
+                root_file,
+                source_file,
+                &prefix,
+                &rename.ident.to_string(),
+                live,
+            )
+            .is_some()
+        }
+        UseTree::Group(group) => group.items.iter().any(|item| {
+            mark_support_required_reexport(
+                modules,
+                root_file,
+                source_file,
+                item,
+                prefix.clone(),
+                required_name,
+                live,
+            )
+        }),
+        UseTree::Glob(_) => false,
+    }
+}
+
+fn mark_support_live_use_imports(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    root_file: &Path,
+    source_file: &Path,
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    needs: SupportUseNeeds<'_>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            mark_support_live_use_imports(
+                modules,
+                root_file,
+                source_file,
+                &path.tree,
+                prefix,
+                needs,
+                live,
+            )
+        }
+        UseTree::Name(name) => {
+            let imported_name = name.ident.to_string();
+            if needs.live_idents.contains(&imported_name)
+                || needs.live_exports.contains(&imported_name)
+            {
+                return mark_support_use_target(
+                    modules,
+                    root_file,
+                    source_file,
+                    &prefix,
+                    &imported_name,
+                    live,
+                );
+            }
+            Some(false)
+        }
+        UseTree::Rename(rename) => {
+            let local_name = rename.rename.to_string();
+            if needs.live_idents.contains(&local_name) || needs.live_exports.contains(&local_name) {
+                return mark_support_use_target(
+                    modules,
+                    root_file,
+                    source_file,
+                    &prefix,
+                    &rename.ident.to_string(),
+                    live,
+                );
+            }
+            Some(false)
+        }
+        UseTree::Group(group) => {
+            let mut inserted = false;
+            for item in &group.items {
+                inserted |= mark_support_live_use_imports(
+                    modules,
+                    root_file,
+                    source_file,
+                    item,
+                    prefix.clone(),
+                    SupportUseNeeds {
+                        live_idents: needs.live_idents,
+                        live_exports: needs.live_exports,
+                    },
+                    live,
+                )?;
+            }
+            Some(inserted)
+        }
+        UseTree::Glob(_) => Some(false),
+    }
+}
+
+fn mark_support_path_target(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    root_file: &Path,
+    source_file: &Path,
+    segments: &[String],
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let (target_file, target_segments) = match segments {
+        [first, rest @ ..] if first == "self" => (source_file, rest),
+        [first, rest @ ..] if first == "crate" => (root_file, rest),
+        [first, ..] if first == "super" => return None,
+        _ => (source_file, segments),
+    };
+    if target_segments.len() < 2 {
+        return Some(false);
+    }
+    mark_support_use_target(
+        modules,
+        root_file,
+        target_file,
+        &target_segments[..1],
+        &target_segments[1],
+        live,
+    )
+}
+
+fn mark_support_use_target(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    root_file: &Path,
+    source_file: &Path,
+    prefix: &[String],
+    target_name: &str,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut source_file = source_file;
+    let mut prefix = prefix;
+    if let Some(first) = prefix.first() {
+        match first.as_str() {
+            "self" => {
+                prefix = &prefix[1..];
+            }
+            "crate" => {
+                source_file = root_file;
+                prefix = &prefix[1..];
+            }
+            "super" => return None,
+            _ => {}
+        }
+    }
+
+    let Some(first) = prefix.first() else {
+        let module = modules.get(source_file)?;
+        if support_named_item_names(&module.syntax.items).contains_key(target_name) {
+            return Some(
+                live.entry(source_file.to_path_buf())
+                    .or_default()
+                    .item_names
+                    .insert(target_name.to_string()),
+            );
+        }
+        return Some(false);
+    };
+
+    let Some(child_file) = support_child_module_file(modules, source_file, first) else {
+        return Some(false);
+    };
+    let inserted_module = live
+        .entry(source_file.to_path_buf())
+        .or_default()
+        .item_names
+        .insert(first.clone());
+    if prefix.len() == 1 {
+        let inserted_child = live
+            .entry(child_file)
+            .or_default()
+            .item_names
+            .insert(target_name.to_string());
+        return Some(inserted_module | inserted_child);
+    }
+    Some(
+        inserted_module
+            | mark_support_use_target(
+                modules,
+                root_file,
+                &child_file,
+                &prefix[1..],
+                target_name,
+                live,
+            )?,
+    )
+}
+
+fn support_child_module_file(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    source_file: &Path,
+    module_name: &str,
+) -> Option<PathBuf> {
+    let module = modules.get(source_file)?;
+    module.syntax.items.iter().find_map(|item| {
+        let Item::Mod(item_mod) = item else {
+            return None;
+        };
+        if item_mod.ident != module_name
+            || item_mod.content.is_some()
+            || attrs_are_test(&item_mod.attrs)
+        {
+            return None;
+        }
+        support_external_module_source(Path::new("/"), &module.module_dir, item_mod)
+            .map(|(child_file, _)| child_file)
+    })
+}
+
+fn support_live_local_glob_import_is_ambiguous(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    source_file: &Path,
+    syntax: &syn::File,
+    live_idents: &BTreeSet<String>,
+) -> bool {
+    if live_idents.is_empty() {
+        return false;
+    }
+    syntax.items.iter().any(|item| {
+        let Item::Use(item_use) = item else {
+            return false;
+        };
+        support_use_tree_has_local_glob(modules, source_file, &item_use.tree, Vec::new())
+    })
+}
+
+fn support_use_tree_has_local_glob(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    source_file: &Path,
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+) -> bool {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            support_use_tree_has_local_glob(modules, source_file, &path.tree, prefix)
+        }
+        UseTree::Group(group) => group.items.iter().any(|item| {
+            support_use_tree_has_local_glob(modules, source_file, item, prefix.clone())
+        }),
+        UseTree::Glob(_) => prefix
+            .first()
+            .is_some_and(|first| support_child_module_file(modules, source_file, first).is_some()),
+        UseTree::Name(_) | UseTree::Rename(_) => false,
+    }
+}
+
+fn transform_restricted_support_file(syntax: &syn::File, live_set: &SupportLiveSet) -> syn::File {
+    let live_usage = support_live_item_usage(syntax, live_set);
+    let public_use_names = live_set
+        .public_exports
+        .union(&live_usage.idents)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let mut transformed = syntax.clone();
     transformed.items = syntax
         .items
         .iter()
-        .filter(|item| {
-            support_item_name(item).is_none_or(|name| live_names.contains(&name))
-                || matches!(item, Item::Use(_) | Item::ExternCrate(_))
+        .filter_map(|item| match item {
+            Item::Use(item_use) if use_is_reexport(&item_use.vis) => {
+                let mut item_use = item_use.clone();
+                item_use.tree = prune_support_public_use_tree(&item_use.tree, &public_use_names)?;
+                Some(Item::Use(item_use))
+            }
+            Item::Use(_) | Item::ExternCrate(_) => Some(item.clone()),
+            _ => {
+                if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
+                    Some(item.clone())
+                } else {
+                    None
+                }
+            }
         })
-        .cloned()
         .collect();
-    Some(transformed)
+    transformed
+}
+
+fn support_live_item_usage(syntax: &syn::File, live_set: &SupportLiveSet) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+    for item in &syntax.items {
+        if support_item_name(item).is_some_and(|name| live_set.item_names.contains(&name)) {
+            collect_token_usage(&item.to_token_stream(), &mut usage);
+        }
+    }
+    usage
+}
+
+fn prune_support_public_use_tree(tree: &UseTree, live_names: &BTreeSet<String>) -> Option<UseTree> {
+    match tree {
+        UseTree::Path(path) => {
+            let mut path = path.clone();
+            path.tree = Box::new(prune_support_public_use_tree(&path.tree, live_names)?);
+            Some(UseTree::Path(path))
+        }
+        UseTree::Name(name) => live_names
+            .contains(&name.ident.to_string())
+            .then(|| UseTree::Name(name.clone())),
+        UseTree::Rename(rename) => (live_names.contains(&rename.ident.to_string())
+            || live_names.contains(&rename.rename.to_string()))
+        .then(|| UseTree::Rename(rename.clone())),
+        UseTree::Group(group) => {
+            let mut group = group.clone();
+            group.items = group
+                .items
+                .iter()
+                .filter_map(|item| prune_support_public_use_tree(item, live_names))
+                .collect::<Punctuated<_, syn::Token![,]>>();
+            (!group.items.is_empty()).then_some(UseTree::Group(group))
+        }
+        UseTree::Glob(_) => None,
+    }
 }
 
 fn support_named_item_names(items: &[Item]) -> BTreeMap<String, Item> {
@@ -1769,63 +2330,6 @@ fn support_item_name(item: &Item) -> Option<String> {
         Item::Union(item) => Some(item.ident.to_string()),
         _ => None,
     }
-}
-
-fn support_library_module_source_files_from_root_syntax(
-    package_root: &Path,
-    lib_path: &Path,
-    root_syntax: &syn::File,
-) -> Result<Option<BTreeSet<PathBuf>>, Box<dyn std::error::Error>> {
-    let mut sources = BTreeSet::new();
-    let module_dir = lib_path.parent().unwrap_or(package_root).to_path_buf();
-    if !collect_support_library_module_sources_from_syntax(
-        package_root,
-        lib_path,
-        &module_dir,
-        root_syntax,
-        &mut sources,
-    )? {
-        return Ok(None);
-    }
-    Ok(Some(sources))
-}
-
-fn collect_support_library_module_sources_from_syntax(
-    package_root: &Path,
-    source_file: &Path,
-    module_dir: &Path,
-    syntax: &syn::File,
-    sources: &mut BTreeSet<PathBuf>,
-) -> Result<bool, Box<dyn std::error::Error>> {
-    let Ok(source_file) = source_file.canonicalize() else {
-        return Ok(false);
-    };
-    if !source_file.starts_with(package_root) {
-        return Ok(false);
-    }
-    if !sources.insert(source_file) {
-        return Ok(true);
-    }
-
-    for item in &syntax.items {
-        let Item::Mod(item_mod) = item else {
-            continue;
-        };
-        if item_mod.content.is_some() || attrs_are_test(&item_mod.attrs) {
-            continue;
-        }
-        let Some((child_file, child_dir)) =
-            support_external_module_source(package_root, module_dir, item_mod)
-        else {
-            return Ok(false);
-        };
-        if !collect_support_library_module_sources(package_root, &child_file, &child_dir, sources)?
-        {
-            return Ok(false);
-        }
-    }
-
-    Ok(true)
 }
 
 fn support_library_module_source_files(

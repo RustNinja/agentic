@@ -505,11 +505,13 @@ precise:
    owner files.
 2. Map macro-expanded item inventory into retained graph edges when RA provides
    stable spans.
-3. Slice copied support packages at item granularity after module/file copying:
-   retain support roots from actual dependency paths, prune dead support facade
-   exports, monolithic protocol siblings, inline tests, target-gated assets, and
-   legacy/websocket/remote-control modules, and fall back broad only when
-   parsing or generated-source modeling fails.
+3. Extend copied support-package item pruning deeper into monolithic protocol
+   files and transitive support reexport chains. The current no-build support
+   path prunes root and child-module items plus simple public facade reexports
+   when retained source names concrete dependency public symbols; remaining
+   broad fallbacks are local glob facades, unresolved relative paths,
+   build-script packages, generated-source packages, and macro-expanded support
+   internals.
 4. Model `OUT_DIR` generated Rust includes through build-script output
    discovery and generated-file copying.
 5. Add a pinned real-repo CI matrix with Litter small, medium, and wide module
