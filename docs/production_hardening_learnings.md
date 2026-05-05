@@ -658,13 +658,15 @@ The usage-classification pass now uses RA reference evidence as a first-class
 guard instead of treating RA definition mapping as deletion permission by
 itself. The analyzer maps syn-indexed functions/items to RA definitions, runs
 `find_all_refs` for mapped non-module symbols, and stores reference owners as
-callables, items, or unowned file-level references. Unknown retention is then a
-fixed-point over the retained slice: unmapped graph-unreachable symbols,
-symbols whose reference query failed, and symbols referenced by retained source
-are promoted to `blocked_by_unknown` before rendering so their dependencies are
-closed normally. This keeps dead-to-dead references removable while preventing
-retained macro/import/semantic surfaces from losing a target that syn failed to
-connect. Unowned file-level references are intentionally diagnostic-only for
-retention: RA reports dead impl headers such as `impl DeadType` as references
-with no callable/item owner, and treating those as retained-file references kept
-unrelated same-file siblings.
+callables, items, or unowned file-level references. Callable/item owners are
+also promoted into `SemanticReductionHints`, so retained owners pull referenced
+targets into the positive `used` graph before rendering instead of leaving
+every RA reference as unknown retention. Unknown retention is still a
+fixed-point over the retained slice for unmapped graph-unreachable symbols,
+symbols whose reference query failed, and retained RA references that cannot be
+turned into owner-target graph edges. This keeps dead-to-dead references
+removable while preventing retained macro/import/semantic surfaces from losing
+a target that syn failed to connect. Unowned file-level references are
+intentionally diagnostic-only for retention: RA reports dead impl headers such
+as `impl DeadType` as references with no callable/item owner, and treating those
+as retained-file references kept unrelated same-file siblings.

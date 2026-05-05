@@ -62,17 +62,20 @@ unknowns but no longer globally block every unrelated unused item. Scoped
 macro/include/dyn/callback hazards promote only explicitly mentioned symbols
 into a pre-render retained closure. In rust-analyzer modes, the analyzer also
 records whether syn-indexed callables/items mapped back to RA definitions and
-runs RA reference search for mapped source symbols. Unknown retention is a
+runs RA reference search for mapped source symbols. RA reference owners are now
+promoted into the same `SemanticReductionHints` graph as method/path/call
+hierarchy edges, so retained owners pull referenced callables/items into the
+positive `used` closure before rendering. Unknown retention remains a
 fixed-point pass over the current retained slice: graph-unreachable candidates
 are promoted into `blocked_by_unknown` when they cannot be mapped, when
-reference search fails, or when RA finds a retained callable/item reference to
-them. File-level unowned references are recorded for diagnostics but do not
-grant retention by themselves, because impl headers for dead sibling types can
-otherwise over-retain whole same-file item sets. Only mapped graph-unreachable
-candidates with no retained reference
-evidence are treated as prunable. The production invariant is fail-closed:
-remove only prunable source, and keep/report anything blocked by unknown until
-compiler feedback or deeper semantics discharges it.
+reference search fails, or when a retained RA reference cannot be discharged
+through a positive edge. File-level unowned references are recorded for
+diagnostics but do not grant retention by themselves, because impl headers for
+dead sibling types can otherwise over-retain whole same-file item sets. Only
+mapped graph-unreachable candidates with no retained reference evidence are
+treated as prunable. The production invariant is fail-closed: remove only
+prunable source, and keep/report anything blocked by unknown until compiler
+feedback or deeper semantics discharges it.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that
@@ -83,10 +86,11 @@ toolchain does not provide a proc-macro server, the analyzer reports that
 expansion is not active and continues with bounded HIR. Both rust-analyzer paths
 map exact project-local method/path resolutions into generic `CallableId` /
 `ItemId` reduction hints and apply those hints as additive retained-graph
-edges. RA definition-mapping and reference-search coverage are reported
-separately from reachability so missing semantic coverage, failed reference
-queries, and retained RA references become explicit unknown-retention signals
-instead of silently becoming deletion permission. Files containing selected
+edges. RA definition-mapping, reference-search coverage, and promoted reference
+edge counts are reported separately from reachability so missing semantic
+coverage, failed reference queries, and retained RA references that cannot be
+converted to graph edges become explicit unknown-retention signals instead of
+silently becoming deletion permission. Files containing selected
 `#[opensourced]` roots are analyzed first so
 bounded semantic budgets prioritize the active slice. The analyzer now records
 per-file semantic inventory; after reduction, production readiness scopes

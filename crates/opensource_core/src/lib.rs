@@ -5559,6 +5559,120 @@ pub fn clean_dead_code() -> i32 {
     }
 
     #[test]
+    fn semantic_reference_edges_classify_referenced_candidates_as_used() {
+        let root = temp_output("semantic-reference-edge-source");
+        let output = temp_output("semantic-reference-edge-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+
+pub fn semantically_referenced_code() -> i32 {
+    private_leaf()
+}
+
+fn private_leaf() -> i32 {
+    2
+}
+
+pub fn clean_dead_code() -> i32 {
+    3
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let entry = project_callable_named(&project, "entry");
+        let referenced = project_callable_named(&project, "semantically_referenced_code");
+        let private_leaf = project_callable_named(&project, "private_leaf");
+        let clean_dead = project_callable_named(&project, "clean_dead_code");
+        let mapped_callable_ids = BTreeSet::from([
+            entry.clone(),
+            referenced.clone(),
+            private_leaf.clone(),
+            clean_dead.clone(),
+        ]);
+        let mut semantic_hints = SemanticReductionHints::default();
+        semantic_hints
+            .add_callable_edge(SemanticOwnerId::Callable(entry.clone()), referenced.clone());
+        let reduced = reduce::reduce_with_extra_roots_and_semantics(&project, &[], &semantic_hints)
+            .expect("semantic edge reduction should work");
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: mapped_callable_ids.len(),
+            unmapped_callables: project
+                .functions
+                .len()
+                .saturating_sub(mapped_callable_ids.len()),
+            callable_reference_edges: 1,
+            referenced_callables: 1,
+            referenced_callable_ids: BTreeSet::from([referenced.clone()]),
+            callable_reference_owners: BTreeMap::from([(
+                referenced.clone(),
+                BTreeSet::from([SemanticOwnerId::Callable(entry.clone())]),
+            )]),
+            mapped_callable_ids,
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerHir,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints,
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
+            .expect("render should succeed");
+        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
+
+        assert!(
+            usage.used.callables.contains(&referenced),
+            "RA-promoted reference edges should classify reachable targets as used",
+        );
+        assert!(
+            usage.used.callables.contains(&private_leaf),
+            "syntactic dependencies of an RA-promoted target should also be used",
+        );
+        assert!(
+            !usage.blocked_by_unknown.callables.contains(&referenced),
+            "RA-promoted reference edges should not remain unknown-retained",
+        );
+        assert!(
+            usage.prunable.callables.contains(&clean_dead),
+            "unreferenced mapped siblings should remain prunable",
+        );
+        let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(generated.contains("pub fn semantically_referenced_code"));
+        assert!(generated.contains("fn private_leaf"));
+        assert!(!generated.contains("pub fn clean_dead_code"));
+    }
+
+    #[test]
     fn default_feature_closure_follows_nested_package_features() {
         let manifest = r#"[package]
 name = "app"
@@ -5877,6 +5991,10 @@ pub fn entry(service: Service) -> u32 {
         assert!(
             semantic_usage.reference_queries > 0,
             "RA-backed usage reports should collect reference-search evidence"
+        );
+        assert!(
+            semantic_usage.callable_reference_edges + semantic_usage.item_reference_edges > 0,
+            "RA-backed usage reports should promote reference owners into semantic reduction edges"
         );
         assert!(report
             .analyzer

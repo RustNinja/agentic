@@ -155,6 +155,8 @@ pub struct SemanticUsageReport {
     pub unmapped_items: usize,
     pub reference_queries: usize,
     pub reference_query_failures: usize,
+    pub callable_reference_edges: usize,
+    pub item_reference_edges: usize,
     pub referenced_callables: usize,
     pub referenced_items: usize,
     pub mapped_callable_ids: BTreeSet<CallableId>,
@@ -566,7 +568,7 @@ mod rust_analyzer {
             ));
             if let Some(usage) = &semantic.usage {
                 notes.push(format!(
-                    "HIR usage mapping: {}/{} callable(s) and {}/{} item(s) mapped to rust-analyzer definitions; {} unmapped; {} reference query/queries, {} failure(s), {} referenced callable(s), {} referenced item(s)",
+                    "HIR usage mapping: {}/{} callable(s) and {}/{} item(s) mapped to rust-analyzer definitions; {} unmapped; {} reference query/queries, {} failure(s), {} promoted reference edge(s), {} referenced callable(s), {} referenced item(s)",
                     usage.mapped_callables,
                     usage.indexed_callables,
                     usage.mapped_items,
@@ -574,6 +576,7 @@ mod rust_analyzer {
                     usage.unmapped_total(),
                     usage.reference_queries,
                     usage.reference_query_failures,
+                    usage.callable_reference_edges + usage.item_reference_edges,
                     usage.referenced_callables,
                     usage.referenced_items
                 ));
@@ -827,7 +830,7 @@ mod rust_analyzer {
         let usage = project
             .zip(semantic_index.as_ref())
             .map(|(project, index)| {
-                collect_semantic_usage_report(database, &semantics, vfs, project, index)
+                collect_semantic_usage_report(database, &semantics, vfs, project, index, &mut hints)
             });
         let ra_feedback = if feedback_mode == RaFeedbackMode::Enabled {
             project
@@ -852,6 +855,7 @@ mod rust_analyzer {
         vfs: &ra_ap_vfs::Vfs,
         project: &Project,
         index: &ProjectSemanticIndex,
+        hints: &mut SemanticReductionHints,
     ) -> SemanticUsageReport {
         let mut report = SemanticUsageReport {
             indexed_callables: project.functions.len() + project.methods.len(),
@@ -896,7 +900,7 @@ mod rust_analyzer {
             .indexed_callables
             .saturating_sub(report.mapped_callables);
         report.unmapped_items = report.indexed_items.saturating_sub(report.mapped_items);
-        collect_semantic_reference_report(database, vfs, project, index, &mut report);
+        collect_semantic_reference_report(database, vfs, project, index, &mut report, hints);
         report
     }
 
@@ -906,6 +910,7 @@ mod rust_analyzer {
         project: &Project,
         index: &ProjectSemanticIndex,
         report: &mut SemanticUsageReport,
+        hints: &mut SemanticReductionHints,
     ) {
         let analysis = ra_ap_ide::AnalysisHost::with_database(database.clone()).analysis();
         let file_ids = vfs_file_ids(vfs);
@@ -938,7 +943,9 @@ mod rust_analyzer {
             let position = ra_ap_ide::FilePosition { file_id, offset };
             match analysis.find_all_refs(position, &config) {
                 Ok(Some(results)) => {
-                    collect_callable_reference_results(vfs, index, callable, results, report);
+                    collect_callable_reference_results(
+                        vfs, index, callable, results, report, hints,
+                    );
                 }
                 Ok(None) | Err(_) => record_callable_reference_query_failure(report, callable),
             }
@@ -962,7 +969,7 @@ mod rust_analyzer {
             let position = ra_ap_ide::FilePosition { file_id, offset };
             match analysis.find_all_refs(position, &config) {
                 Ok(Some(results)) => {
-                    collect_item_reference_results(vfs, index, item, results, report);
+                    collect_item_reference_results(vfs, index, item, results, report, hints);
                 }
                 Ok(None) | Err(_) => record_item_reference_query_failure(report, item),
             }
@@ -970,6 +977,16 @@ mod rust_analyzer {
 
         report.reference_query_failures =
             report.failed_callable_reference_ids.len() + report.failed_item_reference_ids.len();
+        report.callable_reference_edges = report
+            .callable_reference_owners
+            .values()
+            .map(BTreeSet::len)
+            .sum();
+        report.item_reference_edges = report
+            .item_reference_owners
+            .values()
+            .map(BTreeSet::len)
+            .sum();
         report.referenced_callables = report.referenced_callable_ids.len();
         report.referenced_items = report.referenced_item_ids.len();
     }
@@ -980,6 +997,7 @@ mod rust_analyzer {
         target: &CallableId,
         results: Vec<ra_ap_ide::ReferenceSearchResult>,
         report: &mut SemanticUsageReport,
+        hints: &mut SemanticReductionHints,
     ) {
         for result in results {
             for (file_id, references) in result.references {
@@ -991,11 +1009,13 @@ mod rust_analyzer {
                     match index.owner_at_vfs_offset(vfs_path, range.start()) {
                         Some(SemanticOwnerId::Callable(owner)) if owner == *target => {}
                         Some(owner) => {
+                            let owner_for_hint = owner.clone();
                             report
                                 .callable_reference_owners
                                 .entry(target.clone())
                                 .or_default()
                                 .insert(owner);
+                            hints.add_callable_edge(owner_for_hint, target.clone());
                             report.referenced_callable_ids.insert(target.clone());
                         }
                         None => {
@@ -1020,6 +1040,7 @@ mod rust_analyzer {
         target: &ItemId,
         results: Vec<ra_ap_ide::ReferenceSearchResult>,
         report: &mut SemanticUsageReport,
+        hints: &mut SemanticReductionHints,
     ) {
         for result in results {
             for (file_id, references) in result.references {
@@ -1031,11 +1052,13 @@ mod rust_analyzer {
                     match index.owner_at_vfs_offset(vfs_path, range.start()) {
                         Some(SemanticOwnerId::Item(owner)) if owner == *target => {}
                         Some(owner) => {
+                            let owner_for_hint = owner.clone();
                             report
                                 .item_reference_owners
                                 .entry(target.clone())
                                 .or_default()
                                 .insert(owner);
+                            hints.add_item_edge(owner_for_hint, target.clone());
                             report.referenced_item_ids.insert(target.clone());
                         }
                         None => {
