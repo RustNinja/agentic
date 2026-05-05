@@ -2004,6 +2004,241 @@ fn reports_facade_reexported_boxed_io_alias_without_dead_siblings() {
 }
 
 #[test]
+fn prunes_facade_const_alias_dead_siblings() {
+    let workspace = temp_path("rule-facade-const-alias-workspace");
+    let output = temp_path("rule-facade-const-alias-output");
+    let target_dir = temp_path("rule-facade-const-alias-target");
+    write_facade_const_alias_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("facade const alias rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("facade_const_alias_rule/src/lib.rs"));
+    assert!(lib.contains("LIVE_LIMIT as LiveLimit"), "{lib}");
+    assert!(lib.contains("pub const LIVE_LIMIT"), "{lib}");
+    assert!(!lib.contains("DEAD_LIMIT"), "{lib}");
+    assert!(!lib.contains("DeadLimit"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn prunes_facade_function_alias_dead_siblings() {
+    let workspace = temp_path("rule-facade-function-alias-workspace");
+    let output = temp_path("rule-facade-function-alias-output");
+    let target_dir = temp_path("rule-facade-function-alias-target");
+    write_facade_function_alias_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("facade function alias rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("facade_function_alias_rule/src/lib.rs"));
+    assert!(lib.contains("live_value as public_live"), "{lib}");
+    assert!(lib.contains("pub fn live_value"), "{lib}");
+    assert!(!lib.contains("dead_value"), "{lib}");
+    assert!(!lib.contains("public_dead"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_result_alias_error_and_payload_surfaces() {
+    let workspace = temp_path("rule-result-alias-surface-workspace");
+    let output = temp_path("rule-result-alias-surface-output");
+    let target_dir = temp_path("rule-result-alias-surface-target");
+    write_result_alias_surface_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("result alias surface rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("result_alias_surface_rule/src/lib.rs"));
+    assert!(lib.contains("pub type AppResult<T>"), "{lib}");
+    assert!(lib.contains("pub enum AppError"), "{lib}");
+    assert!(lib.contains("pub struct StartResponse"), "{lib}");
+    assert!(!lib.contains("DeadError"), "{lib}");
+    assert!(!lib.contains("DeadResponse"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_arc_object_handle_inside_returned_record() {
+    let workspace = temp_path("rule-arc-handle-record-workspace");
+    let output = temp_path("rule-arc-handle-record-output");
+    let target_dir = temp_path("rule-arc-handle-record-target");
+    write_arc_handle_record_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("arc handle record rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("arc_handle_record_rule/src/lib.rs"));
+    assert!(lib.contains("pub struct PairHostStartResult"), "{lib}");
+    assert!(lib.contains("Arc<PairHostHandle>"), "{lib}");
+    assert!(lib.contains("pub struct PairHostHandle"), "{lib}");
+    assert!(lib.contains("pub struct PairHostInfo"), "{lib}");
+    assert!(!lib.contains("DeadPairHostHandle"), "{lib}");
+    assert!(!lib.contains("DeadPairHostStartResult"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_nested_option_vec_dto_surfaces_without_dead_siblings() {
+    let workspace = temp_path("rule-nested-option-vec-dto-workspace");
+    let output = temp_path("rule-nested-option-vec-dto-output");
+    let target_dir = temp_path("rule-nested-option-vec-dto-target");
+    write_nested_option_vec_dto_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("nested option vec dto rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("nested_option_vec_dto_rule/src/lib.rs"));
+    assert!(lib.contains("Option<Vec<AppDynamicToolSpec>>"), "{lib}");
+    assert!(lib.contains("pub struct AppDynamicToolSpec"), "{lib}");
+    assert!(lib.contains("pub struct AppStartThreadRequest"), "{lib}");
+    assert!(!lib.contains("DeadDynamicToolSpec"), "{lib}");
+    assert!(!lib.contains("DeadStartThreadRequest"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_selected_mirror_try_from_conversion_without_dead_mirrors() {
+    let workspace = temp_path("rule-mirror-try-from-workspace");
+    let output = temp_path("rule-mirror-try-from-output");
+    let target_dir = temp_path("rule-mirror-try-from-target");
+    write_mirror_try_from_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("mirror try_from rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("mirror_try_from_rule/src/lib.rs"));
+    assert!(lib.contains("impl TryFrom<AppStartThreadRequest>"), "{lib}");
+    assert!(lib.contains("pub struct ThreadStartParams"), "{lib}");
+    assert!(lib.contains("pub struct AppDynamicToolSpec"), "{lib}");
+    assert!(lib.contains("fn parse_schema"), "{lib}");
+    assert!(!lib.contains("AppResumeThreadRequest"), "{lib}");
+    assert!(!lib.contains("ThreadResumeParams"), "{lib}");
+    assert!(!lib.contains("dead_parse_schema"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn copies_selected_section_include_assets_only() {
+    let workspace = temp_path("rule-section-include-workspace");
+    let output = temp_path("rule-section-include-output");
+    let target_dir = temp_path("rule-section-include-target");
+    write_section_include_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("section include rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("section_include_rule/src/lib.rs"));
+    assert!(lib.contains("include_str!(\"guides/live.md\")"), "{lib}");
+    assert!(!lib.contains("include_str!(\"guides/dead.md\")"), "{lib}");
+    assert!(output
+        .join("section_include_rule/src/guides/live.md")
+        .exists());
+    assert!(!output
+        .join("section_include_rule/src/guides/dead.md")
+        .exists());
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_runtime_facade_singleton_without_dead_helpers() {
+    let workspace = temp_path("rule-runtime-facade-workspace");
+    let output = temp_path("rule-runtime-facade-output");
+    let target_dir = temp_path("rule-runtime-facade-target");
+    write_runtime_facade_singleton_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("runtime facade singleton rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("runtime_facade_singleton_rule/src/lib.rs"));
+    assert!(
+        lib.contains("shared_mobile_client as shared_client"),
+        "{lib}"
+    );
+    assert!(lib.contains("pub fn shared_mobile_client"), "{lib}");
+    assert!(lib.contains("OnceLock"), "{lib}");
+    assert!(!lib.contains("dead_shared_mobile_client"), "{lib}");
+    assert!(!lib.contains("dead_shared_runtime"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_map_payload_dto_surface_without_dead_snapshot_siblings() {
+    let workspace = temp_path("rule-map-payload-dto-workspace");
+    let output = temp_path("rule-map-payload-dto-output");
+    let target_dir = temp_path("rule-map-payload-dto-target");
+    write_map_payload_dto_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("map payload dto rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("map_payload_dto_rule/src/lib.rs"));
+    assert!(lib.contains("BTreeMap<String, ThreadSnapshot>"), "{lib}");
+    assert!(lib.contains("pub struct ThreadSnapshot"), "{lib}");
+    assert!(!lib.contains("DeadThreadSnapshot"), "{lib}");
+    assert!(!lib.contains("DeadAppSnapshot"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn prunes_dead_inherent_impl_methods_for_function_roots() {
+    let workspace = temp_path("rule-dead-impl-method-workspace");
+    let output = temp_path("rule-dead-impl-method-output");
+    let target_dir = temp_path("rule-dead-impl-method-target");
+    write_dead_impl_method_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("dead impl method rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("dead_impl_method_rule/src/lib.rs"));
+    assert!(lib.contains("pub fn live_score"), "{lib}");
+    assert!(lib.contains("fn private_seed"), "{lib}");
+    assert!(!lib.contains("dead_score"), "{lib}");
+    assert!(!lib.contains("dead_private_seed"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn flags_retained_source_include_macros_as_production_blockers() {
     let workspace = temp_path("rule-source-include-workspace");
     let output = temp_path("rule-source-include-output");
@@ -3859,6 +4094,418 @@ pub fn selected(_input: io_facade::Input) -> usize {
 
 pub fn dead_selected(_output: io_facade::Output) -> usize {
     99
+}
+"#,
+    );
+}
+
+fn write_facade_const_alias_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "facade_const_alias_rule",
+        r#"use opensourced::opensourced;
+
+mod constants {
+    pub const LIVE_LIMIT: u32 = 7;
+
+    pub const DEAD_LIMIT: u32 = 99;
+}
+
+mod facade {
+    pub use crate::constants::{DEAD_LIMIT as DeadLimit, LIVE_LIMIT as LiveLimit};
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    facade::LiveLimit
+}
+"#,
+    );
+}
+
+fn write_facade_function_alias_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "facade_function_alias_rule",
+        r#"use opensourced::opensourced;
+
+mod api {
+    pub fn live_value() -> u32 {
+        7
+    }
+
+    pub fn dead_value() -> u32 {
+        99
+    }
+}
+
+mod facade {
+    pub use crate::api::{dead_value as public_dead, live_value as public_live};
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    facade::public_live()
+}
+"#,
+    );
+}
+
+fn write_result_alias_surface_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "result_alias_surface_rule",
+        r#"use opensourced::opensourced;
+
+pub enum AppError {
+    Missing,
+}
+
+pub enum DeadError {
+    Dead,
+}
+
+pub type AppResult<T> = Result<T, AppError>;
+
+pub struct StartResponse {
+    pub id: String,
+}
+
+pub struct DeadResponse {
+    pub id: String,
+}
+
+#[opensourced]
+pub fn selected(id: String) -> AppResult<StartResponse> {
+    Ok(StartResponse { id })
+}
+"#,
+    );
+}
+
+fn write_arc_handle_record_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "arc_handle_record_rule",
+        r#"use opensourced::opensourced;
+use std::sync::Arc;
+
+pub struct PairHostHandle {
+    id: String,
+}
+
+impl PairHostHandle {
+    pub fn new(id: String) -> Self {
+        Self { id }
+    }
+}
+
+pub struct PairHostInfo {
+    pub label: String,
+}
+
+pub struct PairHostStartResult {
+    pub handle: Arc<PairHostHandle>,
+    pub info: PairHostInfo,
+}
+
+pub struct DeadPairHostHandle;
+
+pub struct DeadPairHostStartResult {
+    pub handle: Arc<DeadPairHostHandle>,
+}
+
+#[opensourced]
+pub fn selected(id: String) -> PairHostStartResult {
+    PairHostStartResult {
+        handle: Arc::new(PairHostHandle::new(id.clone())),
+        info: PairHostInfo { label: id },
+    }
+}
+"#,
+    );
+}
+
+fn write_nested_option_vec_dto_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "nested_option_vec_dto_rule",
+        r#"use opensourced::opensourced;
+
+pub struct AppDynamicToolSpec {
+    pub name: String,
+}
+
+pub struct DeadDynamicToolSpec {
+    pub name: String,
+}
+
+pub struct AppStartThreadRequest {
+    pub model: Option<String>,
+    pub dynamic_tools: Option<Vec<AppDynamicToolSpec>>,
+}
+
+pub struct DeadStartThreadRequest {
+    pub dynamic_tools: Option<Vec<DeadDynamicToolSpec>>,
+}
+
+#[opensourced]
+pub fn selected(name: String) -> AppStartThreadRequest {
+    AppStartThreadRequest {
+        model: None,
+        dynamic_tools: Some(vec![AppDynamicToolSpec { name }]),
+    }
+}
+"#,
+    );
+}
+
+fn write_mirror_try_from_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "mirror_try_from_rule",
+        r#"use opensourced::opensourced;
+use std::convert::{TryFrom, TryInto};
+
+pub enum RpcClientError {
+    Serialization(String),
+}
+
+pub struct AppDynamicToolSpec {
+    pub name: String,
+    pub input_schema_json: String,
+}
+
+pub struct AppStartThreadRequest {
+    pub model: Option<String>,
+    pub dynamic_tools: Option<Vec<AppDynamicToolSpec>>,
+}
+
+pub struct AppResumeThreadRequest {
+    pub thread_id: String,
+}
+
+pub mod upstream {
+    pub struct DynamicToolSpec {
+        pub name: String,
+        pub input_schema: String,
+    }
+
+    pub struct ThreadStartParams {
+        pub model: Option<String>,
+        pub dynamic_tools: Option<Vec<DynamicToolSpec>>,
+    }
+
+    pub struct ThreadResumeParams {
+        pub thread_id: String,
+    }
+}
+
+fn parse_schema(value: String) -> Result<String, RpcClientError> {
+    Ok(value)
+}
+
+fn dead_parse_schema(value: String) -> Result<String, RpcClientError> {
+    Ok(value)
+}
+
+impl TryFrom<AppStartThreadRequest> for upstream::ThreadStartParams {
+    type Error = RpcClientError;
+
+    fn try_from(value: AppStartThreadRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            model: value.model,
+            dynamic_tools: value
+                .dynamic_tools
+                .map(|tools| {
+                    tools
+                        .into_iter()
+                        .map(|spec| {
+                            Ok(upstream::DynamicToolSpec {
+                                name: spec.name,
+                                input_schema: parse_schema(spec.input_schema_json)?,
+                            })
+                        })
+                        .collect::<Result<Vec<_>, RpcClientError>>()
+                })
+                .transpose()?,
+        })
+    }
+}
+
+impl TryFrom<AppResumeThreadRequest> for upstream::ThreadResumeParams {
+    type Error = RpcClientError;
+
+    fn try_from(value: AppResumeThreadRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            thread_id: value.thread_id,
+        })
+    }
+}
+
+#[opensourced]
+pub fn selected(request: AppStartThreadRequest) -> Result<upstream::ThreadStartParams, RpcClientError> {
+    request.try_into()
+}
+"#,
+    );
+}
+
+fn write_section_include_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "section_include_rule",
+        r#"use opensourced::opensourced;
+
+const LIVE_GUIDE: &str = include_str!("guides/live.md");
+const DEAD_GUIDE: &str = include_str!("guides/dead.md");
+
+fn section_content(section: &str) -> Option<&'static str> {
+    match section {
+        "live" => Some(LIVE_GUIDE),
+        _ => None,
+    }
+}
+
+pub fn dead_section_content() -> &'static str {
+    DEAD_GUIDE
+}
+
+#[opensourced]
+pub fn selected() -> Option<&'static str> {
+    section_content("live")
+}
+"#,
+    );
+    write(
+        root.join("section_include_rule/src/guides/live.md"),
+        "live\n",
+    );
+    write(
+        root.join("section_include_rule/src/guides/dead.md"),
+        "dead\n",
+    );
+}
+
+fn write_runtime_facade_singleton_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "runtime_facade_singleton_rule",
+        r#"use opensourced::opensourced;
+use std::sync::{Arc, OnceLock};
+
+pub struct MobileClient {
+    id: u32,
+}
+
+impl MobileClient {
+    pub fn id(&self) -> u32 {
+        self.id
+    }
+}
+
+mod runtime {
+    use super::{Arc, MobileClient, OnceLock};
+
+    static CLIENT: OnceLock<Arc<MobileClient>> = OnceLock::new();
+
+    pub fn shared_mobile_client() -> Arc<MobileClient> {
+        Arc::clone(CLIENT.get_or_init(|| Arc::new(MobileClient { id: 7 })))
+    }
+
+    pub fn dead_shared_mobile_client() -> Arc<MobileClient> {
+        Arc::new(MobileClient { id: 99 })
+    }
+
+    pub fn dead_shared_runtime() -> u32 {
+        99
+    }
+}
+
+mod ffi_shared {
+    pub use crate::runtime::{
+        dead_shared_mobile_client as dead_shared_client, shared_mobile_client as shared_client,
+    };
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    ffi_shared::shared_client().id()
+}
+"#,
+    );
+}
+
+fn write_map_payload_dto_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "map_payload_dto_rule",
+        r#"use opensourced::opensourced;
+use std::collections::BTreeMap;
+
+pub struct ThreadSnapshot {
+    pub id: String,
+}
+
+pub struct DeadThreadSnapshot {
+    pub id: String,
+}
+
+pub struct AppSnapshot {
+    pub threads: BTreeMap<String, ThreadSnapshot>,
+}
+
+pub struct DeadAppSnapshot {
+    pub threads: BTreeMap<String, DeadThreadSnapshot>,
+}
+
+#[opensourced]
+pub fn selected(id: String) -> AppSnapshot {
+    let mut threads = BTreeMap::new();
+    threads.insert(id.clone(), ThreadSnapshot { id });
+    AppSnapshot { threads }
+}
+"#,
+    );
+}
+
+fn write_dead_impl_method_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "dead_impl_method_rule",
+        r#"use opensourced::opensourced;
+
+pub struct Store {
+    value: u32,
+}
+
+impl Store {
+    pub fn new(value: u32) -> Self {
+        Self {
+            value: Self::private_seed(value),
+        }
+    }
+
+    fn private_seed(value: u32) -> u32 {
+        value + 1
+    }
+
+    fn dead_private_seed() -> u32 {
+        99
+    }
+
+    pub fn live_score(&self) -> u32 {
+        self.value
+    }
+
+    pub fn dead_score(&self) -> u32 {
+        Self::dead_private_seed()
+    }
+}
+
+#[opensourced]
+pub fn selected(value: u32) -> u32 {
+    Store::new(value).live_score()
 }
 "#,
     );

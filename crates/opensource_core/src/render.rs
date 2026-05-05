@@ -8981,6 +8981,51 @@ fn reachable_module_import_scope_mentions_unqualified_ident(
         return true;
     }
 
+    if project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+        .is_some_and(|source| {
+            inline_child_modules_import_scope_mentions_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &source.syntax.items,
+                ident,
+                None,
+            )
+        })
+    {
+        return true;
+    }
+
+    if project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .filter(|source| source.module_path.len() == module_path.len() + 1)
+        .filter(|source| path_has_prefix(&source.module_path, module_path))
+        .filter(|source| {
+            module_should_render(project, reduced, render_plan, package, &source.module_path)
+        })
+        .any(|source| {
+            child_module_import_scope_mentions_parent_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                source.module_path.as_slice(),
+                &source.syntax.items,
+                ident,
+                None,
+            )
+        })
+    {
+        return true;
+    }
+
     child_modules_with_super_glob_import(project, reduced, render_plan, package, module_path)
         .into_iter()
         .any(|child_path| {

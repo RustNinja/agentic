@@ -574,6 +574,16 @@ module facade. The rule database now has a generic boxed I/O alias case: a live
 surface, while sibling `Write` aliases and imports are pruned. This keeps broad
 facades from turning one live stream alias into every adjacent stream type.
 
+The next batched rule pass raised the executable set to 92 cases in one fast
+iteration. It added generic coverage for facade const/function aliases, result
+aliases, returned `Arc` object handle records, nested DTO collections, map DTO
+surfaces, mirror `TryFrom` request conversions, selected section
+`include_str!` assets, runtime singleton facades, and dead inherent impl method
+pruning. That batch also exposed a renderer bug: parent imports used only by
+retained child modules through `super::{...}` were pruned. Import-scope
+liveness now checks retained inline and file-backed child modules before
+dropping parent imports.
+
 The fixture also now includes a private FFI barrel shaped like Litter's mobile
 client modules: one selected app-store subscription module is reexported beside
 dead reconnect/alleycat siblings. The expected behavior is strict barrel

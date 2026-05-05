@@ -116,6 +116,17 @@ file.
 | `dyn.auto_trait.cast_keepalive.001` | covered | Explicit casts to `Arc<dyn Send + Sync>` retain the concrete source type while reporting the type-erased surface as a hazard |
 | `dyn.bare_alias.once_lock_arc.001` | covered | Bare `dyn Fn` type aliases hidden behind `Arc<Alias>` and `OnceLock` still report dynamic-dispatch hazards |
 | `dyn.boxed_io_alias.facade.001` | covered | Public module facades reexporting boxed `dyn Read`/`dyn Write` aliases keep the live alias and import, report the trait-object surface, and prune dead sibling aliases/imports |
+| `import.facade_const_alias.001` | covered | Local facade const aliases keep only referenced constants and prune dead alias siblings |
+| `import.facade_function_alias.001` | covered | Local facade function aliases keep only the called function and prune dead function aliases |
+| `import.child_super_parent_import.001` | covered | Parent imports stay live when retained child modules explicitly import them through `super::{...}` and use those names |
+| `static.runtime_facade_singleton.001` | covered | Runtime singleton helpers reexported through FFI-style facades keep parent imports needed by child `super` imports and prune dead singleton helpers |
+| `include.str.section_selector.001` | covered | Section-selector helpers copy only retained `include_str!` assets and omit dead sibling files |
+| `type.result_alias_surface.001` | covered | Public result aliases retain their error and payload surfaces while pruning dead sibling aliases and response records |
+| `type.arc_handle_record_surface.001` | covered | Returned records containing `Arc<Handle>` retain the object handle and sidecar info DTO without keeping dead handle records |
+| `type.option_vec_dto_surface.001` | covered | Nested `Option<Vec<Dto>>` fields retain the DTO surface and prune dead sibling DTO/request types |
+| `type.map_payload_dto_surface.001` | covered | Map payload fields like `BTreeMap<String, Dto>` retain value DTOs and prune dead snapshot siblings |
+| `trait.conversion.mirror_try_from_request.001` | covered | Mirror DTO `TryFrom` conversions retain only the selected request/params/helper conversion path and prune dead mirror request families |
+| `impl.dead_inherent_method.function_root.001` | covered | Function roots keep only called inherent impl methods and private helpers while pruning unused public/private methods on the same type |
 | `dyn.boundary.direct_inputs.001` | covered | Selected `&dyn Trait` and `fn(...)` callback inputs stay as feedback-dischargeable API boundary warnings |
 | `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
 | `include.source.inline_fallback_module.001` | covered | Fallback-retained inline modules run the full syntactic hazard scan, so plain source includes are reported even when the module was retained by path mention |
