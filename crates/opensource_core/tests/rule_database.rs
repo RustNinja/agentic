@@ -110,6 +110,45 @@ fn retains_renamed_dependency_barrel_reexport_targets() {
 }
 
 #[test]
+fn retains_multi_hop_dependency_barrel_reexports_without_dead_support_code() {
+    let workspace = temp_path("rule-multi-hop-dependency-barrel-workspace");
+    let output = temp_path("rule-multi-hop-dependency-barrel-output");
+    let target_dir = temp_path("rule-multi-hop-dependency-barrel-target");
+    write_multi_hop_dependency_barrel_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("multi-hop dependency barrel rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("multi_hop_barrel_app/src/lib.rs"));
+    assert!(app.contains("LiveRecord as Record"), "{app}");
+    assert!(app.contains("LiveMode as Mode"), "{app}");
+    assert!(app.contains("score"), "{app}");
+    assert!(!app.contains("DeadRecord"), "{app}");
+    assert!(!app.contains("dead_score"), "{app}");
+    assert!(!app.contains("dead_leaf_value"), "{app}");
+
+    let support = read(output.join("barrel_support/src/lib.rs"));
+    assert!(support.contains("LeafRecord as LiveRecord"), "{support}");
+    assert!(support.contains("LeafMode as LiveMode"), "{support}");
+    assert!(support.contains("pub fn score"), "{support}");
+    assert!(!support.contains("DeadLeaf"), "{support}");
+    assert!(!support.contains("dead_score"), "{support}");
+    assert!(!support.contains("dead_support_root"), "{support}");
+    assert!(!support.contains("dead_leaf_value"), "{support}");
+
+    let leaf = read(output.join("barrel_leaf/src/lib.rs"));
+    assert!(leaf.contains("pub struct LeafRecord"), "{leaf}");
+    assert!(leaf.contains("pub enum LeafMode"), "{leaf}");
+    assert!(!leaf.contains("pub struct DeadLeaf"), "{leaf}");
+    assert!(!leaf.contains("pub fn dead_leaf_value"), "{leaf}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
 fn prunes_module_scoped_imports_used_only_by_dead_items() {
     let workspace = temp_path("rule-module-import-liveness-workspace");
     let output = temp_path("rule-module-import-liveness-output");
@@ -2233,6 +2272,129 @@ impl SharedMode {
 pub struct DeadRecord;
 
 pub fn dead_shared() -> u32 {
+    99
+}
+"#,
+    );
+}
+
+fn write_multi_hop_dependency_barrel_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["multi_hop_barrel_app", "barrel_support", "barrel_leaf"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("multi_hop_barrel_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "multi_hop_barrel_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+barrel_support = {{ path = "../barrel_support" }}
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("multi_hop_barrel_app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[allow(unused_imports)]
+mod local_facade {
+    pub use barrel_support::prelude::{
+        dead_leaf_value as dead_leaf_value_alias, dead_score as dead_support_score,
+        DeadRecord, LiveMode as Mode, LiveRecord as Record, score,
+    };
+}
+
+#[opensourced]
+pub fn selected(value: u32) -> u32 {
+    let record = local_facade::Record { value };
+    let mode = local_facade::Mode::Fast(record.value);
+    local_facade::score(record, mode)
+}
+
+pub fn dead_selected() -> u32 {
+    local_facade::dead_support_score() + local_facade::dead_leaf_value_alias()
+}
+"#,
+    );
+    write(
+        root.join("barrel_support/Cargo.toml"),
+        r#"[package]
+name = "barrel_support"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+barrel_leaf = { path = "../barrel_leaf" }
+"#,
+    );
+    write(
+        root.join("barrel_support/src/lib.rs"),
+        r#"pub mod prelude {
+    pub use crate::helpers::{dead_score, score};
+    pub use barrel_leaf::{
+        dead_leaf_value, DeadLeaf as DeadRecord, LeafMode as LiveMode, LeafRecord as LiveRecord,
+    };
+}
+
+pub mod helpers {
+    use barrel_leaf::{dead_leaf_value, LeafMode, LeafRecord};
+
+    pub fn score(record: LeafRecord, mode: LeafMode) -> u32 {
+        record.value + mode.score()
+    }
+
+    pub fn dead_score() -> u32 {
+        dead_leaf_value()
+    }
+}
+
+pub fn dead_support_root() -> u32 {
+    helpers::dead_score()
+}
+"#,
+    );
+    write(
+        root.join("barrel_leaf/Cargo.toml"),
+        r#"[package]
+name = "barrel_leaf"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("barrel_leaf/src/lib.rs"),
+        r#"#[derive(Clone, Copy)]
+pub struct LeafRecord {
+    pub value: u32,
+}
+
+#[derive(Clone, Copy)]
+pub enum LeafMode {
+    Fast(u32),
+    Slow,
+}
+
+impl LeafMode {
+    pub fn score(&self) -> u32 {
+        match self {
+            LeafMode::Fast(value) => *value,
+            LeafMode::Slow => 1,
+        }
+    }
+}
+
+pub struct DeadLeaf;
+
+pub fn dead_leaf_value() -> u32 {
     99
 }
 "#,

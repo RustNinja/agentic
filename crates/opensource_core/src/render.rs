@@ -11649,11 +11649,33 @@ fn resolve_reexported_use_path_inner(
 }
 
 fn find_use_function(project: &Project, package: &str, path: &[String]) -> Option<CallableId> {
-    find_use_function_direct(project, package, path).or_else(|| {
-        let name = path.last()?;
-        let module_path = path[..path.len() - 1].to_vec();
-        find_glob_reexport_function(project, package, &module_path, name, &mut BTreeSet::new())
-    })
+    find_use_function_inner(project, package, path, &mut BTreeSet::new())
+}
+
+fn find_use_function_inner(
+    project: &Project,
+    package: &str,
+    path: &[String],
+    visited: &mut BTreeSet<(String, Vec<String>)>,
+) -> Option<CallableId> {
+    if path.is_empty() || !visited.insert((package.to_string(), path.to_vec())) {
+        return None;
+    }
+    if let Some(callable) = find_use_function_direct(project, package, path) {
+        return Some(callable);
+    }
+
+    let name = path.last()?;
+    let module_path = path[..path.len() - 1].to_vec();
+    if let Some((alias_package, alias_path)) = resolve_reexported_use_path(project, package, path) {
+        if let Some(callable) =
+            find_use_function_inner(project, &alias_package, &alias_path, visited)
+        {
+            return Some(callable);
+        }
+    }
+
+    find_glob_reexport_function(project, package, &module_path, name, &mut BTreeSet::new())
 }
 
 fn find_use_function_direct(

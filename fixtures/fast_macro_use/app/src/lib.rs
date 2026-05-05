@@ -206,6 +206,58 @@ mod macro_support {
     pub(crate) use unused_bridge;
 }
 
+#[allow(dead_code, unused_imports)]
+mod request_facade {
+    use super::{ClientError, SharedAlias, WireDto};
+
+    pub enum RequestParams {
+        Start { dto: WireDto },
+        Dead { value: SharedAlias },
+    }
+
+    pub enum RequestResult {
+        Accepted { score: SharedAlias },
+        Dead,
+    }
+
+    pub fn next_request_id() -> SharedAlias {
+        41
+    }
+
+    pub fn dead_request_id() -> SharedAlias {
+        99
+    }
+
+    #[allow(unreachable_patterns)]
+    pub fn send_request(
+        request_id: SharedAlias,
+        params: RequestParams,
+    ) -> Result<RequestResult, ClientError> {
+        match params {
+            RequestParams::Start { dto } => Ok(RequestResult::Accepted {
+                score: request_id + dto.score(),
+            }),
+            _ => Err(ClientError::Missing),
+        }
+    }
+
+    pub fn dead_request() -> RequestResult {
+        RequestResult::Dead
+    }
+
+    macro_rules! req {
+        ($variant:ident { $($field:ident),* $(,)? }) => {{
+            let request_id = $crate::request_facade::next_request_id();
+            $crate::request_facade::send_request(
+                request_id,
+                $crate::request_facade::RequestParams::$variant { $($field),* },
+            )
+        }};
+    }
+
+    pub(crate) use req;
+}
+
 macro_rules! declare_wire_error {
     ($name:ident) => {
         #[derive(Clone, FixtureError)]
@@ -910,6 +962,14 @@ fn macro_reexport_conversion(dto: WireDto) -> Result<RootDto, ClientError> {
     bridge_try!(RootDto::try_from(dto))
 }
 
+fn client_start_request(dto: WireDto) -> Result<SharedAlias, ClientError> {
+    let response = request_facade::req!(Start { dto })?;
+    match response {
+        request_facade::RequestResult::Accepted { score } => Ok(score),
+        request_facade::RequestResult::Dead => Err(ClientError::Missing),
+    }
+}
+
 #[allow(dead_code)]
 mod dynamic_registry {
     pub trait InternalWorker {
@@ -1051,6 +1111,13 @@ pub fn open_macro_helper_reexport(dto: WireDto) -> SharedAlias {
             ClientError::Wire { code } => code,
             ClientError::Missing => 0,
         })
+}
+
+pub fn open_request_facade(dto: WireDto) -> SharedAlias {
+    client_start_request(dto).unwrap_or_else(|error| match error {
+        ClientError::Wire { code } => code,
+        ClientError::Missing => 0,
+    })
 }
 
 pub fn open_conversion_roundtrip(event: ServerEvent) -> SharedAlias {

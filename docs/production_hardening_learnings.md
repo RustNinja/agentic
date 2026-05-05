@@ -536,6 +536,13 @@ runs. That lets strict pruning remove dead sibling aliases while preserving live
 aliases such as `SharedRecord as BarrelRecord` and the private imports that
 consume them.
 
+Multi-hop dependency barrels need the same treatment for functions, not only
+types. A live call such as `local_facade::score(...)` may resolve through an app
+barrel into a support package prelude and then into a private support helper
+module. The reducer now follows alias chains recursively for free-function calls,
+so the exact live helper remains reachable while dead helper reexports and dead
+leaf dependency items still prune away.
+
 The rule for future work: if a real-repo failure is fixed, add a generic
 fixture that proves the rule without naming that repo.
 

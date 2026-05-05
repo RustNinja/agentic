@@ -6291,28 +6291,9 @@ impl Resolver<'_> {
 
         let name = segments.last()?.clone();
         let (package, module_path) = self.resolve_value_prefix(&segments[..segments.len() - 1])?;
-        let id = CallableId::Free {
-            package: package.clone(),
-            module_path: module_path.clone(),
-            name: name.clone(),
-        };
-
-        if self.project.functions.contains_key(&id) {
-            return Some(id);
-        }
-
-        if let Some(alias) = self.resolve_alias_target(&package, &module_path, &name) {
-            let id = CallableId::Free {
-                package: alias.package,
-                module_path: alias.module_path,
-                name: alias.name,
-            };
-            if self.project.functions.contains_key(&id) {
-                return Some(id);
-            }
-        }
-
-        self.find_glob_reexport_function(&package, &module_path, &name, &mut BTreeSet::new())
+        let mut path = module_path;
+        path.push(name);
+        self.find_function(&package, &path, &mut BTreeSet::new())
     }
 
     fn resolve_associated_method(&self, path: &Path) -> Option<CallableId> {
@@ -7759,6 +7740,37 @@ impl Resolver<'_> {
         }
 
         self.find_glob_reexport_item(package, &module_path, &name, kinds, &mut BTreeSet::new())
+    }
+
+    fn find_function(
+        &self,
+        package: &str,
+        path: &[String],
+        visited: &mut BTreeSet<(String, Vec<String>)>,
+    ) -> Option<CallableId> {
+        if path.is_empty() || !visited.insert((package.to_string(), path.to_vec())) {
+            return None;
+        }
+
+        let name = path.last()?.clone();
+        let module_path = path[..path.len() - 1].to_vec();
+        let id = CallableId::Free {
+            package: package.to_string(),
+            module_path: module_path.clone(),
+            name: name.clone(),
+        };
+        if self.project.functions.contains_key(&id) {
+            return Some(id);
+        }
+
+        if let Some(alias) = self.resolve_alias_target(package, &module_path, &name) {
+            if let Some(callable) = self.find_function(&alias.package, &alias.full_path(), visited)
+            {
+                return Some(callable);
+            }
+        }
+
+        self.find_glob_reexport_function(package, &module_path, &name, &mut BTreeSet::new())
     }
 
     fn find_item_in_module(
