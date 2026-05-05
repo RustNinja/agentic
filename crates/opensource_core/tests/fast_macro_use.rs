@@ -406,6 +406,33 @@ fn slices_fast_fixture_from_multiple_root_angles() {
             ],
         },
         SliceAngle {
+            label: "credential-provider-root",
+            roots: &["open_credential_provider"],
+            present: &[
+                "pub fn open_credential_provider",
+                "pub struct CredentialController",
+                "pub trait CredentialProvider",
+                "fn load_secret",
+                "Mutex<Option<Arc<dyn CredentialProvider",
+                "Mutex<Vec<String>>",
+                "pub fn set_provider",
+                "Box<dyn CredentialProvider",
+                "Arc::from(provider)",
+                "pub fn provider_status",
+                "fixture_constructor",
+            ],
+            absent: &[
+                "UnusedCredentialProvider",
+                "dead_rotate_provider",
+                "pub fn open_registry_bridge",
+                "pub struct CallbackRegistry",
+                "pub trait ReconnectCallback",
+                "pub struct RemotePathObject",
+                "pub fn open_macro_use_entry",
+                "include_str!(\"guidelines/core.md\")",
+            ],
+        },
+        SliceAngle {
             label: "registry-bridge-root",
             roots: &["open_registry_bridge"],
             present: &[

@@ -874,6 +874,64 @@ impl CallbackRegistry {
     }
 }
 
+#[fixture_export(callback_interface)]
+pub trait CredentialProvider {
+    fn load_secret(&self, host: String) -> Option<String>;
+}
+
+#[fixture_export(callback_interface)]
+pub trait UnusedCredentialProvider {
+    fn load_unused(&self) -> String;
+}
+
+#[derive(FixtureObject)]
+pub struct CredentialController {
+    provider: Mutex<Option<Arc<dyn CredentialProvider + Send + Sync>>>,
+    attempts: Mutex<Vec<String>>,
+}
+
+#[fixture_export]
+impl CredentialController {
+    #[fixture_constructor]
+    pub fn new() -> Arc<Self> {
+        Arc::new(Self {
+            provider: Mutex::new(None),
+            attempts: Mutex::new(Vec::new()),
+        })
+    }
+
+    pub fn set_provider(&self, provider: Box<dyn CredentialProvider + Send + Sync>) {
+        let provider: Arc<dyn CredentialProvider + Send + Sync> = Arc::from(provider);
+        *self.provider.lock().expect("fixture mutex should lock") = Some(provider);
+    }
+
+    pub fn provider_status(&self, host: String) -> SharedAlias {
+        self.attempts
+            .lock()
+            .expect("fixture mutex should lock")
+            .push(host.clone());
+        let guard = self.provider.lock().expect("fixture mutex should lock");
+        guard
+            .as_ref()
+            .and_then(|provider| provider.load_secret(host))
+            .map(|secret| secret.len() as SharedAlias)
+            .unwrap_or(0)
+    }
+
+    pub fn dead_rotate_provider(&self) -> SharedAlias {
+        99
+    }
+}
+
+pub fn open_credential_provider(
+    provider: Box<dyn CredentialProvider + Send + Sync>,
+    host: String,
+) -> SharedAlias {
+    let controller = CredentialController::new();
+    controller.set_provider(provider);
+    controller.provider_status(host)
+}
+
 pub type BoxDecisionFuture = Pin<Box<dyn Future<Output = bool> + Send>>;
 pub type DecisionCallback = Arc<dyn Fn(&str) -> BoxDecisionFuture + Send + Sync>;
 

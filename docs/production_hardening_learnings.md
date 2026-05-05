@@ -560,6 +560,14 @@ macro arguments are now visited as normal Rust expressions, which keeps
 dependencies such as `self.dto.score()` inside retained helper macros without
 requiring project-specific macro knowledge.
 
+For UniFFI-style objects, the selected root matters. Selecting the object type
+means every retained exported method may be part of the public API surface; a
+narrow function root that constructs the object and calls only selected methods
+should prune unused exported sibling methods. The fast fixture now includes a
+callback-provider setter flow that converts `Box<dyn Trait>` into stored
+`Arc<dyn Trait>` and verifies the unused provider method path stays out of that
+narrow slice.
+
 The fixture also now includes a private FFI barrel shaped like Litter's mobile
 client modules: one selected app-store subscription module is reexported beside
 dead reconnect/alleycat siblings. The expected behavior is strict barrel
