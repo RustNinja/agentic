@@ -115,6 +115,7 @@ file.
 | `dyn.callback.nested_store_trait.001` | covered | Nested callback stores such as `Arc<RwLock<Option<Arc<dyn Trait + Send + Sync>>>>` are hard dynamic-dispatch hazards and keep only the live callback trait |
 | `dyn.auto_trait.cast_keepalive.001` | covered | Explicit casts to `Arc<dyn Send + Sync>` retain the concrete source type while reporting the type-erased surface as a hazard |
 | `dyn.bare_alias.once_lock_arc.001` | covered | Bare `dyn Fn` type aliases hidden behind `Arc<Alias>` and `OnceLock` still report dynamic-dispatch hazards |
+| `dyn.boxed_io_alias.facade.001` | covered | Public module facades reexporting boxed `dyn Read`/`dyn Write` aliases keep the live alias and import, report the trait-object surface, and prune dead sibling aliases/imports |
 | `dyn.boundary.direct_inputs.001` | covered | Selected `&dyn Trait` and `fn(...)` callback inputs stay as feedback-dischargeable API boundary warnings |
 | `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
 | `include.source.inline_fallback_module.001` | covered | Fallback-retained inline modules run the full syntactic hazard scan, so plain source includes are reported even when the module was retained by path mention |

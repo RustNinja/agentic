@@ -1969,6 +1969,41 @@ fn reports_bare_dyn_alias_inside_once_lock_arc_as_dynamic_hazard() {
 }
 
 #[test]
+fn reports_facade_reexported_boxed_io_alias_without_dead_siblings() {
+    let workspace = temp_path("rule-boxed-io-alias-facade-workspace");
+    let output = temp_path("rule-boxed-io-alias-facade-output");
+    let target_dir = temp_path("rule-boxed-io-alias-facade-target");
+    write_boxed_io_alias_facade_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("boxed io alias facade rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "trait_object_surfaces"
+            && hazard
+                .details
+                .iter()
+                .any(|detail| detail.subject.contains("dyn Read"))
+    }));
+    let lib = read(output.join("boxed_io_alias_facade_rule/src/lib.rs"));
+    assert!(lib.contains("pub use types::Input"), "{lib}");
+    assert!(
+        lib.contains("pub type Input = Box<dyn Read + Send>"),
+        "{lib}"
+    );
+    assert!(lib.contains("use std::io::Read"), "{lib}");
+    assert!(!lib.contains("Output"), "{lib}");
+    assert!(!lib.contains("Write"), "{lib}");
+    assert!(!lib.contains("DeadAlias"), "{lib}");
+    assert!(!lib.contains("dead_selected"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn flags_retained_source_include_macros_as_production_blockers() {
     let workspace = temp_path("rule-source-include-workspace");
     let output = temp_path("rule-source-include-output");
@@ -3792,6 +3827,38 @@ pub type DeadObserver = dyn Fn() + Send + Sync + 'static;
 #[opensourced]
 pub fn selected(observer: Arc<Observer>) -> bool {
     OBSERVER.set(observer).is_ok()
+}
+"#,
+    );
+}
+
+fn write_boxed_io_alias_facade_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "boxed_io_alias_facade_rule",
+        r#"use opensourced::opensourced;
+
+mod io_facade {
+    pub mod types {
+        use std::io::{Read, Write};
+
+        pub type Input = Box<dyn Read + Send>;
+
+        pub type Output = Box<dyn Write + Send>;
+
+        pub type DeadAlias = Output;
+    }
+
+    pub use types::{DeadAlias, Input, Output};
+}
+
+#[opensourced]
+pub fn selected(_input: io_facade::Input) -> usize {
+    0
+}
+
+pub fn dead_selected(_output: io_facade::Output) -> usize {
+    99
 }
 "#,
     );

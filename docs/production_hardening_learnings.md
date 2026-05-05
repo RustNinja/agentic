@@ -568,6 +568,12 @@ callback-provider setter flow that converts `Box<dyn Trait>` into stored
 `Arc<dyn Trait>` and verifies the unused provider method path stays out of that
 narrow slice.
 
+Litter's SSH module also exposes boxed I/O trait-object aliases through a
+module facade. The rule database now has a generic boxed I/O alias case: a live
+`Box<dyn Read + Send>` alias reexport is retained and reported as a dynamic
+surface, while sibling `Write` aliases and imports are pruned. This keeps broad
+facades from turning one live stream alias into every adjacent stream type.
+
 The fixture also now includes a private FFI barrel shaped like Litter's mobile
 client modules: one selected app-store subscription module is reexported beside
 dead reconnect/alleycat siblings. The expected behavior is strict barrel
