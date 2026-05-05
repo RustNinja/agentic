@@ -84,20 +84,26 @@ small fixtures, but it was too expensive for pinned Litter runs.
 Retained macro-bearing items must carry their macro contract:
 
 - keep retained custom derives and custom attributes verbatim;
-- retain source-mentioned local proc-macro crates whole because their
-  compile-time implementation is part of the selected code path;
+- retain only the exported proc-macro derives, attributes, and function-like
+  macros referenced by reachable rendered surfaces;
+- keep local helper library crates used by retained proc-macro exports as
+  pruned `support/` packages instead of promoting them into the root slice;
 - promote helper paths inside retained helper attributes into the graph;
 - keep macro definitions when retained macro invocations need them;
 - retain item macro invocations when their generated identifiers feed reachable
   code;
+- treat proc-macro attributes on rendered module boundaries and inline impl
+  blocks as part of the macro contract when nested reachable code or reachable
+  methods force that surface to render;
 - treat retained inline modules that contain macro-generated source as rendered
   module targets when reachable code imports the module by name;
 - still require compiler feedback until expanded items can be mapped into the
   retained source graph.
 
-This intentionally favors correctness over minimality. A missing macro helper
-usually breaks the slice; an extra proc-macro crate is acceptable production
-overhead until expanded-source mapping is reliable.
+This intentionally favors correctness while tightening minimality. A missing
+macro helper usually breaks the slice, but dead exported proc macros and dead
+helper crates are now treated as removable when no reachable rendered surface
+mentions them.
 
 ## Manifest And Support Package Lessons
 

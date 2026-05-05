@@ -279,13 +279,14 @@ pub fn reduce_with_extra_roots_and_semantics(
         &mut reachable_items,
         &mut evidence,
     );
-    let proc_macro_dependency_packages =
-        add_local_proc_macro_dependency_packages(project, &mut packages);
-    retain_entire_packages(
+    let proc_macro_dependency_packages = local_proc_macro_dependency_packages(project, &packages);
+    retain_proc_macro_exports(
         project,
         &proc_macro_dependency_packages,
+        &packages,
         &mut reachable,
         &mut reachable_items,
+        &mut evidence,
     );
     let build_dependency_packages = add_local_build_dependency_packages(project, &mut packages);
     retain_entire_packages(
@@ -1919,6 +1920,9 @@ fn add_source_mentioned_dependency_packages(
             let Some(package) = project.workspace.packages.get(&package_name) else {
                 continue;
             };
+            if package_is_proc_macro(package) {
+                continue;
+            }
             let idents =
                 reachable_package_idents(project, reachable, reachable_items, &package_name);
             let path_prefixes = reachable_package_dependency_path_prefixes(
@@ -2004,29 +2008,592 @@ fn add_local_library_support_dependency_packages(
     retained_library_dependencies
 }
 
-fn add_local_proc_macro_dependency_packages(
+fn local_proc_macro_dependency_packages(
     project: &Project,
-    packages: &mut BTreeSet<String>,
+    packages: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut retained_proc_macro_dependencies = BTreeSet::new();
-    let mut changed = true;
-    while changed {
-        changed = false;
-        for package_name in packages.clone() {
-            let Some(package) = project.workspace.packages.get(&package_name) else {
-                continue;
-            };
-            if !package_is_proc_macro(package) {
-                continue;
-            }
-
-            for package in package_closure(project, &package_name) {
-                retained_proc_macro_dependencies.insert(package.clone());
-                changed |= packages.insert(package);
-            }
+    for package_name in packages.clone() {
+        let Some(package) = project.workspace.packages.get(&package_name) else {
+            continue;
+        };
+        if package_is_proc_macro(package) {
+            retained_proc_macro_dependencies.insert(package_name);
         }
     }
     retained_proc_macro_dependencies
+}
+
+fn retain_proc_macro_exports(
+    project: &Project,
+    proc_macro_packages: &BTreeSet<String>,
+    candidate_packages: &BTreeSet<String>,
+    reachable: &mut BTreeSet<CallableId>,
+    reachable_items: &mut BTreeSet<ItemId>,
+    evidence: &mut ReductionEvidence,
+) {
+    if proc_macro_packages.is_empty() {
+        return;
+    }
+
+    let mut callable_queue = VecDeque::new();
+    let mut item_queue = VecDeque::new();
+    for callable in project.functions.keys() {
+        let Some(record) = project.functions.get(callable) else {
+            continue;
+        };
+        if !proc_macro_packages.contains(callable.package()) {
+            continue;
+        }
+        if !proc_macro_export_names(&record.item).iter().any(|name| {
+            proc_macro_export_is_referenced(
+                project,
+                candidate_packages,
+                reachable,
+                reachable_items,
+                &record.package,
+                name,
+            )
+        }) {
+            continue;
+        }
+        if !reachable.contains(callable) {
+            callable_queue.push_back(callable.clone());
+        }
+    }
+
+    while !callable_queue.is_empty() || !item_queue.is_empty() {
+        while let Some(callable) = callable_queue.pop_front() {
+            if !candidate_packages.contains(callable.package())
+                || !reachable.insert(callable.clone())
+            {
+                continue;
+            }
+            let dependencies = callable_dependencies(project, &callable);
+            evidence.add(&dependencies.evidence);
+            for dependency in dependencies.callables {
+                if candidate_packages.contains(dependency.package())
+                    && !reachable.contains(&dependency)
+                {
+                    callable_queue.push_back(dependency);
+                }
+            }
+            for item in dependencies.items {
+                if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
+                    item_queue.push_back(item);
+                }
+            }
+        }
+
+        while let Some(item) = item_queue.pop_front() {
+            if !candidate_packages.contains(item.package()) || !reachable_items.insert(item.clone())
+            {
+                continue;
+            }
+            let dependencies = item_dependencies(project, &item);
+            evidence.add(&dependencies.evidence);
+            for dependency in dependencies.callables {
+                if candidate_packages.contains(dependency.package())
+                    && !reachable.contains(&dependency)
+                {
+                    callable_queue.push_back(dependency);
+                }
+            }
+            for item in dependencies.items {
+                if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
+                    item_queue.push_back(item);
+                }
+            }
+        }
+    }
+}
+
+fn proc_macro_export_names(item: &syn::ItemFn) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for attr in &item.attrs {
+        let path = attr.path();
+        if path.is_ident("proc_macro") || path.is_ident("proc_macro_attribute") {
+            names.insert(item.sig.ident.to_string());
+            continue;
+        }
+        if !path.is_ident("proc_macro_derive") {
+            continue;
+        }
+        let parser = syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated;
+        if let Ok(args) = attr.parse_args_with(parser) {
+            if let Some(name) = args.iter().find_map(|meta| match meta {
+                Meta::Path(path) => path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string()),
+                _ => None,
+            }) {
+                names.insert(name);
+            }
+        }
+    }
+    names
+}
+
+fn proc_macro_export_is_referenced(
+    project: &Project,
+    candidate_packages: &BTreeSet<String>,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    proc_macro_package: &str,
+    export_name: &str,
+) -> bool {
+    if public_reexport_idents_referenced_by_reachable_packages(
+        project,
+        reachable,
+        reachable_items,
+        proc_macro_package,
+    )
+    .contains(export_name)
+    {
+        return true;
+    }
+
+    if proc_macro_export_is_used_by_reachable_attrs(
+        project,
+        candidate_packages,
+        reachable,
+        reachable_items,
+        proc_macro_package,
+        export_name,
+    ) {
+        return true;
+    }
+
+    if proc_macro_export_is_used_by_reachable_macro_invocation(
+        project,
+        candidate_packages,
+        reachable,
+        reachable_items,
+        proc_macro_package,
+        export_name,
+    ) {
+        return true;
+    }
+
+    for callable in reachable {
+        if callable.package() == proc_macro_package {
+            continue;
+        }
+        if let Some(record) = project.functions.get(callable) {
+            if proc_macro_export_alias_is_used(
+                project,
+                &record.package,
+                &record.aliases,
+                &record.item.to_token_stream(),
+                proc_macro_package,
+                export_name,
+            ) {
+                return true;
+            }
+        }
+        if let Some(record) = project.methods.get(callable) {
+            if proc_macro_export_alias_is_used(
+                project,
+                callable.package(),
+                &record.aliases,
+                &record.item.to_token_stream(),
+                proc_macro_package,
+                export_name,
+            ) {
+                return true;
+            }
+        }
+    }
+
+    reachable_items.iter().any(|item| {
+        item.package != proc_macro_package
+            && project.items.get(item).is_some_and(|record| {
+                proc_macro_export_alias_is_used(
+                    project,
+                    &record.package,
+                    &record.aliases,
+                    &record.item.to_token_stream(),
+                    proc_macro_package,
+                    export_name,
+                )
+            })
+    })
+}
+
+fn token_paths_reference_dependency_export(
+    project: &Project,
+    caller_package: &str,
+    aliases: &HashMap<String, Vec<String>>,
+    tokens: &TokenStream,
+    dependency_package: &str,
+    export_name: &str,
+) -> bool {
+    token_path_candidates(tokens).iter().any(|segments| {
+        let (Some(first), Some(last)) = (segments.first(), segments.last()) else {
+            return false;
+        };
+        if segments.len() < 2 || last != export_name {
+            return false;
+        }
+        first_segment_targets_dependency(project, caller_package, dependency_package, first)
+            || aliases.get(first).is_some_and(|target| {
+                target.first().is_some_and(|target_first| {
+                    first_segment_targets_dependency(
+                        project,
+                        caller_package,
+                        dependency_package,
+                        target_first,
+                    )
+                })
+            })
+    })
+}
+
+fn proc_macro_export_alias_is_used(
+    project: &Project,
+    caller_package: &str,
+    aliases: &HashMap<String, Vec<String>>,
+    tokens: &TokenStream,
+    proc_macro_package: &str,
+    export_name: &str,
+) -> bool {
+    if token_paths_reference_dependency_export(
+        project,
+        caller_package,
+        aliases,
+        tokens,
+        proc_macro_package,
+        export_name,
+    ) {
+        return true;
+    }
+
+    let mut idents = BTreeSet::new();
+    collect_token_idents(tokens, &mut idents);
+    aliases.iter().any(|(alias, target)| {
+        idents.contains(alias)
+            && target.last().is_some_and(|last| last == export_name)
+            && target.first().is_some_and(|first| {
+                first_segment_targets_dependency(project, caller_package, proc_macro_package, first)
+            })
+    })
+}
+
+fn proc_macro_export_is_used_by_reachable_attrs(
+    project: &Project,
+    candidate_packages: &BTreeSet<String>,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    proc_macro_package: &str,
+    export_name: &str,
+) -> bool {
+    project
+        .files
+        .values()
+        .filter(|source| {
+            candidate_packages.contains(&source.package) && source.package != proc_macro_package
+        })
+        .any(|source| {
+            let aliases = project
+                .module_aliases
+                .get(&(source.package.clone(), source.module_path.clone()))
+                .cloned()
+                .unwrap_or_default();
+            proc_macro_export_is_used_by_reachable_attrs_in_items(
+                project,
+                reachable,
+                reachable_items,
+                &source.package,
+                &source.module_path,
+                &aliases,
+                &source.syntax.items,
+                proc_macro_package,
+                export_name,
+            )
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn proc_macro_export_is_used_by_reachable_attrs_in_items(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    package: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    items: &[Item],
+    proc_macro_package: &str,
+    export_name: &str,
+) -> bool {
+    items.iter().any(|item| {
+        let attrs = item_attrs(item);
+        let attrs_reference_export = !attrs.is_empty()
+            && item_attrs_feed_reachable_code(
+                project,
+                reachable,
+                reachable_items,
+                package,
+                module_path,
+                item,
+            )
+            && attrs.iter().any(|attr| {
+                proc_macro_export_alias_is_used(
+                    project,
+                    package,
+                    aliases,
+                    &attr.to_token_stream(),
+                    proc_macro_package,
+                    export_name,
+                )
+            });
+        if attrs_reference_export {
+            return true;
+        }
+
+        let Item::Mod(item_mod) = item else {
+            return false;
+        };
+        let Some((_, nested_items)) = &item_mod.content else {
+            return false;
+        };
+        let mut nested_module_path = module_path.to_vec();
+        nested_module_path.push(item_mod.ident.to_string());
+        let nested_aliases = project
+            .module_aliases
+            .get(&(package.to_string(), nested_module_path.clone()))
+            .unwrap_or(aliases);
+        proc_macro_export_is_used_by_reachable_attrs_in_items(
+            project,
+            reachable,
+            reachable_items,
+            package,
+            &nested_module_path,
+            nested_aliases,
+            nested_items,
+            proc_macro_package,
+            export_name,
+        )
+    })
+}
+
+fn item_attrs(item: &Item) -> &[syn::Attribute] {
+    match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        _ => &[],
+    }
+}
+
+fn item_attrs_feed_reachable_code(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    package: &str,
+    module_path: &[String],
+    item: &Item,
+) -> bool {
+    match item {
+        Item::Fn(item_fn) => reachable.contains(&CallableId::Free {
+            package: package.to_string(),
+            module_path: module_path.to_vec(),
+            name: item_fn.sig.ident.to_string(),
+        }),
+        Item::Mod(item_mod) => {
+            let mut child_path = module_path.to_vec();
+            child_path.push(item_mod.ident.to_string());
+            reachable.iter().any(|callable| match callable {
+                CallableId::Free {
+                    package: callable_package,
+                    module_path: callable_module_path,
+                    ..
+                } => {
+                    callable_package == package
+                        && path_has_prefix(callable_module_path, &child_path)
+                }
+                CallableId::Method {
+                    package: callable_package,
+                    ..
+                } => {
+                    callable_package == package
+                        && project
+                            .methods
+                            .get(callable)
+                            .is_some_and(|record| path_has_prefix(&record.module_path, &child_path))
+                }
+            }) || reachable_items.iter().any(|item| {
+                item.package == package && path_has_prefix(&item.module_path, &child_path)
+            })
+        }
+        Item::Impl(_) => reachable.iter().any(|callable| {
+            callable.package() == package
+                && project.methods.get(callable).is_some_and(|record| {
+                    record.module_path == module_path
+                        && item_impl_attrs_match_reachable_method(item, &record.item)
+                })
+        }),
+        _ => item_id(package, module_path, item)
+            .is_some_and(|item_id| reachable_items.contains(&item_id)),
+    }
+}
+
+fn item_impl_attrs_match_reachable_method(item: &Item, method: &syn::ImplItemFn) -> bool {
+    let Item::Impl(item_impl) = item else {
+        return false;
+    };
+    item_impl.items.iter().any(|impl_item| {
+        matches!(impl_item, ImplItem::Fn(impl_fn) if impl_fn.sig.ident == method.sig.ident)
+    })
+}
+
+fn item_id(package: &str, module_path: &[String], item: &Item) -> Option<ItemId> {
+    let (name, kind) = match item {
+        Item::Struct(item) => (item.ident.to_string(), ItemKind::Struct),
+        Item::Enum(item) => (item.ident.to_string(), ItemKind::Enum),
+        Item::Union(item) => (item.ident.to_string(), ItemKind::Union),
+        Item::Type(item) => (item.ident.to_string(), ItemKind::Type),
+        Item::Trait(item) => (item.ident.to_string(), ItemKind::Trait),
+        Item::Mod(item) => (item.ident.to_string(), ItemKind::Mod),
+        Item::Const(item) => (item.ident.to_string(), ItemKind::Const),
+        Item::Static(item) => (item.ident.to_string(), ItemKind::Static),
+        Item::Macro(item) => (item.ident.as_ref()?.to_string(), ItemKind::Macro),
+        _ => return None,
+    };
+
+    Some(ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name,
+        kind,
+    })
+}
+
+fn proc_macro_export_is_used_by_reachable_macro_invocation(
+    project: &Project,
+    candidate_packages: &BTreeSet<String>,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    proc_macro_package: &str,
+    export_name: &str,
+) -> bool {
+    let reachable_symbols = reachable_symbol_names_by_package(project, reachable, reachable_items);
+    project
+        .files
+        .values()
+        .filter(|source| {
+            candidate_packages.contains(&source.package) && source.package != proc_macro_package
+        })
+        .any(|source| {
+            let aliases = project
+                .module_aliases
+                .get(&(source.package.clone(), source.module_path.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let Some(symbols) = reachable_symbols.get(&source.package) else {
+                return false;
+            };
+            source.syntax.items.iter().any(|item| {
+                let Item::Macro(item_macro) = item else {
+                    return false;
+                };
+                proc_macro_item_invocation_references_export(
+                    project,
+                    &source.package,
+                    &aliases,
+                    item_macro,
+                    proc_macro_package,
+                    export_name,
+                ) && item_macro_mentions_any_symbol(item_macro, symbols)
+            })
+        })
+}
+
+fn reachable_symbol_names_by_package(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+) -> HashMap<String, BTreeSet<String>> {
+    let mut symbols: HashMap<String, BTreeSet<String>> = HashMap::new();
+    for callable in reachable {
+        symbols
+            .entry(callable.package().to_string())
+            .or_default()
+            .insert(callable_name(callable).to_string());
+    }
+    for item in reachable_items {
+        if project.items.contains_key(item) {
+            symbols
+                .entry(item.package.clone())
+                .or_default()
+                .insert(item.name.clone());
+        }
+    }
+    symbols
+}
+
+fn callable_name(callable: &CallableId) -> &str {
+    match callable {
+        CallableId::Free { name, .. } => name,
+        CallableId::Method { method, .. } => method,
+    }
+}
+
+fn proc_macro_item_invocation_references_export(
+    project: &Project,
+    caller_package: &str,
+    aliases: &HashMap<String, Vec<String>>,
+    item_macro: &ItemMacro,
+    proc_macro_package: &str,
+    export_name: &str,
+) -> bool {
+    let segments = item_macro
+        .mac
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let (Some(first), Some(last)) = (segments.first(), segments.last()) else {
+        return false;
+    };
+    if last != export_name {
+        return false;
+    }
+    if first_segment_targets_dependency(project, caller_package, proc_macro_package, first) {
+        return true;
+    }
+    aliases.get(first).is_some_and(|target| {
+        target
+            .last()
+            .is_some_and(|target_last| target_last == export_name)
+            && target.first().is_some_and(|target_first| {
+                first_segment_targets_dependency(
+                    project,
+                    caller_package,
+                    proc_macro_package,
+                    target_first,
+                )
+            })
+    })
+}
+
+fn item_macro_mentions_any_symbol(item_macro: &ItemMacro, symbols: &BTreeSet<String>) -> bool {
+    let mut idents = BTreeSet::new();
+    collect_token_idents(&item_macro.mac.tokens, &mut idents);
+    idents.iter().any(|ident| symbols.contains(ident))
 }
 
 fn manifest_build_script_path(root: &FsPath, manifest: &Value) -> Option<PathBuf> {

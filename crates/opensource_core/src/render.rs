@@ -8658,6 +8658,12 @@ fn prune_use_tree(
                     package,
                     &path.ident.to_string(),
                 )
+                && !pruned_proc_macro_helper_dependency_alias_should_remain(
+                    project,
+                    reduced,
+                    package,
+                    &path.ident.to_string(),
+                )
             {
                 return None;
             }
@@ -8809,6 +8815,13 @@ fn use_target_resolves_to_removed_symbol(
     target: &[String],
 ) -> bool {
     if pruned_local_proc_macro_dependency_target_should_remain(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        target,
+    ) || pruned_proc_macro_helper_dependency_target_should_remain(
         project,
         reduced,
         render_plan,
@@ -8967,6 +8980,13 @@ fn use_target_should_drop(
         package,
         module_path,
         target,
+    ) || pruned_proc_macro_helper_dependency_target_should_remain(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        target,
     ) {
         return false;
     }
@@ -8975,6 +8995,16 @@ fn use_target_should_drop(
         .first()
         .is_some_and(|first| use_name_is_pruned_local_dependency(project, reduced, package, first))
     {
+        if pruned_proc_macro_helper_dependency_target_should_remain(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            target,
+        ) {
+            return false;
+        }
         return !known_macro_dependency_target_should_remain(project, reduced, package, target);
     }
 
@@ -9016,7 +9046,15 @@ fn use_target_should_drop(
     if target.last().is_some_and(|leaf| {
         reduced.packages.contains(&target_package)
             && package_is_proc_macro(project, &target_package)
-            && reachable_package_mentions_ident(project, reduced, package, leaf)
+            && proc_macro_export_is_reachable(project, reduced, &target_package, leaf)
+            && rendered_attrs_mention_unqualified_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                leaf,
+            )
     }) {
         return false;
     }
@@ -9031,13 +9069,6 @@ fn use_target_should_drop(
             leaf,
         )
     });
-    if leaf_is_used_in_module
-        && reduced.packages.contains(&target_package)
-        && package_is_proc_macro(project, &target_package)
-    {
-        return false;
-    }
-
     if let Some(callable) = find_use_function(project, &target_package, &target_path) {
         if !is_public_use && !leaf_is_used_in_module {
             return true;
@@ -9179,6 +9210,16 @@ fn use_prefix_should_drop(
         .first()
         .is_some_and(|first| use_name_is_pruned_local_dependency(project, reduced, package, first))
     {
+        if pruned_proc_macro_helper_dependency_target_should_remain(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            prefix,
+        ) {
+            return false;
+        }
         return true;
     }
 
@@ -9886,13 +9927,33 @@ fn pruned_local_proc_macro_dependency_alias_should_remain(
     package: &str,
     alias: &str,
 ) -> bool {
-    let Some(package_record) = project.workspace.packages.get(package) else {
-        return false;
-    };
-    package_record.dependencies.iter().any(|dependency| {
-        dependency_name_matches(dependency, alias)
+    local_proc_macro_dependency_package_for_alias(project, package, alias).is_some()
+}
+
+fn local_proc_macro_dependency_package_for_alias(
+    project: &Project,
+    package: &str,
+    alias: &str,
+) -> Option<String> {
+    let package_record = project.workspace.packages.get(package)?;
+    package_record.dependencies.iter().find_map(|dependency| {
+        (dependency_name_matches(dependency, alias)
             && project.workspace.packages.contains_key(&dependency.package)
-            && package_is_proc_macro(project, &dependency.package)
+            && package_is_proc_macro(project, &dependency.package))
+        .then(|| dependency.package.clone())
+    })
+}
+
+fn local_dependency_package_for_alias(
+    project: &Project,
+    package: &str,
+    alias: &str,
+) -> Option<String> {
+    let package_record = project.workspace.packages.get(package)?;
+    package_record.dependencies.iter().find_map(|dependency| {
+        (dependency_name_matches(dependency, alias)
+            && project.workspace.packages.contains_key(&dependency.package))
+        .then(|| dependency.package.clone())
     })
 }
 
@@ -9907,13 +9968,14 @@ fn pruned_local_proc_macro_dependency_target_should_remain(
     let Some(first) = target.first() else {
         return false;
     };
-    if !pruned_local_proc_macro_dependency_alias_should_remain(project, package, first) {
+    let Some(target_package) =
+        local_proc_macro_dependency_package_for_alias(project, package, first)
+    else {
         return false;
-    }
+    };
     target.last().is_some_and(|leaf| {
-        reachable_package_mentions_ident(project, reduced, package, leaf)
-            || reachable_package_mentions_ident(project, reduced, package, first)
-            || rendered_attrs_mention_unqualified_ident(
+        proc_macro_export_is_reachable(project, reduced, &target_package, leaf)
+            && rendered_attrs_mention_unqualified_ident(
                 project,
                 reduced,
                 render_plan,
@@ -9922,6 +9984,90 @@ fn pruned_local_proc_macro_dependency_target_should_remain(
                 leaf,
             )
     })
+}
+
+fn pruned_proc_macro_helper_dependency_alias_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    alias: &str,
+) -> bool {
+    package_is_proc_macro(project, package)
+        && reduced.packages.contains(package)
+        && local_dependency_package_for_alias(project, package, alias)
+            .is_some_and(|dependency| !reduced.packages.contains(&dependency))
+}
+
+fn pruned_proc_macro_helper_dependency_target_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+) -> bool {
+    let Some(first) = target.first() else {
+        return false;
+    };
+    if !package_is_proc_macro(project, package) || !reduced.packages.contains(package) {
+        return false;
+    }
+    if local_dependency_package_for_alias(project, package, first)
+        .is_none_or(|dependency| reduced.packages.contains(&dependency))
+    {
+        return false;
+    }
+    target.last().is_some_and(|leaf| {
+        reachable_module_import_scope_mentions_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            leaf,
+        ) || reachable_package_mentions_ident(project, reduced, package, first)
+            || reachable_package_mentions_ident(project, reduced, package, leaf)
+    })
+}
+
+fn proc_macro_export_is_reachable(
+    project: &Project,
+    reduced: &ReducedProject,
+    proc_macro_package: &str,
+    export_name: &str,
+) -> bool {
+    project.functions.iter().any(|(callable, record)| {
+        callable.package() == proc_macro_package
+            && reduced.reachable.contains(callable)
+            && proc_macro_export_names(&record.item).contains(export_name)
+    })
+}
+
+fn proc_macro_export_names(item: &syn::ItemFn) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for attr in &item.attrs {
+        let path = attr.path();
+        if path.is_ident("proc_macro") || path.is_ident("proc_macro_attribute") {
+            names.insert(item.sig.ident.to_string());
+            continue;
+        }
+        if !path.is_ident("proc_macro_derive") {
+            continue;
+        }
+        let parser = Punctuated::<Meta, syn::Token![,]>::parse_terminated;
+        if let Ok(args) = attr.parse_args_with(parser) {
+            if let Some(name) = args.iter().find_map(|meta| match meta {
+                Meta::Path(path) => path
+                    .segments
+                    .last()
+                    .map(|segment| segment.ident.to_string()),
+                _ => None,
+            }) {
+                names.insert(name);
+            }
+        }
+    }
+    names
 }
 
 fn rendered_attrs_mention_unqualified_ident(

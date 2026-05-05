@@ -125,6 +125,10 @@ file.
 | `manifest.local_dependency_alias.local_ident_false_positive.001` | covered | Local path dependencies are not retained just because a local variable/type identifier matches the dependency alias; direct dependency retention requires a path/import prefix |
 | `macro.path_qualified_derive.001` | covered | Path-qualified derive macros such as `macro_helpers::FixtureRecord` keep the proc-macro package but do not retain unused simple `use` imports |
 | `macro.proc_attr_import_retention.001` | covered | Unqualified retained custom attributes keep the proc-macro import that brings the attribute into scope while still pruning unused derive-only imports |
+| `macro.proc_macro_export_pruning.001` | covered | Local proc-macro crates retain only exported derive/attribute/function-like proc macros referenced by reachable rendered surfaces, while unused proc-macro exports and their private helpers are pruned |
+| `macro.proc_macro_helper_support.001` | covered | Local helper library crates used by retained proc-macro exports are copied as pruned `support/` packages instead of being promoted to root workspace members, and dead proc-macro helper crates are omitted |
+| `macro.reachable_module_attr.001` | covered | Path-qualified proc-macro attributes on modules are retained when nested reachable code causes the module boundary to render |
+| `macro.inline_impl_attr.001` | covered | Proc-macro attributes on impl blocks inside inline modules remain when reachable constructors or methods require the impl surface |
 | `macro.root_item_impl_surface.001` | covered | Selected item roots with macro-bearing inherent impls keep exported constructors/methods plus their signature/body dependencies |
 | `macro.inline_root_item_impl_surface.001` | covered | Selected item roots inside inline modules keep macro-bearing impl surfaces, helper constructor/method dependencies, and the imports referenced by retained impl bodies |
 | `dyn.callback.registry_object.001` | covered | Selected object roots with stored `Arc<dyn Trait + Send + Sync>` callback fields keep the callback trait method surface and report hard dynamic-dispatch hazards |

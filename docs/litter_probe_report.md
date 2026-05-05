@@ -78,6 +78,13 @@ not slicer failures.
   package retention requires path/import evidence instead of ordinary local
   identifier matches, and the run still generated 116 files with zero preflight
   errors, zero feedback errors, zero warnings, and `production_ready=accepted`.
+- The proc-macro/support pruning pass stayed generic and also did not regress
+  the pinned batch: local proc-macro crates now retain only referenced exported
+  proc macros, live proc-macro helper crates are copied as pruned `support/`
+  packages instead of root members, dead helper crates are omitted, and retained
+  module/inline-impl proc-macro attributes are detected from reachable surfaces.
+  The pinned batch still generated 116 files with zero preflight errors, zero
+  feedback errors, zero warnings, and `production_ready=accepted`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around

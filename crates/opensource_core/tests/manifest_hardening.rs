@@ -3675,14 +3675,36 @@ fn retains_local_proc_macro_derive_and_helper_attr_dependencies() {
     .expect("reduction should succeed");
 
     let app = read(output.join("app/src/lib.rs"));
+    let root_manifest = read(output.join("Cargo.toml"));
     let app_manifest = read(output.join("app/Cargo.toml"));
+    let derive_manifest = read(output.join("derive-support/Cargo.toml"));
     let macro_source = read(output.join("derive-support/src/lib.rs"));
     assert!(app.contains("derive_support::UseHelper"));
     assert!(app.contains("default_token"));
     assert!(!app.contains("unused_helper"));
     assert!(!app.contains("DeadWire"));
     assert!(app_manifest.contains("[dependencies.derive-support]"));
+    assert!(!root_manifest.contains("\"macro-support\""));
+    assert!(!root_manifest.contains("\"unused-proc-support\""));
+    assert!(root_manifest.contains("support/macro-support"));
+    assert!(!root_manifest.contains("support/unused-proc-support"));
+    assert!(derive_manifest.contains("[dependencies.macro-support]"));
+    assert!(derive_manifest.contains("support/macro-support"));
+    assert!(!derive_manifest.contains("unused-proc-support"));
     assert!(macro_source.contains("proc_macro_derive(UseHelper"));
+    assert!(macro_source.contains("generated_method_name"));
+    assert!(macro_source.contains("macro_support"));
+    assert!(!macro_source.contains("proc_macro_derive(UnusedDerive"));
+    assert!(!macro_source.contains("proc_macro_attribute"));
+    assert!(!macro_source.contains("pub fn unused_macro"));
+    assert!(!macro_source.contains("dead_macro_helper"));
+    assert!(output.join("support/macro-support/src/lib.rs").exists());
+    assert!(output.join("support/macro-support/src/live.rs").exists());
+    assert!(!output.join("support/macro-support/src/orphan.rs").exists());
+    assert!(!output.join("support/macro-support/examples").exists());
+    assert!(!output.join("support/macro-support/tests").exists());
+    assert!(!output.join("support/macro-support/benches").exists());
+    assert!(!output.join("support/unused-proc-support").exists());
     assert!(!app.contains("#[opensourced]"));
 
     let cargo_check = Command::new("cargo")
@@ -3694,11 +3716,13 @@ fn retains_local_proc_macro_derive_and_helper_attr_dependencies() {
         .expect("cargo check should start");
     assert!(
         cargo_check.status.success(),
-        "generated proc-macro helper slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\nderive-support/src/lib.rs:\n{}",
+        "generated proc-macro helper slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nCargo.toml:\n{}\napp/Cargo.toml:\n{}\nderive-support/Cargo.toml:\n{}\napp/src/lib.rs:\n{}\nderive-support/src/lib.rs:\n{}",
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
+        root_manifest,
         app_manifest,
+        derive_manifest,
         app,
         macro_source,
     );
@@ -6823,7 +6847,7 @@ fn write_local_proc_macro_helper_fixture(root: &Path) {
     write(
         root.join("Cargo.toml"),
         r#"[workspace]
-members = ["app", "derive-support"]
+members = ["app", "derive-support", "macro-support", "unused-proc-support"]
 resolver = "2"
 "#,
     );
@@ -6880,6 +6904,10 @@ name = "derive-support"
 version = "0.1.0"
 edition = "2021"
 
+[dependencies]
+macro-support = { path = "../macro-support" }
+unused-proc-support = { path = "../unused-proc-support" }
+
 [lib]
 proc-macro = true
 "#,
@@ -6889,6 +6917,7 @@ proc-macro = true
         r#"extern crate proc_macro;
 
 use proc_macro::TokenStream;
+use macro_support::generated_method_name;
 
 #[proc_macro_derive(UseHelper, attributes(helper))]
 pub fn use_helper(input: TokenStream) -> TokenStream {
@@ -6903,9 +6932,93 @@ pub fn use_helper(input: TokenStream) -> TokenStream {
         .split('<')
         .next()
         .expect("struct name should not be empty");
-    format!("impl {name} {{ pub fn generated(&self) -> u32 {{ default_token() }} }}")
+    let method = generated_method_name();
+    format!("impl {name} {{ pub fn {method}(&self) -> u32 {{ default_token() }} }}")
         .parse()
         .expect("generated derive output should parse")
+}
+
+#[proc_macro_derive(UnusedDerive)]
+pub fn unused_derive(input: TokenStream) -> TokenStream {
+    let _ = unused_proc_support::dead_marker();
+    dead_macro_helper(input)
+}
+
+#[proc_macro_attribute]
+pub fn unused_attr(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let _ = unused_proc_support::dead_marker();
+    dead_macro_helper(item)
+}
+
+#[proc_macro]
+pub fn unused_macro(input: TokenStream) -> TokenStream {
+    let _ = unused_proc_support::dead_marker();
+    dead_macro_helper(input)
+}
+
+fn dead_macro_helper(input: TokenStream) -> TokenStream {
+    input
+}
+"#,
+    );
+    write(
+        root.join("macro-support/Cargo.toml"),
+        r#"[package]
+name = "macro-support"
+version = "0.1.0"
+edition = "2021"
+
+[dev-dependencies]
+pretty_assertions = "1"
+"#,
+    );
+    write(
+        root.join("macro-support/src/lib.rs"),
+        r#"pub mod live;
+
+pub fn generated_method_name() -> &'static str {
+    live::generated_method_name()
+}
+"#,
+    );
+    write(
+        root.join("macro-support/src/live.rs"),
+        r#"pub fn generated_method_name() -> &'static str {
+    "generated"
+}
+"#,
+    );
+    write(
+        root.join("macro-support/src/orphan.rs"),
+        r#"pub fn unused_orphan() -> &'static str {
+    "unused"
+}
+"#,
+    );
+    write(
+        root.join("macro-support/examples/unused.rs"),
+        "fn main() {}\n",
+    );
+    write(
+        root.join("macro-support/tests/unused.rs"),
+        "#[test]\nfn unused() {}\n",
+    );
+    write(
+        root.join("macro-support/benches/unused.rs"),
+        "fn main() {}\n",
+    );
+    write(
+        root.join("unused-proc-support/Cargo.toml"),
+        r#"[package]
+name = "unused-proc-support"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("unused-proc-support/src/lib.rs"),
+        r#"pub fn dead_marker() -> &'static str {
+    "dead"
 }
 "#,
     );
