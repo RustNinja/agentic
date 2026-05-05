@@ -124,6 +124,7 @@ pub struct UsageClassificationReport {
     pub used: UsageClassifiedItems,
     pub unused: UsageClassifiedItems,
     pub unknown: Vec<UsageUnknownSurface>,
+    pub evidence: UsageClassificationEvidence,
 }
 
 #[derive(Debug, Clone)]
@@ -141,6 +142,30 @@ pub struct UsageClassificationSummary {
 pub struct UsageClassifiedItems {
     pub callables: Vec<CallableId>,
     pub items: Vec<ItemId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageClassificationEvidence {
+    pub callables: Vec<UsageCallableEvidence>,
+    pub items: Vec<UsageItemEvidence>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageCallableEvidence {
+    pub id: CallableId,
+    pub classification: String,
+    pub selected_root: bool,
+    pub reason: String,
+    pub evidence: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageItemEvidence {
+    pub id: ItemId,
+    pub classification: String,
+    pub selected_root: bool,
+    pub reason: String,
+    pub evidence: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -778,6 +803,14 @@ fn usage_classification_report(
     } else {
         "classified_with_unknowns".to_string()
     };
+    let evidence = usage_classification_evidence(
+        project,
+        reduced,
+        &used_callables,
+        &unused_callables,
+        &used_items,
+        &unused_items,
+    );
 
     UsageClassificationReport {
         status,
@@ -799,6 +832,163 @@ fn usage_classification_report(
             items: unused_items,
         },
         unknown,
+        evidence,
+    }
+}
+
+fn usage_classification_evidence(
+    project: &model::Project,
+    reduced: &model::ReducedProject,
+    used_callables: &[CallableId],
+    unused_callables: &[CallableId],
+    used_items: &[ItemId],
+    unused_items: &[ItemId],
+) -> UsageClassificationEvidence {
+    let selected_callable_roots = reduced
+        .roots
+        .iter()
+        .filter_map(|root| match root {
+            RootId::Callable(callable) => Some(callable),
+            RootId::Item(_) => None,
+        })
+        .collect::<BTreeSet<_>>();
+    let selected_item_roots = reduced
+        .roots
+        .iter()
+        .filter_map(|root| match root {
+            RootId::Callable(_) => None,
+            RootId::Item(item) => Some(item),
+        })
+        .collect::<BTreeSet<_>>();
+
+    let mut callables = used_callables
+        .iter()
+        .map(|id| {
+            usage_callable_evidence(
+                id,
+                "used",
+                selected_callable_roots.contains(id),
+                &reduced.evidence,
+            )
+        })
+        .chain(
+            unused_callables
+                .iter()
+                .map(|id| usage_callable_evidence(id, "unused", false, &reduced.evidence)),
+        )
+        .collect::<Vec<_>>();
+    callables.sort_by_key(|entry| entry.id.to_string());
+
+    let mut items = used_items
+        .iter()
+        .map(|id| {
+            usage_item_evidence(
+                id,
+                "used",
+                selected_item_roots.contains(id),
+                &reduced.evidence,
+            )
+        })
+        .chain(
+            unused_items
+                .iter()
+                .map(|id| usage_item_evidence(id, "unused", false, &reduced.evidence)),
+        )
+        .collect::<Vec<_>>();
+    items.sort_by_key(|entry| entry.id.to_string());
+
+    debug_assert_eq!(
+        callables.len(),
+        project.functions.len() + project.methods.len()
+    );
+    debug_assert_eq!(items.len(), project.items.len());
+
+    UsageClassificationEvidence { callables, items }
+}
+
+fn usage_callable_evidence(
+    id: &CallableId,
+    classification: &str,
+    selected_root: bool,
+    evidence: &model::ReductionEvidence,
+) -> UsageCallableEvidence {
+    let (reason, details) = usage_evidence_reason(classification, selected_root, evidence);
+    UsageCallableEvidence {
+        id: id.clone(),
+        classification: classification.to_string(),
+        selected_root,
+        reason,
+        evidence: details,
+    }
+}
+
+fn usage_item_evidence(
+    id: &ItemId,
+    classification: &str,
+    selected_root: bool,
+    evidence: &model::ReductionEvidence,
+) -> UsageItemEvidence {
+    let (reason, details) = usage_evidence_reason(classification, selected_root, evidence);
+    UsageItemEvidence {
+        id: id.clone(),
+        classification: classification.to_string(),
+        selected_root,
+        reason,
+        evidence: details,
+    }
+}
+
+fn usage_evidence_reason(
+    classification: &str,
+    selected_root: bool,
+    evidence: &model::ReductionEvidence,
+) -> (String, Vec<String>) {
+    let mut details = vec![
+        "source=syn_inventory".to_string(),
+        format!("classification={classification}"),
+    ];
+
+    if selected_root {
+        details.push("selected_root=true".to_string());
+        return (
+            "selected opensourced root retained as a slice entrypoint".to_string(),
+            details,
+        );
+    }
+
+    match classification {
+        "used" => {
+            details.push("reachable=true".to_string());
+            if evidence.semantic_edges_applied > 0 {
+                details.push(format!(
+                    "semantic_edges_applied={}",
+                    evidence.semantic_edges_applied
+                ));
+            }
+            if evidence.unresolved_method_fallbacks > 0 {
+                details.push(format!(
+                    "syntactic_method_fallbacks={}",
+                    evidence.unresolved_method_fallbacks
+                ));
+            }
+            (
+                "reachable from selected roots through the current syntactic and semantic reduction graph"
+                    .to_string(),
+                details,
+            )
+        }
+        "unused" => {
+            details.push("reachable=false".to_string());
+            (
+                "indexed by syn inventory but absent from the reachable set for selected roots"
+                    .to_string(),
+                details,
+            )
+        }
+        _ => (
+            "classification produced by the current reduction graph".to_string(),
+            details,
+        ),
     }
 }
 
@@ -3607,6 +3797,7 @@ struct UsageClassificationReportJson {
     used: UsageClassifiedItemsJson,
     unused: UsageClassifiedItemsJson,
     unknown: Vec<UsageUnknownSurfaceJson>,
+    evidence: UsageClassificationEvidenceJson,
 }
 
 impl UsageClassificationReportJson {
@@ -3621,6 +3812,7 @@ impl UsageClassificationReportJson {
                 .iter()
                 .map(UsageUnknownSurfaceJson::from_report)
                 .collect(),
+            evidence: UsageClassificationEvidenceJson::from_report(&report.evidence),
         }
     }
 }
@@ -3661,6 +3853,71 @@ impl UsageClassifiedItemsJson {
         Self {
             callables: items.callables.iter().map(ToString::to_string).collect(),
             items: items.items.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UsageClassificationEvidenceJson {
+    callables: Vec<UsageCallableEvidenceJson>,
+    items: Vec<UsageItemEvidenceJson>,
+}
+
+impl UsageClassificationEvidenceJson {
+    fn from_report(evidence: &UsageClassificationEvidence) -> Self {
+        Self {
+            callables: evidence
+                .callables
+                .iter()
+                .map(UsageCallableEvidenceJson::from_report)
+                .collect(),
+            items: evidence
+                .items
+                .iter()
+                .map(UsageItemEvidenceJson::from_report)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UsageCallableEvidenceJson {
+    id: String,
+    classification: String,
+    selected_root: bool,
+    reason: String,
+    evidence: Vec<String>,
+}
+
+impl UsageCallableEvidenceJson {
+    fn from_report(entry: &UsageCallableEvidence) -> Self {
+        Self {
+            id: entry.id.to_string(),
+            classification: entry.classification.clone(),
+            selected_root: entry.selected_root,
+            reason: entry.reason.clone(),
+            evidence: entry.evidence.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UsageItemEvidenceJson {
+    id: String,
+    classification: String,
+    selected_root: bool,
+    reason: String,
+    evidence: Vec<String>,
+}
+
+impl UsageItemEvidenceJson {
+    fn from_report(entry: &UsageItemEvidence) -> Self {
+        Self {
+            id: entry.id.to_string(),
+            classification: entry.classification.clone(),
+            selected_root: entry.selected_root,
+            reason: entry.reason.clone(),
+            evidence: entry.evidence.clone(),
         }
     }
 }
@@ -4020,6 +4277,51 @@ mod tests {
             report.usage.summary.indexed_callables,
             report.usage.summary.used_callables + report.usage.summary.unused_callables,
         );
+        let root_evidence = report
+            .usage
+            .evidence
+            .callables
+            .iter()
+            .find(|entry| entry.id.to_string() == "a::open_source_entry")
+            .expect("root callable should have usage evidence");
+        assert_eq!(root_evidence.classification, "used");
+        assert!(root_evidence.selected_root);
+        assert!(root_evidence.reason.contains("selected opensourced root"));
+        assert!(root_evidence
+            .evidence
+            .iter()
+            .any(|detail| detail == "selected_root=true"));
+        let helper_evidence = report
+            .usage
+            .evidence
+            .callables
+            .iter()
+            .find(|entry| entry.id.to_string() == "b::helper")
+            .expect("reachable helper should have usage evidence");
+        assert_eq!(helper_evidence.classification, "used");
+        assert!(!helper_evidence.selected_root);
+        assert!(helper_evidence
+            .reason
+            .contains("reachable from selected roots"));
+        let unused_evidence = report
+            .usage
+            .evidence
+            .callables
+            .iter()
+            .find(|entry| entry.id.to_string() == "b::unused_public")
+            .expect("unused callable should have usage evidence");
+        assert_eq!(unused_evidence.classification, "unused");
+        assert!(unused_evidence
+            .reason
+            .contains("absent from the reachable set"));
+        assert!(unused_evidence
+            .evidence
+            .iter()
+            .any(|detail| detail == "reachable=false"));
+        assert_eq!(
+            report.usage.evidence.callables.len(),
+            report.usage.summary.indexed_callables,
+        );
 
         let reachable_items = report
             .reachable_items
@@ -4068,6 +4370,29 @@ mod tests {
         assert_eq!(
             report.usage.summary.indexed_items,
             report.usage.summary.used_items + report.usage.summary.unused_items,
+        );
+        let item_evidence = report
+            .usage
+            .evidence
+            .items
+            .iter()
+            .find(|entry| entry.id.to_string() == "d::Worker(Struct)")
+            .expect("used item should have usage evidence");
+        assert_eq!(item_evidence.classification, "used");
+        assert!(item_evidence
+            .reason
+            .contains("reachable from selected roots"));
+        let unused_item_evidence = report
+            .usage
+            .evidence
+            .items
+            .iter()
+            .find(|entry| entry.id.to_string() == "d::UnusedEnum(Enum)")
+            .expect("unused item should have usage evidence");
+        assert_eq!(unused_item_evidence.classification, "unused");
+        assert_eq!(
+            report.usage.evidence.items.len(),
+            report.usage.summary.indexed_items,
         );
         assert_eq!(
             report.usage.status, "classified_with_unknowns",
@@ -4213,6 +4538,27 @@ theme = []
             .unwrap()
             .iter()
             .any(|surface| surface["code"] == "semantic_analyzer_unavailable"));
+        let evidence_callables = value["usage"]["evidence"]["callables"].as_array().unwrap();
+        let root_evidence = evidence_callables
+            .iter()
+            .find(|entry| entry["id"] == "a::open_source_entry")
+            .expect("root callable usage evidence should be serialized");
+        assert_eq!(root_evidence["classification"], "used");
+        assert_eq!(root_evidence["selected_root"], true);
+        assert!(root_evidence["reason"]
+            .as_str()
+            .unwrap()
+            .contains("selected opensourced root"));
+        let unused_evidence = evidence_callables
+            .iter()
+            .find(|entry| entry["id"] == "a::internal_entry")
+            .expect("unused callable usage evidence should be serialized");
+        assert_eq!(unused_evidence["classification"], "unused");
+        assert!(unused_evidence["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|detail| detail == "reachable=false"));
     }
 
     #[test]

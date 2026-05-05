@@ -44,7 +44,10 @@ Generation reports now expose an explicit usage classification:
 `usage.used`, `usage.unused`, and `usage.unknown`. `used` means reachable from
 selected roots through the current syntactic and semantic edge map; `unused`
 means indexed but unreachable in that graph; `unknown` mirrors production
-hazards that prevent treating the classification as a complete proof. The
+hazards that prevent treating the classification as a complete proof.
+`usage.evidence` records one explanation per indexed callable/item, including
+whether it was a selected root, whether it was reachable, and whether semantic
+or syntactic fallback evidence participated in the retained graph. The
 production invariant is still fail-closed: remove only graph-unreachable indexed
 items, and keep/report anything represented by `unknown` until compiler
 feedback or deeper semantics discharges it.
