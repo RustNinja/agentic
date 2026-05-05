@@ -729,3 +729,20 @@ unused-import repair. The remaining gate was `review_required` because retained
 macro, trait-object, syntactic fallback, and bounded semantic-budget hazards are
 still warning-level semantic review items, not because pruning produced a broken
 slice.
+
+The next semantic-budget gap was whole-file query spend. Retained files can
+contain large dead same-file siblings before the selected API, and the old
+semantic inventory counted every method/path in those files against the bounded
+RA budgets. The analyzer now builds the syntactic retained owner set first and
+collects method/path semantic inventory only inside those retained callable/item
+owners. The regression fixture puts more than the default method-call budget in
+a dead same-file function before the selected entry and proves the retained
+owner still gets queried with zero method-call budget exhaustion.
+On the same Litter `codex-ipc-public-mixed-surfaces` random5 probe, this removed
+the retained-slice budget-exhaustion hazards: method calls went from 1000
+queried plus 82 unqueried to 9 queried and 0 unqueried, paths went from 2000
+queried plus 806 unqueried to 233 queried and 0 unqueried, and the generated
+slice still passed production feedback with zero compiler errors or warnings.
+Remaining review hazards are now unresolved retained-owner RA queries,
+macro/derive/invocation surfaces, trait-object surfaces, and syntactic fallback
+evidence rather than budget starvation.

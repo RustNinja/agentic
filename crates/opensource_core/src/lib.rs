@@ -6649,6 +6649,94 @@ pub fn entry(service: Service) -> u32 {
 
     #[test]
     #[cfg(feature = "ra-hir")]
+    fn ra_semantic_inventory_ignores_dead_same_file_budget_noise() {
+        let root = temp_output("ra-semantic-budget-focus-source");
+        let output = temp_output("ra-semantic-budget-focus-reduction");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        let noise_calls = (0..1_100)
+            .map(|_| "    total += dead.noise();")
+            .collect::<Vec<_>>()
+            .join("\n");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            &format!(
+                r#"
+use opensourced::opensourced;
+
+pub struct Dead;
+
+impl Dead {{
+    pub fn noise(&self) -> u32 {{
+        1
+    }}
+}}
+
+pub fn dead_budget_sink(dead: Dead) -> u32 {{
+    let mut total = 0;
+{noise_calls}
+    total
+}}
+
+pub struct Live;
+
+impl Live {{
+    pub fn selected(&self) -> u32 {{
+        7
+    }}
+}}
+
+#[opensourced]
+pub fn entry(live: Live) -> u32 {{
+    live.selected()
+}}
+"#
+            ),
+        );
+
+        let report = generate_with_analyzer(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output,
+            },
+            AnalyzerMode::RustAnalyzerHir,
+        )
+        .expect("RA-backed generation should succeed");
+        let semantic = report
+            .analyzer
+            .semantic
+            .as_ref()
+            .expect("semantic inventory should be available");
+
+        assert!(
+            semantic.queried_method_calls < semantic.method_call_budget,
+            "dead same-file method calls should not spend the retained-owner semantic budget: {:?}",
+            semantic
+        );
+        assert_eq!(semantic.unqueried_method_calls, 0);
+        assert!(report
+            .reachable
+            .iter()
+            .any(|callable| callable.to_string() == "app::Live::selected"));
+        assert!(!report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "semantic_method_call_budget_exhausted"));
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
     fn ra_usage_reference_search_recovers_from_attribute_name_collisions() {
         let root = temp_output("ra-reference-focus-source");
         let output = temp_output("ra-reference-focus-reduction");

@@ -87,6 +87,9 @@ sets. Only mapped graph-unreachable candidates with no retained reference
 evidence are treated as prunable/removable. The production invariant is
 fail-closed: remove only prunable source, and keep/report anything blocked by
 unknown until compiler feedback or deeper semantics discharges it.
+Semantic method/path inventory is scoped to syntactically retained callable/item
+owners before spending bounded RA query budgets, so dead same-file siblings
+cannot exhaust the semantic budget ahead of selected code.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that

@@ -677,6 +677,13 @@ mod rust_analyzer {
         hints: &'a mut SemanticReductionHints,
     }
 
+    impl FileSemanticContext<'_> {
+        fn should_collect_node(&self, offset: TextSize) -> bool {
+            self.semantic_index
+                .is_none_or(|index| index.should_collect_semantic_node(self.vfs_path, offset))
+        }
+    }
+
     fn collect_semantic_report_attached(
         database: &ra_ap_ide::RootDatabase,
         vfs: &ra_ap_vfs::Vfs,
@@ -1279,6 +1286,9 @@ mod rust_analyzer {
 
         for node in source.syntax().descendants() {
             if let Some(method_call) = ast::MethodCallExpr::cast(node.clone()) {
+                if !context.should_collect_node(method_call.syntax().text_range().start()) {
+                    continue;
+                }
                 report.method_calls += 1;
                 if !budget.take_method_call() {
                     report.unqueried_method_calls += 1;
@@ -1317,6 +1327,9 @@ mod rust_analyzer {
             }
 
             if let Some(path) = ast::Path::cast(node) {
+                if !context.should_collect_node(path.syntax().text_range().start()) {
+                    continue;
+                }
                 report.paths += 1;
                 if !budget.take_path() {
                     report.unqueried_paths += 1;
@@ -1537,13 +1550,14 @@ mod rust_analyzer {
         files: HashMap<PathBuf, IndexedSourceFile>,
         root_files: BTreeSet<PathBuf>,
         retained_files: BTreeSet<PathBuf>,
+        retained_owners: BTreeSet<SemanticOwnerId>,
     }
 
     impl ProjectSemanticIndex {
         fn build(project: &Project) -> Self {
             let mut files = HashMap::new();
             let mut root_files = BTreeSet::new();
-            let retained_files = syntactic_retained_file_paths(project);
+            let retention = syntactic_retention(project);
             for source in project.files.values() {
                 let path = normalize_fs_path(&source.path);
                 files.entry(path).or_insert_with(|| IndexedSourceFile {
@@ -1596,7 +1610,8 @@ mod rust_analyzer {
             Self {
                 files,
                 root_files,
-                retained_files,
+                retained_files: retention.files,
+                retained_owners: retention.owners,
             }
         }
 
@@ -1623,6 +1638,18 @@ mod rust_analyzer {
 
         fn is_feedback_owner_path(&self, path: &Path) -> bool {
             self.root_files.contains(path) || self.retained_files.contains(path)
+        }
+
+        fn should_collect_semantic_node(
+            &self,
+            vfs_path: &ra_ap_vfs::VfsPath,
+            offset: TextSize,
+        ) -> bool {
+            if self.retained_owners.is_empty() {
+                return true;
+            }
+            self.owner_at_vfs_offset(vfs_path, offset)
+                .is_some_and(|owner| self.retained_owners.contains(&owner))
         }
 
         fn owner_at_vfs_offset(
@@ -1725,10 +1752,50 @@ mod rust_analyzer {
         }
     }
 
-    fn syntactic_retained_file_paths(project: &Project) -> BTreeSet<PathBuf> {
+    struct SyntacticRetention {
+        files: BTreeSet<PathBuf>,
+        owners: BTreeSet<SemanticOwnerId>,
+    }
+
+    fn syntactic_retention(project: &Project) -> SyntacticRetention {
         reduce::reduce_with_extra_roots(project, &[])
-            .map(|reduced| retained_file_paths(project, &reduced))
-            .unwrap_or_default()
+            .map(|reduced| SyntacticRetention {
+                files: retained_file_paths(project, &reduced),
+                owners: retained_owners(&reduced),
+            })
+            .unwrap_or_else(|_| SyntacticRetention {
+                files: BTreeSet::new(),
+                owners: BTreeSet::new(),
+            })
+    }
+
+    fn retained_owners(reduced: &ReducedProject) -> BTreeSet<SemanticOwnerId> {
+        let mut owners = BTreeSet::new();
+        for root in &reduced.roots {
+            match root {
+                RootId::Callable(callable) => {
+                    owners.insert(SemanticOwnerId::Callable(callable.clone()));
+                }
+                RootId::Item(item) => {
+                    owners.insert(SemanticOwnerId::Item(item.clone()));
+                }
+            }
+        }
+        owners.extend(
+            reduced
+                .reachable
+                .iter()
+                .cloned()
+                .map(SemanticOwnerId::Callable),
+        );
+        owners.extend(
+            reduced
+                .reachable_items
+                .iter()
+                .cloned()
+                .map(SemanticOwnerId::Item),
+        );
+        owners
     }
 
     fn retained_file_paths(project: &Project, reduced: &ReducedProject) -> BTreeSet<PathBuf> {
