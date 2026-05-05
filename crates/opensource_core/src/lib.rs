@@ -156,6 +156,23 @@ pub struct UsageClassifiedItems {
     pub items: Vec<ItemId>,
 }
 
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum UsageDecision {
+    Used,
+    BlockedByUnknown,
+    Prunable,
+}
+
+impl UsageDecision {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Used => "used",
+            Self::BlockedByUnknown => "blocked_by_unknown",
+            Self::Prunable => "prunable",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 pub struct UsageDecisionIndex {
     used_callables: BTreeSet<CallableId>,
@@ -164,6 +181,8 @@ pub struct UsageDecisionIndex {
     blocked_by_unknown_items: BTreeSet<ItemId>,
     prunable_callables: BTreeSet<CallableId>,
     prunable_items: BTreeSet<ItemId>,
+    callable_decisions: BTreeMap<CallableId, UsageDecision>,
+    item_decisions: BTreeMap<ItemId, UsageDecision>,
 }
 
 impl UsageDecisionIndex {
@@ -199,6 +218,13 @@ impl UsageDecisionIndex {
             .filter(|id| !retained_items.contains(*id))
             .cloned()
             .collect::<BTreeSet<_>>();
+        let callable_decisions = usage_decision_map(
+            &used_callables,
+            &blocked_by_unknown_callables,
+            &prunable_callables,
+        );
+        let item_decisions =
+            usage_decision_map(&used_items, &blocked_by_unknown_items, &prunable_items);
 
         Self {
             used_callables,
@@ -207,6 +233,8 @@ impl UsageDecisionIndex {
             blocked_by_unknown_items,
             prunable_callables,
             prunable_items,
+            callable_decisions,
+            item_decisions,
         }
     }
 
@@ -219,15 +247,23 @@ impl UsageDecisionIndex {
     }
 
     pub fn can_remove_callable(&self, callable: &CallableId) -> bool {
-        self.prunable_callables.contains(callable)
+        self.callable_decision(callable) == Some(UsageDecision::Prunable)
     }
 
     pub fn can_remove_item(&self, item: &ItemId) -> bool {
-        self.prunable_items.contains(item)
+        self.item_decision(item) == Some(UsageDecision::Prunable)
     }
 
     pub fn is_blocked_by_unknown_item(&self, item: &ItemId) -> bool {
-        self.blocked_by_unknown_items.contains(item)
+        self.item_decision(item) == Some(UsageDecision::BlockedByUnknown)
+    }
+
+    pub fn callable_decision(&self, callable: &CallableId) -> Option<UsageDecision> {
+        self.callable_decisions.get(callable).copied()
+    }
+
+    pub fn item_decision(&self, item: &ItemId) -> Option<UsageDecision> {
+        self.item_decisions.get(item).copied()
     }
 
     fn used_callables(&self) -> Vec<CallableId> {
@@ -253,6 +289,28 @@ impl UsageDecisionIndex {
     fn prunable_items(&self) -> Vec<ItemId> {
         self.prunable_items.iter().cloned().collect()
     }
+}
+
+fn usage_decision_map<T: Ord + Clone>(
+    used: &BTreeSet<T>,
+    blocked_by_unknown: &BTreeSet<T>,
+    prunable: &BTreeSet<T>,
+) -> BTreeMap<T, UsageDecision> {
+    let mut decisions = BTreeMap::new();
+    for id in used {
+        debug_assert!(decisions.insert(id.clone(), UsageDecision::Used).is_none());
+    }
+    for id in blocked_by_unknown {
+        debug_assert!(decisions
+            .insert(id.clone(), UsageDecision::BlockedByUnknown)
+            .is_none());
+    }
+    for id in prunable {
+        debug_assert!(decisions
+            .insert(id.clone(), UsageDecision::Prunable)
+            .is_none());
+    }
+    decisions
 }
 
 #[derive(Debug, Clone)]
@@ -4507,6 +4565,7 @@ impl GenerateTimingReportJson {
 struct UsageClassificationReportJson {
     status: String,
     summary: UsageClassificationSummaryJson,
+    decision_map: UsageDecisionMapJson,
     used: UsageClassifiedItemsJson,
     unused_candidate: UsageClassifiedItemsJson,
     blocked_by_unknown: UsageClassifiedItemsJson,
@@ -4521,6 +4580,7 @@ impl UsageClassificationReportJson {
         Self {
             status: report.status.clone(),
             summary: UsageClassificationSummaryJson::from_report(&report.summary),
+            decision_map: UsageDecisionMapJson::from_report(report),
             used: UsageClassifiedItemsJson::from_report(&report.used),
             unused_candidate: UsageClassifiedItemsJson::from_report(&report.unused_candidate),
             blocked_by_unknown: UsageClassifiedItemsJson::from_report(&report.blocked_by_unknown),
@@ -4533,6 +4593,49 @@ impl UsageClassificationReportJson {
                 .collect(),
             evidence: UsageClassificationEvidenceJson::from_report(&report.evidence),
         }
+    }
+}
+
+#[derive(Serialize)]
+struct UsageDecisionMapJson {
+    callables: BTreeMap<String, String>,
+    items: BTreeMap<String, String>,
+}
+
+impl UsageDecisionMapJson {
+    fn from_report(report: &UsageClassificationReport) -> Self {
+        let mut callables = BTreeMap::new();
+        let mut items = BTreeMap::new();
+        insert_usage_decisions(&mut callables, &report.used.callables, UsageDecision::Used);
+        insert_usage_decisions(
+            &mut callables,
+            &report.blocked_by_unknown.callables,
+            UsageDecision::BlockedByUnknown,
+        );
+        insert_usage_decisions(
+            &mut callables,
+            &report.prunable.callables,
+            UsageDecision::Prunable,
+        );
+        insert_usage_decisions(&mut items, &report.used.items, UsageDecision::Used);
+        insert_usage_decisions(
+            &mut items,
+            &report.blocked_by_unknown.items,
+            UsageDecision::BlockedByUnknown,
+        );
+        insert_usage_decisions(&mut items, &report.prunable.items, UsageDecision::Prunable);
+        Self { callables, items }
+    }
+}
+
+fn insert_usage_decisions<T: ToString>(
+    decisions: &mut BTreeMap<String, String>,
+    ids: &[T],
+    decision: UsageDecision,
+) {
+    for id in ids {
+        let previous = decisions.insert(id.to_string(), decision.as_str().to_string());
+        debug_assert!(previous.is_none());
     }
 }
 
@@ -5077,7 +5180,7 @@ mod tests {
         usage_evidence_reason, usage_guarded_render_reduction, write_generate_report, AnalyzerMode,
         AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions, ProductionHazardDetail,
         SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
-        SemanticReport, SemanticUsageReport,
+        SemanticReport, SemanticUsageReport, UsageDecision,
     };
     use super::{manifest, parse, reduce, render};
 
@@ -5608,6 +5711,21 @@ pub fn mapped_dead_code() -> i32 {
         let (render_reduced, usage_decisions) =
             usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
                 .expect("usage-guarded render reduction should work");
+        assert_eq!(
+            usage_decisions.callable_decision(&entry),
+            Some(UsageDecision::Used),
+            "selected roots should be classified in the decision map as used",
+        );
+        assert_eq!(
+            usage_decisions.callable_decision(&unmapped_dead),
+            Some(UsageDecision::BlockedByUnknown),
+            "RA-unmapped candidates should be classified in the decision map as unknown-blocked",
+        );
+        assert_eq!(
+            usage_decisions.callable_decision(&mapped_dead),
+            Some(UsageDecision::Prunable),
+            "RA-mapped unreferenced candidates should be classified in the decision map as prunable",
+        );
         render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
             .expect("render should succeed");
         let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
@@ -5631,6 +5749,121 @@ pub fn mapped_dead_code() -> i32 {
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(generated.contains("pub fn unmapped_dead_code"));
         assert!(!generated.contains("pub fn mapped_dead_code"));
+    }
+
+    #[test]
+    fn semantic_usage_prunes_only_proven_unused_public_use_aliases() {
+        let root = temp_output("semantic-usage-public-use-source");
+        let output = temp_output("semantic-usage-public-use-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub use crate::{
+    clean_dead_code as CleanDeadCode,
+    unknown_helper as UnknownHelper,
+};
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+
+pub fn unknown_helper() -> i32 {
+    private_leaf()
+}
+
+fn private_leaf() -> i32 {
+    2
+}
+
+pub fn clean_dead_code() -> i32 {
+    3
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let unknown_helper = project_callable_named(&project, "unknown_helper");
+        let private_leaf = project_callable_named(&project, "private_leaf");
+        let clean_dead = project_callable_named(&project, "clean_dead_code");
+        let mapped_callable_ids =
+            BTreeSet::from([entry.clone(), private_leaf.clone(), clean_dead.clone()]);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: mapped_callable_ids.len(),
+            unmapped_callables: project
+                .functions
+                .len()
+                .saturating_sub(mapped_callable_ids.len()),
+            mapped_callable_ids,
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerHir,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        assert_eq!(
+            usage_decisions.callable_decision(&unknown_helper),
+            Some(UsageDecision::BlockedByUnknown),
+            "RA-unmapped public reexport target must be retained as unknown",
+        );
+        assert_eq!(
+            usage_decisions.callable_decision(&clean_dead),
+            Some(UsageDecision::Prunable),
+            "RA-mapped unreferenced public reexport target should be removable",
+        );
+        render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
+            .expect("render should succeed");
+        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
+        assert!(usage.blocked_by_unknown.callables.contains(&unknown_helper));
+        assert!(usage.unused.callables.contains(&clean_dead));
+        assert!(!usage.unused.callables.contains(&unknown_helper));
+
+        let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(
+            generated.contains("unknown_helper as UnknownHelper"),
+            "unknown-blocked reexport aliases should remain:\n{generated}",
+        );
+        assert!(
+            !generated.contains("CleanDeadCode"),
+            "proven-unused public use aliases should be removed:\n{generated}",
+        );
+        assert!(
+            !generated.contains("pub fn clean_dead_code"),
+            "proven-unused target function should be stripped:\n{generated}",
+        );
+        assert!(
+            generated.contains("pub fn unknown_helper"),
+            "unknown-blocked target function should remain:\n{generated}",
+        );
     }
 
     #[test]
@@ -6052,11 +6285,19 @@ theme = []
             .unwrap()
             .iter()
             .any(|callable| callable == "a::open_source_entry"));
+        assert_eq!(
+            value["usage"]["decision_map"]["callables"]["a::open_source_entry"],
+            "used"
+        );
         assert!(value["usage"]["unused"]["callables"]
             .as_array()
             .unwrap()
             .iter()
             .any(|callable| callable == "a::internal_entry"));
+        assert_eq!(
+            value["usage"]["decision_map"]["callables"]["a::internal_entry"],
+            "prunable"
+        );
         assert!(value["usage"]["unused_candidate"]["callables"]
             .as_array()
             .unwrap()

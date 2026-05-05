@@ -43,16 +43,18 @@ outside the retained set.
 Generation reports now expose an explicit usage classification produced through
 a first-class `SlicePlan` and rendered through the same `UsageDecisionIndex`:
 `usage.used`, `usage.unused_candidate`, `usage.blocked_by_unknown`,
-`usage.prunable`, `usage.unused`, and `usage.unknown`. `used` means
-reachable from selected roots through the current syntactic and semantic edge
-map; `unused_candidate` means indexed but unreachable from selected roots;
-`blocked_by_unknown` means an unreachable item or callable was retained because
-a scoped unknown surface explicitly mentions it or one of its retained
-dependencies; `prunable` means graph-unreachable and not blocked by unknown
-surfaces; `usage.unused` is the public removable set and is intentionally the
-same as `usage.prunable`, not the broader candidate set; `unknown` mirrors
-production hazards that prevent treating the classification as a complete
-proof.
+`usage.prunable`, `usage.unused`, `usage.decision_map`, and `usage.unknown`.
+The decision index keeps deterministic maps from callable/item ids to
+`used`, `blocked_by_unknown`, or `prunable`; the JSON `decision_map` exposes the
+same map for external automation. `used` means reachable from selected roots
+through the current syntactic and semantic edge map; `unused_candidate` means
+indexed but unreachable from selected roots; `blocked_by_unknown` means an
+unreachable item or callable was retained because a scoped unknown surface
+explicitly mentions it or one of its retained dependencies; `prunable` means
+graph-unreachable and not blocked by unknown surfaces; `usage.unused` is the
+public removable set and is intentionally the same as `usage.prunable`, not the
+broader candidate set; `unknown` mirrors production hazards that prevent
+treating the classification as a complete proof.
 `usage.evidence` records one explanation per indexed callable/item, including
 whether it was a selected root, whether it was reachable, and whether semantic
 or syntactic fallback evidence participated in the retained graph. `SlicePlan`

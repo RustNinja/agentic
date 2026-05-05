@@ -522,10 +522,12 @@ The public `usage.unused` field now matches `usage.prunable`, so automation
 that consumes the report sees only the removable set. The broader
 graph-unreachable set remains available as `usage.unused_candidate`, while
 `usage.blocked_by_unknown` records retained candidates whose removal could not
-be proven safe. The report also serializes `analyzer.semantic_usage`, including
-mapped ids, failed reference-query ids, reference owners, and unowned reference
-files, so the used/unused/unknown split can be audited without scraping analyzer
-notes.
+be proven safe. `UsageDecisionIndex` also keeps a deterministic per-id decision
+map, and the report exposes it as `usage.decision_map` so downstream automation
+does not need to reconstruct decisions from parallel arrays. The report also
+serializes `analyzer.semantic_usage`, including mapped ids, failed
+reference-query ids, reference owners, and unowned reference files, so the
+used/unused/unknown split can be audited without scraping analyzer notes.
 
 ## Current Production Boundaries
 
