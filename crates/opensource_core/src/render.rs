@@ -10426,7 +10426,19 @@ fn use_prefix_should_drop(
 
     resolve_use_target_path(project, package, module_path, prefix).is_some_and(
         |(target_package, target_path)| {
-            if !project_has_module(project, &target_package, &target_path) {
+            if !project_has_module_or_inline(project, &target_package, &target_path) {
+                return false;
+            }
+            if is_public_use
+                && public_glob_prefix_exposes_referenced_name(
+                    project,
+                    reduced,
+                    package,
+                    module_path,
+                    &target_package,
+                    &target_path,
+                )
+            {
                 return false;
             }
             if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {
@@ -10508,6 +10520,96 @@ fn external_use_target_should_drop(
             module_path,
             leaf,
         )
+    }
+}
+
+fn public_glob_prefix_exposes_referenced_name(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    source_module_path: &[String],
+    target_package: &str,
+    target_module_path: &[String],
+) -> bool {
+    let Some(items) = module_items_for_path(project, target_package, target_module_path) else {
+        return false;
+    };
+    module_public_visible_names(items).iter().any(|name| {
+        reachable_package_mentions_ident(project, reduced, package, name)
+            || (source_module_path.is_empty()
+                && public_reexport_name_is_referenced_by_reduced_package(
+                    project,
+                    reduced,
+                    target_package,
+                    name,
+                ))
+    })
+}
+
+fn module_public_visible_names(items: &[Item]) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for item in items {
+        match item {
+            Item::Use(item_use) if use_is_reexport(&item_use.vis) => {
+                collect_use_tree_visible_names(&item_use.tree, Vec::new(), &mut names);
+            }
+            _ if item_is_public(item) => {
+                if let Some(name) = support_item_name(item) {
+                    names.insert(name);
+                }
+            }
+            _ => {}
+        }
+    }
+    names
+}
+
+fn collect_use_tree_visible_names(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    names: &mut BTreeSet<String>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_tree_visible_names(&path.tree, prefix, names);
+        }
+        UseTree::Name(name) => {
+            if name.ident == "self" {
+                if let Some(prefix) = prefix.last() {
+                    names.insert(prefix.clone());
+                }
+            } else {
+                names.insert(name.ident.to_string());
+            }
+        }
+        UseTree::Rename(rename) => {
+            names.insert(rename.rename.to_string());
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_tree_visible_names(item, prefix.clone(), names);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn item_is_public(item: &Item) -> bool {
+    match item {
+        Item::Const(item) => use_is_reexport(&item.vis),
+        Item::Enum(item) => use_is_reexport(&item.vis),
+        Item::ExternCrate(item) => use_is_reexport(&item.vis),
+        Item::Fn(item) => use_is_reexport(&item.vis),
+        Item::Macro(_) => false,
+        Item::Mod(item) => use_is_reexport(&item.vis),
+        Item::Static(item) => use_is_reexport(&item.vis),
+        Item::Struct(item) => use_is_reexport(&item.vis),
+        Item::Trait(item) => use_is_reexport(&item.vis),
+        Item::TraitAlias(item) => use_is_reexport(&item.vis),
+        Item::Type(item) => use_is_reexport(&item.vis),
+        Item::Union(item) => use_is_reexport(&item.vis),
+        _ => false,
     }
 }
 
@@ -11593,6 +11695,11 @@ fn project_has_module(project: &Project, package: &str, module_path: &[String]) 
             .files
             .values()
             .any(|source| source.package == package && source.module_path == module_path)
+}
+
+fn project_has_module_or_inline(project: &Project, package: &str, module_path: &[String]) -> bool {
+    project_has_module(project, package, module_path)
+        || inline_module_items_for_path(project, package, module_path).is_some()
 }
 
 fn project_module_paths(project: &Project, package: &str) -> BTreeSet<Vec<String>> {

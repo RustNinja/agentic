@@ -60,7 +60,9 @@ mod reexports {
 mod dependency_barrel {
     pub mod records {
         pub use shared::dead_shared as dead_shared_barrel;
-        pub use shared::{SharedMode as BarrelMode, SharedRecord as BarrelRecord};
+        pub use shared::SharedMode as BarrelMode;
+
+        pub type BarrelRecord = shared::SharedRecord;
     }
 
     pub mod helpers {
@@ -78,7 +80,7 @@ mod dependency_barrel {
 
     pub use helpers::dead_helper as dead_barrel_helper;
     pub use helpers::score_record;
-    pub use records::{BarrelMode, BarrelRecord};
+    pub use records::*;
 }
 
 mod inline_child {
@@ -908,7 +910,7 @@ pub fn open_generic_edges(value: SharedAlias) -> SharedAlias {
 
 #[opensourced]
 pub fn open_dependency_barrel(value: SharedAlias) -> SharedAlias {
-    let record = dependency_barrel::BarrelRecord::new(value);
+    let record = dependency_barrel::BarrelRecord { value };
     let mode = dependency_barrel::BarrelMode::Fast(record.value);
     dependency_barrel::score_record(record, mode)
 }

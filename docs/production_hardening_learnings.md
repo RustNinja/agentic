@@ -522,11 +522,17 @@ precise:
    compiler failures are predicted before the first full build.
 
 Fast fixture expansion added a Litter-shaped dependency type barrel with live
-and dead dependency reexports. While adding it, a separate reducer gap surfaced:
-private inline modules whose only retained content is a public local glob can be
-kept in slices that do not reference the module, then lose the child module that
-the glob points at. Dedicated local-glob support-package coverage is fixed, but
-normal inline-module public glob pruning still needs a name-directed pass.
+and dead dependency reexports. While adding it, a separate reducer gap surfaced
+and was fixed: private inline modules whose only retained content is a public
+local glob could be kept in slices that did not reference the module, then lose
+the child module that the glob pointed at. Normal glob-prefix pruning now treats
+inline child modules as module targets instead of only recognizing file-backed
+modules.
+The same fixture also showed a narrower future improvement: renamed dependency
+type reexports used only through same-package barrel paths still need stronger
+member/impl closure. The fixture uses a public type alias for that record today,
+while explicit dependency reexport aliases remain covered by the copied-support
+bundle rule.
 
 The rule for future work: if a real-repo failure is fixed, add a generic
 fixture that proves the rule without naming that repo.
