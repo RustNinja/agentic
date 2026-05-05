@@ -231,6 +231,12 @@ Recent Litter-driven rules came from these source patterns:
 
 Read-only Litter exploration found these high-value non-cfg patterns:
 
+The deeper gap scan is tracked in `docs/rule_gap_analysis.md`. The next focused
+fixture batch should prioritize async actor loops, FFI/JNI export surfaces, clap
+derive command contracts, thiserror field contracts, async I/O poll impls,
+runtime singletons, platform cfg plus asset bundles, and serde protocol helper
+contracts.
+
 - UniFFI object roots with `#[derive(uniffi::Object)]`, exported impls,
   constructors, async methods, private inner state, and public facade reexports.
 - Private UniFFI object modules reexported through a public FFI facade.
