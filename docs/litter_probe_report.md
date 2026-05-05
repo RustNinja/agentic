@@ -99,6 +99,12 @@ not slicer failures.
   support manifest dependency closure is computed. The pinned random-five batch
   still generated 116 files with zero preflight errors, zero feedback errors,
   zero warnings, and `production_ready=accepted`.
+- Support facade pruning now follows one or more concrete public reexport
+  hops, such as `root -> facade -> inner`, before rendering. This avoids
+  copying dead middle-layer facade leaves and dead inner-module dependency uses
+  while still falling back broad for local glob facades. The pinned random-five
+  batch remained accepted after the transitive pass with 116 files, zero
+  preflight errors, zero feedback errors, and zero warnings.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
@@ -121,9 +127,9 @@ not slicer failures.
   packages with build scripts, `OUT_DIR` source includes, compile-time env,
   nonliteral includes, absolute includes, and package-external support include
   paths.
-- `manifest.support_facade_export_pruning.001`: covered for simple copied
-  support facades that reexport concrete child-module leaves; remaining work is
-  transitive facade chains and glob facades, which still fall back broad.
+- `manifest.support_facade_export_pruning.001`: covered for simple and
+  transitive copied support facades that reexport concrete child-module leaves;
+  remaining work is glob facades, which still fall back broad.
 - `manifest.support_monolith_item_pruning.001`: support crates with large
   protocol files should not retain unrelated request/notification siblings when
   one symbol is referenced.

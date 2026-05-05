@@ -1692,6 +1692,17 @@ struct SupportUseNeeds<'a> {
     live_exports: &'a BTreeSet<String>,
 }
 
+struct SupportResolveContext<'a> {
+    modules: &'a BTreeMap<PathBuf, SupportModuleSource>,
+    root_file: &'a Path,
+}
+
+enum SupportReexportMark {
+    NotMatched,
+    Matched(bool),
+    Unsupported,
+}
+
 fn build_restricted_support_sources(
     package_root: &Path,
     lib_path: &Path,
@@ -1712,8 +1723,12 @@ fn build_restricted_support_sources(
 
     let mut live = BTreeMap::<PathBuf, SupportLiveSet>::new();
     let root_file = lib_path.to_path_buf();
+    let ctx = SupportResolveContext {
+        modules: &modules,
+        root_file: &root_file,
+    };
     for required_name in required_names {
-        if !seed_support_required_name(&modules, &root_file, required_name, &mut live) {
+        if !seed_support_required_name(&ctx, required_name, &mut live) {
             return Ok(None);
         }
     }
@@ -1768,13 +1783,9 @@ fn build_restricted_support_sources(
                 }
 
                 for segments in token_path_candidates(&tokens) {
-                    let Some(inserted) = mark_support_path_target(
-                        &modules,
-                        &root_file,
-                        &source_file,
-                        &segments,
-                        &mut live,
-                    ) else {
+                    let Some(inserted) =
+                        mark_support_path_target(&ctx, &source_file, &segments, &mut live)
+                    else {
                         return Ok(None);
                     };
                     changed |= inserted;
@@ -1795,8 +1806,7 @@ fn build_restricted_support_sources(
                     continue;
                 };
                 let Some(inserted) = mark_support_live_use_imports(
-                    &modules,
-                    &root_file,
+                    &ctx,
                     &source_file,
                     &item_use.tree,
                     Vec::new(),
@@ -1909,17 +1919,16 @@ fn collect_support_module_sources_with_syntax(
 }
 
 fn seed_support_required_name(
-    modules: &BTreeMap<PathBuf, SupportModuleSource>,
-    root_file: &Path,
+    ctx: &SupportResolveContext<'_>,
     required_name: &str,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
 ) -> bool {
-    let Some(root_module) = modules.get(root_file) else {
+    let Some(root_module) = ctx.modules.get(ctx.root_file) else {
         return false;
     };
     let named_items = support_named_item_names(&root_module.syntax.items);
     if named_items.contains_key(required_name) {
-        live.entry(root_file.to_path_buf())
+        live.entry(ctx.root_file.to_path_buf())
             .or_default()
             .item_names
             .insert(required_name.to_string());
@@ -1933,20 +1942,25 @@ fn seed_support_required_name(
         if !use_is_reexport(&item_use.vis) {
             continue;
         }
-        if mark_support_required_reexport(
-            modules,
-            root_file,
-            root_file,
+        let mut visited = BTreeSet::new();
+        match mark_support_required_reexport(
+            ctx,
+            ctx.root_file,
             &item_use.tree,
             Vec::new(),
             required_name,
             live,
+            &mut visited,
         ) {
-            live.entry(root_file.to_path_buf())
-                .or_default()
-                .public_exports
-                .insert(required_name.to_string());
-            return true;
+            SupportReexportMark::Matched(_) => {
+                live.entry(ctx.root_file.to_path_buf())
+                    .or_default()
+                    .public_exports
+                    .insert(required_name.to_string());
+                return true;
+            }
+            SupportReexportMark::Unsupported => return false,
+            SupportReexportMark::NotMatched => {}
         }
     }
 
@@ -1954,73 +1968,85 @@ fn seed_support_required_name(
 }
 
 fn mark_support_required_reexport(
-    modules: &BTreeMap<PathBuf, SupportModuleSource>,
-    root_file: &Path,
+    ctx: &SupportResolveContext<'_>,
     source_file: &Path,
     tree: &UseTree,
     mut prefix: Vec<String>,
     required_name: &str,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
-) -> bool {
+    visited: &mut BTreeSet<(PathBuf, String)>,
+) -> SupportReexportMark {
     match tree {
         UseTree::Path(path) => {
             prefix.push(path.ident.to_string());
             mark_support_required_reexport(
-                modules,
-                root_file,
+                ctx,
                 source_file,
                 &path.tree,
                 prefix,
                 required_name,
                 live,
+                visited,
             )
         }
         UseTree::Name(name) => {
             if name.ident != required_name {
-                return false;
+                return SupportReexportMark::NotMatched;
             }
-            mark_support_use_target(
-                modules,
-                root_file,
-                source_file,
-                &prefix,
-                required_name,
-                live,
-            )
-            .is_some()
+            match mark_support_use_target(ctx, source_file, &prefix, required_name, live, visited) {
+                Some(inserted) => SupportReexportMark::Matched(inserted),
+                None => SupportReexportMark::Unsupported,
+            }
         }
         UseTree::Rename(rename) => {
             if rename.rename != required_name {
-                return false;
+                return SupportReexportMark::NotMatched;
             }
-            mark_support_use_target(
-                modules,
-                root_file,
+            match mark_support_use_target(
+                ctx,
                 source_file,
                 &prefix,
                 &rename.ident.to_string(),
                 live,
-            )
-            .is_some()
+                visited,
+            ) {
+                Some(inserted) => SupportReexportMark::Matched(inserted),
+                None => SupportReexportMark::Unsupported,
+            }
         }
-        UseTree::Group(group) => group.items.iter().any(|item| {
-            mark_support_required_reexport(
-                modules,
-                root_file,
-                source_file,
-                item,
-                prefix.clone(),
-                required_name,
-                live,
-            )
-        }),
-        UseTree::Glob(_) => false,
+        UseTree::Group(group) => {
+            let mut matched = false;
+            let mut inserted = false;
+            for item in &group.items {
+                match mark_support_required_reexport(
+                    ctx,
+                    source_file,
+                    item,
+                    prefix.clone(),
+                    required_name,
+                    live,
+                    visited,
+                ) {
+                    SupportReexportMark::Matched(item_inserted) => {
+                        matched = true;
+                        inserted |= item_inserted;
+                    }
+                    SupportReexportMark::Unsupported => return SupportReexportMark::Unsupported,
+                    SupportReexportMark::NotMatched => {}
+                }
+            }
+            if matched {
+                SupportReexportMark::Matched(inserted)
+            } else {
+                SupportReexportMark::NotMatched
+            }
+        }
+        UseTree::Glob(_) => SupportReexportMark::NotMatched,
     }
 }
 
 fn mark_support_live_use_imports(
-    modules: &BTreeMap<PathBuf, SupportModuleSource>,
-    root_file: &Path,
+    ctx: &SupportResolveContext<'_>,
     source_file: &Path,
     tree: &UseTree,
     mut prefix: Vec<String>,
@@ -2030,28 +2056,21 @@ fn mark_support_live_use_imports(
     match tree {
         UseTree::Path(path) => {
             prefix.push(path.ident.to_string());
-            mark_support_live_use_imports(
-                modules,
-                root_file,
-                source_file,
-                &path.tree,
-                prefix,
-                needs,
-                live,
-            )
+            mark_support_live_use_imports(ctx, source_file, &path.tree, prefix, needs, live)
         }
         UseTree::Name(name) => {
             let imported_name = name.ident.to_string();
             if needs.live_idents.contains(&imported_name)
                 || needs.live_exports.contains(&imported_name)
             {
+                let mut visited = BTreeSet::new();
                 return mark_support_use_target(
-                    modules,
-                    root_file,
+                    ctx,
                     source_file,
                     &prefix,
                     &imported_name,
                     live,
+                    &mut visited,
                 );
             }
             Some(false)
@@ -2059,13 +2078,14 @@ fn mark_support_live_use_imports(
         UseTree::Rename(rename) => {
             let local_name = rename.rename.to_string();
             if needs.live_idents.contains(&local_name) || needs.live_exports.contains(&local_name) {
+                let mut visited = BTreeSet::new();
                 return mark_support_use_target(
-                    modules,
-                    root_file,
+                    ctx,
                     source_file,
                     &prefix,
                     &rename.ident.to_string(),
                     live,
+                    &mut visited,
                 );
             }
             Some(false)
@@ -2074,8 +2094,7 @@ fn mark_support_live_use_imports(
             let mut inserted = false;
             for item in &group.items {
                 inserted |= mark_support_live_use_imports(
-                    modules,
-                    root_file,
+                    ctx,
                     source_file,
                     item,
                     prefix.clone(),
@@ -2093,38 +2112,38 @@ fn mark_support_live_use_imports(
 }
 
 fn mark_support_path_target(
-    modules: &BTreeMap<PathBuf, SupportModuleSource>,
-    root_file: &Path,
+    ctx: &SupportResolveContext<'_>,
     source_file: &Path,
     segments: &[String],
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
 ) -> Option<bool> {
     let (target_file, target_segments) = match segments {
         [first, rest @ ..] if first == "self" => (source_file, rest),
-        [first, rest @ ..] if first == "crate" => (root_file, rest),
+        [first, rest @ ..] if first == "crate" => (ctx.root_file, rest),
         [first, ..] if first == "super" => return None,
         _ => (source_file, segments),
     };
     if target_segments.len() < 2 {
         return Some(false);
     }
+    let mut visited = BTreeSet::new();
     mark_support_use_target(
-        modules,
-        root_file,
+        ctx,
         target_file,
         &target_segments[..1],
         &target_segments[1],
         live,
+        &mut visited,
     )
 }
 
 fn mark_support_use_target(
-    modules: &BTreeMap<PathBuf, SupportModuleSource>,
-    root_file: &Path,
+    ctx: &SupportResolveContext<'_>,
     source_file: &Path,
     prefix: &[String],
     target_name: &str,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+    visited: &mut BTreeSet<(PathBuf, String)>,
 ) -> Option<bool> {
     let mut source_file = source_file;
     let mut prefix = prefix;
@@ -2134,7 +2153,7 @@ fn mark_support_use_target(
                 prefix = &prefix[1..];
             }
             "crate" => {
-                source_file = root_file;
+                source_file = ctx.root_file;
                 prefix = &prefix[1..];
             }
             "super" => return None,
@@ -2143,19 +2162,10 @@ fn mark_support_use_target(
     }
 
     let Some(first) = prefix.first() else {
-        let module = modules.get(source_file)?;
-        if support_named_item_names(&module.syntax.items).contains_key(target_name) {
-            return Some(
-                live.entry(source_file.to_path_buf())
-                    .or_default()
-                    .item_names
-                    .insert(target_name.to_string()),
-            );
-        }
-        return Some(false);
+        return seed_support_name_in_file(ctx, source_file, target_name, live, visited);
     };
 
-    let Some(child_file) = support_child_module_file(modules, source_file, first) else {
+    let Some(child_file) = support_child_module_file(ctx.modules, source_file, first) else {
         return Some(false);
     };
     let inserted_module = live
@@ -2164,24 +2174,68 @@ fn mark_support_use_target(
         .item_names
         .insert(first.clone());
     if prefix.len() == 1 {
-        let inserted_child = live
-            .entry(child_file)
-            .or_default()
-            .item_names
-            .insert(target_name.to_string());
+        let inserted_child =
+            seed_support_name_in_file(ctx, &child_file, target_name, live, visited)?;
         return Some(inserted_module | inserted_child);
     }
     Some(
         inserted_module
-            | mark_support_use_target(
-                modules,
-                root_file,
-                &child_file,
-                &prefix[1..],
-                target_name,
-                live,
-            )?,
+            | mark_support_use_target(ctx, &child_file, &prefix[1..], target_name, live, visited)?,
     )
+}
+
+fn seed_support_name_in_file(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    required_name: &str,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+    visited: &mut BTreeSet<(PathBuf, String)>,
+) -> Option<bool> {
+    let key = (source_file.to_path_buf(), required_name.to_string());
+    if !visited.insert(key) {
+        return Some(false);
+    }
+    let module = ctx.modules.get(source_file)?;
+    let named_items = support_named_item_names(&module.syntax.items);
+    if named_items.contains_key(required_name) {
+        return Some(
+            live.entry(source_file.to_path_buf())
+                .or_default()
+                .item_names
+                .insert(required_name.to_string()),
+        );
+    }
+
+    for item in &module.syntax.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        if !use_is_reexport(&item_use.vis) {
+            continue;
+        }
+        match mark_support_required_reexport(
+            ctx,
+            source_file,
+            &item_use.tree,
+            Vec::new(),
+            required_name,
+            live,
+            visited,
+        ) {
+            SupportReexportMark::Matched(inserted) => {
+                let inserted_export = live
+                    .entry(source_file.to_path_buf())
+                    .or_default()
+                    .public_exports
+                    .insert(required_name.to_string());
+                return Some(inserted | inserted_export);
+            }
+            SupportReexportMark::Unsupported => return None,
+            SupportReexportMark::NotMatched => {}
+        }
+    }
+
+    Some(false)
 }
 
 fn support_child_module_file(

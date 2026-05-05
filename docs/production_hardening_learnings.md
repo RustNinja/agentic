@@ -507,11 +507,11 @@ precise:
    stable spans.
 3. Extend copied support-package item pruning deeper into monolithic protocol
    files and transitive support reexport chains. The current no-build support
-   path prunes root and child-module items plus simple public facade reexports
-   when retained source names concrete dependency public symbols; remaining
-   broad fallbacks are local glob facades, unresolved relative paths,
-   build-script packages, generated-source packages, and macro-expanded support
-   internals.
+   path prunes root and child-module items plus simple and transitive public
+   facade reexports when retained source names concrete dependency public
+   symbols; remaining broad fallbacks are local glob facades, unresolved
+   relative paths, build-script packages, generated-source packages, and
+   macro-expanded support internals.
 4. Model `OUT_DIR` generated Rust includes through build-script output
    discovery and generated-file copying.
 5. Add a pinned real-repo CI matrix with Litter small, medium, and wide module
