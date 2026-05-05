@@ -60,9 +60,7 @@ mod reexports {
 mod dependency_barrel {
     pub mod records {
         pub use shared::dead_shared as dead_shared_barrel;
-        pub use shared::SharedMode as BarrelMode;
-
-        pub type BarrelRecord = shared::SharedRecord;
+        pub use shared::{SharedMode as BarrelMode, SharedRecord as BarrelRecord};
     }
 
     pub mod helpers {

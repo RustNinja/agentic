@@ -621,6 +621,8 @@ fn slices_fast_fixture_from_multiple_root_angles() {
                 "mod dependency_barrel",
                 "pub mod records",
                 "pub use records::*",
+                "SharedRecord as BarrelRecord",
+                "SharedMode as BarrelMode",
                 "BarrelRecord",
                 "BarrelMode",
                 "pub use helpers::score_record",

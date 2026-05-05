@@ -38,12 +38,15 @@ impl RenderPlan {
         let mut rendered_item_idents = BTreeSet::new();
         let callable_idents = reachable_reduced_callable_ident_index(project, reduced);
         let retained_surface_idents = retained_surface_idents_by_package(project, reduced);
+        let referenced_reexport_target_items =
+            referenced_public_reexport_target_items(project, reduced);
 
         for item in &reduced.reachable_items {
             if root_item_should_render(reduced, item)
                 || !package_has_reachable_callables(reduced, &item.package)
                 || matches!(item.kind, ItemKind::Const | ItemKind::Static)
                 || reachable_trait_surface_should_render(project, reduced, item)
+                || referenced_reexport_target_items.contains(item)
                 || callable_idents.all.contains(&item.name)
                 || retained_surface_idents
                     .get(&item.package)
@@ -57,6 +60,15 @@ impl RenderPlan {
                     item,
                 );
             }
+        }
+        for item in &referenced_reexport_target_items {
+            insert_render_plan_item(
+                project,
+                reduced,
+                &mut reachable_items,
+                &mut rendered_item_idents,
+                item,
+            );
         }
 
         loop {
@@ -3371,6 +3383,109 @@ fn retained_surface_idents_by_package(
         }
     }
     packages
+}
+
+fn referenced_public_reexport_target_items(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> BTreeSet<ItemId> {
+    let mut target_items = BTreeSet::new();
+    for package in &reduced.packages {
+        for module_path in project_module_paths(project, package) {
+            let Some(items) = module_items_for_path(project, package, &module_path) else {
+                continue;
+            };
+            for item in items {
+                let Item::Use(item_use) = item else {
+                    continue;
+                };
+                if !use_is_reexport(&item_use.vis) {
+                    continue;
+                }
+                let mut visible_targets = Vec::new();
+                collect_use_tree_visible_targets(&item_use.tree, Vec::new(), &mut visible_targets);
+                for (visible_name, target) in visible_targets {
+                    if !reachable_package_mentions_ident(project, reduced, package, &visible_name)
+                        && !public_reexport_name_is_referenced_by_reduced_package(
+                            project,
+                            reduced,
+                            package,
+                            &visible_name,
+                        )
+                    {
+                        continue;
+                    }
+                    let Some((target_package, target_path)) =
+                        resolve_use_target_path(project, package, &module_path, &target)
+                    else {
+                        continue;
+                    };
+                    if !reduced.packages.contains(&target_package) {
+                        continue;
+                    }
+                    if let Some(item) = find_use_item(project, &target_package, &target_path) {
+                        target_items.insert(item);
+                        continue;
+                    }
+                    if let Some((alias_package, alias_path)) =
+                        resolve_reexported_use_path(project, &target_package, &target_path)
+                    {
+                        if reduced.packages.contains(&alias_package) {
+                            if let Some(item) = find_use_item(project, &alias_package, &alias_path)
+                            {
+                                target_items.insert(item);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+    target_items
+}
+
+fn collect_use_tree_visible_targets(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    targets: &mut Vec<(String, Vec<String>)>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_tree_visible_targets(&path.tree, prefix, targets);
+        }
+        UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            let visible_name = if ident == "self" {
+                prefix.last().cloned().unwrap_or_else(|| ident.clone())
+            } else {
+                ident.clone()
+            };
+            let mut target = prefix;
+            if ident != "self" {
+                target.push(ident);
+            }
+            if !target.is_empty() {
+                targets.push((visible_name, target));
+            }
+        }
+        UseTree::Rename(rename) => {
+            let ident = rename.ident.to_string();
+            let mut target = prefix;
+            if ident != "self" {
+                target.push(ident);
+            }
+            if !target.is_empty() {
+                targets.push((rename.rename.to_string(), target));
+            }
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_use_tree_visible_targets(nested, prefix.clone(), targets);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
 }
 
 fn source_tree_rs_files(path: &Path) -> Result<Vec<PathBuf>, Box<dyn std::error::Error>> {

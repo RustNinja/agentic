@@ -528,11 +528,13 @@ local glob could be kept in slices that did not reference the module, then lose
 the child module that the glob pointed at. Normal glob-prefix pruning now treats
 inline child modules as module targets instead of only recognizing file-backed
 modules.
-The same fixture also showed a narrower future improvement: renamed dependency
-type reexports used only through same-package barrel paths still need stronger
-member/impl closure. The fixture uses a public type alias for that record today,
-while explicit dependency reexport aliases remain covered by the copied-support
-bundle rule.
+The same fixture now covers renamed dependency type reexports used through
+same-package barrel paths. Render planning records public reexport visible names
+that retained code actually references, resolves those reexports to their
+concrete dependency items, and keeps those target items before use-tree pruning
+runs. That lets strict pruning remove dead sibling aliases while preserving live
+aliases such as `SharedRecord as BarrelRecord` and the private imports that
+consume them.
 
 The rule for future work: if a real-repo failure is fixed, add a generic
 fixture that proves the rule without naming that repo.
