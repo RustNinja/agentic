@@ -546,3 +546,9 @@ closure, so retained fields with `with = "module"` keep `module::serialize`
 and `module::deserialize`, and direct helper strings such as
 `deserialize_with = "module::parse"` or `default = "crate::module::empty"` keep
 only the named helper functions. Dead sibling helpers remain pruned.
+
+The shared-runtime macro case also found that receiver method calls inside
+macro invocation arguments must be walked before expansion. Parseable expression
+macro arguments are now visited as normal Rust expressions, which keeps
+dependencies such as `self.dto.score()` inside retained helper macros without
+requiring project-specific macro knowledge.

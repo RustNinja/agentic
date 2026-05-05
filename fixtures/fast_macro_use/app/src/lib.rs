@@ -122,6 +122,34 @@ mod serde_helpers {
     }
 }
 
+#[allow(unused_imports)]
+mod runtime_shared {
+    use super::SharedAlias;
+    use std::sync::OnceLock;
+
+    static RUNTIME_SEED: OnceLock<SharedAlias> = OnceLock::new();
+
+    pub fn shared_runtime() -> SharedAlias {
+        *RUNTIME_SEED.get_or_init(|| 7)
+    }
+
+    pub fn shared_mobile_client() -> SharedAlias {
+        shared_runtime() + 1
+    }
+
+    pub fn shared_mobile_client_if_initialized() -> Option<SharedAlias> {
+        RUNTIME_SEED.get().copied()
+    }
+
+    macro_rules! blocking_async {
+        ($expr:expr) => {
+            $crate::runtime_shared::shared_mobile_client() + $expr
+        };
+    }
+
+    pub(crate) use blocking_async;
+}
+
 #[cfg_attr(any(unix, windows), macro_helpers::fixture_attr(shared::helper_marker))]
 mod platform_bridge {
     pub fn platform_value() -> u32 {
@@ -621,7 +649,7 @@ impl LayeredClient {
     }
 
     pub async fn compute(&self) -> SharedAlias {
-        self.dto.score() + self.token.score()
+        runtime_shared::blocking_async!(self.dto.score() + self.token.score())
     }
 
     pub fn event(&self) -> ServerEvent {

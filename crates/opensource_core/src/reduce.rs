@@ -5064,16 +5064,6 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn add_expression_macro_dependencies(&mut self, mac: &Macro) {
-        if !macro_path_ends_with(&mac.path, "assert")
-            && !macro_path_ends_with(&mac.path, "assert_eq")
-            && !macro_path_ends_with(&mac.path, "assert_ne")
-            && !macro_path_ends_with(&mac.path, "debug_assert")
-            && !macro_path_ends_with(&mac.path, "debug_assert_eq")
-            && !macro_path_ends_with(&mac.path, "debug_assert_ne")
-        {
-            return;
-        }
-
         let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
         let Ok(arguments) = parser.parse2(mac.tokens.clone()) else {
             return;

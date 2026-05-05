@@ -327,6 +327,31 @@ fn retains_macro_metavariable_enum_variant_paths() {
 }
 
 #[test]
+fn retains_receiver_methods_inside_expression_macro_arguments() {
+    let workspace = temp_path("rule-expression-macro-receiver-workspace");
+    let output = temp_path("rule-expression-macro-receiver-output");
+    let target_dir = temp_path("rule-expression-macro-receiver-target");
+    write_expression_macro_receiver_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("expression macro receiver rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("expression_macro_receiver_rule/src/lib.rs"));
+    assert!(lib.contains("macro_rules! passthrough"), "{lib}");
+    assert!(lib.contains("fn score(&self) -> u32"), "{lib}");
+    assert!(
+        lib.contains("passthrough!(make_payload().score())"),
+        "{lib}"
+    );
+    assert!(!lib.contains("dead_score"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_serde_serialize_and_deserialize_helper_paths_from_attrs() {
     let workspace = temp_path("rule-serde-hook-workspace");
     let output = temp_path("rule-serde-hook-output");
@@ -2474,6 +2499,42 @@ fn dead_id() -> u32 {
 #[opensourced]
 pub fn selected() -> Request {
     req!(Ping)
+}
+"#,
+    );
+}
+
+fn write_expression_macro_receiver_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "expression_macro_receiver_rule",
+        r#"use opensourced::opensourced;
+
+macro_rules! passthrough {
+    ($expr:expr) => {
+        $expr
+    };
+}
+
+pub struct Payload(u32);
+
+impl Payload {
+    pub fn score(&self) -> u32 {
+        self.0
+    }
+
+    pub fn dead_score(&self) -> u32 {
+        99
+    }
+}
+
+fn make_payload() -> Payload {
+    Payload(7)
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    passthrough!(make_payload().score())
 }
 "#,
     );
