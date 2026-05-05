@@ -1078,7 +1078,8 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                     .or_insert_with(|| workspace.manifest.clone());
                 self.collect_patch_replace_paths(&workspace.root, &workspace.manifest)?;
             }
-            let source_plan = build_support_source_plan(&root, &manifest, &required_names)?;
+            let source_plan =
+                build_support_source_plan(&root, &manifest, workspace.as_ref(), &required_names)?;
             self.collect_support_manifest_dependency_paths(
                 &root,
                 &manifest,
@@ -1631,6 +1632,7 @@ fn copy_support_package_library_source_tree(
 fn build_support_source_plan(
     package_root: &Path,
     manifest: &Value,
+    workspace: Option<&SupportWorkspace>,
     required_names: &BTreeSet<String>,
 ) -> Result<SupportSourcePlan, Box<dyn std::error::Error>> {
     if required_names.is_empty() || manifest_build_script_path(package_root, manifest).is_some() {
@@ -1658,8 +1660,14 @@ fn build_support_source_plan(
         Ok(syntax) => syntax,
         Err(_) => return Ok(SupportSourcePlan::default()),
     };
-    let Some(transformed_sources) =
-        build_restricted_support_sources(&package_root, &lib_path, &syntax, required_names)?
+    let dependency_roots = support_source_dependency_roots(&package_root, manifest, workspace)?;
+    let Some(transformed_sources) = build_restricted_support_sources(
+        &package_root,
+        &lib_path,
+        &syntax,
+        &dependency_roots,
+        required_names,
+    )?
     else {
         return Ok(SupportSourcePlan::default());
     };
@@ -1673,6 +1681,52 @@ fn build_support_source_plan(
         transformed_sources: Some(transformed_sources),
         usage: Some(usage),
     })
+}
+
+fn support_source_dependency_roots(
+    package_root: &Path,
+    manifest: &Value,
+    workspace: Option<&SupportWorkspace>,
+) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
+    let mut roots = BTreeSet::new();
+    if let Some(manifest) = manifest.as_table() {
+        collect_support_source_dependency_roots(package_root, workspace, manifest, &mut roots)?;
+    }
+
+    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            collect_support_source_dependency_roots(package_root, workspace, target, &mut roots)?;
+        }
+    }
+
+    Ok(roots)
+}
+
+fn collect_support_source_dependency_roots(
+    package_root: &Path,
+    workspace: Option<&SupportWorkspace>,
+    table_parent: &Table,
+    roots: &mut BTreeSet<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        let Some(dependencies) = table_parent.get(table_name).and_then(Value::as_table) else {
+            continue;
+        };
+        for (alias, value) in dependencies {
+            let (value, _) =
+                materialized_dependency_value_for_workspace(package_root, workspace, alias, value)?;
+            let package = dependency_package_name(alias, &value);
+            if is_marker_dependency(alias, &package) {
+                continue;
+            }
+            roots.insert(alias.clone());
+            roots.insert(dependency_code_name(alias));
+        }
+    }
+    Ok(())
 }
 
 #[derive(Clone)]
@@ -1695,6 +1749,7 @@ struct SupportUseNeeds<'a> {
 struct SupportResolveContext<'a> {
     modules: &'a BTreeMap<PathBuf, SupportModuleSource>,
     root_file: &'a Path,
+    dependency_roots: &'a BTreeSet<String>,
 }
 
 enum SupportReexportMark {
@@ -1713,6 +1768,7 @@ fn build_restricted_support_sources(
     package_root: &Path,
     lib_path: &Path,
     syntax: &syn::File,
+    dependency_roots: &BTreeSet<String>,
     required_names: &BTreeSet<String>,
 ) -> Result<Option<BTreeMap<PathBuf, syn::File>>, Box<dyn std::error::Error>> {
     let mut modules = BTreeMap::new();
@@ -1732,6 +1788,7 @@ fn build_restricted_support_sources(
     let ctx = SupportResolveContext {
         modules: &modules,
         root_file: &root_file,
+        dependency_roots,
     };
     for required_name in required_names {
         if !seed_support_required_name(&ctx, required_name, &mut live) {
@@ -2197,6 +2254,9 @@ fn mark_support_use_target(
     };
 
     let Some(child_file) = support_child_module_file(ctx.modules, source_file, first) else {
+        if ctx.dependency_roots.contains(first) {
+            return SupportReexportMark::Matched(false);
+        }
         return SupportReexportMark::NotMatched;
     };
     let inserted_module = live

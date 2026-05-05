@@ -112,6 +112,11 @@ not slicer failures.
   before manifest dependency closure. The pinned random-five batch remained
   accepted after the glob pass with 116 files, zero preflight errors, zero
   feedback errors, and zero warnings.
+- Copied support packages now also resolve explicit dependency-crate reexport
+  barrels such as `pub use dependency::{Live, Dead}` by manifest dependency
+  alias/code-name roots. Live aliases stay in the support facade, dead aliases
+  are pruned, and the downstream copied dependency is restricted to the concrete
+  original dependency symbols that remain.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around
@@ -136,7 +141,7 @@ not slicer failures.
   paths.
 - `manifest.support_facade_export_pruning.001`: covered for simple and
   transitive copied support facades, including local glob facades, that
-  reexport concrete child-module leaves.
+  reexport concrete child-module leaves or explicit dependency-crate symbols.
 - `manifest.support_monolith_item_pruning.001`: support crates with large
   protocol files should not retain unrelated request/notification siblings when
   one symbol is referenced.

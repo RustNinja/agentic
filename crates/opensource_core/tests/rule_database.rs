@@ -1118,10 +1118,17 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     let helper_facade = read(output.join("support/external-helper/src/facade.rs"));
     let helper_inner = read(output.join("support/external-helper/src/facade/inner.rs"));
     let helper_atoms = read(output.join("support/external-helper/src/live/atoms.rs"));
+    let leaf_lib = read(output.join("support/external-leaf/src/lib.rs"));
     assert!(helper_lib.contains("pub fn decorate"), "{helper_lib}");
+    assert!(
+        helper_lib.contains("pub use external_leaf::LeafLive as LeafAlias"),
+        "{helper_lib}"
+    );
     assert!(helper_lib.contains("pub use facade::*"), "{helper_lib}");
     assert!(!helper_lib.contains("dead_decorate"), "{helper_lib}");
     assert!(!helper_lib.contains("dead_leaf"), "{helper_lib}");
+    assert!(!helper_lib.contains("LeafDead"), "{helper_lib}");
+    assert!(!helper_lib.contains("LeafDeadAlias"), "{helper_lib}");
     assert!(!helper_lib.contains("FacadeDead"), "{helper_lib}");
     assert!(!helper_lib.contains("FacadeLive"), "{helper_lib}");
     assert!(helper_live.contains("mod atoms"), "{helper_live}");
@@ -1152,6 +1159,10 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     );
     assert!(!helper_atoms.contains("dead_suffix"), "{helper_atoms}");
     assert!(!helper_atoms.contains("dead_leaf"), "{helper_atoms}");
+    assert!(leaf_lib.contains("pub struct LeafLive"), "{leaf_lib}");
+    assert!(leaf_lib.contains("pub fn suffix"), "{leaf_lib}");
+    assert!(!leaf_lib.contains("LeafDead"), "{leaf_lib}");
+    assert!(!leaf_lib.contains("dead_suffix"), "{leaf_lib}");
     assert!(!output.join("support/external-helper/src/bin").exists());
     assert!(!output.join("support/external-helper/examples").exists());
     assert!(!output.join("support/external-helper/tests").exists());
@@ -4580,10 +4591,12 @@ use opensourced::opensourced;
 
 #[opensourced]
 pub fn selected(value: &str) -> String {
+    let leaf = external_helper::LeafAlias::new(value);
     format!(
-        "{}:{}",
+        "{}:{}:{}",
         external_helper::decorate(value),
-        external_helper::facade_decorate(value)
+        external_helper::facade_decorate(value),
+        leaf.label()
     )
 }
 "#,
@@ -4609,6 +4622,7 @@ dead-leaf = {{ path = "{}" }}
         r#"
 mod facade;
 mod live;
+pub use external_leaf::{LeafDead as LeafDeadAlias, LeafLive as LeafAlias};
 pub use facade::*;
 
 #[cfg(test)]
@@ -4723,6 +4737,30 @@ edition = "2021"
         r#"
 pub fn suffix() -> &'static str {
     ":leaf"
+}
+
+pub struct LeafLive {
+    label: String,
+}
+
+impl LeafLive {
+    pub fn new(value: &str) -> Self {
+        Self {
+            label: value.to_string(),
+        }
+    }
+
+    pub fn label(&self) -> &str {
+        &self.label
+    }
+}
+
+pub struct LeafDead {
+    label: String,
+}
+
+pub fn dead_suffix() -> &'static str {
+    ":dead-leaf"
 }
 "#,
     );
