@@ -511,8 +511,9 @@ precise:
    local-glob, and explicit dependency-crate public facade reexports/imports
    when retained source names concrete dependency public symbols, and drops impl
    blocks whose local self type was pruned; remaining broad fallbacks are
-   unresolved relative paths, unsupported glob prefixes, build-script packages,
-   generated-source packages, and macro-expanded support internals.
+   unresolved relative paths, external dependency glob reexports/imports,
+   unsupported glob prefixes, build-script packages, generated-source packages,
+   and macro-expanded support internals.
 4. Model `OUT_DIR` generated Rust includes through build-script output
    discovery and generated-file copying.
 5. Add a pinned real-repo CI matrix with Litter small, medium, and wide module

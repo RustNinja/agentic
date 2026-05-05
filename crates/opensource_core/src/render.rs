@@ -2093,7 +2093,13 @@ fn mark_support_required_reexport(
             if prefix.is_empty() {
                 return SupportReexportMark::NotMatched;
             }
-            mark_support_use_target(ctx, source_file, &prefix, required_name, live, visited)
+            match support_local_use_prefix_target(ctx, source_file, &prefix) {
+                SupportLocalTarget::Local(_) => {
+                    mark_support_use_target(ctx, source_file, &prefix, required_name, live, visited)
+                }
+                SupportLocalTarget::External => SupportReexportMark::Unsupported,
+                SupportLocalTarget::Unsupported => SupportReexportMark::Unsupported,
+            }
         }
     }
 }
@@ -2180,7 +2186,13 @@ fn mark_support_live_glob_imports(
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
 ) -> Option<bool> {
     match support_local_use_prefix_target(ctx, source_file, prefix) {
-        SupportLocalTarget::External => Some(false),
+        SupportLocalTarget::External => {
+            if needs.live_idents.is_empty() && needs.live_exports.is_empty() {
+                Some(false)
+            } else {
+                None
+            }
+        }
         SupportLocalTarget::Unsupported => None,
         SupportLocalTarget::Local(_) => {
             let mut inserted = false;
