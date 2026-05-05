@@ -85,6 +85,12 @@ not slicer failures.
   module/inline-impl proc-macro attributes are detected from reachable surfaces.
   The pinned batch still generated 116 files with zero preflight errors, zero
   feedback errors, zero warnings, and `production_ready=accepted`.
+- The bounded support item-pruning pass also kept the pinned batch accepted:
+  no-build support package roots can now be transformed from concrete retained
+  dependency public names, dead sibling root items are removed, and local path
+  dependencies used only by those dead support items are no longer copied. The
+  pinned batch still generated 116 files with zero preflight errors, zero
+  feedback errors, zero warnings, and `production_ready=accepted`.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around

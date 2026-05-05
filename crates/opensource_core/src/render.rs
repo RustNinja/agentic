@@ -590,12 +590,29 @@ struct SupportPackage {
     output_rel_dir: PathBuf,
     manifest: Value,
     workspace: Option<SupportWorkspace>,
+    source_plan: SupportSourcePlan,
 }
 
 #[derive(Clone)]
 struct SupportWorkspace {
     root: PathBuf,
     manifest: Value,
+}
+
+#[derive(Clone, Default)]
+struct SupportSourcePlan {
+    transformed_sources: Option<BTreeMap<PathBuf, syn::File>>,
+    usage: Option<TokenUsage>,
+}
+
+impl SupportSourcePlan {
+    fn is_restricted(&self) -> bool {
+        self.usage.is_some()
+    }
+
+    fn dependency_public_names(&self, alias: &str) -> Option<BTreeSet<String>> {
+        self.usage.as_ref()?.dependency_public_names(alias)
+    }
 }
 
 impl SupportPackagePlan {
@@ -717,6 +734,15 @@ impl SupportPackagePlan {
             let Some(value) = dependencies.get(&alias).cloned() else {
                 continue;
             };
+            if package.source_plan.is_restricted()
+                && package
+                    .source_plan
+                    .dependency_public_names(&alias)
+                    .is_none()
+            {
+                dependencies.remove(&alias);
+                continue;
+            }
             let transformed = self.transformed_support_dependency_value(package, &alias, &value)?;
             dependencies.insert(alias, transformed);
         }
@@ -830,6 +856,7 @@ impl SupportPackagePlan {
 struct SupportPackagePlanBuilder<'a> {
     project: &'a Project,
     pending: BTreeSet<PathBuf>,
+    pending_required_names: BTreeMap<PathBuf, BTreeSet<String>>,
     packages: BTreeMap<PathBuf, SupportPackage>,
     workspace_manifests: BTreeMap<PathBuf, Value>,
     used_output_dirs: BTreeSet<PathBuf>,
@@ -849,6 +876,7 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         Self {
             project,
             pending: BTreeSet::new(),
+            pending_required_names: BTreeMap::new(),
             packages: BTreeMap::new(),
             workspace_manifests: BTreeMap::new(),
             used_output_dirs: BTreeSet::new(),
@@ -945,12 +973,19 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                 return Ok(());
             };
             if !self.generated_workspace_roots.contains_key(&root) {
-                self.pending.insert(root);
+                self.add_pending_dependency_root(
+                    root,
+                    package_usage.dependency_public_names(alias),
+                );
             }
             return Ok(());
         }
 
-        self.add_dependency_path(source, manifest_dir)
+        self.add_dependency_path(
+            source,
+            manifest_dir,
+            package_usage.dependency_public_names(alias),
+        )
     }
 
     fn collect_patch_replace_paths(
@@ -980,7 +1015,7 @@ impl<'a> SupportPackagePlanBuilder<'a> {
             return Ok(());
         };
         if table.get("path").and_then(Value::as_str).is_some() {
-            return self.add_dependency_path(value, manifest_dir);
+            return self.add_dependency_path(value, manifest_dir, None);
         }
         for value in table.values() {
             self.collect_manifest_path_dependencies(manifest_dir, value)?;
@@ -992,6 +1027,7 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         &mut self,
         value: &Value,
         manifest_dir: &Path,
+        required_names: Option<BTreeSet<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let Some(root) = dependency_path_root(value, manifest_dir)? else {
             return Ok(());
@@ -1000,9 +1036,23 @@ impl<'a> SupportPackagePlanBuilder<'a> {
             return Ok(());
         }
         if !self.packages.contains_key(&root) {
-            self.pending.insert(root);
+            self.add_pending_dependency_root(root, required_names);
         }
         Ok(())
+    }
+
+    fn add_pending_dependency_root(
+        &mut self,
+        root: PathBuf,
+        required_names: Option<BTreeSet<String>>,
+    ) {
+        self.pending.insert(root.clone());
+        if let Some(required_names) = required_names.filter(|names| !names.is_empty()) {
+            self.pending_required_names
+                .entry(root)
+                .or_default()
+                .extend(required_names);
+        }
     }
 
     fn finish(mut self) -> Result<SupportPackagePlan, Box<dyn std::error::Error>> {
@@ -1010,6 +1060,10 @@ impl<'a> SupportPackagePlanBuilder<'a> {
             if self.packages.contains_key(&root) {
                 continue;
             }
+            let required_names = self
+                .pending_required_names
+                .remove(&root)
+                .unwrap_or_default();
             let manifest = read_toml_value(&root.join("Cargo.toml"))?;
             let name = manifest_package_name(&manifest).unwrap_or_else(|| {
                 root.file_name()
@@ -1024,7 +1078,13 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                     .or_insert_with(|| workspace.manifest.clone());
                 self.collect_patch_replace_paths(&workspace.root, &workspace.manifest)?;
             }
-            self.collect_support_manifest_dependency_paths(&root, &manifest, workspace.as_ref())?;
+            let source_plan = build_support_source_plan(&root, &manifest, &required_names)?;
+            self.collect_support_manifest_dependency_paths(
+                &root,
+                &manifest,
+                workspace.as_ref(),
+                &source_plan,
+            )?;
             let output_rel_dir = self.allocate_output_dir(&name);
             self.packages.insert(
                 root.clone(),
@@ -1033,6 +1093,7 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                     output_rel_dir,
                     manifest,
                     workspace,
+                    source_plan,
                 },
             );
         }
@@ -1049,15 +1110,26 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         package_root: &Path,
         manifest: &Value,
         workspace: Option<&SupportWorkspace>,
+        source_plan: &SupportSourcePlan,
     ) -> Result<(), Box<dyn std::error::Error>> {
         let has_build_script = manifest_build_script_path(package_root, manifest).is_some();
 
         if let Some(table) = manifest.get("dependencies").and_then(Value::as_table) {
-            self.collect_support_dependency_table_paths(package_root, table, workspace)?;
+            self.collect_support_dependency_table_paths(
+                package_root,
+                table,
+                workspace,
+                source_plan,
+            )?;
         }
         if has_build_script {
             if let Some(table) = manifest.get("build-dependencies").and_then(Value::as_table) {
-                self.collect_support_dependency_table_paths(package_root, table, workspace)?;
+                self.collect_support_dependency_table_paths(
+                    package_root,
+                    table,
+                    workspace,
+                    &SupportSourcePlan::default(),
+                )?;
             }
         }
 
@@ -1067,7 +1139,12 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                     continue;
                 };
                 if let Some(table) = target.get("dependencies").and_then(Value::as_table) {
-                    self.collect_support_dependency_table_paths(package_root, table, workspace)?;
+                    self.collect_support_dependency_table_paths(
+                        package_root,
+                        table,
+                        workspace,
+                        source_plan,
+                    )?;
                 }
                 if has_build_script {
                     if let Some(table) = target.get("build-dependencies").and_then(Value::as_table)
@@ -1076,6 +1153,7 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                             package_root,
                             table,
                             workspace,
+                            &SupportSourcePlan::default(),
                         )?;
                     }
                 }
@@ -1089,11 +1167,16 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         package_root: &Path,
         dependencies: &Table,
         workspace: Option<&SupportWorkspace>,
+        source_plan: &SupportSourcePlan,
     ) -> Result<(), Box<dyn std::error::Error>> {
         for (alias, value) in dependencies {
+            let required_names = source_plan.dependency_public_names(alias);
+            if source_plan.is_restricted() && required_names.is_none() {
+                continue;
+            }
             let (value, manifest_dir) =
                 materialized_dependency_value_for_workspace(package_root, workspace, alias, value)?;
-            self.add_dependency_path(&value, &manifest_dir)?;
+            self.add_dependency_path(&value, &manifest_dir, required_names)?;
         }
         Ok(())
     }
@@ -1502,6 +1585,17 @@ fn copy_support_package_library_source_tree(
         &package_root.join("Cargo.toml"),
         package_output,
     )?;
+    if let Some(transformed_sources) = &package.source_plan.transformed_sources {
+        for (source_file, syntax) in transformed_sources {
+            copied += write_support_package_source_file(
+                &package_root,
+                source_file,
+                syntax,
+                package_output,
+            )?;
+        }
+        return Ok(copied);
+    }
     let Some(lib_path) = support_library_source_path(package) else {
         return Ok(copied);
     };
@@ -1534,13 +1628,220 @@ fn copy_support_package_library_source_tree(
     Ok(copied)
 }
 
+fn build_support_source_plan(
+    package_root: &Path,
+    manifest: &Value,
+    required_names: &BTreeSet<String>,
+) -> Result<SupportSourcePlan, Box<dyn std::error::Error>> {
+    if required_names.is_empty() || manifest_build_script_path(package_root, manifest).is_some() {
+        return Ok(SupportSourcePlan::default());
+    }
+
+    let Some(lib_path) = support_library_source_path_from(package_root, manifest) else {
+        return Ok(SupportSourcePlan::default());
+    };
+    let Ok(package_root) = package_root.canonicalize() else {
+        return Ok(SupportSourcePlan::default());
+    };
+    let Ok(lib_path) = lib_path.canonicalize() else {
+        return Ok(SupportSourcePlan::default());
+    };
+    if !lib_path.starts_with(&package_root) {
+        return Ok(SupportSourcePlan::default());
+    }
+
+    let text = match fs::read_to_string(&lib_path) {
+        Ok(text) => text,
+        Err(_) => return Ok(SupportSourcePlan::default()),
+    };
+    let syntax = match syn::parse_file(&text) {
+        Ok(syntax) => syntax,
+        Err(_) => return Ok(SupportSourcePlan::default()),
+    };
+    let Some(transformed_root) = prune_support_root_file(&syntax, required_names) else {
+        return Ok(SupportSourcePlan::default());
+    };
+
+    let Some(source_files) = support_library_module_source_files_from_root_syntax(
+        &package_root,
+        &lib_path,
+        &transformed_root,
+    )?
+    else {
+        return Ok(SupportSourcePlan::default());
+    };
+
+    let mut transformed_sources = BTreeMap::new();
+    transformed_sources.insert(lib_path.clone(), transformed_root);
+    for source_file in source_files {
+        if source_file == lib_path {
+            continue;
+        }
+        let text = match fs::read_to_string(&source_file) {
+            Ok(text) => text,
+            Err(_) => return Ok(SupportSourcePlan::default()),
+        };
+        let syntax = match syn::parse_file(&text) {
+            Ok(syntax) => syntax,
+            Err(_) => return Ok(SupportSourcePlan::default()),
+        };
+        transformed_sources.insert(source_file, syntax);
+    }
+
+    let mut usage = TokenUsage::default();
+    for syntax in transformed_sources.values() {
+        usage.record_file(syntax);
+    }
+
+    Ok(SupportSourcePlan {
+        transformed_sources: Some(transformed_sources),
+        usage: Some(usage),
+    })
+}
+
+fn prune_support_root_file(
+    syntax: &syn::File,
+    required_names: &BTreeSet<String>,
+) -> Option<syn::File> {
+    let named_items = support_named_item_names(&syntax.items);
+    if !required_names
+        .iter()
+        .all(|name| named_items.contains_key(name))
+    {
+        return None;
+    }
+
+    let mut live_names = required_names.clone();
+    let mut changed = true;
+    while changed {
+        changed = false;
+        for name in live_names.clone() {
+            let Some(item) = named_items.get(&name) else {
+                continue;
+            };
+            let tokens = item.to_token_stream();
+            for candidate in named_items.keys() {
+                if live_names.contains(candidate) {
+                    continue;
+                }
+                if token_stream_mentions_ident(&tokens, candidate)
+                    || token_path_candidates(&tokens)
+                        .iter()
+                        .any(|segments| segments.first().is_some_and(|first| first == candidate))
+                {
+                    changed |= live_names.insert(candidate.clone());
+                }
+            }
+        }
+    }
+
+    let mut transformed = syntax.clone();
+    transformed.items = syntax
+        .items
+        .iter()
+        .filter(|item| {
+            support_item_name(item).is_none_or(|name| live_names.contains(&name))
+                || matches!(item, Item::Use(_) | Item::ExternCrate(_))
+        })
+        .cloned()
+        .collect();
+    Some(transformed)
+}
+
+fn support_named_item_names(items: &[Item]) -> BTreeMap<String, Item> {
+    items
+        .iter()
+        .filter_map(|item| support_item_name(item).map(|name| (name, item.clone())))
+        .collect()
+}
+
+fn support_item_name(item: &Item) -> Option<String> {
+    match item {
+        Item::Const(item) => Some(item.ident.to_string()),
+        Item::Enum(item) => Some(item.ident.to_string()),
+        Item::Fn(item) => Some(item.sig.ident.to_string()),
+        Item::Macro(item) => item.ident.as_ref().map(ToString::to_string),
+        Item::Mod(item) => Some(item.ident.to_string()),
+        Item::Static(item) => Some(item.ident.to_string()),
+        Item::Struct(item) => Some(item.ident.to_string()),
+        Item::Trait(item) => Some(item.ident.to_string()),
+        Item::Type(item) => Some(item.ident.to_string()),
+        Item::Union(item) => Some(item.ident.to_string()),
+        _ => None,
+    }
+}
+
+fn support_library_module_source_files_from_root_syntax(
+    package_root: &Path,
+    lib_path: &Path,
+    root_syntax: &syn::File,
+) -> Result<Option<BTreeSet<PathBuf>>, Box<dyn std::error::Error>> {
+    let mut sources = BTreeSet::new();
+    let module_dir = lib_path.parent().unwrap_or(package_root).to_path_buf();
+    if !collect_support_library_module_sources_from_syntax(
+        package_root,
+        lib_path,
+        &module_dir,
+        root_syntax,
+        &mut sources,
+    )? {
+        return Ok(None);
+    }
+    Ok(Some(sources))
+}
+
+fn collect_support_library_module_sources_from_syntax(
+    package_root: &Path,
+    source_file: &Path,
+    module_dir: &Path,
+    syntax: &syn::File,
+    sources: &mut BTreeSet<PathBuf>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    let Ok(source_file) = source_file.canonicalize() else {
+        return Ok(false);
+    };
+    if !source_file.starts_with(package_root) {
+        return Ok(false);
+    }
+    if !sources.insert(source_file) {
+        return Ok(true);
+    }
+
+    for item in &syntax.items {
+        let Item::Mod(item_mod) = item else {
+            continue;
+        };
+        if item_mod.content.is_some() || attrs_are_test(&item_mod.attrs) {
+            continue;
+        }
+        let Some((child_file, child_dir)) =
+            support_external_module_source(package_root, module_dir, item_mod)
+        else {
+            return Ok(false);
+        };
+        if !collect_support_library_module_sources(package_root, &child_file, &child_dir, sources)?
+        {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
 fn support_library_module_source_files(
     package: &SupportPackage,
 ) -> Result<Option<BTreeSet<PathBuf>>, Box<dyn std::error::Error>> {
-    let Some(lib_path) = support_library_source_path(package) else {
+    support_library_module_source_files_for(&package.root, &package.manifest)
+}
+
+fn support_library_module_source_files_for(
+    package_root: &Path,
+    manifest: &Value,
+) -> Result<Option<BTreeSet<PathBuf>>, Box<dyn std::error::Error>> {
+    let Some(lib_path) = support_library_source_path_from(package_root, manifest) else {
         return Ok(None);
     };
-    let Ok(package_root) = package.root.canonicalize() else {
+    let Ok(package_root) = package_root.canonicalize() else {
         return Ok(None);
     };
     let Ok(lib_path) = lib_path.canonicalize() else {
@@ -1557,6 +1858,21 @@ fn support_library_module_source_files(
         return Ok(None);
     }
     Ok(Some(sources))
+}
+
+fn write_support_package_source_file(
+    package_root: &Path,
+    path: &Path,
+    syntax: &syn::File,
+    package_output: &Path,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let relative = path.strip_prefix(package_root)?;
+    let output_path = package_output.join(relative);
+    if let Some(parent) = output_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(output_path, prettyplease::unparse(syntax))?;
+    Ok(1)
 }
 
 fn collect_support_library_module_sources(
@@ -1778,7 +2094,20 @@ fn copy_support_include_assets(
         .unwrap_or(package_root.as_path())
         .canonicalize()?;
     let mut rust_files = Vec::new();
-    if support_build_script_path(package).is_some() {
+    if let Some(transformed_sources) = &package.source_plan.transformed_sources {
+        let mut copied = 0;
+        for (source, syntax) in transformed_sources {
+            copied += copy_include_assets_for_support_source(
+                &package_root,
+                &allowed_source_root,
+                source,
+                syntax,
+                package_output,
+                output_root,
+            )?;
+        }
+        return Ok(copied);
+    } else if support_build_script_path(package).is_some() {
         let mut visited = BTreeSet::new();
         collect_support_rust_files(&package_root, &package_root, &mut visited, &mut rust_files)?;
     } else if let Some(source_files) = support_library_module_source_files(package)? {
@@ -2407,16 +2736,19 @@ fn package_library_source_path(package: &Package) -> Option<PathBuf> {
 }
 
 fn support_library_source_path(package: &SupportPackage) -> Option<PathBuf> {
-    if let Some(path) = package
-        .manifest
+    support_library_source_path_from(&package.root, &package.manifest)
+}
+
+fn support_library_source_path_from(package_root: &Path, manifest: &Value) -> Option<PathBuf> {
+    if let Some(path) = manifest
         .get("lib")
         .and_then(|lib| lib.get("path"))
         .and_then(Value::as_str)
     {
-        let path = package.root.join(path);
+        let path = package_root.join(path);
         return path.exists().then_some(path);
     }
-    let path = package.root.join("src/lib.rs");
+    let path = package_root.join("src/lib.rs");
     path.exists().then_some(path)
 }
 
@@ -3771,13 +4103,18 @@ impl PackageSourceUsage {
     fn target_names(&self) -> impl Iterator<Item = &String> {
         self.targets.keys()
     }
+
+    fn dependency_public_names(&self, alias: &str) -> Option<BTreeSet<String>> {
+        self.all.dependency_public_names(alias)
+    }
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct TokenUsage {
     idents: BTreeSet<String>,
     path_roots: BTreeSet<String>,
     use_idents: BTreeSet<String>,
+    dependency_public_names: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl TokenUsage {
@@ -3786,6 +4123,11 @@ impl TokenUsage {
         for item in &file.items {
             if let Item::Use(item_use) = item {
                 collect_use_tree_idents(&item_use.tree, &mut self.use_idents);
+                collect_use_tree_dependency_public_names(
+                    &item_use.tree,
+                    Vec::new(),
+                    &mut self.dependency_public_names,
+                );
             }
         }
     }
@@ -3801,6 +4143,23 @@ impl TokenUsage {
             || (alias != code_name
                 && (self.path_roots.contains(alias) || self.use_idents.contains(alias)))
             || known_macro_dependency_usage(self, alias, &code_name)
+    }
+
+    fn dependency_public_names(&self, alias: &str) -> Option<BTreeSet<String>> {
+        if !self.mentions_dependency(alias) {
+            return None;
+        }
+        let code_name = dependency_code_name(alias);
+        let mut names = BTreeSet::new();
+        if let Some(alias_names) = self.dependency_public_names.get(alias) {
+            names.extend(alias_names.iter().cloned());
+        }
+        if alias != code_name {
+            if let Some(code_names) = self.dependency_public_names.get(&code_name) {
+                names.extend(code_names.iter().cloned());
+            }
+        }
+        Some(names)
     }
 }
 
@@ -3997,6 +4356,16 @@ fn collect_token_usage(tokens: &TokenStream, usage: &mut TokenUsage) {
             }
         }
     }
+
+    for segments in token_path_candidates(tokens) {
+        if let [root, name, ..] = segments.as_slice() {
+            usage
+                .dependency_public_names
+                .entry(root.clone())
+                .or_default()
+                .insert(name.clone());
+        }
+    }
 }
 
 fn collect_use_tree_idents(tree: &UseTree, idents: &mut BTreeSet<String>) {
@@ -4015,6 +4384,41 @@ fn collect_use_tree_idents(tree: &UseTree, idents: &mut BTreeSet<String>) {
         UseTree::Group(group) => {
             for item in &group.items {
                 collect_use_tree_idents(item, idents);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn collect_use_tree_dependency_public_names(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    names: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_tree_dependency_public_names(&path.tree, prefix, names);
+        }
+        UseTree::Name(name) => {
+            if let Some(root) = prefix.first() {
+                names
+                    .entry(root.clone())
+                    .or_default()
+                    .insert(name.ident.to_string());
+            }
+        }
+        UseTree::Rename(rename) => {
+            if let Some(root) = prefix.first() {
+                names
+                    .entry(root.clone())
+                    .or_default()
+                    .insert(rename.ident.to_string());
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_tree_dependency_public_names(item, prefix.clone(), names);
             }
         }
         UseTree::Glob(_) => {}

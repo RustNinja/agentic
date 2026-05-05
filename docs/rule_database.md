@@ -96,6 +96,7 @@ file.
 | `serde.tagged_enum_payload_contract.001` | covered | Internally tagged serde enums retain field-bearing payload variants and variant attrs when used as a parsing contract |
 | `serde.default_enum_variant_contract.001` | covered | `Default` serde enum variants and `#[serde(default)]` fields retain the enum contract while dead sibling enums prune away |
 | `manifest.support_path_bundle.001` | covered | External support path dependency bundles rewrite absolute paths to generated relative support paths, copy dependency closure assets, and drop dead bins/examples/tests/benches/fixtures/orphan modules |
+| `manifest.support_dependency_item_pruning.001` | covered | No-build copied support packages with concrete retained public names prune dead sibling items in the library root and omit local path dependencies used only by those dead items |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

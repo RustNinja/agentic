@@ -352,6 +352,16 @@ parsed safely. The pinned Litter codex-ipc five-root corpus run stayed
 warning-clean under feedback with `--deny-warnings` and dropped from 121 to 116
 generated files by removing generic support test/tool files.
 
+The next support-package precision fix adds bounded item-level pruning for
+no-build support library roots when retained source names the exact dependency
+public item, such as `external_helper::decorate` or `use external_helper::Live`.
+The support copier transforms the library root, keeps only the named item and
+simple local item/module dependencies, computes dependency usage from the
+transformed support source, and removes support manifest path dependencies used
+only by pruned dead items. Build-script packages, opaque module graphs, missing
+named roots, and unsupported reexport shapes still fall back to the broader
+module-level support copy.
+
 Copied support packages are now production-reporting surfaces, not invisible
 blobs. After rendering, the production gate scans generated `support/` packages
 for retained build scripts, retained Rust `include!`, `OUT_DIR` source/file

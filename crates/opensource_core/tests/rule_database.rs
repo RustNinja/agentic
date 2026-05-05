@@ -1078,7 +1078,8 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     let external = temp_path("rule-support-path-bundle-external");
     let helper = external.join("external-helper");
     let leaf = external.join("external-leaf");
-    write_support_path_bundle_rule_fixture(&workspace, &helper, &leaf);
+    let dead_leaf = external.join("dead-leaf");
+    write_support_path_bundle_rule_fixture(&workspace, &helper, &leaf, &dead_leaf);
 
     let report = generate(GenerateOptions {
         workspace_root: workspace,
@@ -1092,6 +1093,7 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     let leaf_manifest = read(output.join("support/external-leaf/Cargo.toml"));
     assert!(app_manifest.contains("path = \"../support/external-helper\""));
     assert!(helper_manifest.contains("path = \"../external-leaf\""));
+    assert!(!helper_manifest.contains("dead-leaf"));
     assert!(leaf_manifest.contains("name = \"external-leaf\""));
     assert!(!app_manifest.contains(&manifest_path(&helper)));
     assert!(!helper_manifest.contains(&manifest_path(&leaf)));
@@ -1101,6 +1103,11 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     assert!(output.join("support/external-helper/src/live.rs").exists());
     assert!(output.join("support/external-helper/src/live.txt").exists());
     assert!(output.join("support/external-leaf/src/lib.rs").exists());
+    assert!(!output.join("support/dead-leaf").exists());
+    let helper_lib = read(output.join("support/external-helper/src/lib.rs"));
+    assert!(helper_lib.contains("pub fn decorate"), "{helper_lib}");
+    assert!(!helper_lib.contains("dead_decorate"), "{helper_lib}");
+    assert!(!helper_lib.contains("dead_leaf"), "{helper_lib}");
     assert!(!output.join("support/external-helper/src/bin").exists());
     assert!(!output.join("support/external-helper/examples").exists());
     assert!(!output.join("support/external-helper/tests").exists());
@@ -1120,6 +1127,8 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
         .expect("original helper package should move away");
     fs::rename(&leaf, leaf.with_extension("moved"))
         .expect("original leaf package should move away");
+    fs::rename(&dead_leaf, dead_leaf.with_extension("moved"))
+        .expect("original dead leaf package should move away");
     let lib = read(output.join("support_path_app/src/lib.rs"));
     assert_cargo_check(&output, &target_dir, &lib);
 }
@@ -4491,7 +4500,12 @@ pub fn selected(route: Route) -> usize {
     );
 }
 
-fn write_support_path_bundle_rule_fixture(root: &Path, helper: &Path, leaf: &Path) {
+fn write_support_path_bundle_rule_fixture(
+    root: &Path,
+    helper: &Path,
+    leaf: &Path,
+    dead_leaf: &Path,
+) {
     write(
         root.join("Cargo.toml"),
         r#"[workspace]
@@ -4536,8 +4550,10 @@ edition = "2021"
 
 [dependencies]
 external-leaf = {{ path = "{}" }}
+dead-leaf = {{ path = "{}" }}
 "#,
-            manifest_path(leaf)
+            manifest_path(leaf),
+            manifest_path(dead_leaf)
         ),
     );
     write(
@@ -4550,6 +4566,10 @@ mod test_only;
 
 pub fn decorate(value: &str) -> String {
     format!("{}{}", live::decorate(value), external_leaf::suffix())
+}
+
+pub fn dead_decorate(value: &str) -> String {
+    format!("{value}{}", dead_leaf::suffix())
 }
 "#,
     );
@@ -4604,6 +4624,22 @@ edition = "2021"
         r#"
 pub fn suffix() -> &'static str {
     ":leaf"
+}
+"#,
+    );
+    write(
+        dead_leaf.join("Cargo.toml"),
+        r#"[package]
+name = "dead-leaf"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        dead_leaf.join("src/lib.rs"),
+        r#"
+pub fn suffix() -> &'static str {
+    ":dead"
 }
 "#,
     );
