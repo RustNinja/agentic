@@ -56,6 +56,31 @@ mod reexports {
     pub use shared::nested::nested_value as reexported_nested;
 }
 
+#[allow(unused_imports)]
+mod dependency_barrel {
+    pub mod records {
+        pub use shared::dead_shared as dead_shared_barrel;
+        pub use shared::{SharedMode as BarrelMode, SharedRecord as BarrelRecord};
+    }
+
+    pub mod helpers {
+        use super::records::{BarrelMode, BarrelRecord};
+
+        pub fn score_record(record: BarrelRecord, mode: BarrelMode) -> u32 {
+            record.value + mode.score()
+        }
+
+        #[allow(dead_code)]
+        pub fn dead_helper() -> u32 {
+            99
+        }
+    }
+
+    pub use helpers::dead_helper as dead_barrel_helper;
+    pub use helpers::score_record;
+    pub use records::{BarrelMode, BarrelRecord};
+}
+
 mod inline_child {
     use super::{RootDto, SharedMode};
 
@@ -879,6 +904,13 @@ pub fn open_generic_edges(value: SharedAlias) -> SharedAlias {
     let envelope = GenericEnvelope::new(GenericValue(value));
     let packed = <GenericCodec as GenericApi<GenericValue>>::pack(GenericValue(1));
     envelope.score() + packed.score()
+}
+
+#[opensourced]
+pub fn open_dependency_barrel(value: SharedAlias) -> SharedAlias {
+    let record = dependency_barrel::BarrelRecord::new(value);
+    let mode = dependency_barrel::BarrelMode::Fast(record.value);
+    dependency_barrel::score_record(record, mode)
 }
 
 #[fixture_export(async_runtime = "fixture")]

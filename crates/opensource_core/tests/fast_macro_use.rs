@@ -92,6 +92,10 @@ fn slices_fast_macro_use_fixture_and_compiles() {
     assert!(app.contains("pub struct RemotePathObject"));
     assert!(app.contains("pub trait BridgeCallback"));
     assert!(app.contains("fn async_bridge_value"));
+    assert!(app.contains("pub fn open_dependency_barrel"));
+    assert!(app.contains("mod dependency_barrel"));
+    assert!(app.contains("BarrelRecord"));
+    assert!(app.contains("BarrelMode"));
     assert!(!app.contains("pub struct CallbackRegistry"));
     assert!(!app.contains("pub fn open_decision_callback"));
     assert!(!app.contains("pub fn open_registry_bridge"));
@@ -603,6 +607,30 @@ fn slices_fast_fixture_from_multiple_root_angles() {
             ],
             absent: &[
                 "pub fn open_transport_bundle",
+                "pub struct LayeredClient",
+                "pub struct FacadeObject",
+                "pub fn open_macro_use_entry",
+                "include_str!(\"guidelines/core.md\")",
+            ],
+        },
+        SliceAngle {
+            label: "dependency-barrel-root",
+            roots: &["open_dependency_barrel"],
+            present: &[
+                "pub fn open_dependency_barrel",
+                "mod dependency_barrel",
+                "pub mod records",
+                "pub use records::{BarrelMode, BarrelRecord}",
+                "BarrelRecord",
+                "BarrelMode",
+                "pub use helpers::score_record",
+                "pub fn score_record",
+            ],
+            absent: &[
+                "dead_shared_barrel",
+                "dead_barrel_helper",
+                "dead_helper",
+                "pub fn open_generic_edges",
                 "pub struct LayeredClient",
                 "pub struct FacadeObject",
                 "pub fn open_macro_use_entry",

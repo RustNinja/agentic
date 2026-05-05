@@ -521,5 +521,12 @@ precise:
 6. Promote recurring low-progress reports into preflight graph rules so common
    compiler failures are predicted before the first full build.
 
+Fast fixture expansion added a Litter-shaped dependency type barrel with live
+and dead dependency reexports. While adding it, a separate reducer gap surfaced:
+private inline modules whose only retained content is a public local glob can be
+kept in slices that do not reference the module, then lose the child module that
+the glob points at. Dedicated local-glob support-package coverage is fixed, but
+normal inline-module public glob pruning still needs a name-directed pass.
+
 The rule for future work: if a real-repo failure is fixed, add a generic
 fixture that proves the rule without naming that repo.
