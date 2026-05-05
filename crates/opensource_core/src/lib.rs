@@ -59,6 +59,7 @@ pub struct GenerateReport {
     pub targets: Vec<GeneratedTargetReport>,
     pub reachable: Vec<CallableId>,
     pub reachable_items: Vec<ItemId>,
+    pub usage: UsageClassificationReport,
     pub source_map: SourceMapReport,
     pub files_written: usize,
     pub timings: GenerateTimingReport,
@@ -114,6 +115,40 @@ pub struct ProductionHazardDetail {
     pub cfg: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggested_cargo_args: Vec<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageClassificationReport {
+    pub status: String,
+    pub summary: UsageClassificationSummary,
+    pub used: UsageClassifiedItems,
+    pub unused: UsageClassifiedItems,
+    pub unknown: Vec<UsageUnknownSurface>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageClassificationSummary {
+    pub indexed_callables: usize,
+    pub indexed_items: usize,
+    pub used_callables: usize,
+    pub used_items: usize,
+    pub unused_callables: usize,
+    pub unused_items: usize,
+    pub unknown_surfaces: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageClassifiedItems {
+    pub callables: Vec<CallableId>,
+    pub items: Vec<ItemId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct UsageUnknownSurface {
+    pub code: String,
+    pub severity: String,
+    pub message: String,
+    pub details: Vec<ProductionHazardDetail>,
 }
 
 #[derive(Debug, Clone)]
@@ -204,6 +239,7 @@ pub fn generate_with_analyzer_feedback(
     let source_map = source_map_report(&project, &reduced);
     let production =
         production_readiness_report(&analyzer, &project, &reduced, &options.output_root);
+    let usage = usage_classification_report(&project, &reduced, &production);
 
     Ok(GenerateReport {
         analyzer,
@@ -215,6 +251,7 @@ pub fn generate_with_analyzer_feedback(
         targets,
         reachable,
         reachable_items,
+        usage,
         source_map,
         files_written,
         timings,
@@ -684,6 +721,85 @@ fn source_map_report(project: &model::Project, reduced: &model::ReducedProject) 
     items.sort_by_key(|location| location.id.to_string());
 
     SourceMapReport { callables, items }
+}
+
+fn usage_classification_report(
+    project: &model::Project,
+    reduced: &model::ReducedProject,
+    production: &ProductionReadinessReport,
+) -> UsageClassificationReport {
+    let mut used_callables = project
+        .functions
+        .keys()
+        .chain(project.methods.keys())
+        .filter(|id| reduced.reachable.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    used_callables.sort();
+
+    let mut unused_callables = project
+        .functions
+        .keys()
+        .chain(project.methods.keys())
+        .filter(|id| !reduced.reachable.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    unused_callables.sort();
+
+    let mut used_items = project
+        .items
+        .keys()
+        .filter(|id| reduced.reachable_items.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    used_items.sort();
+
+    let mut unused_items = project
+        .items
+        .keys()
+        .filter(|id| !reduced.reachable_items.contains(*id))
+        .cloned()
+        .collect::<Vec<_>>();
+    unused_items.sort();
+
+    let unknown = production
+        .hazards
+        .iter()
+        .map(|hazard| UsageUnknownSurface {
+            code: hazard.code.clone(),
+            severity: hazard.severity.clone(),
+            message: hazard.message.clone(),
+            details: hazard.details.clone(),
+        })
+        .collect::<Vec<_>>();
+
+    let status = if unknown.is_empty() {
+        "classified".to_string()
+    } else {
+        "classified_with_unknowns".to_string()
+    };
+
+    UsageClassificationReport {
+        status,
+        summary: UsageClassificationSummary {
+            indexed_callables: used_callables.len() + unused_callables.len(),
+            indexed_items: used_items.len() + unused_items.len(),
+            used_callables: used_callables.len(),
+            used_items: used_items.len(),
+            unused_callables: unused_callables.len(),
+            unused_items: unused_items.len(),
+            unknown_surfaces: unknown.len(),
+        },
+        used: UsageClassifiedItems {
+            callables: used_callables,
+            items: used_items,
+        },
+        unused: UsageClassifiedItems {
+            callables: unused_callables,
+            items: unused_items,
+        },
+        unknown,
+    }
 }
 
 fn production_readiness_report(
@@ -3401,6 +3517,7 @@ struct GenerateReportJson {
     targets: Vec<GeneratedTargetReportJson>,
     reachable: Vec<String>,
     reachable_items: Vec<String>,
+    usage: UsageClassificationReportJson,
     source_map: SourceMapReportJson,
     files_written: usize,
 }
@@ -3430,6 +3547,7 @@ impl GenerateReportJson {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
+            usage: UsageClassificationReportJson::from_report(&report.usage),
             source_map: SourceMapReportJson::from_report(&report.source_map),
             files_written: report.files_written,
         }
@@ -3478,6 +3596,90 @@ impl GenerateTimingReportJson {
             parse_ms: report.parse_ms,
             reduce_ms: report.reduce_ms,
             render_ms: report.render_ms,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UsageClassificationReportJson {
+    status: String,
+    summary: UsageClassificationSummaryJson,
+    used: UsageClassifiedItemsJson,
+    unused: UsageClassifiedItemsJson,
+    unknown: Vec<UsageUnknownSurfaceJson>,
+}
+
+impl UsageClassificationReportJson {
+    fn from_report(report: &UsageClassificationReport) -> Self {
+        Self {
+            status: report.status.clone(),
+            summary: UsageClassificationSummaryJson::from_report(&report.summary),
+            used: UsageClassifiedItemsJson::from_report(&report.used),
+            unused: UsageClassifiedItemsJson::from_report(&report.unused),
+            unknown: report
+                .unknown
+                .iter()
+                .map(UsageUnknownSurfaceJson::from_report)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UsageClassificationSummaryJson {
+    indexed_callables: usize,
+    indexed_items: usize,
+    used_callables: usize,
+    used_items: usize,
+    unused_callables: usize,
+    unused_items: usize,
+    unknown_surfaces: usize,
+}
+
+impl UsageClassificationSummaryJson {
+    fn from_report(summary: &UsageClassificationSummary) -> Self {
+        Self {
+            indexed_callables: summary.indexed_callables,
+            indexed_items: summary.indexed_items,
+            used_callables: summary.used_callables,
+            used_items: summary.used_items,
+            unused_callables: summary.unused_callables,
+            unused_items: summary.unused_items,
+            unknown_surfaces: summary.unknown_surfaces,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UsageClassifiedItemsJson {
+    callables: Vec<String>,
+    items: Vec<String>,
+}
+
+impl UsageClassifiedItemsJson {
+    fn from_report(items: &UsageClassifiedItems) -> Self {
+        Self {
+            callables: items.callables.iter().map(ToString::to_string).collect(),
+            items: items.items.iter().map(ToString::to_string).collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct UsageUnknownSurfaceJson {
+    code: String,
+    severity: String,
+    message: String,
+    details: Vec<ProductionHazardDetail>,
+}
+
+impl UsageUnknownSurfaceJson {
+    fn from_report(surface: &UsageUnknownSurface) -> Self {
+        Self {
+            code: surface.code.clone(),
+            severity: surface.severity.clone(),
+            message: surface.message.clone(),
+            details: surface.details.clone(),
         }
     }
 }
@@ -3792,6 +3994,32 @@ mod tests {
                 "unreachable callable {not_expected} was retained in graph",
             );
         }
+        let usage_used_callables = report
+            .usage
+            .used
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let usage_unused_callables = report
+            .usage
+            .unused
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(usage_used_callables.contains("a::open_source_entry"));
+        assert!(usage_used_callables.contains("b::helper"));
+        assert!(usage_unused_callables.contains("a::internal_entry"));
+        assert!(usage_unused_callables.contains("b::unused_public"));
+        assert!(
+            usage_used_callables.is_disjoint(&usage_unused_callables),
+            "usage classifier must not classify a callable as both used and unused",
+        );
+        assert_eq!(
+            report.usage.summary.indexed_callables,
+            report.usage.summary.used_callables + report.usage.summary.unused_callables,
+        );
 
         let reachable_items = report
             .reachable_items
@@ -3817,6 +4045,39 @@ mod tests {
                 .any(|actual| actual == "d::UnusedEnum(Enum)"),
             "unreachable enum was retained in item graph",
         );
+        let usage_used_items = report
+            .usage
+            .used
+            .items
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let usage_unused_items = report
+            .usage
+            .unused
+            .items
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(usage_used_items.contains("d::Worker(Struct)"));
+        assert!(usage_unused_items.contains("d::UnusedEnum(Enum)"));
+        assert!(
+            usage_used_items.is_disjoint(&usage_unused_items),
+            "usage classifier must not classify an item as both used and unused",
+        );
+        assert_eq!(
+            report.usage.summary.indexed_items,
+            report.usage.summary.used_items + report.usage.summary.unused_items,
+        );
+        assert_eq!(
+            report.usage.status, "classified_with_unknowns",
+            "syn generation should expose unknown semantic surfaces instead of pretending classification is complete",
+        );
+        assert!(report
+            .usage
+            .unknown
+            .iter()
+            .any(|surface| surface.code == "semantic_analyzer_unavailable"));
 
         let d_source = fs::read_to_string(output.join("d/src/lib.rs")).unwrap();
         assert!(d_source.contains("pub enum Mode"));
@@ -3932,6 +4193,26 @@ theme = []
             .find(|location| location["id"] == "a::internal_entry")
             .expect("unreachable callable should still have a source-map entry");
         assert_eq!(internal_location["reachable"], false);
+        assert_eq!(value["usage"]["status"], "classified_with_unknowns");
+        assert_eq!(
+            value["usage"]["summary"]["indexed_callables"],
+            report.usage.summary.indexed_callables,
+        );
+        assert!(value["usage"]["used"]["callables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|callable| callable == "a::open_source_entry"));
+        assert!(value["usage"]["unused"]["callables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|callable| callable == "a::internal_entry"));
+        assert!(value["usage"]["unknown"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|surface| surface["code"] == "semantic_analyzer_unavailable"));
     }
 
     #[test]

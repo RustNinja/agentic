@@ -40,6 +40,14 @@ outgoing call hierarchy closure without requesting proc-macro/build-script
 discovery. Both paths record project-local call hierarchy edges into the same
 additive reduction hint map, then let the existing `syn` renderer prune items
 outside the retained set.
+Generation reports now expose an explicit usage classification:
+`usage.used`, `usage.unused`, and `usage.unknown`. `used` means reachable from
+selected roots through the current syntactic and semantic edge map; `unused`
+means indexed but unreachable in that graph; `unknown` mirrors production
+hazards that prevent treating the classification as a complete proof. The
+production invariant is still fail-closed: remove only graph-unreachable indexed
+items, and keep/report anything represented by `unknown` until compiler
+feedback or deeper semantics discharges it.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that
