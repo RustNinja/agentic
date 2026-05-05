@@ -54,6 +54,16 @@ file.
 | `dyn.callback.inline_future_field.001` | covered | Inline `Arc<dyn Fn(...) -> Pin<Box<dyn Future...>>>` callback fields report hard dynamic-dispatch hazards without requiring a type alias |
 | `static.lazy_lock_closure.001` | covered | `LazyLock::new(|| helper())` static initializers retain helper calls made only inside initializer closures |
 | `static.once_lock_get_or_init.001` | covered | `OnceLock::get_or_init(|| Arc::new(T::new()))` singleton helpers retain init guards, constructor calls, and imports while pruning dead singleton builders |
+| `static.once_lock_global_runtime_surface.001` | covered | Runtime singleton facades retain `OnceLock<Arc<_>>`, global registries, builder chains, and initializer helpers while pruning dead singleton globals |
+| `async.actor_loop.channel_command.001` | covered | Tokio actor-loop roots retain channel sender/receiver/task wiring and prune private dead command variants plus their payload types |
+| `async.select_reconnect_loop.001` | covered | Tokio `select!` reconnect loops retain watch/broadcast/mpsc edges and prune dead event siblings |
+| `trait.async_io_poll_impl.001` | covered | Generic async I/O helper roots keep the concrete `AsyncRead`/`AsyncWrite` poll impls needed by the selected stream type |
+| `ffi.no_mangle_export_surface.001` | covered | Rust 2024-style `#[unsafe(no_mangle)] extern "C"` roots are treated as built-in FFI surfaces, not custom attribute macro hazards |
+| `ffi.jni_extern_system_entrypoint.001` | covered | JNI-shaped `extern "system"` exports retain ABI argument imports and live helper calls while pruning dead sibling native exports |
+| `macro.clap_nested_command_contract.001` | covered | Clap parser/subcommand/args derive trees retain command/arg helper attrs and nested command structs while pruning unrelated CLI helpers |
+| `macro.thiserror_from_source_contract.001` | covered | Thiserror derives retain `#[from]` fields and format-captured error fields while pruning unrelated error enums/helpers |
+| `cfg.platform_asset_extern_bundle.001` | covered | Target-cfg platform init roots copy cfg-gated assets and keep cfg-gated extern import blocks intact while pruning dead platform helpers/assets |
+| `serde.custom_numeric_string_helpers.001` | covered | Adjacent-tag serde DTOs retain custom numeric/string serializer and deserializer helpers referenced only through serde field attrs |
 | `pattern.let_else_slice_enum.001` | covered | Let-else slice patterns retain the enum variant path and prune unrelated helpers without deleting public enum surface variants |
 | `const.chain_array_len.001` | covered | Const-to-const arithmetic and const array lengths retain every referenced const and prune dead sibling consts |
 | `const.format_capture_identifier.001` | covered | Implicit `format!("{CONST}")` captures retain the referenced const and prune dead sibling consts |

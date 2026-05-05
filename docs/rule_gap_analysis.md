@@ -7,11 +7,12 @@ found from the local Litter checkout at:
 
 `/Users/mykyta/Documents/New project 6/litter-analysis/shared/rust-bridge`
 
-The committed baseline before this scan is:
+The current committed baseline after the first gap-closure pass is:
 
-- 122 focused cargo-checked rule database cases.
+- 132 focused cargo-checked rule database cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
-- Full workspace tests and clippy passed in commit `6bcdcde`.
+- The first documented gap batch is now executable in
+  `crates/opensource_core/tests/rule_database.rs`.
 
 ## Litter Scan Summary
 
@@ -199,23 +200,44 @@ Fixture ideas:
   keeps external enum variants, conversion helpers, and JSON mutation helpers
   used by reachable match arms while pruning unrelated protocol variants.
 
+## Closed In First Gap Pass
+
+The first implementation pass converted the top gap list into executable,
+generic rules and added reducer/render hardening:
+
+- `async.actor_loop.channel_command.001`
+- `async.select_reconnect_loop.001`
+- `ffi.no_mangle_export_surface.001`
+- `ffi.jni_extern_system_entrypoint.001`
+- `macro.clap_nested_command_contract.001`
+- `macro.thiserror_from_source_contract.001`
+- `trait.async_io_poll_impl.001`
+- `static.once_lock_global_runtime_surface.001`
+- `cfg.platform_asset_extern_bundle.001`
+- `serde.custom_numeric_string_helpers.001`
+
+Two generic fixes came from those fixtures:
+
+- Private enum variants are now pruned when only dead code mentions them, while
+  public/root/derive/serde/clap/thiserror/UniFFI enum contracts keep full
+  variant surfaces.
+- Target-cfg `extern` blocks are kept intact, because host validation cannot
+  prove target-specific foreign imports unused.
+
 ## Next Batch Recommendation
 
 Do not grow production confidence by adding 1,000 hand-written near-duplicates.
-Keep the generated 1,200-row catalog for breadth, then add focused
-cargo-checked fixtures for the missing shapes above. The next implementation
-batch should add 10 to 15 fixtures in one pass, with these first:
+Keep the generated 1,200-row catalog for breadth. The next focused batch should
+target the remaining shapes that are not closed above:
 
-1. `async.actor_loop.channel_command.001`
-2. `async.select_reconnect_loop.001`
-3. `ffi.no_mangle_export_surface.001`
-4. `ffi.jni_extern_system_entrypoint.001`
-5. `macro.clap_nested_command_contract.001`
-6. `macro.thiserror_from_source_contract.001`
-7. `trait.async_io_poll_impl.001`
-8. `static.once_lock_global_runtime_surface.001`
-9. `cfg.platform_asset_extern_bundle.001`
-10. `serde.custom_numeric_string_helpers.001`
+1. `manifest.cdylib_staticlib_target_patch_bundle.001`
+2. `pattern.external_protocol_variant_projection.001`
+3. `request.json_patch_state_machine.001`
+4. `serde.adjacent_tag_content_contract.001`
+5. `static.lazy_regex_constructor.001`
+6. `static.global_mutex_registry.001`
+7. `uniffi.shared_runtime_once_lock.001`
+8. `uniffi.async_runtime_exported_object.001`
 
 After those fixtures are executable, rerun five random Litter roots and compare
 failures against this list. Any new failure should become a minimized generic

@@ -3165,6 +3165,9 @@ fn rendered_item_surface_idents(
         Item::Struct(item_struct) => {
             collect_struct_surface_idents(project, reduced, item, item_struct, &mut idents);
         }
+        Item::Enum(item_enum) => {
+            collect_enum_surface_idents(project, reduced, item, item_enum, &mut idents);
+        }
         Item::Trait(item_trait) => {
             collect_trait_surface_idents(project, reduced, item, item_trait, &mut idents);
         }
@@ -3206,6 +3209,36 @@ fn collect_struct_surface_idents(
             field,
         ) {
             collect_token_idents(&field.to_token_stream(), idents);
+        }
+    }
+}
+
+fn collect_enum_surface_idents(
+    project: &Project,
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+    item_enum: &syn::ItemEnum,
+    idents: &mut BTreeSet<String>,
+) {
+    if enum_preserves_full_variant_surface(reduced, item_id, item_enum) {
+        collect_token_idents(&item_enum.to_token_stream(), idents);
+        return;
+    }
+
+    idents.insert(item_id.name.clone());
+    idents.extend(item_id.module_path.iter().cloned());
+    for attr in &item_enum.attrs {
+        collect_token_idents(&attr.to_token_stream(), idents);
+    }
+    collect_token_idents(&item_enum.generics.to_token_stream(), idents);
+    for variant in &item_enum.variants {
+        if enum_variant_should_remain(
+            project,
+            reduced,
+            &item_id.package,
+            &variant.ident.to_string(),
+        ) {
+            collect_token_idents(&variant.to_token_stream(), idents);
         }
     }
 }
@@ -5981,22 +6014,42 @@ fn transform_items(
                     Item::Trait(item_trait)
                 })
             }),
-            Item::Enum(_)
-            | Item::Union(_)
-            | Item::Type(_)
-            | Item::Const(_)
-            | Item::Static(_)
-            | Item::Macro(_) => item_id(package, module_path, item).and_then(|id| {
+            Item::Enum(item_enum) => item_id(package, module_path, item).and_then(|id| {
                 render_plan.item_should_render(&id).then(|| {
-                    let mut item = item.clone();
-                    strip_opensourced_attrs_from_item(&mut item);
+                    let mut item_enum = item_enum.clone();
+                    strip_opensourced_attrs(&mut item_enum.attrs);
                     if !preserve_uniffi_surface {
-                        strip_uniffi_attrs_from_item(&mut item);
+                        strip_uniffi_attrs(&mut item_enum.attrs);
+                        for variant in &mut item_enum.variants {
+                            strip_uniffi_attrs_from_variant(variant);
+                        }
                     }
-                    allow_dead_code_for_non_public_item(&mut item);
-                    item
+                    if !enum_preserves_full_variant_surface(reduced, &id, &item_enum) {
+                        prune_private_enum_variants(
+                            project,
+                            reduced,
+                            package,
+                            module_path,
+                            &mut item_enum,
+                        );
+                    }
+                    allow_dead_code_if_not_public(&item_enum.vis, &mut item_enum.attrs);
+                    Item::Enum(item_enum)
                 })
             }),
+            Item::Union(_) | Item::Type(_) | Item::Const(_) | Item::Static(_) | Item::Macro(_) => {
+                item_id(package, module_path, item).and_then(|id| {
+                    render_plan.item_should_render(&id).then(|| {
+                        let mut item = item.clone();
+                        strip_opensourced_attrs_from_item(&mut item);
+                        if !preserve_uniffi_surface {
+                            strip_uniffi_attrs_from_item(&mut item);
+                        }
+                        allow_dead_code_for_non_public_item(&mut item);
+                        item
+                    })
+                })
+            }
             Item::Impl(item_impl) => {
                 let aliases = project
                     .module_aliases
@@ -6270,9 +6323,11 @@ fn transform_items(
             }
             Item::ForeignMod(foreign_mod) => {
                 let mut foreign_mod = foreign_mod.clone();
-                foreign_mod.items.retain(|foreign_item| {
-                    foreign_item_should_render(render_plan, package, module_path, foreign_item)
-                });
+                if !foreign_mod_attrs_require_intact_surface(&foreign_mod.attrs) {
+                    foreign_mod.items.retain(|foreign_item| {
+                        foreign_item_should_render(render_plan, package, module_path, foreign_item)
+                    });
+                }
                 (!foreign_mod.items.is_empty()).then(|| Item::ForeignMod(foreign_mod))
             }
             _ => Some(item.clone()),
@@ -6284,6 +6339,12 @@ fn transform_items(
     }
 
     transformed
+}
+
+fn foreign_mod_attrs_require_intact_surface(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| attr.path().is_ident("cfg") || attr.path().is_ident("cfg_attr"))
 }
 
 fn foreign_item_should_render(
@@ -9624,6 +9685,80 @@ fn allow_dead_code_for_non_public_impl_item(item: &mut ImplItem) {
     if let ImplItem::Fn(method) = item {
         allow_dead_code_if_not_public(&method.vis, &mut method.attrs);
     }
+}
+
+fn enum_preserves_full_variant_surface(
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+    item_enum: &syn::ItemEnum,
+) -> bool {
+    matches!(item_enum.vis, syn::Visibility::Public(_))
+        || root_item_should_render(reduced, item_id)
+        || enum_attrs_require_full_variant_surface(item_enum)
+}
+
+fn enum_attrs_require_full_variant_surface(item_enum: &syn::ItemEnum) -> bool {
+    item_enum
+        .attrs
+        .iter()
+        .any(enum_attr_requires_full_variant_surface)
+        || item_enum.variants.iter().any(|variant| {
+            variant
+                .attrs
+                .iter()
+                .any(enum_attr_requires_full_variant_surface)
+                || variant.fields.iter().any(|field| {
+                    field
+                        .attrs
+                        .iter()
+                        .any(enum_attr_requires_full_variant_surface)
+                })
+        })
+}
+
+fn enum_attr_requires_full_variant_surface(attr: &syn::Attribute) -> bool {
+    let path = attr.path();
+    path.is_ident("derive")
+        || path.is_ident("serde")
+        || path.is_ident("clap")
+        || path.is_ident("command")
+        || path.is_ident("arg")
+        || path.is_ident("error")
+        || path.is_ident("repr")
+        || path.is_ident("non_exhaustive")
+        || path_starts_with(path, "uniffi")
+        || (path.is_ident("cfg_attr")
+            && (token_stream_mentions_ident(&attr.to_token_stream(), "derive")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "serde")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "uniffi")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "clap")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "error")))
+}
+
+fn prune_private_enum_variants(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    _module_path: &[String],
+    item_enum: &mut syn::ItemEnum,
+) {
+    item_enum.variants = item_enum
+        .variants
+        .iter()
+        .filter(|variant| {
+            enum_variant_should_remain(project, reduced, package, &variant.ident.to_string())
+        })
+        .cloned()
+        .collect();
+}
+
+fn enum_variant_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    variant_name: &str,
+) -> bool {
+    reachable_callables_mention_ident(project, reduced, package, variant_name)
 }
 
 fn prune_private_struct_fields(

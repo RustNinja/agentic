@@ -3335,6 +3335,7 @@ fn attribute_path_is_builtin_or_inert(first_segment: &str) -> bool {
             | "should_panic"
             | "test"
             | "track_caller"
+            | "unsafe"
             | "used"
             | "warn"
     )

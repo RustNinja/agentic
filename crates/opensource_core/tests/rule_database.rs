@@ -3109,6 +3109,260 @@ fn prunes_inline_include_str_module_bundles_by_live_branch() {
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
+#[test]
+fn retains_async_actor_channel_loop_without_dead_command_payloads() {
+    let workspace = temp_path("rule-async-actor-loop-workspace");
+    let output = temp_path("rule-async-actor-loop-output");
+    let target_dir = temp_path("rule-async-actor-loop-target");
+    write_async_actor_loop_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("async actor loop rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("async_actor_loop_rule/src/lib.rs"));
+    assert!(lib.contains("tokio::spawn(worker_loop(rx))"), "{lib}");
+    assert!(lib.contains("mpsc::Sender<Command>"), "{lib}");
+    assert!(lib.contains("Live(Payload)"), "{lib}");
+    assert!(!lib.contains("DeadPayload"), "{lib}");
+    assert!(!lib.contains("dead_record"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_async_select_reconnect_loop_edges_without_dead_events() {
+    let workspace = temp_path("rule-async-select-reconnect-workspace");
+    let output = temp_path("rule-async-select-reconnect-output");
+    let target_dir = temp_path("rule-async-select-reconnect-target");
+    write_async_select_reconnect_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("async select reconnect rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("async_select_reconnect_rule/src/lib.rs"));
+    assert!(lib.contains("tokio::select!"), "{lib}");
+    assert!(lib.contains("broadcast::Sender<Event>"), "{lib}");
+    assert!(lib.contains("watch::Receiver<bool>"), "{lib}");
+    assert!(lib.contains("Event::Connected"), "{lib}");
+    assert!(!lib.contains("DeadEvent"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn treats_unsafe_no_mangle_export_as_builtin_ffi_surface() {
+    let workspace = temp_path("rule-ffi-unsafe-no-mangle-workspace");
+    let output = temp_path("rule-ffi-unsafe-no-mangle-output");
+    let target_dir = temp_path("rule-ffi-unsafe-no-mangle-target");
+    write_ffi_unsafe_no_mangle_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("unsafe no_mangle FFI rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    assert!(!report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "custom_attribute_macros"));
+    let lib = read(output.join("ffi_unsafe_no_mangle_rule/src/lib.rs"));
+    assert!(lib.contains("#[unsafe(no_mangle)]"), "{lib}");
+    assert!(lib.contains("pub extern \"C\" fn selected_bridge"), "{lib}");
+    assert!(lib.contains("fn live_offset"), "{lib}");
+    assert!(!lib.contains("dead_bridge"), "{lib}");
+    assert!(!lib.contains("dead_offset"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_jni_extern_system_entrypoint_without_dead_sibling_exports() {
+    let workspace = temp_path("rule-jni-extern-system-workspace");
+    let output = temp_path("rule-jni-extern-system-output");
+    let target_dir = temp_path("rule-jni-extern-system-target");
+    write_jni_extern_system_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("JNI extern system rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("jni_extern_system_rule/src/lib.rs"));
+    assert!(
+        lib.contains("pub extern \"system\" fn Java_demo_Native_live"),
+        "{lib}"
+    );
+    assert!(lib.contains("use jni::objects::{JClass, JString}"), "{lib}");
+    assert!(lib.contains("use jni::sys::jint"), "{lib}");
+    assert!(lib.contains("fn live_probe"), "{lib}");
+    assert!(!lib.contains("Java_demo_Native_dead"), "{lib}");
+    assert!(!lib.contains("dead_probe"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_clap_nested_command_derive_contract() {
+    let workspace = temp_path("rule-clap-command-workspace");
+    let output = temp_path("rule-clap-command-output");
+    let target_dir = temp_path("rule-clap-command-target");
+    write_clap_command_contract_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("clap command contract rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("clap_command_rule/src/lib.rs"));
+    assert!(lib.contains("#[derive(Parser)]"), "{lib}");
+    assert!(lib.contains("#[derive(Subcommand)]"), "{lib}");
+    assert!(lib.contains("#[derive(Args)]"), "{lib}");
+    assert!(lib.contains("value_delimiter = ','"), "{lib}");
+    assert!(lib.contains("conflicts_with = \"raw\""), "{lib}");
+    assert!(!lib.contains("DeadCliHelper"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_thiserror_from_source_and_format_capture_contracts() {
+    let workspace = temp_path("rule-thiserror-contract-workspace");
+    let output = temp_path("rule-thiserror-contract-output");
+    let target_dir = temp_path("rule-thiserror-contract-target");
+    write_thiserror_contract_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("thiserror contract rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("thiserror_contract_rule/src/lib.rs"));
+    assert!(lib.contains("#[derive(Debug, Error)]"), "{lib}");
+    assert!(lib.contains("#[from]"), "{lib}");
+    assert!(
+        lib.contains("#[error(\"protocol {code}: {message}\")]"),
+        "{lib}"
+    );
+    assert!(lib.contains("fn live_message"), "{lib}");
+    assert!(!lib.contains("DeadBridgeError"), "{lib}");
+    assert!(!lib.contains("dead_message"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_async_io_poll_impls_for_generic_stream_helpers() {
+    let workspace = temp_path("rule-async-io-poll-workspace");
+    let output = temp_path("rule-async-io-poll-output");
+    let target_dir = temp_path("rule-async-io-poll-target");
+    write_async_io_poll_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("async I/O poll rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("async_io_poll_rule/src/lib.rs"));
+    assert!(lib.contains("impl AsyncRead for BridgeStream"), "{lib}");
+    assert!(lib.contains("impl AsyncWrite for BridgeStream"), "{lib}");
+    assert!(lib.contains("fn poll_read"), "{lib}");
+    assert!(lib.contains("fn poll_shutdown"), "{lib}");
+    assert!(!lib.contains("DeadStream"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_runtime_singleton_registry_initializers_without_dead_globals() {
+    let workspace = temp_path("rule-runtime-singleton-registry-workspace");
+    let output = temp_path("rule-runtime-singleton-registry-output");
+    let target_dir = temp_path("rule-runtime-singleton-registry-target");
+    write_runtime_singleton_registry_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("runtime singleton registry rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("runtime_singleton_registry_rule/src/lib.rs"));
+    assert!(lib.contains("OnceLock<Arc<Runtime>>"), "{lib}");
+    assert!(lib.contains("OnceLock<Mutex<Vec<String>>>"), "{lib}");
+    assert!(lib.contains("RuntimeBuilder::new()"), "{lib}");
+    assert!(lib.contains("fn stack_size"), "{lib}");
+    assert!(!lib.contains("DEAD_RUNTIME"), "{lib}");
+    assert!(!lib.contains("dead_stack_size"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn copies_platform_cfg_assets_and_keeps_extern_bundle_intact() {
+    let workspace = temp_path("rule-platform-asset-extern-workspace");
+    let output = temp_path("rule-platform-asset-extern-output");
+    let target_dir = temp_path("rule-platform-asset-extern-target");
+    write_platform_asset_extern_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("platform asset extern rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("platform_asset_extern_rule/src/lib.rs"));
+    assert!(
+        lib.contains("#[cfg(any(target_os = \"ios\", target_os = \"android\"))]"),
+        "{lib}"
+    );
+    assert!(lib.contains("include_bytes!(\"cacert.pem\")"), "{lib}");
+    assert!(lib.contains("unsafe extern \"C\""), "{lib}");
+    assert!(lib.contains("fn init_tls_roots"), "{lib}");
+    assert!(!lib.contains("dead_platform_probe"), "{lib}");
+    assert!(output
+        .join("platform_asset_extern_rule/src/cacert.pem")
+        .exists());
+    assert!(!output
+        .join("platform_asset_extern_rule/src/dead.pem")
+        .exists());
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_serde_adjacent_tag_custom_numeric_helpers() {
+    let workspace = temp_path("rule-serde-custom-numeric-workspace");
+    let output = temp_path("rule-serde-custom-numeric-output");
+    let target_dir = temp_path("rule-serde-custom-numeric-target");
+    write_serde_custom_numeric_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde custom numeric rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_custom_numeric_rule/src/lib.rs"));
+    assert!(lib.contains("tag = \"type\", content = \"value\""), "{lib}");
+    assert!(lib.contains("deserialize_with = \"de_f64\""), "{lib}");
+    assert!(lib.contains("serialize_with = \"ser_f64\""), "{lib}");
+    assert!(lib.contains("deserialize_with = \"de_opt_u32\""), "{lib}");
+    assert!(!lib.contains("dead_de_f64"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
 fn write_public_reexport_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -7985,6 +8239,621 @@ pub fn orphan() -> &'static str {
 "#,
     );
     write(helper.join("examples/unused.rs"), "fn main() {}\n");
+}
+
+fn write_async_actor_loop_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "async_actor_loop_rule",
+        r#"tokio = { version = "1", features = ["rt", "sync"] }
+"#,
+        r#"use opensourced::opensourced;
+use tokio::sync::mpsc;
+use tokio::task::JoinHandle;
+
+pub struct Payload {
+    value: u32,
+}
+
+pub struct DeadPayload {
+    value: u32,
+}
+
+enum Command {
+    Live(Payload),
+    Dead(DeadPayload),
+}
+
+pub struct WorkerHandle {
+    tx: mpsc::Sender<Command>,
+    task: JoinHandle<()>,
+}
+
+impl WorkerHandle {
+    pub fn sender(&self) -> mpsc::Sender<Command> {
+        self.tx.clone()
+    }
+
+    pub fn abort(self) {
+        self.task.abort();
+    }
+}
+
+async fn worker_loop(mut rx: mpsc::Receiver<Command>) {
+    while let Some(command) = rx.recv().await {
+        if let Command::Live(payload) = command {
+            record(payload).await;
+        }
+    }
+}
+
+async fn record(payload: Payload) {
+    let _ = payload.value;
+}
+
+async fn dead_record(payload: DeadPayload) {
+    let _ = payload.value;
+}
+
+#[opensourced]
+pub fn selected() -> WorkerHandle {
+    let (tx, rx) = mpsc::channel(4);
+    let task = tokio::spawn(worker_loop(rx));
+    WorkerHandle { tx, task }
+}
+"#,
+    );
+}
+
+fn write_async_select_reconnect_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "async_select_reconnect_rule",
+        r#"tokio = { version = "1", features = ["macros", "rt", "sync", "time"] }
+"#,
+        r#"use opensourced::opensourced;
+use std::time::Duration;
+use tokio::sync::{broadcast, mpsc, watch};
+use tokio::task::JoinHandle;
+
+#[derive(Clone)]
+pub enum Event {
+    Connected,
+}
+
+pub enum DeadEvent {
+    Dead,
+}
+
+pub struct Reconnector {
+    invalidation_tx: mpsc::UnboundedSender<()>,
+    task: JoinHandle<()>,
+}
+
+impl Reconnector {
+    pub fn invalidate(&self) {
+        let _ = self.invalidation_tx.send(());
+    }
+
+    pub fn shutdown(self) {
+        self.task.abort();
+    }
+}
+
+async fn reconnect_loop(
+    mut invalidate_rx: mpsc::UnboundedReceiver<()>,
+    mut connected_rx: watch::Receiver<bool>,
+    events: broadcast::Sender<Event>,
+) {
+    loop {
+        tokio::select! {
+            signal = invalidate_rx.recv() => {
+                if signal.is_none() {
+                    return;
+                }
+                let _ = events.send(Event::Connected);
+                break;
+            }
+            changed = connected_rx.changed() => {
+                if changed.is_err() {
+                    return;
+                }
+                if *connected_rx.borrow() {
+                    let _ = events.send(Event::Connected);
+                }
+            }
+            _ = tokio::time::sleep(Duration::from_millis(1)) => {
+                break;
+            }
+        }
+    }
+}
+
+fn dead_event() -> DeadEvent {
+    DeadEvent::Dead
+}
+
+#[opensourced]
+pub fn selected() -> Reconnector {
+    let (invalidation_tx, invalidation_rx) = mpsc::unbounded_channel();
+    let (connected_tx, connected_rx) = watch::channel(false);
+    let (events, _) = broadcast::channel(4);
+    drop(connected_tx);
+    let task = tokio::spawn(reconnect_loop(invalidation_rx, connected_rx, events));
+    Reconnector {
+        invalidation_tx,
+        task,
+    }
+}
+"#,
+    );
+}
+
+fn write_ffi_unsafe_no_mangle_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "ffi_unsafe_no_mangle_rule",
+        r#"use opensourced::opensourced;
+use std::os::raw::c_char;
+
+fn live_offset() -> usize {
+    1
+}
+
+fn dead_offset() -> usize {
+    99
+}
+
+#[opensourced]
+#[unsafe(no_mangle)]
+pub extern "C" fn selected_bridge(ptr: *const c_char, len: usize) -> usize {
+    if ptr.is_null() {
+        0
+    } else {
+        len + live_offset()
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn dead_bridge(_ptr: *const c_char) -> usize {
+    dead_offset()
+}
+"#,
+    );
+}
+
+fn write_jni_extern_system_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "jni_extern_system_rule",
+        r#"use opensourced::opensourced;
+
+mod jni {
+    pub struct JNIEnv;
+
+    impl JNIEnv {
+        pub fn get_string(&mut self, _value: &objects::JString) -> Result<String, ()> {
+            Ok("live".to_string())
+        }
+    }
+
+    pub mod objects {
+        pub struct JClass;
+        pub struct JString;
+    }
+
+    pub mod sys {
+        #[allow(non_camel_case_types)]
+        pub type jint = i32;
+    }
+}
+
+use jni::objects::{JClass, JString};
+use jni::sys::jint;
+use jni::JNIEnv;
+
+fn live_probe(value: &str) -> jint {
+    value.len() as jint
+}
+
+fn dead_probe() -> jint {
+    -99
+}
+
+#[opensourced]
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_demo_Native_live(
+    mut env: JNIEnv,
+    _class: JClass,
+    value: JString,
+) -> jint {
+    match env.get_string(&value) {
+        Ok(value) => live_probe(&value),
+        Err(_) => -1,
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "system" fn Java_demo_Native_dead(_env: JNIEnv, _class: JClass) -> jint {
+    dead_probe()
+}
+"#,
+    );
+}
+
+fn write_clap_command_contract_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "clap_command_rule",
+        r#"clap = { version = "4", features = ["derive"] }
+"#,
+        r#"use clap::{Args, Parser, Subcommand};
+use opensourced::opensourced;
+
+#[derive(Parser)]
+#[command(name = "debug-tool", about = "Debug entrypoint")]
+pub struct Cli {
+    #[command(subcommand)]
+    command: Command,
+
+    #[arg(long, default_value = "json")]
+    format: String,
+}
+
+#[derive(Subcommand)]
+enum Command {
+    Live(LiveArgs),
+    Serve {
+        #[arg(long, value_delimiter = ',', default_value = "all")]
+        methods: Vec<String>,
+    },
+}
+
+#[derive(Args)]
+pub struct LiveArgs {
+    #[arg(long, conflicts_with = "raw")]
+    pretty: bool,
+
+    #[arg(long)]
+    raw: bool,
+}
+
+pub struct DeadCliHelper;
+
+impl LiveArgs {
+    fn mode(&self) -> &'static str {
+        if self.raw {
+            "raw"
+        } else if self.pretty {
+            "pretty"
+        } else {
+            "compact"
+        }
+    }
+}
+
+#[opensourced]
+pub fn selected<I, T>(iter: I) -> Result<String, clap::Error>
+where
+    I: IntoIterator<Item = T>,
+    T: Into<std::ffi::OsString> + Clone,
+{
+    let cli = Cli::try_parse_from(iter)?;
+    let command = match cli.command {
+        Command::Live(args) => args.mode().to_string(),
+        Command::Serve { methods } => methods.join(","),
+    };
+    Ok(format!("{}:{command}", cli.format))
+}
+"#,
+    );
+}
+
+fn write_thiserror_contract_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "thiserror_contract_rule",
+        r#"thiserror = "2"
+"#,
+        r#"use opensourced::opensourced;
+use thiserror::Error;
+
+#[derive(Debug, Error)]
+pub enum BridgeError {
+    #[error("io: {0}")]
+    Io(#[from] std::io::Error),
+
+    #[error("protocol {code}: {message}")]
+    Protocol { code: String, message: String },
+}
+
+#[derive(Debug, Error)]
+pub enum DeadBridgeError {
+    #[error("dead")]
+    Dead,
+}
+
+fn live_message() -> String {
+    "bad frame".to_string()
+}
+
+fn dead_message() -> String {
+    "dead".to_string()
+}
+
+#[opensourced]
+pub fn selected(value: &str) -> Result<(), BridgeError> {
+    if value.is_empty() {
+        return Err(BridgeError::Protocol {
+            code: "empty".to_string(),
+            message: live_message(),
+        });
+    }
+    Err(std::io::Error::from(std::io::ErrorKind::Other).into())
+}
+"#,
+    );
+}
+
+fn write_async_io_poll_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "async_io_poll_rule",
+        r#"tokio = { version = "1", features = ["io-util"] }
+"#,
+        r#"use opensourced::opensourced;
+use std::pin::Pin;
+use std::task::{Context, Poll};
+use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
+
+pub struct BridgeStream {
+    read: Vec<u8>,
+    written: usize,
+}
+
+impl BridgeStream {
+    fn new() -> Self {
+        Self {
+            read: vec![1, 2, 3],
+            written: 0,
+        }
+    }
+}
+
+impl AsyncRead for BridgeStream {
+    fn poll_read(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &mut ReadBuf<'_>,
+    ) -> Poll<std::io::Result<()>> {
+        let this = self.get_mut();
+        buf.put_slice(&this.read);
+        this.read.clear();
+        Poll::Ready(Ok(()))
+    }
+}
+
+impl AsyncWrite for BridgeStream {
+    fn poll_write(
+        self: Pin<&mut Self>,
+        _cx: &mut Context<'_>,
+        buf: &[u8],
+    ) -> Poll<std::io::Result<usize>> {
+        let this = self.get_mut();
+        this.written += buf.len();
+        Poll::Ready(Ok(buf.len()))
+    }
+
+    fn poll_flush(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+
+    fn poll_shutdown(self: Pin<&mut Self>, _cx: &mut Context<'_>) -> Poll<std::io::Result<()>> {
+        Poll::Ready(Ok(()))
+    }
+}
+
+pub struct DeadStream;
+
+fn generic_stream<S>(stream: S) -> S
+where
+    S: AsyncRead + AsyncWrite + Unpin,
+{
+    stream
+}
+
+#[opensourced]
+pub fn selected() -> BridgeStream {
+    generic_stream(BridgeStream::new())
+}
+"#,
+    );
+}
+
+fn write_runtime_singleton_registry_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "runtime_singleton_registry_rule",
+        r#"use opensourced::opensourced;
+use std::sync::{Arc, Mutex, OnceLock};
+
+pub struct Runtime {
+    stack: usize,
+}
+
+pub struct RuntimeBuilder {
+    stack: usize,
+}
+
+impl RuntimeBuilder {
+    fn new() -> Self {
+        Self { stack: 0 }
+    }
+
+    fn thread_stack_size(mut self, stack: usize) -> Self {
+        self.stack = stack;
+        self
+    }
+
+    fn build(self) -> Runtime {
+        Runtime { stack: self.stack }
+    }
+}
+
+static RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
+static REGISTRY: OnceLock<Mutex<Vec<String>>> = OnceLock::new();
+static DEAD_RUNTIME: OnceLock<Arc<Runtime>> = OnceLock::new();
+
+fn stack_size() -> usize {
+    1024
+}
+
+fn dead_stack_size() -> usize {
+    1
+}
+
+fn shared_runtime() -> Arc<Runtime> {
+    Arc::clone(RUNTIME.get_or_init(|| {
+        Arc::new(
+            RuntimeBuilder::new()
+                .thread_stack_size(stack_size())
+                .build(),
+        )
+    }))
+}
+
+fn registry() -> &'static Mutex<Vec<String>> {
+    REGISTRY.get_or_init(|| Mutex::new(Vec::new()))
+}
+
+fn remember(name: String) -> usize {
+    let mut guard = registry().lock().expect("registry lock");
+    guard.push(name);
+    guard.len()
+}
+
+#[opensourced]
+pub fn selected(name: String) -> usize {
+    remember(name) + shared_runtime().stack
+}
+"#,
+    );
+}
+
+fn write_platform_asset_extern_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "platform_asset_extern_rule",
+        r#"use opensourced::opensourced;
+
+fn live_common() -> usize {
+    1
+}
+
+#[cfg(any(target_os = "ios", target_os = "android"))]
+mod platform {
+    static CACERT_PEM: &[u8] = include_bytes!("cacert.pem");
+
+    #[cfg(target_os = "ios")]
+    unsafe extern "C" {
+        fn ios_tls_probe() -> i32;
+    }
+
+    #[cfg(target_os = "ios")]
+    fn platform_probe() -> usize {
+        unsafe { ios_tls_probe() as usize }
+    }
+
+    #[cfg(target_os = "android")]
+    fn platform_probe() -> usize {
+        7
+    }
+
+    pub fn init_tls_roots() -> usize {
+        CACERT_PEM.len() + platform_probe()
+    }
+
+    pub fn dead_platform_probe() -> usize {
+        include_bytes!("dead.pem").len()
+    }
+}
+
+#[opensourced]
+pub fn selected() -> usize {
+    let total = live_common();
+    #[cfg(any(target_os = "ios", target_os = "android"))]
+    {
+        return total + platform::init_tls_roots();
+    }
+    total
+}
+"#,
+    );
+    write(
+        root.join("platform_asset_extern_rule/src/cacert.pem"),
+        "cert",
+    );
+    write(root.join("platform_asset_extern_rule/src/dead.pem"), "dead");
+}
+
+fn write_serde_custom_numeric_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_custom_numeric_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type", content = "value", rename_all = "camelCase")]
+pub enum WireEvent {
+    Number(#[serde(deserialize_with = "de_f64", serialize_with = "ser_f64")] f64),
+    Counter {
+        #[serde(default, deserialize_with = "de_opt_u32")]
+        count: Option<u32>,
+    },
+}
+
+fn de_f64<'de, D>(deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = String::deserialize(deserializer)?;
+    value.parse().map_err(serde::de::Error::custom)
+}
+
+fn ser_f64<S>(value: &f64, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    serializer.serialize_str(&value.to_string())
+}
+
+fn de_opt_u32<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<String>::deserialize(deserializer)?;
+    value
+        .map(|value| value.parse().map_err(serde::de::Error::custom))
+        .transpose()
+}
+
+fn dead_de_f64<'de, D>(_deserializer: D) -> Result<f64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(0.0)
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> Result<WireEvent, serde_json::Error> {
+    serde_json::from_str(input)
+}
+"#,
+    );
 }
 
 fn write_workspace(root: &Path, package: &str, lib: &str) {

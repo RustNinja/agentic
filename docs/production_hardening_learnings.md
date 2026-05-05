@@ -614,7 +614,7 @@ or types that appear in retained callable signatures, and retained macro bodies
 are scanned for `env!`/`option_env!` hazards before feedback-only macro warnings
 decide production status.
 
-The current rule pass raises the executable database to 122 cases and adds an
+The current rule pass raises the executable database to 132 cases and adds an
 enforceable coverage-family map for all 1,200 generated catalog records. The new
 fixtures cover nested private facade chains, UniFFI enum struct variants, nested
 serde response envelopes, multiple serde helper paths, generic
