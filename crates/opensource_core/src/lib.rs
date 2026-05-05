@@ -122,6 +122,9 @@ pub struct UsageClassificationReport {
     pub status: String,
     pub summary: UsageClassificationSummary,
     pub used: UsageClassifiedItems,
+    pub unused_candidate: UsageClassifiedItems,
+    pub blocked_by_unknown: UsageClassifiedItems,
+    pub prunable: UsageClassifiedItems,
     pub unused: UsageClassifiedItems,
     pub unknown: Vec<UsageUnknownSurface>,
     pub evidence: UsageClassificationEvidence,
@@ -133,6 +136,12 @@ pub struct UsageClassificationSummary {
     pub indexed_items: usize,
     pub used_callables: usize,
     pub used_items: usize,
+    pub unused_candidate_callables: usize,
+    pub unused_candidate_items: usize,
+    pub blocked_by_unknown_callables: usize,
+    pub blocked_by_unknown_items: usize,
+    pub prunable_callables: usize,
+    pub prunable_items: usize,
     pub unused_callables: usize,
     pub unused_items: usize,
     pub unknown_surfaces: usize,
@@ -798,6 +807,32 @@ fn usage_classification_report(
         })
         .collect::<Vec<_>>();
 
+    let has_unknown = !unknown.is_empty();
+    let mut blocked_by_unknown_callables = if has_unknown {
+        unused_callables.clone()
+    } else {
+        Vec::new()
+    };
+    let mut prunable_callables = if has_unknown {
+        Vec::new()
+    } else {
+        unused_callables.clone()
+    };
+    let mut blocked_by_unknown_items = if has_unknown {
+        unused_items.clone()
+    } else {
+        Vec::new()
+    };
+    let mut prunable_items = if has_unknown {
+        Vec::new()
+    } else {
+        unused_items.clone()
+    };
+    blocked_by_unknown_callables.sort();
+    prunable_callables.sort();
+    blocked_by_unknown_items.sort();
+    prunable_items.sort();
+
     let status = if unknown.is_empty() {
         "classified".to_string()
     } else {
@@ -810,6 +845,7 @@ fn usage_classification_report(
         &unused_callables,
         &used_items,
         &unused_items,
+        unknown.len(),
     );
 
     UsageClassificationReport {
@@ -819,6 +855,12 @@ fn usage_classification_report(
             indexed_items: used_items.len() + unused_items.len(),
             used_callables: used_callables.len(),
             used_items: used_items.len(),
+            unused_candidate_callables: unused_callables.len(),
+            unused_candidate_items: unused_items.len(),
+            blocked_by_unknown_callables: blocked_by_unknown_callables.len(),
+            blocked_by_unknown_items: blocked_by_unknown_items.len(),
+            prunable_callables: prunable_callables.len(),
+            prunable_items: prunable_items.len(),
             unused_callables: unused_callables.len(),
             unused_items: unused_items.len(),
             unknown_surfaces: unknown.len(),
@@ -826,6 +868,18 @@ fn usage_classification_report(
         used: UsageClassifiedItems {
             callables: used_callables,
             items: used_items,
+        },
+        unused_candidate: UsageClassifiedItems {
+            callables: unused_callables.clone(),
+            items: unused_items.clone(),
+        },
+        blocked_by_unknown: UsageClassifiedItems {
+            callables: blocked_by_unknown_callables,
+            items: blocked_by_unknown_items,
+        },
+        prunable: UsageClassifiedItems {
+            callables: prunable_callables,
+            items: prunable_items,
         },
         unused: UsageClassifiedItems {
             callables: unused_callables,
@@ -843,7 +897,9 @@ fn usage_classification_evidence(
     unused_callables: &[CallableId],
     used_items: &[ItemId],
     unused_items: &[ItemId],
+    unknown_surfaces: usize,
 ) -> UsageClassificationEvidence {
+    let has_unknown = unknown_surfaces > 0;
     let selected_callable_roots = reduced
         .roots
         .iter()
@@ -869,13 +925,22 @@ fn usage_classification_evidence(
                 "used",
                 selected_callable_roots.contains(id),
                 &reduced.evidence,
+                unknown_surfaces,
             )
         })
-        .chain(
-            unused_callables
-                .iter()
-                .map(|id| usage_callable_evidence(id, "unused", false, &reduced.evidence)),
-        )
+        .chain(unused_callables.iter().map(|id| {
+            usage_callable_evidence(
+                id,
+                if has_unknown {
+                    "blocked_by_unknown"
+                } else {
+                    "prunable"
+                },
+                false,
+                &reduced.evidence,
+                unknown_surfaces,
+            )
+        }))
         .collect::<Vec<_>>();
     callables.sort_by_key(|entry| entry.id.to_string());
 
@@ -887,13 +952,22 @@ fn usage_classification_evidence(
                 "used",
                 selected_item_roots.contains(id),
                 &reduced.evidence,
+                unknown_surfaces,
             )
         })
-        .chain(
-            unused_items
-                .iter()
-                .map(|id| usage_item_evidence(id, "unused", false, &reduced.evidence)),
-        )
+        .chain(unused_items.iter().map(|id| {
+            usage_item_evidence(
+                id,
+                if has_unknown {
+                    "blocked_by_unknown"
+                } else {
+                    "prunable"
+                },
+                false,
+                &reduced.evidence,
+                unknown_surfaces,
+            )
+        }))
         .collect::<Vec<_>>();
     items.sort_by_key(|entry| entry.id.to_string());
 
@@ -911,8 +985,10 @@ fn usage_callable_evidence(
     classification: &str,
     selected_root: bool,
     evidence: &model::ReductionEvidence,
+    unknown_surfaces: usize,
 ) -> UsageCallableEvidence {
-    let (reason, details) = usage_evidence_reason(classification, selected_root, evidence);
+    let (reason, details) =
+        usage_evidence_reason(classification, selected_root, evidence, unknown_surfaces);
     UsageCallableEvidence {
         id: id.clone(),
         classification: classification.to_string(),
@@ -927,8 +1003,10 @@ fn usage_item_evidence(
     classification: &str,
     selected_root: bool,
     evidence: &model::ReductionEvidence,
+    unknown_surfaces: usize,
 ) -> UsageItemEvidence {
-    let (reason, details) = usage_evidence_reason(classification, selected_root, evidence);
+    let (reason, details) =
+        usage_evidence_reason(classification, selected_root, evidence, unknown_surfaces);
     UsageItemEvidence {
         id: id.clone(),
         classification: classification.to_string(),
@@ -942,6 +1020,7 @@ fn usage_evidence_reason(
     classification: &str,
     selected_root: bool,
     evidence: &model::ReductionEvidence,
+    unknown_surfaces: usize,
 ) -> (String, Vec<String>) {
     let mut details = vec![
         "source=syn_inventory".to_string(),
@@ -977,10 +1056,24 @@ fn usage_evidence_reason(
                 details,
             )
         }
-        "unused" => {
+        "blocked_by_unknown" => {
             details.push("reachable=false".to_string());
+            details.push("unused_candidate=true".to_string());
+            details.push("prunable=false".to_string());
+            details.push(format!("unknown_surfaces={unknown_surfaces}"));
             (
-                "indexed by syn inventory but absent from the reachable set for selected roots"
+                "indexed by syn inventory and absent from the reachable graph, but retained unknown surfaces may still reference it"
+                    .to_string(),
+                details,
+            )
+        }
+        "prunable" => {
+            details.push("reachable=false".to_string());
+            details.push("unused_candidate=true".to_string());
+            details.push("prunable=true".to_string());
+            details.push("unknown_surfaces=0".to_string());
+            (
+                "indexed by syn inventory, absent from the reachable graph, and not blocked by retained unknown surfaces"
                     .to_string(),
                 details,
             )
@@ -3795,6 +3888,9 @@ struct UsageClassificationReportJson {
     status: String,
     summary: UsageClassificationSummaryJson,
     used: UsageClassifiedItemsJson,
+    unused_candidate: UsageClassifiedItemsJson,
+    blocked_by_unknown: UsageClassifiedItemsJson,
+    prunable: UsageClassifiedItemsJson,
     unused: UsageClassifiedItemsJson,
     unknown: Vec<UsageUnknownSurfaceJson>,
     evidence: UsageClassificationEvidenceJson,
@@ -3806,6 +3902,9 @@ impl UsageClassificationReportJson {
             status: report.status.clone(),
             summary: UsageClassificationSummaryJson::from_report(&report.summary),
             used: UsageClassifiedItemsJson::from_report(&report.used),
+            unused_candidate: UsageClassifiedItemsJson::from_report(&report.unused_candidate),
+            blocked_by_unknown: UsageClassifiedItemsJson::from_report(&report.blocked_by_unknown),
+            prunable: UsageClassifiedItemsJson::from_report(&report.prunable),
             unused: UsageClassifiedItemsJson::from_report(&report.unused),
             unknown: report
                 .unknown
@@ -3823,6 +3922,12 @@ struct UsageClassificationSummaryJson {
     indexed_items: usize,
     used_callables: usize,
     used_items: usize,
+    unused_candidate_callables: usize,
+    unused_candidate_items: usize,
+    blocked_by_unknown_callables: usize,
+    blocked_by_unknown_items: usize,
+    prunable_callables: usize,
+    prunable_items: usize,
     unused_callables: usize,
     unused_items: usize,
     unknown_surfaces: usize,
@@ -3835,6 +3940,12 @@ impl UsageClassificationSummaryJson {
             indexed_items: summary.indexed_items,
             used_callables: summary.used_callables,
             used_items: summary.used_items,
+            unused_candidate_callables: summary.unused_candidate_callables,
+            unused_candidate_items: summary.unused_candidate_items,
+            blocked_by_unknown_callables: summary.blocked_by_unknown_callables,
+            blocked_by_unknown_items: summary.blocked_by_unknown_items,
+            prunable_callables: summary.prunable_callables,
+            prunable_items: summary.prunable_items,
             unused_callables: summary.unused_callables,
             unused_items: summary.unused_items,
             unknown_surfaces: summary.unknown_surfaces,
@@ -4195,9 +4306,10 @@ mod tests {
     use super::generate_with_analyzer;
     use super::{
         add_semantic_inventory_hazard, default_feature_closure, generate,
-        generate_with_analyzer_feedback, semantic_hazard_metrics, write_generate_report,
-        AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions,
-        SemanticFileReport, SemanticHazardScope, SemanticReductionHints, SemanticReport,
+        generate_with_analyzer_feedback, semantic_hazard_metrics, usage_evidence_reason,
+        write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
+        GenerateOptions, SemanticFileReport, SemanticHazardScope, SemanticReductionHints,
+        SemanticReport,
     };
 
     #[test]
@@ -4269,6 +4381,33 @@ mod tests {
         assert!(usage_used_callables.contains("b::helper"));
         assert!(usage_unused_callables.contains("a::internal_entry"));
         assert!(usage_unused_callables.contains("b::unused_public"));
+        let usage_unused_candidate_callables = report
+            .usage
+            .unused_candidate
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let usage_blocked_callables = report
+            .usage
+            .blocked_by_unknown
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let usage_prunable_callables = report
+            .usage
+            .prunable
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(usage_unused_callables, usage_unused_candidate_callables);
+        assert!(usage_blocked_callables.contains("b::unused_public"));
+        assert!(
+            usage_prunable_callables.is_empty(),
+            "unknown semantic surfaces should block graph-unreachable callables from being reported as prunable",
+        );
         assert!(
             usage_used_callables.is_disjoint(&usage_unused_callables),
             "usage classifier must not classify a callable as both used and unused",
@@ -4277,6 +4416,15 @@ mod tests {
             report.usage.summary.indexed_callables,
             report.usage.summary.used_callables + report.usage.summary.unused_callables,
         );
+        assert_eq!(
+            report.usage.summary.unused_candidate_callables,
+            report.usage.summary.unused_callables,
+        );
+        assert_eq!(
+            report.usage.summary.blocked_by_unknown_callables,
+            report.usage.summary.unused_callables,
+        );
+        assert_eq!(report.usage.summary.prunable_callables, 0);
         let root_evidence = report
             .usage
             .evidence
@@ -4310,14 +4458,18 @@ mod tests {
             .iter()
             .find(|entry| entry.id.to_string() == "b::unused_public")
             .expect("unused callable should have usage evidence");
-        assert_eq!(unused_evidence.classification, "unused");
+        assert_eq!(unused_evidence.classification, "blocked_by_unknown");
         assert!(unused_evidence
             .reason
-            .contains("absent from the reachable set"));
+            .contains("retained unknown surfaces may still reference it"));
         assert!(unused_evidence
             .evidence
             .iter()
             .any(|detail| detail == "reachable=false"));
+        assert!(unused_evidence
+            .evidence
+            .iter()
+            .any(|detail| detail == "prunable=false"));
         assert_eq!(
             report.usage.evidence.callables.len(),
             report.usage.summary.indexed_callables,
@@ -4363,6 +4515,18 @@ mod tests {
             .collect::<BTreeSet<_>>();
         assert!(usage_used_items.contains("d::Worker(Struct)"));
         assert!(usage_unused_items.contains("d::UnusedEnum(Enum)"));
+        let usage_blocked_items = report
+            .usage
+            .blocked_by_unknown
+            .items
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(usage_blocked_items.contains("d::UnusedEnum(Enum)"));
+        assert!(
+            report.usage.prunable.items.is_empty(),
+            "unknown semantic surfaces should block graph-unreachable items from being reported as prunable",
+        );
         assert!(
             usage_used_items.is_disjoint(&usage_unused_items),
             "usage classifier must not classify an item as both used and unused",
@@ -4371,6 +4535,11 @@ mod tests {
             report.usage.summary.indexed_items,
             report.usage.summary.used_items + report.usage.summary.unused_items,
         );
+        assert_eq!(
+            report.usage.summary.blocked_by_unknown_items,
+            report.usage.summary.unused_items,
+        );
+        assert_eq!(report.usage.summary.prunable_items, 0);
         let item_evidence = report
             .usage
             .evidence
@@ -4389,7 +4558,7 @@ mod tests {
             .iter()
             .find(|entry| entry.id.to_string() == "d::UnusedEnum(Enum)")
             .expect("unused item should have usage evidence");
-        assert_eq!(unused_item_evidence.classification, "unused");
+        assert_eq!(unused_item_evidence.classification, "blocked_by_unknown");
         assert_eq!(
             report.usage.evidence.items.len(),
             report.usage.summary.indexed_items,
@@ -4428,6 +4597,20 @@ mod tests {
         assert!(a_source.contains("pub fn open_source_entry"));
         assert!(!a_source.contains("#[opensourced]"));
         assert!(!a_source.contains("internal_entry"));
+    }
+
+    #[test]
+    fn usage_evidence_marks_prunable_only_without_unknowns() {
+        let evidence = super::model::ReductionEvidence::default();
+        let (reason, details) = usage_evidence_reason("prunable", false, &evidence, 0);
+
+        assert!(reason.contains("not blocked by retained unknown surfaces"));
+        assert!(details.iter().any(|detail| detail == "reachable=false"));
+        assert!(details
+            .iter()
+            .any(|detail| detail == "unused_candidate=true"));
+        assert!(details.iter().any(|detail| detail == "prunable=true"));
+        assert!(details.iter().any(|detail| detail == "unknown_surfaces=0"));
     }
 
     #[test]
@@ -4533,6 +4716,25 @@ theme = []
             .unwrap()
             .iter()
             .any(|callable| callable == "a::internal_entry"));
+        assert!(value["usage"]["unused_candidate"]["callables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|callable| callable == "a::internal_entry"));
+        assert!(value["usage"]["blocked_by_unknown"]["callables"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|callable| callable == "a::internal_entry"));
+        assert!(value["usage"]["prunable"]["callables"]
+            .as_array()
+            .unwrap()
+            .is_empty());
+        assert_eq!(
+            value["usage"]["summary"]["prunable_callables"].as_u64(),
+            Some(0),
+            "unknown surfaces should keep graph-unreachable callables out of the prunable bucket",
+        );
         assert!(value["usage"]["unknown"]
             .as_array()
             .unwrap()
@@ -4553,12 +4755,17 @@ theme = []
             .iter()
             .find(|entry| entry["id"] == "a::internal_entry")
             .expect("unused callable usage evidence should be serialized");
-        assert_eq!(unused_evidence["classification"], "unused");
+        assert_eq!(unused_evidence["classification"], "blocked_by_unknown");
         assert!(unused_evidence["evidence"]
             .as_array()
             .unwrap()
             .iter()
             .any(|detail| detail == "reachable=false"));
+        assert!(unused_evidence["evidence"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|detail| detail == "prunable=false"));
     }
 
     #[test]

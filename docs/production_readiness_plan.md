@@ -41,16 +41,24 @@ discovery. Both paths record project-local call hierarchy edges into the same
 additive reduction hint map, then let the existing `syn` renderer prune items
 outside the retained set.
 Generation reports now expose an explicit usage classification:
-`usage.used`, `usage.unused`, and `usage.unknown`. `used` means reachable from
-selected roots through the current syntactic and semantic edge map; `unused`
-means indexed but unreachable in that graph; `unknown` mirrors production
-hazards that prevent treating the classification as a complete proof.
+`usage.used`, `usage.unused_candidate`, `usage.blocked_by_unknown`,
+`usage.prunable`, and `usage.unknown`. `used` means reachable from selected
+roots through the current syntactic and semantic edge map; `unused_candidate`
+means indexed but unreachable in that graph; `blocked_by_unknown` means an
+unreachable item is not safe to call prunable because retained unknown surfaces
+may still reference it; `prunable` means graph-unreachable and not blocked by
+unknown surfaces; `unknown` mirrors production hazards that prevent treating the
+classification as a complete proof. `usage.unused` remains a compatibility
+alias for `usage.unused_candidate`.
 `usage.evidence` records one explanation per indexed callable/item, including
 whether it was a selected root, whether it was reachable, and whether semantic
-or syntactic fallback evidence participated in the retained graph. The
-production invariant is still fail-closed: remove only graph-unreachable indexed
-items, and keep/report anything represented by `unknown` until compiler
-feedback or deeper semantics discharges it.
+or syntactic fallback evidence participated in the retained graph. The first
+blocked/prunable rule is deliberately conservative: while any unknown surface
+remains, graph-unreachable items are candidates blocked by unknown rather than
+fully prunable. The production invariant is fail-closed: treat only
+`usage.prunable` as safe to remove without more evidence, and keep/report
+anything represented by `unknown` until compiler feedback or deeper semantics
+discharges it.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that
