@@ -34,6 +34,7 @@ pub use feedback::{
     CheckSuggestion, CheckTarget, FeedbackHazard, FeedbackWideningCandidate,
     FeedbackWideningReport,
 };
+pub use manifest::marked_workspace_packages;
 pub use model::{
     CallableId, ItemId, RootId, SemanticDependencies, SemanticOwnerId, SemanticReductionHints,
     SourceSpan,
@@ -269,14 +270,18 @@ impl SlicePlan {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let unknown_retention =
             UnknownRetentionPlan::build(project, root_reduced, analyzer, pre_render_production)?;
+        let mut render_extra_roots = root_reduced.roots.clone();
+        render_extra_roots.extend(unknown_retention.roots.iter().cloned());
+        render_extra_roots.sort();
+        render_extra_roots.dedup();
         let mut render_reduced = if unknown_retention.roots.is_empty() {
             root_reduced.clone()
         } else if analyzer.semantic_hints.is_empty() {
-            reduce::reduce_with_extra_roots(project, &unknown_retention.roots)?
+            reduce::reduce_with_extra_roots(project, &render_extra_roots)?
         } else {
             reduce::reduce_with_extra_roots_and_semantics(
                 project,
-                &unknown_retention.roots,
+                &render_extra_roots,
                 &analyzer.semantic_hints,
             )?
         };
@@ -3045,9 +3050,9 @@ fn add_syntactic_production_hazards(
     if counts.function_pointer_surfaces > 0 {
         hazards.push(production_hazard_with_details(
             "function_pointer_surfaces",
-            "error",
+            "warning",
             format!(
-                "{} retained function pointer type surface(s) may hide callback edges outside the static call graph",
+                "{} retained function pointer type surface(s) may hide callback edges outside the static call graph; compiler feedback validates the generated signatures and remaining warning requires semantic review",
                 counts.function_pointer_surfaces
             ),
             counts.function_pointer_details,
@@ -3056,9 +3061,9 @@ fn add_syntactic_production_hazards(
     if counts.trait_object_surfaces > 0 {
         hazards.push(production_hazard_with_details(
             "trait_object_surfaces",
-            "error",
+            "warning",
             format!(
-                "{} retained trait object surface(s) may hide dynamic dispatch edges outside the static call graph",
+                "{} retained trait object surface(s) may hide dynamic dispatch edges outside the static call graph; compiler feedback validates the generated signatures and remaining warning requires semantic review",
                 counts.trait_object_surfaces
             ),
             counts.trait_object_details,
@@ -6635,7 +6640,9 @@ pub fn entry(
             .production
             .hazards
             .iter()
-            .find(|hazard| hazard.code == "function_pointer_surfaces" && hazard.severity == "error")
+            .find(|hazard| {
+                hazard.code == "function_pointer_surfaces" && hazard.severity == "warning"
+            })
             .expect("function pointer hazard should be reported");
         assert!(function_pointer.details.iter().any(|detail| {
             detail.subject == "app: fn () -> usize"
@@ -6650,7 +6657,7 @@ pub fn entry(
             .production
             .hazards
             .iter()
-            .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
+            .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "warning")
             .expect("trait object hazard should be reported");
         assert!(trait_object.details.iter().any(|detail| {
             detail.subject == "app: dyn Worker"
@@ -6685,7 +6692,7 @@ pub fn entry(
                     .as_ref()
                     .is_some_and(|file| file.ends_with("app/src/lib.rs"))
         }));
-        assert_eq!(report.production.status, "hazards_detected");
+        assert_eq!(report.production.status, "requires_feedback");
     }
 
     #[test]
@@ -7705,6 +7712,13 @@ pub fn entry() -> usize {
 pub fn helper() -> usize {
     2
 }
+
+#[custom_attr::decorate(maybe_macro_helper)]
+pub fn risky() {}
+
+pub fn maybe_macro_helper() -> usize {
+    3
+}
 "#,
         );
 
@@ -7733,6 +7747,18 @@ pub fn helper() -> usize {
             .any(|root| root.to_string() == "app::helper"));
         assert!(report
             .reachable
+            .iter()
+            .any(|callable| callable.to_string() == "app::helper"));
+        assert!(report
+            .usage
+            .used
+            .callables
+            .iter()
+            .any(|callable| callable.to_string() == "app::helper"));
+        assert!(!report
+            .usage
+            .prunable
+            .callables
             .iter()
             .any(|callable| callable.to_string() == "app::helper"));
     }

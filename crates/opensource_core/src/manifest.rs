@@ -94,6 +94,32 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
     })
 }
 
+pub fn marked_workspace_packages(root: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let root = root.canonicalize()?;
+    let root_manifest = root.join("Cargo.toml");
+    let metadata = load_cargo_metadata(&root_manifest)?;
+    let workspace_members = metadata
+        .workspace_members
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut packages = metadata
+        .packages
+        .into_iter()
+        .filter(|package| workspace_members.contains(&package.id))
+        .filter(|package| {
+            package
+                .targets
+                .iter()
+                .filter(|target| target_is_parse_candidate(target))
+                .any(|target| source_contains_opensourced_marker(&target.src_path))
+        })
+        .map(|package| package.name)
+        .collect::<Vec<_>>();
+    packages.sort();
+    packages.dedup();
+    Ok(packages)
+}
+
 fn read_manifest(path: &Path) -> Result<Value, Box<dyn std::error::Error>> {
     let text = fs::read_to_string(path)?;
     Ok(text.parse::<Value>()?)

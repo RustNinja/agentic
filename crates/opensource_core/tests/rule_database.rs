@@ -206,12 +206,12 @@ fn reports_inline_callback_future_fields_as_dynamic_hazards() {
     })
     .expect("inline callback future rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     let trait_object = report
         .production
         .hazards
         .iter()
-        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
+        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "warning")
         .expect("inline callback future should report trait object hazards");
     assert!(trait_object
         .details
@@ -470,7 +470,7 @@ fn reports_async_trait_object_surfaces_with_macro_attr() {
     })
     .expect("async trait object rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     assert!(report.production.hazards.iter().any(|hazard| {
         hazard.code == "trait_object_surfaces"
             && hazard
@@ -520,7 +520,7 @@ fn reports_returned_trait_object_surfaces_as_dynamic_hazards() {
     })
     .expect("returned dyn rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     assert!(report.production.hazards.iter().any(|hazard| {
         hazard.code == "trait_object_surfaces"
             && hazard
@@ -1325,13 +1325,13 @@ fn reports_owned_dynamic_dispatch_surfaces_inside_retained_structs() {
     })
     .expect("owned dyn rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     let trait_object = report
         .production
         .hazards
         .iter()
-        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
-        .expect("owned dyn field should be a hard production hazard");
+        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "warning")
+        .expect("owned dyn field should be a feedback hazard");
     assert!(trait_object.details.iter().any(|detail| {
         detail.subject.contains("dyn Worker")
             && detail
@@ -1344,8 +1344,8 @@ fn reports_owned_dynamic_dispatch_surfaces_inside_retained_structs() {
         .production
         .hazards
         .iter()
-        .find(|hazard| hazard.code == "function_pointer_surfaces" && hazard.severity == "error")
-        .expect("stored callback field should be a hard production hazard");
+        .find(|hazard| hazard.code == "function_pointer_surfaces" && hazard.severity == "warning")
+        .expect("stored callback field should be a feedback hazard");
     assert!(function_pointer
         .details
         .iter()
@@ -1491,12 +1491,12 @@ fn reports_nested_callback_future_aliases_as_dynamic_hazards() {
     })
     .expect("callback future rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     let trait_object = report
         .production
         .hazards
         .iter()
-        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
+        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "warning")
         .expect("nested callback future should report trait object hazards");
     assert!(trait_object
         .details
@@ -1799,13 +1799,13 @@ fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
     })
     .expect("Option<Arc<dyn callback>> rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     let trait_object = report
         .production
         .hazards
         .iter()
-        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
-        .expect("callback trait object should be a hard production hazard");
+        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "warning")
+        .expect("callback trait object should be a feedback hazard");
     assert!(trait_object.details.iter().any(|detail| {
         detail.subject.contains("dyn Callback")
             && detail.subject.contains("Send")
@@ -1832,13 +1832,13 @@ fn reports_nested_callback_store_trait_objects_as_dynamic_hazards() {
     })
     .expect("nested callback store rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     let trait_object = report
         .production
         .hazards
         .iter()
-        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "error")
-        .expect("nested callback store should be a hard production hazard");
+        .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "warning")
+        .expect("nested callback store should be a feedback hazard");
     assert!(trait_object.details.iter().any(|detail| {
         detail.subject.contains("dyn ReconnectCallback")
             && detail.subject.contains("Send")
@@ -1866,7 +1866,7 @@ fn reports_trait_object_casts_while_retaining_concrete_sources() {
     })
     .expect("trait object cast rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     assert!(report.production.hazards.iter().any(|hazard| {
         hazard.code == "trait_object_surfaces"
             && hazard
@@ -1953,7 +1953,7 @@ fn reports_bare_dyn_alias_inside_once_lock_arc_as_dynamic_hazard() {
     })
     .expect("bare dyn alias once lock rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     assert!(report.production.hazards.iter().any(|hazard| {
         hazard.code == "trait_object_surfaces"
             && hazard
@@ -1981,7 +1981,7 @@ fn reports_facade_reexported_boxed_io_alias_without_dead_siblings() {
     })
     .expect("boxed io alias facade rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     assert!(report.production.hazards.iter().any(|hazard| {
         hazard.code == "trait_object_surfaces"
             && hazard
@@ -2409,7 +2409,7 @@ fn reports_boxed_future_return_alias_as_dynamic_hazard() {
     })
     .expect("boxed future return rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
+    assert_eq!(report.production.status, "requires_feedback");
     assert!(report.production.hazards.iter().any(|hazard| {
         hazard.code == "trait_object_surfaces"
             && hazard

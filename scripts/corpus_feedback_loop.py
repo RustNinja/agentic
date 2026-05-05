@@ -328,6 +328,7 @@ def validate_args(args: argparse.Namespace) -> None:
     if args.validation == "production":
         args.baseline_check = True
         args.deny_warnings = True
+        args.feedback_loop = max(args.feedback_loop, 2)
 
 
 def load_pinned_batches(path: Path) -> list[dict[str, Any]]:
@@ -544,6 +545,12 @@ def run_batch(
             uses_workspace_dependency,
         )
         annotate(roots)
+        reconcile_source_lockfile_for_validation(
+            cargo_source.manifest_path,
+            cargo_source.cargo_root,
+            cargo_check_args,
+            args.case_timeout,
+        )
 
         command = slicers_command(
             args,
@@ -1049,10 +1056,29 @@ def validation_cargo_check_args(
         cargo_args.extend(pinned_batch.get("cargo_check_args", []))
     if args.validation == "preflight":
         return cargo_args
+    if not cargo_args_have_package_scope(cargo_args):
+        cargo_args = package_scope_cargo_args(roots) + cargo_args
     selected_dev_kinds = selected_root_dev_kinds(roots)
     if selected_dev_kinds and not cargo_args_cover_dev_targets(cargo_args, selected_dev_kinds):
         cargo_args.append("--all-targets")
     return cargo_args
+
+
+def package_scope_cargo_args(roots: list[Candidate]) -> list[str]:
+    cargo_args: list[str] = []
+    package_names = sorted({candidate.package.name for candidate in roots})
+    for package_name in package_names:
+        cargo_args.extend(["-p", package_name])
+    return cargo_args
+
+
+def cargo_args_have_package_scope(cargo_args: list[str]) -> bool:
+    return any(
+        arg in {"--workspace", "--all", "-p", "--package"}
+        or arg.startswith("--package=")
+        or (arg.startswith("-p") and len(arg) > 2)
+        for arg in cargo_args
+    )
 
 
 def selected_root_dev_kinds(roots: list[Candidate]) -> set[str]:
@@ -1112,6 +1138,34 @@ def run_baseline_check(
         "diagnostic_semantic_warning_keys": semantic_hazard_warning_keys(diagnostics),
         "first_diagnostics": summarize_diagnostics(diagnostics),
     }
+
+
+def reconcile_source_lockfile_for_validation(
+    manifest_path: Path,
+    cargo_root: Path,
+    cargo_check_args: list[str],
+    timeout_seconds: int,
+) -> None:
+    if not (cargo_root / "Cargo.lock").exists() or "--frozen" in cargo_check_args:
+        return
+    command = [
+        "cargo",
+        "generate-lockfile",
+        "--manifest-path",
+        str(manifest_path),
+        *lockfile_reconciliation_args(cargo_check_args),
+    ]
+    result = run_command(command, manifest_path.parent, timeout_seconds=timeout_seconds)
+    if not result.success:
+        detail = first_nonempty_line(result.stderr) or first_nonempty_line(result.stdout)
+        raise RuntimeError(
+            "cargo generate-lockfile failed after corpus manifest mutation"
+            + (f": {detail}" if detail else "")
+        )
+
+
+def lockfile_reconciliation_args(cargo_check_args: list[str]) -> list[str]:
+    return ["--offline"] if "--offline" in cargo_check_args else []
 
 
 def run_command(command: list[str], cwd: Path, timeout_seconds: int) -> CommandResult:

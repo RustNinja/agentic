@@ -29,6 +29,17 @@ not slicer failures.
 - The production flow can accept multiple real Litter `codex-ipc` roots with
   compiler feedback, including compact protocol, pending-request, transport, and
   bridge/state roots.
+- A 2026-05-06 fresh-checkout rerun of the pinned five-root codex-ipc corpus
+  case exposed three generic hardening gaps and then passed with the fixes:
+  validation must scope Cargo checks to selected root packages (`-p codex-ipc`)
+  so unrelated workspace members do not block the source baseline; the corpus
+  runner must reconcile its temporary lockfile after injecting the local
+  `opensourced` marker dependency because production validation uses `--locked`;
+  and the render plan must keep feedback-widened roots when unknown-retention
+  roots are also present. The accepted run generated 124 files, widened six
+  missing-method roots from E0599 diagnostics, passed warning-clean compiler
+  feedback on the second iteration, and finished as `review_required` because
+  dynamic/macro/semantic warnings remain.
 - Large file counts are now the most visible gap for some accepted slices.
   `project_conversation_state` and `IpcBridge::new` both accepted production
   validation but generated 850+ files because retained protocol/support path

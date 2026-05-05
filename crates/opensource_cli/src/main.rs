@@ -11,10 +11,11 @@ use std::{
 use serde::Serialize;
 
 use opensource_core::{
-    check_workspace, generate_with_analyzer, generate_with_analyzer_feedback, preflight_workspace,
-    repair_workspace, write_generate_report, write_preflight_report, write_repair_report,
-    write_report, AnalyzerMode, CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions,
-    GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
+    check_workspace, generate_with_analyzer, generate_with_analyzer_feedback,
+    marked_workspace_packages, preflight_workspace, repair_workspace, write_generate_report,
+    write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
+    CheckOptions, CheckReport, GenerateOptions, GeneratedTargetReport, PreflightDiagnostic,
+    PreflightOptions, PreflightReport, RepairOptions,
 };
 
 fn main() {
@@ -25,11 +26,13 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
-    let options = parse_args()?;
+    let mut options = parse_args()?;
 
     if same_path(&options.workspace_root, &options.output_root) {
         return Err("output root must be different from workspace root".into());
     }
+
+    apply_default_marked_package_scope(&mut options)?;
 
     let mut validation = ValidationReport::new(&options);
 
@@ -613,6 +616,59 @@ fn normalize_workspace_root_arg(path: &Path) -> PathBuf {
         .filter(|parent| !parent.as_os_str().is_empty())
         .unwrap_or_else(|| Path::new("."))
         .to_path_buf()
+}
+
+fn apply_default_marked_package_scope(
+    options: &mut CliOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    if !validation_runs_cargo_check(options)
+        || cargo_args_have_package_scope(&options.cargo_check_args)
+    {
+        return Ok(());
+    }
+
+    let packages = marked_workspace_packages(&options.workspace_root)?;
+    if packages.is_empty() {
+        return Ok(());
+    }
+
+    println!(
+        "validation package scope: {}",
+        packages
+            .iter()
+            .map(|package| format!("-p {package}"))
+            .collect::<Vec<_>>()
+            .join(" ")
+    );
+    let mut scoped_args = package_scope_cargo_args(&packages);
+    scoped_args.extend(options.cargo_check_args.clone());
+    options.cargo_check_args = scoped_args;
+    Ok(())
+}
+
+fn validation_runs_cargo_check(options: &CliOptions) -> bool {
+    options.run_baseline_check
+        || options.run_check
+        || options.feedback_iterations > 0
+        || options.feedback_repair_iterations > 0
+}
+
+fn package_scope_cargo_args(packages: &[String]) -> Vec<String> {
+    packages
+        .iter()
+        .flat_map(|package| ["-p".to_string(), package.clone()])
+        .collect()
+}
+
+fn cargo_args_have_package_scope(cargo_args: &[String]) -> bool {
+    cargo_args.iter().any(|arg| {
+        arg == "--workspace"
+            || arg == "--all"
+            || arg == "-p"
+            || arg == "--package"
+            || arg.starts_with("--package=")
+            || (arg.starts_with("-p") && arg.len() > 2)
+    })
 }
 
 fn production_should_add_locked_arg(
@@ -3450,7 +3506,8 @@ mod tests {
     };
 
     use super::{
-        baseline_limited_feedback_is_accepted, diagnostics_shape_signature, diagnostics_signature,
+        apply_default_marked_package_scope, baseline_limited_feedback_is_accepted,
+        cargo_args_have_package_scope, diagnostics_shape_signature, diagnostics_signature,
         feedback_errors_are_baseline_known, feedback_is_accepted, feedback_repair_is_accepted,
         parse_args_from, production_readiness_blocks_validation,
         production_validation_matrix_entries, record_final_production_readiness,
@@ -3795,6 +3852,76 @@ mod tests {
 
         assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
         assert!(options.production_preset);
+    }
+
+    #[test]
+    fn default_validation_scope_targets_marked_packages() {
+        let workspace = temp_path("cli-marked-package-scope-source");
+        let output = temp_path("cli-marked-package-scope-output");
+        write(
+            workspace.join("Cargo.toml"),
+            r#"[workspace]
+members = ["app", "unrelated"]
+resolver = "2"
+"#,
+        );
+        write(
+            workspace.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            workspace.join("app/src/lib.rs"),
+            "#[opensourced::opensourced]\npub fn selected() -> i32 { 1 }\n",
+        );
+        write(
+            workspace.join("unrelated/Cargo.toml"),
+            "[package]\nname = \"unrelated\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            workspace.join("unrelated/src/lib.rs"),
+            "compile_error!(\"unrelated package should not define validation scope\");\n",
+        );
+        let mut options = parse_args_from([
+            std::ffi::OsString::from("--production"),
+            workspace.clone().into_os_string(),
+            output.into_os_string(),
+        ])
+        .expect("production arguments should parse");
+
+        apply_default_marked_package_scope(&mut options)
+            .expect("marked package scope should resolve");
+
+        assert_eq!(options.cargo_check_args, ["-p", "app"]);
+    }
+
+    #[test]
+    fn default_validation_scope_respects_explicit_package_selection() {
+        let mut options = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--workspace",
+            "workspace",
+            "out",
+        ]);
+        let original_args = options.cargo_check_args.clone();
+
+        apply_default_marked_package_scope(&mut options)
+            .expect("explicit workspace scope should skip marker scan");
+
+        assert_eq!(options.cargo_check_args, original_args);
+    }
+
+    #[test]
+    fn cargo_arg_package_scope_detection_accepts_common_forms() {
+        assert!(cargo_args_have_package_scope(&["-p".to_string()]));
+        assert!(cargo_args_have_package_scope(&["-papp".to_string()]));
+        assert!(cargo_args_have_package_scope(
+            &["--package=app".to_string()]
+        ));
+        assert!(cargo_args_have_package_scope(&["--workspace".to_string()]));
+        assert!(!cargo_args_have_package_scope(&[
+            "--all-targets".to_string()
+        ]));
     }
 
     #[test]

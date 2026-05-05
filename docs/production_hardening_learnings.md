@@ -161,6 +161,18 @@ Generic source repair wins came from recognizing patterns, not projects:
 - Exact repeated diagnostics and repeated diagnostic shapes now stop feedback,
   repair, and production-matrix loops early with structured reports. This keeps
   repeated builds from consuming time when the graph has stopped changing.
+- Real compiler feedback widening must be part of the retained render plan, not
+  just the first reduction. A 2026-05-06 Litter codex-ipc run exposed that
+  unknown-retention re-rendering could drop feedback-widened roots when both
+  paths were active. The fix is generic: render from the union of selected
+  roots, compiler-widened roots, and unknown-retention roots, then classify
+  usage from the same `UsageDecisionIndex`.
+- Dynamic dispatch and callback surfaces should block unsafe pruning, but they
+  should not stop before compiler feedback. They are now warning/review hazards:
+  retained `dyn Trait` and function-pointer surfaces keep nearby unknowns
+  fail-closed, the generated signatures are checked by Cargo, and final
+  production status stays `review_required` until deeper semantics discharges
+  the warning.
 
 ## Real-Repo Corpus Lessons
 
@@ -173,6 +185,13 @@ The useful corpus pattern is:
 - pinned large real repositories with known-good source baselines;
 - strict mode with `--deny-warnings`, `--feedback`, repair loops, and explicit
   package/target Cargo args.
+- production corpus runs need at least two feedback iterations so a first-pass
+  compiler diagnostic can widen roots and a second pass can verify the
+  regenerated slice;
+- when the corpus runner mutates a temp source manifest to add the local
+  `opensourced` marker dependency, it must reconcile the temporary lockfile
+  before invoking the CLI production preset, because the preset validates with
+  `--locked`;
 - one tiny checked-in stress workspace for fast macro/use iteration, so common
   graph and render regressions are caught before running a large repository;
 - one scriptable short loop that checks the stress workspace source and the

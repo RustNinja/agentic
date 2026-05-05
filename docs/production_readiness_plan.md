@@ -106,6 +106,17 @@ plain compiler feedback: warning-only production hazards now produce
 `review_required`, and only a slice with no remaining production hazards is
 marked `accepted`.
 
+The latest codex-ipc production probe on a fresh Litter checkout now validates
+the pinned five-root `scripts/corpus_cases/litter_codex_ipc_random5.json` case
+with package-scoped baseline/feedback args. The first feedback pass widened six
+generic missing-method roots from E0599 diagnostics, the second pass produced a
+warning-clean `cargo check -p codex-ipc --locked`, and the final validation
+status was `review_required` because macro/dynamic-dispatch/semantic warning
+hazards remain for human or deeper-semantic discharge. This exposed and fixed
+three generic infrastructure gaps: package-scoped validation for marked roots,
+corpus lockfile reconciliation after marker dependency injection, and
+render-plan unioning of selected, feedback-widened, and unknown-retention roots.
+
 The latest hardening milestone validated the pinned Litter UniFFI cases in
 strict repair mode with `--deny-warnings`: all three pinned roots reached zero
 final warnings through the RA analyzer path, and production reports show
@@ -145,10 +156,11 @@ checks from blocking the feedback loop.
 - Compile success can still be semantically wrong. The Litter const-pattern
   failure showed that a slice can build while changing behavior.
 - Dynamic dispatch and function-pointer callback surfaces can compile while
-  hiding concrete call edges; they must fail closed until semantic resolution
-  proves the retained implementation or callback set. These hazards now include
-  structured package/module/file/line details so users and corpus triage can
-  find the exact retained dynamic surface.
+  hiding concrete call edges. They must block unsafe pruning and keep structured
+  package/module/file/line details, but they are warning/review hazards rather
+  than pre-feedback hard errors: Cargo feedback validates the generated
+  signatures, and final production readiness remains `review_required` until
+  semantic resolution proves the retained implementation or callback set.
 - Unknown macros should not be pruned silently. Either retain bounded source,
   query a semantic oracle, or fail with an unsupported-construct report.
 - Retained custom derives, custom attributes, and non-builtin macro invocations
