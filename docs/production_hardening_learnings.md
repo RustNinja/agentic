@@ -518,6 +518,14 @@ hazards add named unreachable symbols as blocked roots, and rust-analyzer
 definition-mapping gaps, failed reference searches, and retained RA references
 now block otherwise prunable candidates instead of silently deleting code the
 semantic oracle failed to prove removable.
+The public `usage.unused` field now matches `usage.prunable`, so automation
+that consumes the report sees only the removable set. The broader
+graph-unreachable set remains available as `usage.unused_candidate`, while
+`usage.blocked_by_unknown` records retained candidates whose removal could not
+be proven safe. The report also serializes `analyzer.semantic_usage`, including
+mapped ids, failed reference-query ids, reference owners, and unowned reference
+files, so the used/unused/unknown split can be audited without scraping analyzer
+notes.
 
 ## Current Production Boundaries
 

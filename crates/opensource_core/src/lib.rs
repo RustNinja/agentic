@@ -1246,12 +1246,13 @@ fn usage_classification_report(
     let mut prunable_callables = decisions.prunable_callables();
     prunable_callables.sort();
 
-    let mut unused_callables = blocked_by_unknown_callables
+    let mut unused_candidate_callables = blocked_by_unknown_callables
         .iter()
         .cloned()
         .chain(prunable_callables.iter().cloned())
         .collect::<Vec<_>>();
-    unused_callables.sort();
+    unused_candidate_callables.sort();
+    let unused_callables = prunable_callables.clone();
 
     let mut used_items = decisions.used_items();
     used_items.sort();
@@ -1262,12 +1263,13 @@ fn usage_classification_report(
     let mut prunable_items = decisions.prunable_items();
     prunable_items.sort();
 
-    let mut unused_items = blocked_by_unknown_items
+    let mut unused_candidate_items = blocked_by_unknown_items
         .iter()
         .cloned()
         .chain(prunable_items.iter().cloned())
         .collect::<Vec<_>>();
-    unused_items.sort();
+    unused_candidate_items.sort();
+    let unused_items = prunable_items.clone();
 
     let unknown = production
         .hazards
@@ -1298,12 +1300,12 @@ fn usage_classification_report(
     UsageClassificationReport {
         status,
         summary: UsageClassificationSummary {
-            indexed_callables: used_callables.len() + unused_callables.len(),
-            indexed_items: used_items.len() + unused_items.len(),
+            indexed_callables: used_callables.len() + unused_candidate_callables.len(),
+            indexed_items: used_items.len() + unused_candidate_items.len(),
             used_callables: used_callables.len(),
             used_items: used_items.len(),
-            unused_candidate_callables: unused_callables.len(),
-            unused_candidate_items: unused_items.len(),
+            unused_candidate_callables: unused_candidate_callables.len(),
+            unused_candidate_items: unused_candidate_items.len(),
             blocked_by_unknown_callables: blocked_by_unknown_callables.len(),
             blocked_by_unknown_items: blocked_by_unknown_items.len(),
             prunable_callables: prunable_callables.len(),
@@ -1317,8 +1319,8 @@ fn usage_classification_report(
             items: used_items,
         },
         unused_candidate: UsageClassifiedItems {
-            callables: unused_callables.clone(),
-            items: unused_items.clone(),
+            callables: unused_candidate_callables,
+            items: unused_candidate_items,
         },
         blocked_by_unknown: UsageClassifiedItems {
             callables: blocked_by_unknown_callables,
@@ -4735,6 +4737,7 @@ struct AnalyzerReportJson {
     notes: Vec<String>,
     semantic: Option<SemanticReportJson>,
     semantic_reduction_hints: SemanticReductionHintsJson,
+    semantic_usage: Option<SemanticUsageReportJson>,
 }
 
 impl AnalyzerReportJson {
@@ -4751,6 +4754,10 @@ impl AnalyzerReportJson {
             semantic_reduction_hints: SemanticReductionHintsJson::from_report(
                 &report.semantic_hints,
             ),
+            semantic_usage: report
+                .semantic_usage
+                .as_ref()
+                .map(SemanticUsageReportJson::from_report),
         }
     }
 }
@@ -4776,6 +4783,147 @@ impl SemanticReductionHintsJson {
             unmapped_targets: report.unmapped_targets,
         }
     }
+}
+
+#[derive(Serialize)]
+struct SemanticUsageReportJson {
+    indexed_callables: usize,
+    indexed_items: usize,
+    mapped_callables: usize,
+    mapped_items: usize,
+    unmapped_callables: usize,
+    unmapped_items: usize,
+    reference_queries: usize,
+    reference_query_failures: usize,
+    callable_reference_edges: usize,
+    item_reference_edges: usize,
+    referenced_callables: usize,
+    referenced_items: usize,
+    mapped_callable_ids: Vec<String>,
+    mapped_item_ids: Vec<String>,
+    failed_callable_reference_ids: Vec<String>,
+    failed_item_reference_ids: Vec<String>,
+    referenced_callable_ids: Vec<String>,
+    referenced_item_ids: Vec<String>,
+    callable_reference_owners: Vec<SemanticCallableReferenceOwnersJson>,
+    item_reference_owners: Vec<SemanticItemReferenceOwnersJson>,
+    callable_unowned_reference_files: Vec<SemanticCallableReferenceFilesJson>,
+    item_unowned_reference_files: Vec<SemanticItemReferenceFilesJson>,
+}
+
+#[derive(Serialize)]
+struct SemanticCallableReferenceOwnersJson {
+    target: String,
+    owners: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SemanticItemReferenceOwnersJson {
+    target: String,
+    owners: Vec<String>,
+}
+
+#[derive(Serialize)]
+struct SemanticCallableReferenceFilesJson {
+    target: String,
+    files: Vec<PathBuf>,
+}
+
+#[derive(Serialize)]
+struct SemanticItemReferenceFilesJson {
+    target: String,
+    files: Vec<PathBuf>,
+}
+
+impl SemanticUsageReportJson {
+    fn from_report(report: &SemanticUsageReport) -> Self {
+        Self {
+            indexed_callables: report.indexed_callables,
+            indexed_items: report.indexed_items,
+            mapped_callables: report.mapped_callables,
+            mapped_items: report.mapped_items,
+            unmapped_callables: report.unmapped_callables,
+            unmapped_items: report.unmapped_items,
+            reference_queries: report.reference_queries,
+            reference_query_failures: report.reference_query_failures,
+            callable_reference_edges: report.callable_reference_edges,
+            item_reference_edges: report.item_reference_edges,
+            referenced_callables: report.referenced_callables,
+            referenced_items: report.referenced_items,
+            mapped_callable_ids: report
+                .mapped_callable_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            mapped_item_ids: report
+                .mapped_item_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            failed_callable_reference_ids: report
+                .failed_callable_reference_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            failed_item_reference_ids: report
+                .failed_item_reference_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            referenced_callable_ids: report
+                .referenced_callable_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            referenced_item_ids: report
+                .referenced_item_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            callable_reference_owners: report
+                .callable_reference_owners
+                .iter()
+                .map(|(target, owners)| SemanticCallableReferenceOwnersJson {
+                    target: target.to_string(),
+                    owners: semantic_owner_ids_to_strings(owners),
+                })
+                .collect(),
+            item_reference_owners: report
+                .item_reference_owners
+                .iter()
+                .map(|(target, owners)| SemanticItemReferenceOwnersJson {
+                    target: target.to_string(),
+                    owners: semantic_owner_ids_to_strings(owners),
+                })
+                .collect(),
+            callable_unowned_reference_files: report
+                .callable_unowned_reference_files
+                .iter()
+                .map(|(target, files)| SemanticCallableReferenceFilesJson {
+                    target: target.to_string(),
+                    files: files.iter().cloned().collect(),
+                })
+                .collect(),
+            item_unowned_reference_files: report
+                .item_unowned_reference_files
+                .iter()
+                .map(|(target, files)| SemanticItemReferenceFilesJson {
+                    target: target.to_string(),
+                    files: files.iter().cloned().collect(),
+                })
+                .collect(),
+        }
+    }
+}
+
+fn semantic_owner_ids_to_strings(owners: &BTreeSet<SemanticOwnerId>) -> Vec<String> {
+    owners
+        .iter()
+        .map(|owner| match owner {
+            SemanticOwnerId::Callable(callable) => callable.to_string(),
+            SemanticOwnerId::Item(item) => item.to_string(),
+        })
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -5359,6 +5507,29 @@ fn private_leaf() -> i32 {
             prunable_callables.contains("app::safe::unrelated_dead_code"),
             "unused code outside the unknown surface scope should remain prunable: {prunable_callables:?}",
         );
+        let removable_callables = usage
+            .unused
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            removable_callables, prunable_callables,
+            "usage.unused is the public removable set and must match prunable only",
+        );
+        assert!(
+            !removable_callables.contains("app::risky::maybe_macro_helper"),
+            "blocked_by_unknown candidates must not leak into the removable unused set",
+        );
+        assert_eq!(
+            usage.summary.unused_callables, usage.summary.prunable_callables,
+            "unused summary count must describe removable/prunable code only",
+        );
+        assert_eq!(
+            usage.summary.unused_candidate_callables,
+            usage.summary.blocked_by_unknown_callables + usage.summary.prunable_callables,
+            "unused_candidate remains the wider graph-unreachable set",
+        );
 
         let risky_source = fs::read_to_string(output.join("app/src/risky.rs")).unwrap();
         assert!(risky_source.contains("maybe_macro_helper"));
@@ -5448,6 +5619,14 @@ pub fn mapped_dead_code() -> i32 {
         assert!(
             usage.prunable.callables.contains(&mapped_dead),
             "graph-unused callables with RA mapping evidence should remain prunable",
+        );
+        assert!(
+            !usage.unused.callables.contains(&unmapped_dead),
+            "RA-unmapped unknown candidates must not be reported as removable unused code",
+        );
+        assert!(
+            usage.unused.callables.contains(&mapped_dead),
+            "RA-mapped clean candidates should be reported in removable unused code",
         );
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(generated.contains("pub fn unmapped_dead_code"));
@@ -5556,6 +5735,14 @@ pub fn clean_dead_code() -> i32 {
         assert!(
             usage.prunable.callables.contains(&clean_dead),
             "mapped graph-unused callables with no retained references should remain prunable",
+        );
+        assert!(
+            !usage.unused.callables.contains(&referenced_dead),
+            "RA-referenced unknown candidates must not be reported as removable unused code",
+        );
+        assert!(
+            usage.unused.callables.contains(&clean_dead),
+            "RA-clean candidates should be reported as removable unused code",
         );
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(generated.contains("pub fn semantically_referenced_dead_code"));
@@ -5722,11 +5909,67 @@ theme = []
     #[test]
     fn writes_generation_report_json() {
         let output = temp_output("generation-report-output");
-        let report = generate(GenerateOptions {
+        let mut report = generate(GenerateOptions {
             workspace_root: workspace_root(),
             output_root: output,
         })
         .expect("reduction should succeed");
+        let semantic_callable = report
+            .reachable
+            .first()
+            .cloned()
+            .expect("fixture should have reachable callables");
+        let semantic_owner_callable = report
+            .reachable
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| semantic_callable.clone());
+        let semantic_item = report
+            .reachable_items
+            .first()
+            .cloned()
+            .expect("fixture should have reachable items");
+        let semantic_owner_item = report
+            .reachable_items
+            .get(1)
+            .cloned()
+            .unwrap_or_else(|| semantic_item.clone());
+        report.analyzer.semantic_usage = Some(SemanticUsageReport {
+            indexed_callables: 3,
+            indexed_items: 2,
+            mapped_callables: 1,
+            mapped_items: 1,
+            unmapped_callables: 2,
+            unmapped_items: 1,
+            reference_queries: 4,
+            reference_query_failures: 2,
+            callable_reference_edges: 1,
+            item_reference_edges: 1,
+            referenced_callables: 1,
+            referenced_items: 1,
+            mapped_callable_ids: BTreeSet::from([semantic_callable.clone()]),
+            mapped_item_ids: BTreeSet::from([semantic_item.clone()]),
+            failed_callable_reference_ids: BTreeSet::from([semantic_callable.clone()]),
+            failed_item_reference_ids: BTreeSet::from([semantic_item.clone()]),
+            referenced_callable_ids: BTreeSet::from([semantic_callable.clone()]),
+            referenced_item_ids: BTreeSet::from([semantic_item.clone()]),
+            callable_reference_owners: BTreeMap::from([(
+                semantic_callable.clone(),
+                BTreeSet::from([SemanticOwnerId::Callable(semantic_owner_callable.clone())]),
+            )]),
+            item_reference_owners: BTreeMap::from([(
+                semantic_item.clone(),
+                BTreeSet::from([SemanticOwnerId::Item(semantic_owner_item.clone())]),
+            )]),
+            callable_unowned_reference_files: BTreeMap::from([(
+                semantic_callable.clone(),
+                BTreeSet::from([PathBuf::from("/tmp/unowned-callable.rs")]),
+            )]),
+            item_unowned_reference_files: BTreeMap::from([(
+                semantic_item.clone(),
+                BTreeSet::from([PathBuf::from("/tmp/unowned-item.rs")]),
+            )]),
+        });
         let report_path = temp_output("generation-report-json").join("slice-report.json");
 
         write_generate_report(&report, &report_path).expect("generation report should be written");
@@ -5734,6 +5977,40 @@ theme = []
         let value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(report_path).unwrap()).unwrap();
         assert_eq!(value["analyzer"]["mode"], "syn");
+        assert_eq!(
+            value["analyzer"]["semantic_usage"]["reference_query_failures"],
+            2
+        );
+        assert!(value["analyzer"]["semantic_usage"]["mapped_callable_ids"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|entry| entry == &semantic_callable.to_string()));
+        assert!(
+            value["analyzer"]["semantic_usage"]["failed_item_reference_ids"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|entry| entry == &semantic_item.to_string())
+        );
+        assert_eq!(
+            value["analyzer"]["semantic_usage"]["callable_reference_owners"][0]["target"],
+            semantic_callable.to_string(),
+        );
+        assert!(
+            value["analyzer"]["semantic_usage"]["callable_reference_owners"][0]["owners"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|owner| owner == &semantic_owner_callable.to_string())
+        );
+        assert!(
+            value["analyzer"]["semantic_usage"]["item_unowned_reference_files"][0]["files"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|file| file == "/tmp/unowned-item.rs")
+        );
         assert_eq!(value["production"]["status"], "requires_feedback");
         assert!(value["production"]["hazards"]
             .as_array()
