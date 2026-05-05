@@ -3,6 +3,11 @@ use macro_helpers::{
     FixtureObject, FixtureRecord,
 };
 use opensourced::opensourced;
+use shared::{
+    fixture_value as selected_value,
+    prelude::{exported_nested, SharedAlias, SharedMode, FEATURE_FLAG},
+    SharedRecord, SHARED_STATIC,
+};
 use std::{
     fmt,
     future::Future,
@@ -10,17 +15,12 @@ use std::{
     str::FromStr,
     sync::{Arc, Mutex, OnceLock},
 };
-use shared::{
-    fixture_value as selected_value,
-    prelude::{exported_nested, SharedAlias, SharedMode, FEATURE_FLAG},
-    SharedRecord, SHARED_STATIC,
-};
 use util::{make_util, DescribeValue, Transform, Useful, UtilValue};
 
 use crate::grouped::{dead_grouped as local_shadow, live_grouped};
 use crate::macro_support::bridge_try;
-use crate::removed::dead_fn as selected_shadow;
 use crate::reexports::reexported_nested;
+use crate::removed::dead_fn as selected_shadow;
 
 pub(crate) mod generated_types {
     include!("generated.rs");
@@ -89,10 +89,40 @@ mod inline_child {
     }
 }
 
-#[cfg_attr(
-    any(unix, windows),
-    macro_helpers::fixture_attr(shared::helper_marker)
-)]
+#[allow(dead_code)]
+mod serde_helpers {
+    pub mod wire {
+        pub fn serialize(value: &u32) -> u32 {
+            *value
+        }
+
+        pub fn deserialize(value: u32) -> u32 {
+            value
+        }
+
+        pub fn dead_wire_helper(value: u32) -> u32 {
+            value + 99
+        }
+    }
+
+    pub fn parse_label(value: String) -> String {
+        value
+    }
+
+    pub fn empty() -> String {
+        String::new()
+    }
+
+    pub fn dead_parse_label(value: String) -> String {
+        value
+    }
+
+    pub fn dead_empty() -> String {
+        "dead".to_string()
+    }
+}
+
+#[cfg_attr(any(unix, windows), macro_helpers::fixture_attr(shared::helper_marker))]
 mod platform_bridge {
     pub fn platform_value() -> u32 {
         17
@@ -386,8 +416,44 @@ impl GenericApi<GenericValue> for GenericCodec {
     }
 }
 
-#[derive(Clone)]
-#[derive(macro_helpers::FixtureRecord)]
+#[derive(Clone, FixtureRecord)]
+#[fixture_serde(rename_all = "snake_case")]
+pub struct LitterWireDto<T: LocalBound>
+where
+    T: Clone,
+{
+    #[fixture_serde(
+        with = "crate::serde_helpers::wire",
+        serialize_with = "crate::serde_helpers::wire::serialize",
+        deserialize_with = "crate::serde_helpers::wire::deserialize"
+    )]
+    value: SharedAlias,
+    #[fixture_serde(
+        default = "crate::serde_helpers::empty",
+        deserialize_with = "serde_helpers::parse_label"
+    )]
+    label: String,
+    payload: T,
+}
+
+impl<T> LitterWireDto<T>
+where
+    T: LocalBound + Clone,
+{
+    pub fn new(value: SharedAlias, label: String, payload: T) -> Self {
+        Self {
+            value,
+            label,
+            payload,
+        }
+    }
+
+    pub fn score(&self) -> SharedAlias {
+        self.value + self.label.len() as SharedAlias + self.payload.raw()
+    }
+}
+
+#[derive(Clone, macro_helpers::FixtureRecord)]
 #[fixture_serde(rename_all = "snake_case")]
 #[opensourced]
 pub struct SplitRecord {
@@ -541,7 +607,7 @@ impl LayeredClient {
     }
 }
 
-#[fixture_export]
+#[fixture_export(async_runtime = "fixture")]
 impl LayeredClient {
     #[fixture_constructor]
     pub fn new(value: SharedAlias) -> Arc<Self> {
@@ -900,10 +966,12 @@ pub fn open_transport_bundle(
     TransportBundle::new(transport, keepalive, LayeredClient::new(value))
 }
 
+#[opensourced]
 pub fn open_generic_edges(value: SharedAlias) -> SharedAlias {
     let envelope = GenericEnvelope::new(GenericValue(value));
     let packed = <GenericCodec as GenericApi<GenericValue>>::pack(GenericValue(1));
-    envelope.score() + packed.score()
+    let wire = LitterWireDto::new(value, format!("generic-{value}"), GenericValue(2));
+    envelope.score() + packed.score() + wire.score()
 }
 
 #[opensourced]
@@ -916,13 +984,14 @@ pub fn open_dependency_barrel(value: SharedAlias) -> SharedAlias {
 #[fixture_export(async_runtime = "fixture")]
 #[opensourced]
 pub async fn open_async_macro_use(input: u32) -> u32 {
-    async_bridge_value(input).await + exported_bridge(
-        WireDto {
-            label: None,
-            mode: SharedMode::Fast(input),
-        },
-        WireKind::Updated,
-    )
+    async_bridge_value(input).await
+        + exported_bridge(
+            WireDto {
+                label: None,
+                mode: SharedMode::Fast(input),
+            },
+            WireKind::Updated,
+        )
 }
 
 #[opensourced]

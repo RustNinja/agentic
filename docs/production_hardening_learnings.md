@@ -538,3 +538,11 @@ consume them.
 
 The rule for future work: if a real-repo failure is fixed, add a generic
 fixture that proves the rule without naming that repo.
+
+The fast fixture now also mirrors Litter-style derive-helper attributes that
+behave like serde but are not literally named `serde`. The reducer treats
+attribute paths ending in `_serde` as serde-helper carriers for string path
+closure, so retained fields with `with = "module"` keep `module::serialize`
+and `module::deserialize`, and direct helper strings such as
+`deserialize_with = "module::parse"` or `default = "crate::module::empty"` keep
+only the named helper functions. Dead sibling helpers remain pruned.

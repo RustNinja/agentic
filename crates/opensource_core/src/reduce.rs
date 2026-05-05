@@ -5696,7 +5696,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_call_path(&path);
             self.add_item_path(&path);
             self.add_macro_path(&path);
-            if macro_path_ends_with(attribute.path(), "serde") {
+            if attribute_uses_serde_helper_paths(attribute.path()) {
                 for path in serde_module_helper_paths(&segments) {
                     self.add_call_path(&path);
                     self.add_item_path(&path);
@@ -8924,6 +8924,13 @@ fn macro_path_ends_with(path: &Path, name: &str) -> bool {
     path.segments
         .last()
         .is_some_and(|segment| segment.ident == name)
+}
+
+fn attribute_uses_serde_helper_paths(path: &Path) -> bool {
+    path.segments.last().is_some_and(|segment| {
+        let ident = segment.ident.to_string();
+        ident == "serde" || ident.ends_with("_serde")
+    })
 }
 
 fn collect_token_path_candidates(tokens: &TokenStream, candidates: &mut Vec<Vec<String>>) {

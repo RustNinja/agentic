@@ -96,6 +96,18 @@ fn slices_fast_macro_use_fixture_and_compiles() {
     assert!(app.contains("mod dependency_barrel"));
     assert!(app.contains("BarrelRecord"));
     assert!(app.contains("BarrelMode"));
+    assert!(app.contains("pub struct LitterWireDto<T: LocalBound>"));
+    assert!(app.contains("mod serde_helpers"));
+    assert!(app.contains("pub mod wire"));
+    assert!(app.contains("with = \"crate::serde_helpers::wire\""));
+    assert!(app.contains("serialize_with = \"crate::serde_helpers::wire::serialize\""));
+    assert!(app.contains("deserialize_with = \"crate::serde_helpers::wire::deserialize\""));
+    assert!(app.contains("deserialize_with = \"serde_helpers::parse_label\""));
+    assert!(app.contains("default = \"crate::serde_helpers::empty\""));
+    assert!(app.contains("pub fn serialize"));
+    assert!(app.contains("pub fn deserialize"));
+    assert!(app.contains("pub fn parse_label"));
+    assert!(app.contains("pub fn empty"));
     assert!(!app.contains("pub struct CallbackRegistry"));
     assert!(!app.contains("pub fn open_decision_callback"));
     assert!(!app.contains("pub fn open_registry_bridge"));
@@ -107,6 +119,9 @@ fn slices_fast_macro_use_fixture_and_compiles() {
     assert!(!app.contains("unused_macro"));
     assert!(!app.contains("DEAD_GUIDE"));
     assert!(!app.contains("dead_public_api"));
+    assert!(!app.contains("dead_wire_helper"));
+    assert!(!app.contains("dead_parse_label"));
+    assert!(!app.contains("dead_empty"));
     assert_include_assets(&output, &app);
 
     let shared = read(output.join("shared/src/lib.rs"));
@@ -542,6 +557,7 @@ fn slices_fast_fixture_from_multiple_root_angles() {
             present: &[
                 "pub struct LayeredClient",
                 "fn private_seed",
+                "fixture_export(async_runtime = \"fixture\")",
                 "pub async fn compute",
                 "pub fn event",
                 "pub enum ServerEvent",
@@ -604,6 +620,18 @@ fn slices_fast_fixture_from_multiple_root_angles() {
                 "T: LocalBound + Clone",
                 "pub trait GenericApi<T: LocalBound>",
                 "impl GenericApi<GenericValue> for GenericCodec",
+                "pub struct LitterWireDto<T: LocalBound>",
+                "mod serde_helpers",
+                "pub mod wire",
+                "with = \"crate::serde_helpers::wire\"",
+                "serialize_with = \"crate::serde_helpers::wire::serialize\"",
+                "deserialize_with = \"crate::serde_helpers::wire::deserialize\"",
+                "deserialize_with = \"serde_helpers::parse_label\"",
+                "default = \"crate::serde_helpers::empty\"",
+                "pub fn serialize",
+                "pub fn deserialize",
+                "pub fn parse_label",
+                "pub fn empty",
             ],
             absent: &[
                 "pub fn open_transport_bundle",
@@ -611,6 +639,9 @@ fn slices_fast_fixture_from_multiple_root_angles() {
                 "pub struct FacadeObject",
                 "pub fn open_macro_use_entry",
                 "include_str!(\"guidelines/core.md\")",
+                "dead_wire_helper",
+                "dead_parse_label",
+                "dead_empty",
             ],
         },
         SliceAngle {
