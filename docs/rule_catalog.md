@@ -5,9 +5,10 @@ records broad Rust/Cargo combinations that the slicer must handle without
 turning every combination into a slow, hand-written integration test.
 
 `crates/opensource_core/tests/rule_catalog.rs` currently generates 1,200
-generic rule records and validates them in milliseconds. The records are not
-Litter-specific. They are composed from Rust/Cargo axes such as root kind, edge
-shape, dependency surface, validation mode, expected behavior, and failure mode.
+generic rule records and executes every row as a real generated slice. The
+records are not Litter-specific. They are composed from Rust/Cargo axes such as
+root kind, edge shape, dependency surface, validation mode, expected behavior,
+and failure mode.
 
 ## Catalog Axes
 
@@ -33,10 +34,18 @@ seed rule, and an enforcement level. The levels are:
 | `production_hazard_fixture` | A representative fixture asserts the structured warning/error that keeps production fail-closed |
 | `catalog_guard` | A policy guard covers broad combinations that should not explode into a fixture matrix, such as cfg movement and compiler-feedback convergence |
 
-This means the 1,200 records are coverage obligations. They are not counted as
-1,200 generated-workspace checks. One high-quality executable fixture can cover
-many axis combinations by family, but the docs and tests keep that distinction
-explicit.
+This means the 1,200 records are now both coverage obligations and generated
+workspace slice checks. The catalog harness batches about 50 rows per temporary
+workspace so the full catalog runs through `opensource_core::generate()` without
+paying 1,200 separate Cargo metadata passes. Each generated row has unique live
+and dead sentinels, family-specific assertions, and hazard/asset checks where
+the row calls for them.
+
+The catalog still does not run `cargo check` for all 1,200 generated rows. That
+would make the fast loop too slow. Cargo compilation remains concentrated in the
+focused `rule_database.rs`, `fast_macro_use.rs`, and real-repo probes, while the
+catalog proves that every planned row is rendered through the real slicer and is
+syntactically checked with `syn`.
 
 ## Promotion Workflow
 
@@ -51,9 +60,9 @@ When a real repo probe fails or retains too much output:
 5. Record the learning in `docs/rule_database.md`,
    `docs/slice_coverage_matrix.md`, or the relevant real-repo probe report.
 
-This keeps the fast loop aggressive: the catalog can hold thousands of planned
-combinations, while executable fixtures stay focused on behavior that actually
-protects the slicer.
+This keeps the fast loop aggressive: the catalog can hold thousands of generated
+slice combinations, while cargo-checked fixtures stay focused on behavior that
+actually protects the slicer.
 
 ## Cfg Policy
 

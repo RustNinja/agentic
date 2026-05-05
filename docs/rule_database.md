@@ -25,7 +25,7 @@ Use stable group prefixes when adding cases:
 
 Current executable seed cases live in
 `crates/opensource_core/tests/rule_database.rs`. The broader generated catalog
-of planned generic combinations lives in
+of 1,200 generic slice combinations lives in
 `crates/opensource_core/tests/rule_catalog.rs` and is documented in
 `docs/rule_catalog.md`.
 
@@ -195,10 +195,10 @@ When a real repo slice fails or retains too much code:
 5. Run `scripts/fast_rule_loop.sh`, then the broader workspace checks before
    committing.
 
-The target is hundreds of small executable rules plus thousands of generated
-catalog combinations, not a thousand hand-written one-off tests. More executable
-cases are valuable only when they introduce a distinct Rust/Cargo shape or a
-distinct failure mode.
+The target is hundreds of small cargo-checked executable rules plus thousands of
+generated catalog slice combinations, not a thousand hand-written one-off tests.
+More focused executable cases are valuable only when they introduce a distinct
+Rust/Cargo shape or a distinct failure mode.
 
 ## Source Evidence
 

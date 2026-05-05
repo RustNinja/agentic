@@ -242,11 +242,15 @@ build-script `rustc-env`/`env!` blockers, nested callback/future aliases, and
 `pub(crate)` macro helper reexports. Litter examples should be converted into
 these generic groups before any slicer behavior is changed.
 
-The generated rule catalog is the scalable backlog for that work. It validates
-1,200 generic rule records across import, macro, trait, dyn, include, build,
-UniFFI, manifest, repair, and cfg axes without naming Litter or any other real
-project. A catalog entry becomes an executable fixture only when it protects a
-distinct reducer, renderer, manifest, or production-gate behavior.
+The generated rule catalog is the scalable backlog for that work, and it now
+executes the full 1,200-row catalog as real generated slices. The harness batches
+about 50 rows per temporary workspace, runs `opensource_core::generate()` on
+each batch, and checks unique live/dead sentinels, copied/omitted assets,
+production hazard codes, and `syn` parseability of rendered Rust. It covers
+import, macro, trait, dyn, include, build, UniFFI, manifest, repair, and cfg axes
+without naming Litter or any other real project. A catalog entry still becomes a
+focused cargo-checked fixture only when it protects a distinct reducer,
+renderer, manifest, or production-gate behavior.
 
 The second rule-database pass added eight more non-cfg shapes and exposed two
 generic reducer issues. Retained `macro_rules!` bodies can call methods on
