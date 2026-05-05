@@ -127,6 +127,16 @@ file.
 | `type.map_payload_dto_surface.001` | covered | Map payload fields like `BTreeMap<String, Dto>` retain value DTOs and prune dead snapshot siblings |
 | `trait.conversion.mirror_try_from_request.001` | covered | Mirror DTO `TryFrom` conversions retain only the selected request/params/helper conversion path and prune dead mirror request families |
 | `impl.dead_inherent_method.function_root.001` | covered | Function roots keep only called inherent impl methods and private helpers while pruning unused public/private methods on the same type |
+| `type.alias_chain_surface.001` | covered | Public type aliases chained through intermediate aliases retain concrete payload items and prune dead sibling alias families |
+| `type.newtype_tuple_surface.001` | covered | Tuple newtype records retain nested tuple field surfaces while pruning dead newtype siblings |
+| `type.impl_trait_iterator_item_surface.001` | covered | `impl Iterator<Item = Dto>` return surfaces retain the item DTO and helper constructor without keeping dead iterator families |
+| `trait.conversion.question_mark_from_error.001` | covered | `?` retains the exact `From<SourceError> for TargetError` impl and prunes unrelated conversion impls for the same target error |
+| `enum.variant_constructor_function.001` | covered | Enum variant constructors used as function values in iterator adapters retain payload structs and prune dead enum families |
+| `struct.update_default_surface.001` | covered | Struct update expressions with `..Default::default()` retain the live default-derived record and prune dead default-derived siblings |
+| `call.method_reference_iterator.001` | covered | Inherent method references used as iterator adapter functions retain only the referenced associated functions and methods |
+| `dyn.boxed_future_return_alias.001` | covered | Boxed `Pin<Box<dyn Future<Output = T>>>` return aliases retain output DTOs, report hard dynamic hazards, and prune dead future aliases |
+| `const.array_surface_len.001` | covered | Const-generic array fields in public surfaces retain the live const length and prune dead const/array siblings |
+| `type.nested_result_option_alias.001` | covered | Nested `Result<Option<Payload>, Error>` aliases retain payload/error surfaces and prune dead alias payloads |
 | `dyn.boundary.direct_inputs.001` | covered | Selected `&dyn Trait` and `fn(...)` callback inputs stay as feedback-dischargeable API boundary warnings |
 | `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
 | `include.source.inline_fallback_module.001` | covered | Fallback-retained inline modules run the full syntactic hazard scan, so plain source includes are reported even when the module was retained by path mention |

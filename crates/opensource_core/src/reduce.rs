@@ -5956,8 +5956,24 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_expr_try(&mut self, expr: &'ast syn::ExprTry) {
-        for type_ref in self.expected_error_types.clone() {
-            self.add_trait_impls_for_type_named(&type_ref, "From");
+        if let Some(source_error) = self.expression_result_error_type(&expr.expr) {
+            for target_error in self.expected_error_types.clone() {
+                if source_error == target_error {
+                    continue;
+                }
+                for callable in self.resolver.resolve_conversion_impls_from_to(
+                    &source_error,
+                    &target_error,
+                    "From",
+                    "from",
+                ) {
+                    self.dependencies.callables.insert(callable);
+                }
+            }
+        } else {
+            for type_ref in self.expected_error_types.clone() {
+                self.add_trait_impls_for_type_named(&type_ref, "From");
+            }
         }
         visit::visit_expr_try(self, expr);
     }
@@ -7304,6 +7320,49 @@ impl Resolver<'_> {
                         .iter()
                         .any(|type_path| conversion_input_matches_receiver(type_path, receiver))
                     && (package == &receiver.package || package == self.package))
+                    .then(|| id.clone())
+            })
+            .collect()
+    }
+
+    fn resolve_conversion_impls_from_to(
+        &self,
+        source: &TypeRef,
+        target: &TypeRef,
+        trait_name: &str,
+        method_name: &str,
+    ) -> Vec<CallableId> {
+        let source_candidates = self.type_ref_candidates(source);
+        let target_candidates = self.type_ref_candidates(target);
+        self.project
+            .methods
+            .iter()
+            .filter_map(|(id, record)| {
+                let CallableId::Method {
+                    package,
+                    type_path,
+                    trait_path: Some(trait_path),
+                    method,
+                    ..
+                } = id
+                else {
+                    return None;
+                };
+                (method == method_name
+                    && trait_path
+                        .last()
+                        .is_some_and(|candidate| candidate == trait_name)
+                    && target_candidates.iter().any(|candidate| {
+                        package == &candidate.package && type_path == &candidate.type_path
+                    })
+                    && source_candidates.iter().any(|candidate| {
+                        record.trait_input_type_paths.iter().any(|type_path| {
+                            conversion_input_matches_receiver(type_path, candidate)
+                        })
+                    })
+                    && (package == &source.package
+                        || package == &target.package
+                        || package == self.package))
                     .then(|| id.clone())
             })
             .collect()

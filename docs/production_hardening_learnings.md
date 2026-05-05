@@ -584,6 +584,18 @@ retained child modules through `super::{...}` were pruned. Import-scope
 liveness now checks retained inline and file-backed child modules before
 dropping parent imports.
 
+The following batch raised the executable set to 102 cases. It added coverage
+for alias chains, tuple newtype surfaces, `impl Iterator<Item = Dto>` returns,
+enum variant constructors used as functions, struct update defaults, inherent
+method references in iterator adapters, boxed future return aliases, const array
+surface lengths, and nested `Result<Option<T>, E>` aliases. The failure found by
+that batch was a minimality bug in `?`: the reducer kept every
+`From<_> for TargetError` impl when a retained function returned
+`Result<_, TargetError>`. It now resolves the source error type of the tried
+expression and retains only the exact `From<SourceError> for TargetError` impl,
+falling back to broader target-error retention only when the source error type
+cannot be inferred.
+
 The fixture also now includes a private FFI barrel shaped like Litter's mobile
 client modules: one selected app-store subscription module is reexported beside
 dead reconnect/alleycat siblings. The expected behavior is strict barrel

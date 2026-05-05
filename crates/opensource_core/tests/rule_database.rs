@@ -2239,6 +2239,240 @@ fn prunes_dead_inherent_impl_methods_for_function_roots() {
 }
 
 #[test]
+fn retains_type_alias_chain_surface_dependencies() {
+    let workspace = temp_path("rule-type-alias-chain-workspace");
+    let output = temp_path("rule-type-alias-chain-output");
+    let target_dir = temp_path("rule-type-alias-chain-target");
+    write_type_alias_chain_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("type alias chain rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("type_alias_chain_rule/src/lib.rs"));
+    assert!(lib.contains("pub type PublicBatch"), "{lib}");
+    assert!(lib.contains("pub type MessageBatch"), "{lib}");
+    assert!(lib.contains("pub struct WireMessage"), "{lib}");
+    assert!(!lib.contains("DeadWireMessage"), "{lib}");
+    assert!(!lib.contains("DeadBatch"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_newtype_tuple_surface_dependencies() {
+    let workspace = temp_path("rule-newtype-tuple-surface-workspace");
+    let output = temp_path("rule-newtype-tuple-surface-output");
+    let target_dir = temp_path("rule-newtype-tuple-surface-target");
+    write_newtype_tuple_surface_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("newtype tuple surface rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("newtype_tuple_surface_rule/src/lib.rs"));
+    assert!(lib.contains("pub struct SessionId"), "{lib}");
+    assert!(lib.contains("pub struct StartResult"), "{lib}");
+    assert!(!lib.contains("DeadSessionId"), "{lib}");
+    assert!(!lib.contains("DeadStartResult"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_impl_trait_iterator_item_surface() {
+    let workspace = temp_path("rule-impl-trait-iterator-workspace");
+    let output = temp_path("rule-impl-trait-iterator-output");
+    let target_dir = temp_path("rule-impl-trait-iterator-target");
+    write_impl_trait_iterator_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("impl trait iterator rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("impl_trait_iterator_rule/src/lib.rs"));
+    assert!(lib.contains("impl Iterator<Item = EventDto>"), "{lib}");
+    assert!(lib.contains("pub struct EventDto"), "{lib}");
+    assert!(lib.contains("fn make_event"), "{lib}");
+    assert!(!lib.contains("DeadEventDto"), "{lib}");
+    assert!(!lib.contains("dead_events"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_question_mark_error_conversion_impl() {
+    let workspace = temp_path("rule-question-mark-error-workspace");
+    let output = temp_path("rule-question-mark-error-output");
+    let target_dir = temp_path("rule-question-mark-error-target");
+    write_question_mark_error_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("question mark error rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("question_mark_error_rule/src/lib.rs"));
+    assert!(lib.contains("impl From<ParseError> for AppError"), "{lib}");
+    assert!(lib.contains("fn parse_wire"), "{lib}");
+    assert!(!lib.contains("DeadError"), "{lib}");
+    assert!(!lib.contains("dead_parse_wire"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_enum_variant_constructor_used_as_function() {
+    let workspace = temp_path("rule-enum-variant-constructor-workspace");
+    let output = temp_path("rule-enum-variant-constructor-output");
+    let target_dir = temp_path("rule-enum-variant-constructor-target");
+    write_enum_variant_constructor_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("enum variant constructor rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("enum_variant_constructor_rule/src/lib.rs"));
+    assert!(lib.contains("pub enum Event"), "{lib}");
+    assert!(lib.contains("pub struct Started"), "{lib}");
+    assert!(lib.contains("map(Event::Started)"), "{lib}");
+    assert!(!lib.contains("DeadStarted"), "{lib}");
+    assert!(!lib.contains("DeadEvent"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_struct_update_default_surface() {
+    let workspace = temp_path("rule-struct-update-default-workspace");
+    let output = temp_path("rule-struct-update-default-output");
+    let target_dir = temp_path("rule-struct-update-default-target");
+    write_struct_update_default_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("struct update default rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("struct_update_default_rule/src/lib.rs"));
+    assert!(lib.contains("#[derive(Default)]"), "{lib}");
+    assert!(lib.contains("pub struct RuntimeConfig"), "{lib}");
+    assert!(lib.contains("..Default::default()"), "{lib}");
+    assert!(!lib.contains("DeadRuntimeConfig"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_method_references_used_as_iterator_functions() {
+    let workspace = temp_path("rule-method-reference-map-workspace");
+    let output = temp_path("rule-method-reference-map-output");
+    let target_dir = temp_path("rule-method-reference-map-target");
+    write_method_reference_map_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("method reference map rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("method_reference_map_rule/src/lib.rs"));
+    assert!(lib.contains("Score::from_raw"), "{lib}");
+    assert!(lib.contains("Score::value"), "{lib}");
+    assert!(lib.contains("pub fn from_raw"), "{lib}");
+    assert!(lib.contains("pub fn value"), "{lib}");
+    assert!(!lib.contains("dead_value"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn reports_boxed_future_return_alias_as_dynamic_hazard() {
+    let workspace = temp_path("rule-boxed-future-return-workspace");
+    let output = temp_path("rule-boxed-future-return-output");
+    let target_dir = temp_path("rule-boxed-future-return-target");
+    write_boxed_future_return_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("boxed future return rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "trait_object_surfaces"
+            && hazard
+                .details
+                .iter()
+                .any(|detail| detail.subject.contains("dyn Future"))
+    }));
+    let lib = read(output.join("boxed_future_return_rule/src/lib.rs"));
+    assert!(lib.contains("type ResponseFuture"), "{lib}");
+    assert!(lib.contains("dyn Future<Output = Response>"), "{lib}");
+    assert!(lib.contains("pub struct Response"), "{lib}");
+    assert!(!lib.contains("DeadResponse"), "{lib}");
+    assert!(!lib.contains("dead_selected"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_const_generic_array_surface_dependency() {
+    let workspace = temp_path("rule-const-generic-array-workspace");
+    let output = temp_path("rule-const-generic-array-output");
+    let target_dir = temp_path("rule-const-generic-array-target");
+    write_const_generic_array_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("const generic array rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("const_generic_array_rule/src/lib.rs"));
+    assert!(lib.contains("pub const LIVE_FRAME_LEN"), "{lib}");
+    assert!(lib.contains("[u8; LIVE_FRAME_LEN]"), "{lib}");
+    assert!(lib.contains("pub struct FrameBytes"), "{lib}");
+    assert!(!lib.contains("DEAD_FRAME_LEN"), "{lib}");
+    assert!(!lib.contains("DeadFrameBytes"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_nested_result_option_alias_surface() {
+    let workspace = temp_path("rule-nested-result-option-alias-workspace");
+    let output = temp_path("rule-nested-result-option-alias-output");
+    let target_dir = temp_path("rule-nested-result-option-alias-target");
+    write_nested_result_option_alias_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("nested result option alias rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("nested_result_option_alias_rule/src/lib.rs"));
+    assert!(lib.contains("pub type MaybePayload"), "{lib}");
+    assert!(lib.contains("pub type ApiResult"), "{lib}");
+    assert!(lib.contains("pub struct Payload"), "{lib}");
+    assert!(!lib.contains("DeadPayload"), "{lib}");
+    assert!(!lib.contains("DeadResult"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn flags_retained_source_include_macros_as_production_blockers() {
     let workspace = temp_path("rule-source-include-workspace");
     let output = temp_path("rule-source-include-output");
@@ -4506,6 +4740,321 @@ impl Store {
 #[opensourced]
 pub fn selected(value: u32) -> u32 {
     Store::new(value).live_score()
+}
+"#,
+    );
+}
+
+fn write_type_alias_chain_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "type_alias_chain_rule",
+        r#"use opensourced::opensourced;
+
+pub struct WireMessage {
+    pub text: String,
+}
+
+pub type MessageBatch = Vec<WireMessage>;
+
+pub type PublicBatch = MessageBatch;
+
+pub struct DeadWireMessage {
+    pub text: String,
+}
+
+pub type DeadBatch = Vec<DeadWireMessage>;
+
+#[opensourced]
+pub fn selected(text: String) -> PublicBatch {
+    vec![WireMessage { text }]
+}
+"#,
+    );
+}
+
+fn write_newtype_tuple_surface_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "newtype_tuple_surface_rule",
+        r#"use opensourced::opensourced;
+
+pub struct SessionId(pub String);
+
+pub struct StartResult(pub SessionId);
+
+pub struct DeadSessionId(pub String);
+
+pub struct DeadStartResult(pub DeadSessionId);
+
+#[opensourced]
+pub fn selected(id: String) -> StartResult {
+    StartResult(SessionId(id))
+}
+"#,
+    );
+}
+
+fn write_impl_trait_iterator_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "impl_trait_iterator_rule",
+        r#"use opensourced::opensourced;
+
+pub struct EventDto {
+    pub id: String,
+}
+
+pub struct DeadEventDto {
+    pub id: String,
+}
+
+fn make_event(id: String) -> EventDto {
+    EventDto { id }
+}
+
+pub fn dead_events(id: String) -> impl Iterator<Item = DeadEventDto> {
+    vec![DeadEventDto { id }].into_iter()
+}
+
+#[opensourced]
+pub fn selected(id: String) -> impl Iterator<Item = EventDto> {
+    vec![make_event(id)].into_iter()
+}
+"#,
+    );
+}
+
+fn write_question_mark_error_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "question_mark_error_rule",
+        r#"use opensourced::opensourced;
+
+pub enum ParseError {
+    Bad,
+}
+
+pub enum AppError {
+    Parse(ParseError),
+}
+
+impl From<ParseError> for AppError {
+    fn from(value: ParseError) -> Self {
+        Self::Parse(value)
+    }
+}
+
+pub enum DeadError {
+    Dead,
+}
+
+impl From<DeadError> for AppError {
+    fn from(_value: DeadError) -> Self {
+        Self::Parse(ParseError::Bad)
+    }
+}
+
+fn parse_wire(value: String) -> Result<u32, ParseError> {
+    value.parse::<u32>().map_err(|_error| ParseError::Bad)
+}
+
+fn dead_parse_wire() -> Result<u32, DeadError> {
+    Err(DeadError::Dead)
+}
+
+#[opensourced]
+pub fn selected(value: String) -> Result<u32, AppError> {
+    let parsed = parse_wire(value)?;
+    Ok(parsed + 1)
+}
+"#,
+    );
+}
+
+fn write_enum_variant_constructor_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "enum_variant_constructor_rule",
+        r#"use opensourced::opensourced;
+
+pub struct Started {
+    pub id: String,
+}
+
+pub enum Event {
+    Started(Started),
+    Stopped,
+}
+
+pub struct DeadStarted {
+    pub id: String,
+}
+
+pub enum DeadEvent {
+    DeadStarted(DeadStarted),
+}
+
+#[opensourced]
+pub fn selected(ids: Vec<String>) -> Vec<Event> {
+    ids.into_iter()
+        .map(|id| Started { id })
+        .map(Event::Started)
+        .collect()
+}
+"#,
+    );
+}
+
+fn write_struct_update_default_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "struct_update_default_rule",
+        r#"use opensourced::opensourced;
+
+#[derive(Default)]
+pub struct RuntimeConfig {
+    pub enabled: bool,
+    pub label: String,
+}
+
+#[derive(Default)]
+pub struct DeadRuntimeConfig {
+    pub enabled: bool,
+}
+
+#[opensourced]
+pub fn selected(label: String) -> RuntimeConfig {
+    RuntimeConfig {
+        enabled: true,
+        label,
+        ..Default::default()
+    }
+}
+"#,
+    );
+}
+
+fn write_method_reference_map_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "method_reference_map_rule",
+        r#"use opensourced::opensourced;
+
+pub struct Score {
+    value: u32,
+}
+
+impl Score {
+    pub fn from_raw(value: u32) -> Self {
+        Self { value }
+    }
+
+    pub fn value(self) -> u32 {
+        self.value
+    }
+
+    pub fn dead_value(&self) -> u32 {
+        99
+    }
+}
+
+#[opensourced]
+pub fn selected(values: Vec<u32>) -> Vec<u32> {
+    values
+        .into_iter()
+        .map(Score::from_raw)
+        .map(Score::value)
+        .collect()
+}
+"#,
+    );
+}
+
+fn write_boxed_future_return_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "boxed_future_return_rule",
+        r#"use opensourced::opensourced;
+use std::{future::Future, pin::Pin};
+
+pub struct Response {
+    pub ok: bool,
+}
+
+pub struct DeadResponse {
+    pub ok: bool,
+}
+
+pub type ResponseFuture = Pin<Box<dyn Future<Output = Response> + Send>>;
+
+pub type DeadFuture = Pin<Box<dyn Future<Output = DeadResponse> + Send>>;
+
+#[opensourced]
+pub fn selected() -> ResponseFuture {
+    Box::pin(async { Response { ok: true } })
+}
+
+pub fn dead_selected() -> DeadFuture {
+    Box::pin(async { DeadResponse { ok: false } })
+}
+"#,
+    );
+}
+
+fn write_const_generic_array_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "const_generic_array_rule",
+        r#"use opensourced::opensourced;
+
+pub const LIVE_FRAME_LEN: usize = 4;
+
+pub const DEAD_FRAME_LEN: usize = 8;
+
+pub struct FrameBytes {
+    pub bytes: [u8; LIVE_FRAME_LEN],
+}
+
+pub struct DeadFrameBytes {
+    pub bytes: [u8; DEAD_FRAME_LEN],
+}
+
+#[opensourced]
+pub fn selected(bytes: [u8; LIVE_FRAME_LEN]) -> FrameBytes {
+    FrameBytes { bytes }
+}
+"#,
+    );
+}
+
+fn write_nested_result_option_alias_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "nested_result_option_alias_rule",
+        r#"use opensourced::opensourced;
+
+pub struct Payload {
+    pub id: String,
+}
+
+pub struct DeadPayload {
+    pub id: String,
+}
+
+pub enum ApiError {
+    Missing,
+}
+
+pub type MaybePayload = Option<Payload>;
+
+pub type ApiResult = Result<MaybePayload, ApiError>;
+
+pub type DeadResult = Result<Option<DeadPayload>, ApiError>;
+
+#[opensourced]
+pub fn selected(id: Option<String>) -> ApiResult {
+    Ok(id.map(|id| Payload { id }))
 }
 "#,
     );
