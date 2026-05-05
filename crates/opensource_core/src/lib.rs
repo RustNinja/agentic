@@ -278,7 +278,7 @@ impl UsageDecisionIndex {
         self.blocked_by_unknown_callables.iter().cloned().collect()
     }
 
-    fn blocked_by_unknown_items(&self) -> Vec<ItemId> {
+    pub fn blocked_by_unknown_items(&self) -> Vec<ItemId> {
         self.blocked_by_unknown_items.iter().cloned().collect()
     }
 
@@ -5173,14 +5173,15 @@ mod tests {
 
     #[cfg(feature = "ra-hir")]
     use super::generate_with_analyzer;
+    use super::model::ItemKind;
     use super::{
         add_semantic_inventory_hazard, default_feature_closure, generate,
         generate_with_analyzer_feedback, production_hazard_with_details,
         production_readiness_status, semantic_hazard_metrics, usage_classification_report,
         usage_evidence_reason, usage_guarded_render_reduction, write_generate_report, AnalyzerMode,
-        AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions, ProductionHazardDetail,
-        SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
-        SemanticReport, SemanticUsageReport, UsageDecision,
+        AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions, ItemId,
+        ProductionHazardDetail, SemanticFileReport, SemanticHazardScope, SemanticOwnerId,
+        SemanticReductionHints, SemanticReport, SemanticUsageReport, UsageDecision,
     };
     use super::{manifest, parse, reduce, render};
 
@@ -5867,6 +5868,115 @@ pub fn clean_dead_code() -> i32 {
     }
 
     #[test]
+    fn blocked_unknown_items_keep_their_import_mentions() {
+        let root = temp_output("semantic-usage-blocked-item-import-source");
+        let output = temp_output("semantic-usage-blocked-item-import-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub mod dep;
+pub mod surface;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+"#,
+        );
+        write(
+            root.join("app/src/dep.rs"),
+            r#"pub struct BlockedType {
+    pub value: i32,
+}
+
+pub struct CleanType {
+    pub value: i32,
+}
+"#,
+        );
+        write(
+            root.join("app/src/surface.rs"),
+            r#"use crate::dep::{BlockedType, CleanType};
+
+pub struct UnknownSurface {
+    pub field: BlockedType,
+}
+
+pub struct CleanSurface {
+    pub field: CleanType,
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let blocked_type = project_item_named(&project, "BlockedType", ItemKind::Struct);
+        let clean_type = project_item_named(&project, "CleanType", ItemKind::Struct);
+        let clean_surface = project_item_named(&project, "CleanSurface", ItemKind::Struct);
+        let mapped_item_ids = BTreeSet::from([
+            blocked_type.clone(),
+            clean_type.clone(),
+            clean_surface.clone(),
+        ]);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: 1,
+            mapped_items: mapped_item_ids.len(),
+            unmapped_items: project.items.len().saturating_sub(mapped_item_ids.len()),
+            mapped_callable_ids: BTreeSet::from([entry]),
+            mapped_item_ids,
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerHir,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
+            .expect("render should succeed");
+        let generated = fs::read_to_string(output.join("app/src/surface.rs")).unwrap();
+
+        assert!(
+            generated.contains("BlockedType"),
+            "blocked unknown item field type and import should remain:\n{generated}",
+        );
+        assert!(
+            !generated.contains("CleanType"),
+            "proven-unused sibling import should be pruned:\n{generated}",
+        );
+        assert!(
+            !generated.contains("CleanSurface"),
+            "proven-unused sibling item should be pruned:\n{generated}",
+        );
+    }
+
+    #[test]
     fn semantic_usage_references_from_retained_code_block_pruning() {
         let root = temp_output("semantic-usage-reference-source");
         let output = temp_output("semantic-usage-reference-output");
@@ -6539,6 +6649,78 @@ pub fn entry(service: Service) -> u32 {
 
     #[test]
     #[cfg(feature = "ra-hir")]
+    fn ra_usage_reference_search_recovers_from_attribute_name_collisions() {
+        let root = temp_output("ra-reference-focus-source");
+        let output = temp_output("ra-reference-focus-reduction");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"
+use opensourced::opensourced;
+
+#[doc = "Widget appears before the struct declaration name"]
+pub struct Widget {
+    value: u32,
+}
+
+#[doc = "helper appears before the function declaration name"]
+pub fn helper(widget: Widget) -> u32 {
+    widget.value
+}
+
+#[doc = "unused_fn appears before the function declaration name"]
+pub fn unused_fn() -> u32 {
+    7
+}
+
+#[doc = "entry appears before the function declaration name"]
+#[opensourced]
+pub fn entry(widget: Widget) -> u32 {
+    helper(widget)
+}
+"#,
+        );
+
+        let report = generate_with_analyzer(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output,
+            },
+            AnalyzerMode::RustAnalyzerHir,
+        )
+        .expect("RA-backed generation should succeed");
+        let semantic_usage = report
+            .analyzer
+            .semantic_usage
+            .as_ref()
+            .expect("RA-backed generation should report semantic usage mapping");
+
+        assert!(
+            semantic_usage.failed_callable_reference_ids.is_empty(),
+            "reference search should retry past doc/attribute name collisions for callables: {:?}",
+            semantic_usage.failed_callable_reference_ids,
+        );
+        assert!(
+            semantic_usage.failed_item_reference_ids.is_empty(),
+            "reference search should retry past doc/attribute name collisions for items: {:?}",
+            semantic_usage.failed_item_reference_ids,
+        );
+        assert_eq!(semantic_usage.reference_query_failures, 0);
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
     fn ra_feedback_records_outgoing_call_closure_edges() {
         let root = temp_output("ra-feedback-source");
         let output = temp_output("ra-feedback-reduction");
@@ -6559,10 +6741,12 @@ pub fn entry(service: Service) -> u32 {
             r#"
 use opensourced::opensourced;
 
+#[doc = "helper appears before the function declaration name"]
 pub fn helper() -> u32 {
     1
 }
 
+#[doc = "entry appears before the function declaration name"]
 #[opensourced]
 pub fn entry() -> u32 {
     helper()
@@ -6612,10 +6796,12 @@ pub fn entry() -> u32 {
             r#"
 use opensourced::opensourced;
 
+#[doc = "helper appears before the function declaration name"]
 pub fn helper() -> u32 {
     1
 }
 
+#[doc = "entry appears before the function declaration name"]
 #[opensourced]
 pub fn entry() -> u32 {
     helper()
@@ -8506,6 +8692,19 @@ pub fn entry() -> usize {
             })
             .cloned()
             .unwrap_or_else(|| panic!("callable {expected} should exist"))
+    }
+
+    fn project_item_named(
+        project: &super::model::Project,
+        expected: &str,
+        kind: ItemKind,
+    ) -> ItemId {
+        project
+            .items
+            .keys()
+            .find(|item| item.name == expected && item.kind == kind)
+            .cloned()
+            .unwrap_or_else(|| panic!("item {expected}({kind:?}) should exist"))
     }
 
     #[cfg(feature = "ra-hir")]

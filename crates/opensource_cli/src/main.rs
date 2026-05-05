@@ -1819,6 +1819,7 @@ fn run_feedback_repair_loop(
         if !preflight.success {
             return Err("repair produced a structurally invalid generated workspace".into());
         }
+        refresh_generated_lockfile_for_locked_validation(options, validation)?;
     }
 
     if !validation

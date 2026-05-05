@@ -68,9 +68,15 @@ records whether syn-indexed callables/items mapped back to RA definitions and
 runs RA reference search for mapped source symbols. The generation report now
 serializes the `analyzer.semantic_usage` proof surface: mapping counts, failed
 reference-query ids, referenced ids, reference owners, and unowned reference
-files. RA reference owners are promoted into the same `SemanticReductionHints`
-graph as method/path/call hierarchy edges, so retained owners pull referenced
-callables/items into the positive `used` closure before rendering. Unknown
+files. Reference search uses multiple focus candidates per symbol, preferring
+declaration-name offsets over earlier doc/attribute mentions before falling
+back to other identifier-boundary matches, so `semantic_usage_reference_incomplete`
+is reserved for symbols RA still cannot answer after retrying plausible source
+positions. RA outgoing-call feedback uses the same focus-candidate retry before
+adding call-hierarchy edges. RA reference owners are promoted into the same
+`SemanticReductionHints` graph as method/path/call hierarchy edges, so retained
+owners pull referenced callables/items into the positive `used` closure before
+rendering. Unknown
 retention remains a fixed-point pass over the current retained slice:
 graph-unreachable candidates are promoted into `blocked_by_unknown` when they
 cannot be mapped, when reference search fails, or when a retained RA reference

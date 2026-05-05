@@ -699,3 +699,33 @@ a target that syn failed to connect. Unowned file-level references are
 intentionally diagnostic-only for retention: RA reports dead impl headers such
 as `impl DeadType` as references with no callable/item owner, and treating those
 as retained-file references kept unrelated same-file siblings.
+Renderer import pruning now uses that same fail-closed retained set. Items kept
+only because they are `blocked_by_unknown` are included in the rendered mention
+index, so imports required by their public fields/surfaces are preserved while
+proven-prunable sibling imports are still removed. This closes the case where a
+retained unknown struct field referenced `IpcConnection` but the local `use`
+was stripped because the item was not in the positive used graph.
+The reference-search focus is now resilient to doc/attribute collisions. Rather
+than querying only the first textual occurrence of a symbol inside its full syn
+span, the analyzer builds candidate offsets from identifier-boundary matches,
+tries declaration-name matches first (`fn`, `struct`, `enum`, `trait`, etc.),
+and only records `semantic_usage_reference_incomplete` after every candidate
+fails. The RA fixture covers callables and items whose names appear in `#[doc =
+"..."]` before the actual declaration, and asserts zero failed reference
+queries.
+RA outgoing-call feedback now uses the same candidate-offset strategy. That
+keeps the default production analyzer path from losing call-hierarchy edges when
+a retained function's span mentions its name in an attribute before the real
+`fn` declaration.
+Locked production feedback also reconciles the generated `Cargo.lock` after a
+repair changes files, because conservative warning repairs can let Cargo advance
+far enough on the next attempt to notice a stale lockfile.
+The Litter `codex-ipc-public-mixed-surfaces` random5 corpus slice now exercises
+this path end to end: RA mapped 1712/1751 callables and 838/885 items, ran 2421
+reference queries with zero failures, pruned 1747 callables and 840 items as
+proven removable, retained 3 callables and 21 items as `blocked_by_unknown`, and
+passed production feedback with zero compiler errors or warnings after one
+unused-import repair. The remaining gate was `review_required` because retained
+macro, trait-object, syntactic fallback, and bounded semantic-budget hazards are
+still warning-level semantic review items, not because pruning produced a broken
+slice.

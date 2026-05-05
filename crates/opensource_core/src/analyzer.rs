@@ -932,22 +932,16 @@ mod rust_analyzer {
                 continue;
             }
             report.reference_queries += 1;
-            let Some((path, offset)) = index.callable_focus_offset(callable) else {
-                record_callable_reference_query_failure(report, callable);
-                continue;
-            };
-            let Some(file_id) = file_ids.get(&path).copied() else {
-                record_callable_reference_query_failure(report, callable);
-                continue;
-            };
-            let position = ra_ap_ide::FilePosition { file_id, offset };
-            match analysis.find_all_refs(position, &config) {
-                Ok(Some(results)) => {
-                    collect_callable_reference_results(
-                        vfs, index, callable, results, report, hints,
-                    );
+            match find_all_refs_from_candidates(
+                &analysis,
+                &file_ids,
+                index.callable_focus_offsets(callable),
+                &config,
+            ) {
+                Some(results) => {
+                    collect_callable_reference_results(vfs, index, callable, results, report, hints)
                 }
-                Ok(None) | Err(_) => record_callable_reference_query_failure(report, callable),
+                None => record_callable_reference_query_failure(report, callable),
             }
         }
 
@@ -958,20 +952,16 @@ mod rust_analyzer {
                 continue;
             }
             report.reference_queries += 1;
-            let Some((path, offset)) = index.item_focus_offset(item) else {
-                record_item_reference_query_failure(report, item);
-                continue;
-            };
-            let Some(file_id) = file_ids.get(&path).copied() else {
-                record_item_reference_query_failure(report, item);
-                continue;
-            };
-            let position = ra_ap_ide::FilePosition { file_id, offset };
-            match analysis.find_all_refs(position, &config) {
-                Ok(Some(results)) => {
-                    collect_item_reference_results(vfs, index, item, results, report, hints);
+            match find_all_refs_from_candidates(
+                &analysis,
+                &file_ids,
+                index.item_focus_offsets(item),
+                &config,
+            ) {
+                Some(results) => {
+                    collect_item_reference_results(vfs, index, item, results, report, hints)
                 }
-                Ok(None) | Err(_) => record_item_reference_query_failure(report, item),
+                None => record_item_reference_query_failure(report, item),
             }
         }
 
@@ -989,6 +979,24 @@ mod rust_analyzer {
             .sum();
         report.referenced_callables = report.referenced_callable_ids.len();
         report.referenced_items = report.referenced_item_ids.len();
+    }
+
+    fn find_all_refs_from_candidates(
+        analysis: &ra_ap_ide::Analysis,
+        file_ids: &HashMap<PathBuf, ra_ap_ide::FileId>,
+        candidates: Vec<(PathBuf, TextSize)>,
+        config: &ra_ap_ide::FindAllRefsConfig,
+    ) -> Option<Vec<ra_ap_ide::ReferenceSearchResult>> {
+        for (path, offset) in candidates {
+            let Some(file_id) = file_ids.get(&path).copied() else {
+                continue;
+            };
+            let position = ra_ap_ide::FilePosition { file_id, offset };
+            if let Ok(Some(results)) = analysis.find_all_refs(position, config) {
+                return Some(results);
+            }
+        }
+        None
     }
 
     fn collect_callable_reference_results(
@@ -1193,18 +1201,18 @@ mod rust_analyzer {
         callables.sort();
 
         for callable in callables {
-            let Some((path, offset)) = index.callable_focus_offset(callable) else {
-                continue;
-            };
-            if !index.is_feedback_owner_path(&path) {
+            let candidates = index
+                .callable_focus_offsets(callable)
+                .into_iter()
+                .filter(|(path, _)| index.is_feedback_owner_path(path))
+                .collect::<Vec<_>>();
+            if candidates.is_empty() {
                 continue;
             }
-            let Some(file_id) = file_ids.get(&path).copied() else {
-                continue;
-            };
             report.queried_callables += 1;
-            let position = ra_ap_ide::FilePosition { file_id, offset };
-            let Ok(Some(outgoing)) = analysis.outgoing_calls(&config, position) else {
+            let Some(outgoing) =
+                outgoing_calls_from_candidates(&analysis, &file_ids, candidates, &config)
+            else {
                 continue;
             };
             for call in outgoing {
@@ -1233,6 +1241,24 @@ mod rust_analyzer {
         }
 
         report
+    }
+
+    fn outgoing_calls_from_candidates(
+        analysis: &ra_ap_ide::Analysis,
+        file_ids: &HashMap<PathBuf, ra_ap_ide::FileId>,
+        candidates: Vec<(PathBuf, TextSize)>,
+        config: &ra_ap_ide::CallHierarchyConfig<'_>,
+    ) -> Option<Vec<ra_ap_ide::CallItem>> {
+        for (path, offset) in candidates {
+            let Some(file_id) = file_ids.get(&path).copied() else {
+                continue;
+            };
+            let position = ra_ap_ide::FilePosition { file_id, offset };
+            if let Ok(Some(outgoing)) = analysis.outgoing_calls(config, position) {
+                return Some(outgoing);
+            }
+        }
+        None
     }
 
     fn vfs_file_ids(vfs: &ra_ap_vfs::Vfs) -> HashMap<PathBuf, ra_ap_ide::FileId> {
@@ -1648,7 +1674,7 @@ mod rust_analyzer {
                 .map(|item| item.id.clone())
         }
 
-        fn callable_focus_offset(&self, callable: &CallableId) -> Option<(PathBuf, TextSize)> {
+        fn callable_focus_offsets(&self, callable: &CallableId) -> Vec<(PathBuf, TextSize)> {
             let name = callable_name(callable);
             for (path, file) in &self.files {
                 let Some(indexed) = file
@@ -1661,16 +1687,12 @@ mod rust_analyzer {
                 let start = file.byte_offset(indexed.span.start_line, indexed.span.start_column);
                 let end = file.byte_offset(indexed.span.end_line, indexed.span.end_column);
                 let range = file.text.get(start..end).unwrap_or_default();
-                let offset = range
-                    .find(name)
-                    .map(|relative| start + relative)
-                    .unwrap_or(start);
-                return Some((path.clone(), TextSize::new(offset as u32)));
+                return focus_offsets_for_name(path, start, range, name, &["fn"]);
             }
-            None
+            Vec::new()
         }
 
-        fn item_focus_offset(&self, item: &ItemId) -> Option<(PathBuf, TextSize)> {
+        fn item_focus_offsets(&self, item: &ItemId) -> Vec<(PathBuf, TextSize)> {
             let name = &item.name;
             for (path, file) in &self.files {
                 let Some(indexed) = file.items.iter().find(|indexed| indexed.id == *item) else {
@@ -1679,13 +1701,15 @@ mod rust_analyzer {
                 let start = file.byte_offset(indexed.span.start_line, indexed.span.start_column);
                 let end = file.byte_offset(indexed.span.end_line, indexed.span.end_column);
                 let range = file.text.get(start..end).unwrap_or_default();
-                let offset = range
-                    .find(name)
-                    .map(|relative| start + relative)
-                    .unwrap_or(start);
-                return Some((path.clone(), TextSize::new(offset as u32)));
+                return focus_offsets_for_name(
+                    path,
+                    start,
+                    range,
+                    name,
+                    item_declaration_keywords(item.kind),
+                );
             }
-            None
+            Vec::new()
         }
 
         fn indexed_file(&self, vfs_path: &ra_ap_vfs::VfsPath) -> Option<&IndexedSourceFile> {
@@ -1787,6 +1811,101 @@ mod rust_analyzer {
             } else {
                 self.text.len()
             }
+        }
+    }
+
+    fn focus_offsets_for_name(
+        path: &Path,
+        start: usize,
+        range: &str,
+        name: &str,
+        declaration_keywords: &[&str],
+    ) -> Vec<(PathBuf, TextSize)> {
+        let mut declaration_offsets = Vec::new();
+        let mut fallback_offsets = Vec::new();
+        for relative in identifier_occurrences(range, name) {
+            let offset = TextSize::new((start + relative) as u32);
+            if is_declaration_name_occurrence(range, relative, declaration_keywords) {
+                declaration_offsets.push(offset);
+            } else {
+                fallback_offsets.push(offset);
+            }
+        }
+        declaration_offsets.extend(fallback_offsets);
+        declaration_offsets.dedup();
+        if declaration_offsets.is_empty() {
+            declaration_offsets.push(TextSize::new(start as u32));
+        }
+        declaration_offsets
+            .into_iter()
+            .map(|offset| (path.to_path_buf(), offset))
+            .collect()
+    }
+
+    fn identifier_occurrences(haystack: &str, needle: &str) -> Vec<usize> {
+        if needle.is_empty() {
+            return Vec::new();
+        }
+        let mut occurrences = Vec::new();
+        let mut cursor = 0;
+        while let Some(relative) = haystack[cursor..].find(needle) {
+            let start = cursor + relative;
+            let end = start + needle.len();
+            if is_identifier_boundary(haystack, start, end) {
+                occurrences.push(start);
+            }
+            cursor = end;
+        }
+        occurrences
+    }
+
+    fn is_identifier_boundary(text: &str, start: usize, end: usize) -> bool {
+        !previous_char(text, start).is_some_and(is_rust_ident_continue)
+            && !next_char(text, end).is_some_and(is_rust_ident_continue)
+    }
+
+    fn previous_char(text: &str, offset: usize) -> Option<char> {
+        text.get(..offset)?.chars().next_back()
+    }
+
+    fn next_char(text: &str, offset: usize) -> Option<char> {
+        text.get(offset..)?.chars().next()
+    }
+
+    fn is_rust_ident_continue(ch: char) -> bool {
+        ch == '_' || ch.is_ascii_alphanumeric()
+    }
+
+    fn is_declaration_name_occurrence(
+        range: &str,
+        relative: usize,
+        declaration_keywords: &[&str],
+    ) -> bool {
+        previous_word(range, relative).is_some_and(|word| declaration_keywords.contains(&word))
+    }
+
+    fn previous_word(text: &str, offset: usize) -> Option<&str> {
+        let prefix = text.get(..offset)?.trim_end();
+        let end = prefix.len();
+        let start = prefix
+            .char_indices()
+            .rev()
+            .find_map(|(index, ch)| (!is_rust_ident_continue(ch)).then_some(index + ch.len_utf8()))
+            .unwrap_or(0);
+        (start < end).then(|| &prefix[start..end])
+    }
+
+    fn item_declaration_keywords(kind: ItemKind) -> &'static [&'static str] {
+        match kind {
+            ItemKind::Struct => &["struct"],
+            ItemKind::Enum => &["enum"],
+            ItemKind::Union => &["union"],
+            ItemKind::Type => &["type"],
+            ItemKind::Trait => &["trait"],
+            ItemKind::Mod => &["mod"],
+            ItemKind::Const => &["const"],
+            ItemKind::Static => &["static"],
+            ItemKind::Macro => &[],
         }
     }
 

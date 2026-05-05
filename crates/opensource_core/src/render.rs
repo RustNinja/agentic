@@ -72,6 +72,15 @@ impl RenderPlan {
                 item,
             );
         }
+        for item in usage.blocked_by_unknown_items() {
+            insert_render_plan_item(
+                project,
+                reduced,
+                &mut reachable_items,
+                &mut rendered_item_idents,
+                &item,
+            );
+        }
 
         loop {
             let mut added = false;
