@@ -1,6 +1,6 @@
 # Production Readiness Plan
 
-Last updated: 2026-05-04
+Last updated: 2026-05-06
 
 See also `docs/production_hardening_learnings.md` for the durable lessons from
 the Litter, RTK, RA feedback, compiler-repair, manifest, and proc-macro
@@ -24,7 +24,7 @@ assets, output safety, or product diagnostics by itself.
 
 ## Current Branch Status
 
-`codex/production-hardening` is currently a semantic-assisted CLI with a `syn`
+`main` is currently a semantic-assisted CLI with a `syn`
 base reducer and rustc feedback/repair as the production gate. The default
 `opensource_cli` feature set enables `ra-hir`, and the CLI defaults to
 `--analyzer ra-hir`; users can still pass `--analyzer syn` or build with
@@ -40,9 +40,10 @@ outgoing call hierarchy closure without requesting proc-macro/build-script
 discovery. Both paths record project-local call hierarchy edges into the same
 additive reduction hint map, then let the existing `syn` renderer prune items
 outside the retained set.
-Generation reports now expose an explicit usage classification backed by a
-first-class `UsageDecisionIndex`: `usage.used`, `usage.unused_candidate`,
-`usage.blocked_by_unknown`, `usage.prunable`, and `usage.unknown`. `used` means
+Generation reports now expose an explicit usage classification produced through
+a first-class `SlicePlan` and rendered through the same `UsageDecisionIndex`:
+`usage.used`, `usage.unused_candidate`, `usage.blocked_by_unknown`,
+`usage.prunable`, and `usage.unknown`. `used` means
 reachable from selected roots through the current syntactic and semantic edge
 map; `unused_candidate` means indexed but unreachable from selected roots;
 `blocked_by_unknown` means an unreachable item or callable was retained because
@@ -53,15 +54,18 @@ classification as a complete proof. `usage.unused` remains a compatibility
 alias for `usage.unused_candidate`.
 `usage.evidence` records one explanation per indexed callable/item, including
 whether it was a selected root, whether it was reachable, and whether semantic
-or syntactic fallback evidence participated in the retained graph. The renderer
-receives the same usage decision index used by the report, so source deletion is
-guarded by the classification instead of recomputing ad hoc liveness. Unknown
-semantic availability warnings are reported as unknowns but no longer globally
-block every unrelated unused item. Scoped macro/include/dyn/callback hazards
-promote only explicitly mentioned symbols into a pre-render retained closure.
-The production invariant is fail-closed: remove only prunable source, and
-keep/report anything blocked by unknown until compiler feedback or deeper
-semantics discharges it.
+or syntactic fallback evidence participated in the retained graph. `SlicePlan`
+centralizes the final render reduction and the exact usage decisions, so source
+deletion and reporting consume one shared decision object instead of recomputing
+liveness independently. Unknown semantic availability warnings are reported as
+unknowns but no longer globally block every unrelated unused item. Scoped
+macro/include/dyn/callback hazards promote only explicitly mentioned symbols
+into a pre-render retained closure. In rust-analyzer modes, the analyzer also
+records whether syn-indexed callables/items mapped back to RA definitions;
+graph-unreachable candidates that cannot be mapped are retained as
+`blocked_by_unknown` rather than pruned. The production invariant is
+fail-closed: remove only prunable source, and keep/report anything blocked by
+unknown until compiler feedback or deeper semantics discharges it.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that
@@ -72,7 +76,10 @@ toolchain does not provide a proc-macro server, the analyzer reports that
 expansion is not active and continues with bounded HIR. Both rust-analyzer paths
 map exact project-local method/path resolutions into generic `CallableId` /
 `ItemId` reduction hints and apply those hints as additive retained-graph
-edges. Files containing selected `#[opensourced]` roots are analyzed first so
+edges. RA definition-mapping coverage is reported separately from reachability
+so missing semantic coverage becomes an explicit unknown-retention signal
+instead of silently becoming deletion permission. Files containing selected
+`#[opensourced]` roots are analyzed first so
 bounded semantic budgets prioritize the active slice. The analyzer now records
 per-file semantic inventory; after reduction, production readiness scopes
 semantic failure/budget/unresolved warnings to retained slice files when those

@@ -1,6 +1,9 @@
-use std::path::{Path, PathBuf};
+use std::{
+    collections::BTreeSet,
+    path::{Path, PathBuf},
+};
 
-use crate::model::{Project, SemanticReductionHints};
+use crate::model::{CallableId, ItemId, Project, SemanticReductionHints};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AnalyzerMode {
@@ -78,6 +81,7 @@ pub struct AnalyzerReport {
     pub notes: Vec<String>,
     pub semantic: Option<SemanticReport>,
     pub semantic_hints: SemanticReductionHints,
+    pub semantic_usage: Option<SemanticUsageReport>,
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -141,6 +145,32 @@ pub struct SemanticFileReport {
     pub unqueried_paths: usize,
 }
 
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct SemanticUsageReport {
+    pub indexed_callables: usize,
+    pub indexed_items: usize,
+    pub mapped_callables: usize,
+    pub mapped_items: usize,
+    pub unmapped_callables: usize,
+    pub unmapped_items: usize,
+    pub mapped_callable_ids: BTreeSet<CallableId>,
+    pub mapped_item_ids: BTreeSet<ItemId>,
+}
+
+impl SemanticUsageReport {
+    pub fn is_callable_mapped(&self, callable: &CallableId) -> bool {
+        self.mapped_callable_ids.contains(callable)
+    }
+
+    pub fn is_item_mapped(&self, item: &ItemId) -> bool {
+        self.mapped_item_ids.contains(item)
+    }
+
+    pub fn unmapped_total(&self) -> usize {
+        self.unmapped_callables + self.unmapped_items
+    }
+}
+
 impl AnalyzerReport {
     fn syn() -> Self {
         Self {
@@ -150,6 +180,7 @@ impl AnalyzerReport {
             notes: vec!["using syntactic resolver".to_string()],
             semantic: None,
             semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: None,
         }
     }
 }
@@ -255,6 +286,7 @@ mod rust_analyzer {
 
     use super::{
         AnalyzerMode, AnalyzerReport, SemanticFileReport, SemanticProvider, SemanticReport,
+        SemanticUsageReport,
     };
 
     const DEFAULT_SEMANTIC_FILE_BUDGET: usize = 48;
@@ -473,6 +505,16 @@ mod rust_analyzer {
                 semantic.hints.unqueried_queries,
                 semantic.hints.unmapped_targets
             ));
+            if let Some(usage) = &semantic.usage {
+                notes.push(format!(
+                    "HIR usage mapping: {}/{} callable(s) and {}/{} item(s) mapped to rust-analyzer definitions; {} unmapped",
+                    usage.mapped_callables,
+                    usage.indexed_callables,
+                    usage.mapped_items,
+                    usage.indexed_items,
+                    usage.unmapped_total()
+                ));
+            }
             if let Some(feedback) = semantic.ra_feedback {
                 notes.push(format!(
                     "RA feedback closure: {} callable owner(s) queried, {} outgoing call target(s), {} project-local edge(s) observed, {} unmapped target(s)",
@@ -503,6 +545,7 @@ mod rust_analyzer {
                     notes,
                     semantic: Some(semantic.report),
                     semantic_hints: semantic.hints,
+                    semantic_usage: semantic.usage,
                 },
                 _database: database,
             })
@@ -547,6 +590,7 @@ mod rust_analyzer {
     struct SemanticCollection {
         report: SemanticReport,
         hints: SemanticReductionHints,
+        usage: Option<SemanticUsageReport>,
         ra_feedback: Option<RaFeedbackReport>,
     }
 
@@ -717,6 +761,9 @@ mod rust_analyzer {
         report.unresolved_paths = report.queried_paths.saturating_sub(report.resolved_paths);
         hints.unresolved_queries = report.unresolved_method_calls + report.unresolved_paths;
         hints.unqueried_queries = report.unqueried_method_calls + report.unqueried_paths;
+        let usage = project
+            .zip(semantic_index.as_ref())
+            .map(|(project, index)| collect_semantic_usage_report(&semantics, vfs, project, index));
         let ra_feedback = if feedback_mode == RaFeedbackMode::Enabled {
             project
                 .zip(semantic_index.as_ref())
@@ -729,8 +776,142 @@ mod rust_analyzer {
         SemanticCollection {
             report,
             hints,
+            usage,
             ra_feedback,
         }
+    }
+
+    fn collect_semantic_usage_report(
+        semantics: &ra_ap_ide::Semantics<'_, ra_ap_ide::RootDatabase>,
+        vfs: &ra_ap_vfs::Vfs,
+        project: &Project,
+        index: &ProjectSemanticIndex,
+    ) -> SemanticUsageReport {
+        let mut report = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            ..SemanticUsageReport::default()
+        };
+
+        for (file_id, vfs_path) in vfs.iter() {
+            if !index.contains_vfs_path(vfs_path) {
+                continue;
+            }
+            let source = semantics.parse_guess_edition(file_id);
+            for node in source.syntax().descendants() {
+                if let Some(function) = ast::Fn::cast(node.clone()) {
+                    if semantics.to_def(&function).is_some() {
+                        if let Some(callable) = index.callable_at_vfs_offset(
+                            vfs_path,
+                            function.syntax().text_range().start(),
+                        ) {
+                            report.mapped_callable_ids.insert(callable);
+                        }
+                    }
+                    continue;
+                }
+                if let Some(item) = mapped_item_at_node(semantics, vfs_path, index, node) {
+                    report.mapped_item_ids.insert(item);
+                }
+            }
+        }
+
+        report.mapped_callables = report
+            .mapped_callable_ids
+            .iter()
+            .filter(|id| project.functions.contains_key(*id) || project.methods.contains_key(*id))
+            .count();
+        report.mapped_items = report
+            .mapped_item_ids
+            .iter()
+            .filter(|id| project.items.contains_key(*id))
+            .count();
+        report.unmapped_callables = report
+            .indexed_callables
+            .saturating_sub(report.mapped_callables);
+        report.unmapped_items = report.indexed_items.saturating_sub(report.mapped_items);
+        report
+    }
+
+    fn mapped_item_at_node(
+        semantics: &ra_ap_ide::Semantics<'_, ra_ap_ide::RootDatabase>,
+        vfs_path: &ra_ap_vfs::VfsPath,
+        index: &ProjectSemanticIndex,
+        node: ra_ap_syntax::SyntaxNode,
+    ) -> Option<ItemId> {
+        if let Some(item) = ast::Struct::cast(node.clone()) {
+            return semantics.to_def(&item).is_some().then(|| {
+                index.item_at_vfs_offset(
+                    vfs_path,
+                    item.syntax().text_range().start(),
+                    Some(ItemKind::Struct),
+                )
+            })?;
+        }
+        if let Some(item) = ast::Enum::cast(node.clone()) {
+            return semantics.to_def(&item).is_some().then(|| {
+                index.item_at_vfs_offset(
+                    vfs_path,
+                    item.syntax().text_range().start(),
+                    Some(ItemKind::Enum),
+                )
+            })?;
+        }
+        if let Some(item) = ast::Union::cast(node.clone()) {
+            return semantics.to_def(&item).is_some().then(|| {
+                index.item_at_vfs_offset(
+                    vfs_path,
+                    item.syntax().text_range().start(),
+                    Some(ItemKind::Union),
+                )
+            })?;
+        }
+        if let Some(item) = ast::Trait::cast(node.clone()) {
+            return semantics.to_def(&item).is_some().then(|| {
+                index.item_at_vfs_offset(
+                    vfs_path,
+                    item.syntax().text_range().start(),
+                    Some(ItemKind::Trait),
+                )
+            })?;
+        }
+        if let Some(item) = ast::TypeAlias::cast(node.clone()) {
+            return semantics.to_def(&item).is_some().then(|| {
+                index.item_at_vfs_offset(
+                    vfs_path,
+                    item.syntax().text_range().start(),
+                    Some(ItemKind::Type),
+                )
+            })?;
+        }
+        if let Some(item) = ast::Const::cast(node.clone()) {
+            return semantics.to_def(&item).is_some().then(|| {
+                index.item_at_vfs_offset(
+                    vfs_path,
+                    item.syntax().text_range().start(),
+                    Some(ItemKind::Const),
+                )
+            })?;
+        }
+        if let Some(item) = ast::Static::cast(node.clone()) {
+            return semantics.to_def(&item).is_some().then(|| {
+                index.item_at_vfs_offset(
+                    vfs_path,
+                    item.syntax().text_range().start(),
+                    Some(ItemKind::Static),
+                )
+            })?;
+        }
+        if let Some(item) = ast::Module::cast(node) {
+            return semantics.to_def(&item).is_some().then(|| {
+                index.item_at_vfs_offset(
+                    vfs_path,
+                    item.syntax().text_range().start(),
+                    Some(ItemKind::Mod),
+                )
+            })?;
+        }
+        None
     }
 
     fn collect_ra_feedback_edges(

@@ -491,6 +491,14 @@ aliases still participate when they resolve to a dependency, which keeps
 derive/attribute macro imports such as `use helper::Derive; #[derive(Derive)]`
 working without reintroducing local-variable false positives.
 
+The usage classifier now has a concrete center of gravity. `SlicePlan` builds
+the final render reduction and the `UsageDecisionIndex` together, so the report
+and renderer share the same used/blocked/prunable decision object. Unknown
+retention is explicit input to that plan: scoped macro/include/dyn/callback
+hazards add named unreachable symbols as blocked roots, and rust-analyzer
+definition-mapping gaps now block otherwise prunable candidates instead of
+silently deleting code the semantic oracle failed to map.
+
 ## Current Production Boundaries
 
 These are intentional fail-closed areas:
