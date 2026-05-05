@@ -2473,6 +2473,242 @@ fn retains_nested_result_option_alias_surface() {
 }
 
 #[test]
+fn retains_uniffi_callback_interface_facade_reexport() {
+    let workspace = temp_path("rule-uniffi-callback-facade-workspace");
+    let output = temp_path("rule-uniffi-callback-facade-output");
+    let target_dir = temp_path("rule-uniffi-callback-facade-target");
+    write_uniffi_callback_facade_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("uniffi callback facade rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("uniffi_callback_facade_rule/src/lib.rs"));
+    assert!(
+        lib.contains("pub use crate::boundary::{Credential, CredentialProvider}"),
+        "{lib}"
+    );
+    assert!(lib.contains("pub trait CredentialProvider"), "{lib}");
+    assert!(lib.contains("pub struct Credential"), "{lib}");
+    assert!(!lib.contains("DeadCredential"), "{lib}");
+    assert!(!lib.contains("DeadProvider"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_returned_subscription_object_exported_impl_surface() {
+    let workspace = temp_path("rule-returned-subscription-workspace");
+    let output = temp_path("rule-returned-subscription-output");
+    let target_dir = temp_path("rule-returned-subscription-target");
+    write_returned_subscription_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("returned subscription rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("returned_subscription_rule/src/lib.rs"));
+    assert!(lib.contains("pub struct StreamSubscription"), "{lib}");
+    assert!(lib.contains("pub async fn next_event"), "{lib}");
+    assert!(lib.contains("pub struct StreamEvent"), "{lib}");
+    assert!(lib.contains("pub enum StreamError"), "{lib}");
+    assert!(!lib.contains("DeadSubscription"), "{lib}");
+    assert!(!lib.contains("dead_event"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_split_exported_wrapper_private_impl_dependencies() {
+    let workspace = temp_path("rule-split-wrapper-impl-workspace");
+    let output = temp_path("rule-split-wrapper-impl-output");
+    let target_dir = temp_path("rule-split-wrapper-impl-target");
+    write_split_wrapper_impl_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("split wrapper impl rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("split_wrapper_impl_rule/src/lib.rs"));
+    assert!(lib.contains("pub fn exported_wrapper"), "{lib}");
+    assert!(lib.contains("fn private_helper"), "{lib}");
+    assert!(lib.contains("fn convert"), "{lib}");
+    assert!(!lib.contains("dead_helper"), "{lib}");
+    assert!(!lib.contains("dead_export"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_nested_serde_tagged_patch_path_contract() {
+    let workspace = temp_path("rule-serde-patch-path-workspace");
+    let output = temp_path("rule-serde-patch-path-output");
+    let target_dir = temp_path("rule-serde-patch-path-target");
+    write_serde_patch_path_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde patch path rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_patch_path_rule/src/lib.rs"));
+    assert!(lib.contains("#[serde(tag = \"type\")]"), "{lib}");
+    assert!(lib.contains("#[serde(untagged)]"), "{lib}");
+    assert!(lib.contains("pub struct Patch"), "{lib}");
+    assert!(lib.contains("Vec<PathSegment>"), "{lib}");
+    assert!(!lib.contains("DeadPatch"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_request_method_typed_dispatch_unknown_fallback() {
+    let workspace = temp_path("rule-method-dispatch-workspace");
+    let output = temp_path("rule-method-dispatch-output");
+    let target_dir = temp_path("rule-method-dispatch-target");
+    write_method_dispatch_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("method dispatch rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("method_dispatch_rule/src/lib.rs"));
+    assert!(lib.contains("Method::from_wire"), "{lib}");
+    assert!(lib.contains("Start(StartParams)"), "{lib}");
+    assert!(lib.contains("Unknown {"), "{lib}");
+    assert!(lib.contains("pub struct StartParams"), "{lib}");
+    assert!(!lib.contains("StopParams"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_try_from_option_vec_transpose_dependencies() {
+    let workspace = temp_path("rule-try-from-transpose-workspace");
+    let output = temp_path("rule-try-from-transpose-output");
+    let target_dir = temp_path("rule-try-from-transpose-target");
+    write_try_from_option_vec_transpose_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("try_from transpose rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("try_from_transpose_rule/src/lib.rs"));
+    assert!(lib.contains(".transpose()?"), "{lib}");
+    assert!(lib.contains("parse_schema"), "{lib}");
+    assert!(lib.contains("pub struct DynamicToolSpec"), "{lib}");
+    assert!(!lib.contains("DeadToolSpec"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn copies_function_local_static_include_bytes_asset() {
+    let workspace = temp_path("rule-local-static-include-bytes-workspace");
+    let output = temp_path("rule-local-static-include-bytes-output");
+    let target_dir = temp_path("rule-local-static-include-bytes-target");
+    write_local_static_include_bytes_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("local static include bytes rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("local_static_include_bytes_rule/src/lib.rs"));
+    assert!(lib.contains("include_bytes!(\"certs/live.pem\")"), "{lib}");
+    assert!(!lib.contains("include_bytes!(\"certs/dead.pem\")"), "{lib}");
+    assert!(output
+        .join("local_static_include_bytes_rule/src/certs/live.pem")
+        .exists());
+    assert!(!output
+        .join("local_static_include_bytes_rule/src/certs/dead.pem")
+        .exists());
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn flags_compile_time_env_inside_retained_macro_body() {
+    let workspace = temp_path("rule-macro-env-workspace");
+    let output = temp_path("rule-macro-env-output");
+    write_macro_env_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("macro env rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    assert!(report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "compile_env_macros" && hazard.severity == "error"));
+    let lib = read(output.join("macro_env_rule/src/lib.rs"));
+    assert!(lib.contains("macro_rules! find_resource"), "{lib}");
+    assert!(lib.contains("option_env!(\"BAZEL_PACKAGE\")"), "{lib}");
+    assert!(!lib.contains("dead_resource"), "{lib}");
+}
+
+#[test]
+fn retains_dependency_crate_alias_manifest_edge() {
+    let workspace = temp_path("rule-dependency-crate-alias-workspace");
+    let output = temp_path("rule-dependency-crate-alias-output");
+    let target_dir = temp_path("rule-dependency-crate-alias-target");
+    write_dependency_crate_alias_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("dependency crate alias rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("dependency_alias_app/src/lib.rs"));
+    assert!(app.contains("use protocol_runtime as upstream"), "{app}");
+    assert!(app.contains("upstream::LiveType"), "{app}");
+    assert!(!app.contains("DeadType"), "{app}");
+    let manifest = read(output.join("dependency_alias_app/Cargo.toml"));
+    assert!(manifest.contains("protocol_runtime"), "{manifest}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
+fn prunes_private_child_wildcard_with_selected_public_reexports() {
+    let workspace = temp_path("rule-private-child-wildcard-workspace");
+    let output = temp_path("rule-private-child-wildcard-output");
+    let target_dir = temp_path("rule-private-child-wildcard-target");
+    write_private_child_wildcard_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("private child wildcard rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("private_child_wildcard_rule/src/lib.rs"));
+    assert!(lib.contains("pub use live::selected_helper"), "{lib}");
+    assert!(lib.contains("use self::live::*"), "{lib}");
+    assert!(!lib.contains("dead_helper"), "{lib}");
+    assert!(!lib.contains("dead_value"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn flags_retained_source_include_macros_as_production_blockers() {
     let workspace = temp_path("rule-source-include-workspace");
     let output = temp_path("rule-source-include-output");
@@ -5055,6 +5291,516 @@ pub type DeadResult = Result<Option<DeadPayload>, ApiError>;
 #[opensourced]
 pub fn selected(id: Option<String>) -> ApiResult {
     Ok(id.map(|id| Payload { id }))
+}
+"#,
+    );
+}
+
+fn write_uniffi_callback_facade_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "uniffi_callback_facade_rule",
+        r#"use opensourced::opensourced;
+
+pub mod boundary {
+    #[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+    pub struct Credential {
+        pub user: String,
+    }
+
+    pub struct DeadCredential {
+        pub user: String,
+    }
+
+    #[cfg_attr(feature = "ffi", uniffi::export(callback_interface))]
+    pub trait CredentialProvider: Send + Sync {
+        fn load(&self, key: String) -> Option<Credential>;
+    }
+
+    pub trait DeadProvider: Send + Sync {
+        fn dead_load(&self) -> Option<DeadCredential>;
+    }
+}
+
+pub mod ffi {
+    pub use crate::boundary::{Credential, CredentialProvider};
+    pub use crate::boundary::{DeadCredential, DeadProvider};
+}
+
+#[opensourced]
+pub fn selected(provider: &dyn ffi::CredentialProvider, key: String) -> Option<ffi::Credential> {
+    provider.load(key)
+}
+"#,
+    );
+}
+
+fn write_returned_subscription_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "returned_subscription_rule",
+        r#"use opensourced::opensourced;
+
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
+pub struct Manager;
+
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
+pub struct StreamSubscription {
+    remaining: u32,
+}
+
+pub struct StreamEvent {
+    pub value: u32,
+}
+
+pub enum StreamError {
+    Closed,
+}
+
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
+pub struct DeadSubscription;
+
+pub struct DeadEvent {
+    pub value: u32,
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+impl Manager {
+    pub fn subscribe(&self) -> StreamSubscription {
+        StreamSubscription { remaining: 1 }
+    }
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export(async_runtime = "tokio"))]
+impl StreamSubscription {
+    pub async fn next_event(&self) -> Result<StreamEvent, StreamError> {
+        if self.remaining == 0 {
+            Err(StreamError::Closed)
+        } else {
+            Ok(StreamEvent {
+                value: self.remaining,
+            })
+        }
+    }
+}
+
+impl DeadSubscription {
+    pub async fn dead_event(&self) -> DeadEvent {
+        DeadEvent { value: 99 }
+    }
+}
+
+#[opensourced]
+pub fn selected(manager: &Manager) -> StreamSubscription {
+    manager.subscribe()
+}
+"#,
+    );
+}
+
+fn write_split_wrapper_impl_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "split_wrapper_impl_rule",
+        r#"use opensourced::opensourced;
+
+#[cfg_attr(feature = "ffi", derive(uniffi::Object))]
+pub struct Manager {
+    seed: u32,
+}
+
+pub struct Internal {
+    value: u32,
+}
+
+impl Manager {
+    pub fn new(seed: u32) -> Self {
+        Self { seed }
+    }
+
+    fn private_helper(&self, value: Internal) -> u32 {
+        self.seed + value.value
+    }
+
+    fn dead_helper(&self) -> u32 {
+        99
+    }
+}
+
+fn convert(value: u32) -> Internal {
+    Internal { value }
+}
+
+#[cfg_attr(feature = "ffi", uniffi::export)]
+impl Manager {
+    pub fn exported_wrapper(&self, value: u32) -> u32 {
+        self.private_helper(convert(value))
+    }
+
+    pub fn dead_export(&self) -> u32 {
+        self.dead_helper()
+    }
+}
+
+#[opensourced]
+pub fn selected(seed: u32, value: u32) -> u32 {
+    Manager::new(seed).exported_wrapper(value)
+}
+"#,
+    );
+}
+
+fn write_serde_patch_path_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_patch_path_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum PathSegment {
+    Index(usize),
+    Key(String),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Patch {
+    pub path: Vec<PathSegment>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub value: Option<serde_json::Value>,
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "type")]
+pub enum Change {
+    Snapshot {
+        #[serde(rename = "snapshot")]
+        value: serde_json::Value,
+    },
+    Patches {
+        patches: Vec<Patch>,
+    },
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Params {
+    pub change: Change,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeadPatch {
+    pub path: Vec<String>,
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> serde_json::Result<Params> {
+    serde_json::from_str::<Params>(input)
+}
+"#,
+    );
+}
+
+fn write_method_dispatch_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "method_dispatch_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+pub enum Method {
+    Start,
+    Stop,
+    Unknown(String),
+}
+
+impl Method {
+    pub fn from_wire(value: &str) -> Self {
+        match value {
+            "start" => Self::Start,
+            "stop" => Self::Stop,
+            other => Self::Unknown(other.to_string()),
+        }
+    }
+}
+
+pub struct Request {
+    pub method: String,
+    pub params: serde_json::Value,
+}
+
+#[derive(Deserialize)]
+pub struct StartParams {
+    pub model: String,
+}
+
+#[derive(Deserialize)]
+pub struct StopParams {
+    pub id: String,
+}
+
+pub enum TypedRequest {
+    Start(StartParams),
+    Unknown {
+        method: String,
+        params: serde_json::Value,
+    },
+}
+
+impl TypedRequest {
+    pub fn from_request(request: Request) -> serde_json::Result<Self> {
+        match Method::from_wire(&request.method) {
+            Method::Start => Ok(Self::Start(serde_json::from_value(request.params)?)),
+            Method::Unknown(method) => Ok(Self::Unknown {
+                method,
+                params: request.params,
+            }),
+            Method::Stop => Ok(Self::Unknown {
+                method: "stop".to_string(),
+                params: request.params,
+            }),
+        }
+    }
+}
+
+#[opensourced]
+pub fn selected(request: Request) -> serde_json::Result<TypedRequest> {
+    TypedRequest::from_request(request)
+}
+"#,
+    );
+}
+
+fn write_try_from_option_vec_transpose_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "try_from_transpose_rule",
+        r#"use opensourced::opensourced;
+use std::convert::{TryFrom, TryInto};
+
+pub enum RpcError {
+    BadSchema,
+}
+
+pub struct AppToolSpec {
+    pub name: String,
+    pub schema_json: String,
+}
+
+pub struct AppRequest {
+    pub tools: Option<Vec<AppToolSpec>>,
+}
+
+pub struct DeadToolSpec {
+    pub name: String,
+}
+
+pub mod upstream {
+    pub struct DynamicToolSpec {
+        pub name: String,
+        pub schema: String,
+    }
+
+    pub struct Params {
+        pub tools: Option<Vec<DynamicToolSpec>>,
+    }
+}
+
+fn parse_schema(value: String) -> Result<String, RpcError> {
+    if value.is_empty() {
+        Err(RpcError::BadSchema)
+    } else {
+        Ok(value)
+    }
+}
+
+impl TryFrom<AppToolSpec> for upstream::DynamicToolSpec {
+    type Error = RpcError;
+
+    fn try_from(value: AppToolSpec) -> Result<Self, Self::Error> {
+        Ok(Self {
+            name: value.name,
+            schema: parse_schema(value.schema_json)?,
+        })
+    }
+}
+
+impl TryFrom<AppRequest> for upstream::Params {
+    type Error = RpcError;
+
+    fn try_from(value: AppRequest) -> Result<Self, Self::Error> {
+        Ok(Self {
+            tools: value
+                .tools
+                .map(|tools| {
+                    tools
+                        .into_iter()
+                        .map(|tool| tool.try_into())
+                        .collect::<Result<Vec<_>, RpcError>>()
+                })
+                .transpose()?,
+        })
+    }
+}
+
+#[opensourced]
+pub fn selected(request: AppRequest) -> Result<upstream::Params, RpcError> {
+    request.try_into()
+}
+"#,
+    );
+}
+
+fn write_local_static_include_bytes_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "local_static_include_bytes_rule",
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    static CERT: &[u8] = include_bytes!("certs/live.pem");
+    CERT.len()
+}
+
+pub fn dead_cert_len() -> usize {
+    static CERT: &[u8] = include_bytes!("certs/dead.pem");
+    CERT.len()
+}
+"#,
+    );
+    write(
+        root.join("local_static_include_bytes_rule/src/certs/live.pem"),
+        "live",
+    );
+    write(
+        root.join("local_static_include_bytes_rule/src/certs/dead.pem"),
+        "dead",
+    );
+}
+
+fn write_macro_env_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "macro_env_rule",
+        r#"use opensourced::opensourced;
+
+macro_rules! find_resource {
+    () => {{
+        option_env!("BAZEL_PACKAGE").unwrap_or(env!("CARGO_MANIFEST_DIR"))
+    }};
+}
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    find_resource!()
+}
+
+pub fn dead_resource() -> &'static str {
+    env!("DEAD_RESOURCE")
+}
+"#,
+    );
+}
+
+fn write_dependency_crate_alias_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["dependency_alias_app", "protocol-rule"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("dependency_alias_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "dependency_alias_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+protocol_runtime = {{ package = "protocol-rule", path = "../protocol-rule" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("dependency_alias_app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use protocol_runtime as upstream;
+
+#[opensourced]
+pub fn selected(id: String) -> upstream::LiveType {
+    upstream::LiveType { id }
+}
+
+pub fn dead_selected(id: String) -> upstream::DeadType {
+    upstream::DeadType { id }
+}
+"#,
+    );
+    write(
+        root.join("protocol-rule/Cargo.toml"),
+        r#"[package]
+name = "protocol-rule"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("protocol-rule/src/lib.rs"),
+        r#"pub struct LiveType {
+    pub id: String,
+}
+
+pub struct DeadType {
+    pub id: String,
+}
+"#,
+    );
+}
+
+fn write_private_child_wildcard_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "private_child_wildcard_rule",
+        r#"use opensourced::opensourced;
+
+mod live {
+    pub fn selected_helper() -> u32 {
+        live_value()
+    }
+
+    pub fn live_value() -> u32 {
+        7
+    }
+
+    pub fn dead_value() -> u32 {
+        99
+    }
+}
+
+mod dead {
+    pub fn dead_helper() -> u32 {
+        99
+    }
+}
+
+use self::live::*;
+pub use live::selected_helper;
+pub use dead::dead_helper;
+
+#[opensourced]
+pub fn selected() -> u32 {
+    selected_helper()
 }
 "#,
     );

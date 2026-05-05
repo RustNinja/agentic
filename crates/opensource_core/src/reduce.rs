@@ -268,6 +268,26 @@ pub fn reduce_with_extra_roots_and_semantics(
                 item_queue.push_back(item);
             }
         }
+
+        let dependencies = reachable_macro_impl_surface_dependencies(
+            project,
+            &candidate_packages,
+            &roots,
+            &reachable,
+            &reachable_items,
+        );
+        evidence.add(&dependencies.evidence);
+        for dependency in dependencies.callables {
+            if candidate_packages.contains(dependency.package()) && !reachable.contains(&dependency)
+            {
+                callable_queue.push_back(dependency);
+            }
+        }
+        for item in dependencies.items {
+            if candidate_packages.contains(item.package()) && !reachable_items.contains(&item) {
+                item_queue.push_back(item);
+            }
+        }
     }
 
     let mut packages = reachable_packages(&roots, &reachable, &reachable_items);
@@ -3204,6 +3224,54 @@ fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
     dependencies
 }
 
+fn reachable_macro_impl_surface_dependencies(
+    project: &Project,
+    candidate_packages: &BTreeSet<String>,
+    roots: &[RootId],
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+) -> DependencySet {
+    let mut dependencies = DependencySet::default();
+    for item in reachable_items.iter().filter(|item| {
+        candidate_packages.contains(item.package())
+            && matches!(
+                item.kind,
+                ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type
+            )
+    }) {
+        if !item_is_root(roots, item)
+            && !item_is_reachable_callable_signature_surface(project, reachable, item)
+        {
+            continue;
+        }
+        dependencies.extend(item_root_macro_impl_dependencies(project, item));
+    }
+    dependencies
+}
+
+fn item_is_root(roots: &[RootId], item: &ItemId) -> bool {
+    roots
+        .iter()
+        .any(|root| matches!(root, RootId::Item(root_item) if root_item == item))
+}
+
+fn item_is_reachable_callable_signature_surface(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    item: &ItemId,
+) -> bool {
+    reachable.iter().any(|callable| {
+        if callable.package() != item.package {
+            return false;
+        }
+        project.functions.get(callable).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.sig.to_token_stream(), &item.name)
+        }) || project.methods.get(callable).is_some_and(|record| {
+            token_stream_mentions_ident(&record.item.sig.to_token_stream(), &item.name)
+        })
+    })
+}
+
 fn reachable_struct_field_dependencies(
     project: &Project,
     candidate_packages: &BTreeSet<String>,
@@ -3343,6 +3411,11 @@ fn attr_requires_impl_surface_retention(attribute: &syn::Attribute) -> bool {
     let Some(first) = attribute.path().segments.first() else {
         return false;
     };
+    if first.ident == "cfg_attr" {
+        let tokens = attribute.to_token_stream();
+        return token_stream_mentions_ident(&tokens, "uniffi")
+            && token_stream_mentions_ident(&tokens, "export");
+    }
     !matches!(
         first.ident.to_string().as_str(),
         "allow"

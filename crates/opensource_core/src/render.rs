@@ -6100,8 +6100,9 @@ fn transform_items(
                         .iter()
                         .filter(|impl_item| retain_test_items || !impl_item_is_test(impl_item))
                         .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
-                let root_macro_impl_surface_is_required =
-                    root_item_impl_surface_should_render(reduced, package, &type_path, item_impl);
+                let root_macro_impl_surface_is_required = root_item_impl_surface_should_render(
+                    project, reduced, package, &type_path, item_impl,
+                );
 
                 for impl_item in &item_impl.items {
                     if let ImplItem::Fn(method) = impl_item {
@@ -7836,7 +7837,7 @@ fn impl_has_reachable_method(
     else {
         return false;
     };
-    if root_item_impl_surface_should_render(reduced, package, &type_path, item_impl) {
+    if root_item_impl_surface_should_render(project, reduced, package, &type_path, item_impl) {
         return true;
     }
     let trait_path = item_impl
@@ -8059,13 +8060,14 @@ fn impl_item_attrs_require_surface_retention(impl_item: &ImplItem) -> bool {
 }
 
 fn root_item_impl_surface_should_render(
+    project: &Project,
     reduced: &ReducedProject,
     package: &str,
     type_path: &[String],
     item_impl: &syn::ItemImpl,
 ) -> bool {
     item_impl.trait_.is_none()
-        && path_item_is_root(
+        && (path_item_is_root(
             reduced,
             package,
             type_path,
@@ -8075,7 +8077,9 @@ fn root_item_impl_surface_should_render(
                 ItemKind::Union,
                 ItemKind::Type,
             ],
-        )
+        ) || type_path_is_reachable_callable_signature_surface(
+            project, reduced, package, type_path,
+        ))
         && impl_surface_has_macro_contract_attrs(item_impl)
 }
 
@@ -8089,7 +8093,7 @@ fn root_macro_impl_surface_should_render_for_module(
 ) -> bool {
     resolved_local_type_path(project, package, module_path, &item_impl.self_ty, aliases)
         .is_some_and(|type_path| {
-            root_item_impl_surface_should_render(reduced, package, &type_path, item_impl)
+            root_item_impl_surface_should_render(project, reduced, package, &type_path, item_impl)
         })
 }
 
@@ -8134,6 +8138,11 @@ fn attr_requires_impl_surface_retention(attribute: &syn::Attribute) -> bool {
     let Some(first) = attribute.path().segments.first() else {
         return false;
     };
+    if first.ident == "cfg_attr" {
+        let tokens = attribute.to_token_stream();
+        return token_stream_mentions_ident(&tokens, "uniffi")
+            && token_stream_mentions_ident(&tokens, "export");
+    }
     !matches!(
         first.ident.to_string().as_str(),
         "allow"
@@ -8260,6 +8269,25 @@ fn path_item_is_root(
                         && item.kind == *kind
             )
         })
+    })
+}
+
+fn type_path_is_reachable_callable_signature_surface(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    type_path: &[String],
+) -> bool {
+    let Some(name) = type_path.last() else {
+        return false;
+    };
+    reduced.reachable.iter().any(|callable| {
+        callable.package() == package
+            && (project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.sig.to_token_stream(), name)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_ident(&record.item.sig.to_token_stream(), name)
+            }))
     })
 }
 

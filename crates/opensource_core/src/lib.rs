@@ -2823,6 +2823,12 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
             self.visit_file_include_macro(mac);
         } else if macro_path_ends_with(mac, "env") || macro_path_ends_with(mac, "option_env") {
             self.visit_compile_env_macro(mac);
+        } else if macro_path_ends_with(mac, "macro_rules") {
+            let count = compile_env_macro_count_in_tokens(&mac.tokens);
+            if count > 0 {
+                self.counts.compile_env_macros += count;
+                self.counts.compile_env_details.push(self.span_detail(mac));
+            }
         }
         if macro_invocation_requires_expansion_boundary(mac) {
             self.counts.custom_macro_invocations += 1;
@@ -3017,6 +3023,44 @@ fn macro_first_string_literal(tokens: &TokenStream) -> Option<String> {
         proc_macro2::TokenTree::Group(group) => macro_first_string_literal(&group.stream()),
         proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => None,
     })
+}
+
+fn compile_env_macro_count_in_tokens(tokens: &TokenStream) -> usize {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    let mut count = 0;
+    let mut index = 0;
+    while index < tokens.len() {
+        match &tokens[index] {
+            proc_macro2::TokenTree::Ident(ident)
+                if matches!(ident.to_string().as_str(), "env" | "option_env") =>
+            {
+                if matches!(tokens.get(index + 1), Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == '!')
+                    && tokens
+                        .get(index + 2)
+                        .and_then(|token| match token {
+                            proc_macro2::TokenTree::Group(group) => {
+                                macro_first_string_literal(&group.stream())
+                            }
+                            _ => None,
+                        })
+                        .as_deref()
+                        .is_none_or(|name| !cargo_manifest_modeled_env_var(name))
+                {
+                    count += 1;
+                }
+                index += 3;
+                continue;
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                count += compile_env_macro_count_in_tokens(&group.stream());
+            }
+            proc_macro2::TokenTree::Ident(_)
+            | proc_macro2::TokenTree::Punct(_)
+            | proc_macro2::TokenTree::Literal(_) => {}
+        }
+        index += 1;
+    }
+    count
 }
 
 fn cargo_manifest_modeled_env_var(name: &str) -> bool {

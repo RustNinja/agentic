@@ -596,6 +596,20 @@ expression and retains only the exact `From<SourceError> for TargetError` impl,
 falling back to broader target-error retention only when the source error type
 cannot be inferred.
 
+The next Litter-exploration batch raised the executable set to 112 cases and
+recorded source evidence in `docs/rule_database.md`. The added rules cover
+UniFFI-style callback interface facade reexports, returned subscription objects,
+split exported wrapper impls, nested tagged/untagged serde patch contracts,
+method-string typed dispatch with unknown fallback, fallible
+`Option<Vec<T>>`/`transpose()?` request conversions, function-local
+`include_bytes!` assets, compile-time env reads inside retained `macro_rules!`
+bodies, dependency-crate alias manifest edges, and private-child wildcard imports
+with selected public reexports. Two generic hardening changes came out of the
+batch: reachable macro/FFI impl surfaces now expand only for selected item roots
+or types that appear in retained callable signatures, and retained macro bodies
+are scanned for `env!`/`option_env!` hazards before feedback-only macro warnings
+decide production status.
+
 The fixture also now includes a private FFI barrel shaped like Litter's mobile
 client modules: one selected app-store subscription module is reexported beside
 dead reconnect/alleycat siblings. The expected behavior is strict barrel

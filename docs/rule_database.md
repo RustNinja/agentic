@@ -137,6 +137,16 @@ file.
 | `dyn.boxed_future_return_alias.001` | covered | Boxed `Pin<Box<dyn Future<Output = T>>>` return aliases retain output DTOs, report hard dynamic hazards, and prune dead future aliases |
 | `const.array_surface_len.001` | covered | Const-generic array fields in public surfaces retain the live const length and prune dead const/array siblings |
 | `type.nested_result_option_alias.001` | covered | Nested `Result<Option<Payload>, Error>` aliases retain payload/error surfaces and prune dead alias payloads |
+| `uniffi.callback_interface.facade_reexport.001` | covered | UniFFI-style callback traits reexported through an FFI facade keep trait method record surfaces and prune dead callback siblings |
+| `uniffi.object.returned_subscription.001` | covered | Returned UniFFI-style object surfaces retain their exported impl methods and signature DTO/error dependencies without expanding unrelated internal objects |
+| `uniffi.object.split_impl_wrapper.001` | covered | Exported wrapper impl methods retain called private same-type helpers and conversion helpers while pruning unused exported/private sibling methods on internally constructed objects |
+| `serde.tagged_patch_path_contract.001` | covered | Nested tagged outer contracts with untagged patch path payloads retain patch/path/value DTO surfaces and prune dead patch families |
+| `request.method_typed_dispatch_unknown.001` | covered | Method-string dispatch with an unknown fallback retains only selected typed params plus fallback payloads, not dead typed request DTOs |
+| `trait.conversion.try_from_option_vec_transpose.001` | covered | Fallible `TryFrom` mirrors using `Option<Vec<T>>`, nested `try_into`, `collect::<Result<Vec<_>, E>>()`, and `transpose()?` retain only the live nested conversion path |
+| `include.bytes.function_local_static.001` | covered | Function-local static `include_bytes!` assets are copied when retained and dead local static assets are omitted |
+| `macro.compile_env_in_retained_body.001` | covered | Retained `macro_rules!` bodies are scanned for `env!`/`option_env!` hazards even when the env read is hidden behind a live macro invocation |
+| `manifest.dependency_crate_alias.001` | covered | `use dependency_crate as alias` qualified paths retain the aliased dependency edge and concrete live dependency items while pruning dead sibling dependency items |
+| `import.private_child_wildcard_selected_reexport.001` | covered | Private child wildcard imports combined with selected public reexports keep only the live child helper path and prune dead child reexports/items |
 | `dyn.boundary.direct_inputs.001` | covered | Selected `&dyn Trait` and `fn(...)` callback inputs stay as feedback-dischargeable API boundary warnings |
 | `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
 | `include.source.inline_fallback_module.001` | covered | Fallback-retained inline modules run the full syntactic hazard scan, so plain source includes are reported even when the module was retained by path mention |
@@ -179,6 +189,23 @@ The target is hundreds of small executable rules plus thousands of generated
 catalog combinations, not a thousand hand-written one-off tests. More executable
 cases are valuable only when they introduce a distinct Rust/Cargo shape or a
 distinct failure mode.
+
+## Source Evidence
+
+Recent Litter-driven rules came from these source patterns:
+
+| Rule | Source evidence |
+| --- | --- |
+| `uniffi.callback_interface.facade_reexport.001` | `codex-mobile-client/src/reconnect.rs:73`, `codex-mobile-client/src/ffi/mod.rs:33` |
+| `uniffi.object.returned_subscription.001` | `codex-mobile-client/src/ffi/discovery.rs:28`, `codex-mobile-client/src/ffi/discovery.rs:60`, `codex-mobile-client/src/ffi/discovery.rs:435` |
+| `uniffi.object.split_impl_wrapper.001` | `codex-mobile-client/src/session/voice_handoff.rs:163`, `codex-mobile-client/src/session/voice_handoff.rs:678` |
+| `serde.tagged_patch_path_contract.001` | `codex-ipc/src/protocol/params.rs:49`, `codex-ipc/src/protocol/params.rs:61`, `codex-ipc/src/protocol/params.rs:78` |
+| `request.method_typed_dispatch_unknown.001` | `codex-ipc/src/protocol/method.rs:10`, `codex-ipc/src/protocol/params.rs:228`, `codex-ipc/src/protocol/params.rs:318` |
+| `trait.conversion.try_from_option_vec_transpose.001` | `codex-mobile-client/src/types/server_requests.rs:312`, `codex-mobile-client/src/types/server_requests.rs:331`, `codex-mobile-client/src/types/server_requests.rs:371` |
+| `include.bytes.function_local_static.001` | `codex-bridge/src/lib.rs:76`, `codex-bridge/src/lib.rs:93` |
+| `macro.compile_env_in_retained_body.001` | `third_party/codex/codex-rs/utils/cargo-bin/src/lib.rs:118`, `third_party/codex/codex-rs/utils/cargo-bin/src/lib.rs:127` |
+| `manifest.dependency_crate_alias.001` | `codex-ipc/src/conversation_state.rs:3`, `codex-mobile-client/src/store/reducer.rs:5`, `codex-mobile-client/src/ffi/client.rs:8` |
+| `import.private_child_wildcard_selected_reexport.001` | `codex-mobile-client/src/mobile_client/mod.rs:47`, `codex-mobile-client/src/mobile_client/mod.rs:56` |
 
 ## Litter Patterns To Convert Next
 
