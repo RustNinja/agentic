@@ -1107,6 +1107,9 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     assert!(output
         .join("support/external-helper/src/facade/inner.rs")
         .exists());
+    assert!(output
+        .join("support/external-helper/src/live/atoms.rs")
+        .exists());
     assert!(output.join("support/external-helper/src/live.txt").exists());
     assert!(output.join("support/external-leaf/src/lib.rs").exists());
     assert!(!output.join("support/dead-leaf").exists());
@@ -1114,17 +1117,21 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     let helper_live = read(output.join("support/external-helper/src/live.rs"));
     let helper_facade = read(output.join("support/external-helper/src/facade.rs"));
     let helper_inner = read(output.join("support/external-helper/src/facade/inner.rs"));
+    let helper_atoms = read(output.join("support/external-helper/src/live/atoms.rs"));
     assert!(helper_lib.contains("pub fn decorate"), "{helper_lib}");
-    assert!(helper_lib.contains("facade_decorate"), "{helper_lib}");
+    assert!(helper_lib.contains("pub use facade::*"), "{helper_lib}");
     assert!(!helper_lib.contains("dead_decorate"), "{helper_lib}");
     assert!(!helper_lib.contains("dead_leaf"), "{helper_lib}");
     assert!(!helper_lib.contains("FacadeDead"), "{helper_lib}");
+    assert!(!helper_lib.contains("FacadeLive"), "{helper_lib}");
+    assert!(helper_live.contains("mod atoms"), "{helper_live}");
+    assert!(helper_live.contains("use atoms::*"), "{helper_live}");
     assert!(helper_live.contains("pub fn decorate"), "{helper_live}");
     assert!(!helper_live.contains("dead_child"), "{helper_live}");
     assert!(!helper_live.contains("dead_leaf"), "{helper_live}");
     assert!(helper_facade.contains("mod inner"), "{helper_facade}");
     assert!(
-        helper_facade.contains("pub use inner::facade_decorate"),
+        helper_facade.contains("pub use inner::*"),
         "{helper_facade}"
     );
     assert!(!helper_facade.contains("dead_facade"), "{helper_facade}");
@@ -1139,6 +1146,12 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     assert!(!helper_inner.contains("FacadeDead"), "{helper_inner}");
     assert!(!helper_inner.contains("FacadeLive"), "{helper_inner}");
     assert!(!helper_inner.contains("dead_leaf"), "{helper_inner}");
+    assert!(
+        helper_atoms.contains("pub fn suffix() -> &'static str"),
+        "{helper_atoms}"
+    );
+    assert!(!helper_atoms.contains("dead_suffix"), "{helper_atoms}");
+    assert!(!helper_atoms.contains("dead_leaf"), "{helper_atoms}");
     assert!(!output.join("support/external-helper/src/bin").exists());
     assert!(!output.join("support/external-helper/examples").exists());
     assert!(!output.join("support/external-helper/tests").exists());
@@ -4596,7 +4609,7 @@ dead-leaf = {{ path = "{}" }}
         r#"
 mod facade;
 mod live;
-pub use facade::{facade_decorate, FacadeDead, FacadeLive};
+pub use facade::*;
 
 #[cfg(test)]
 mod test_only;
@@ -4614,7 +4627,7 @@ pub fn dead_decorate(value: &str) -> String {
         helper.join("src/facade.rs"),
         r#"
 mod inner;
-pub use inner::{facade_decorate, FacadeDead, FacadeLive};
+pub use inner::*;
 
 pub fn dead_facade(value: &str) -> String {
     format!("{value}{}", dead_leaf::suffix())
@@ -4645,13 +4658,27 @@ pub fn dead_inner(value: &str) -> String {
         helper.join("src/live.rs"),
         r#"
 const LABEL: &str = include_str!("live.txt");
+mod atoms;
+use atoms::*;
 
 pub fn decorate(value: &str) -> String {
-    format!("{value}:{}", LABEL.trim())
+    format!("{value}:{}:{}", LABEL.trim(), suffix())
 }
 
 pub fn dead_child(value: &str) -> String {
     format!("{value}{}", dead_leaf::suffix())
+}
+"#,
+    );
+    write(
+        helper.join("src/live/atoms.rs"),
+        r#"
+pub fn suffix() -> &'static str {
+    "atoms"
+}
+
+pub fn dead_suffix() -> &'static str {
+    dead_leaf::suffix()
 }
 "#,
     );
