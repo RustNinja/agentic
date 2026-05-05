@@ -10861,7 +10861,7 @@ fn external_use_target_should_drop(
     if is_public_use {
         !render_plan.package_mentions_ident(_package, leaf)
     } else {
-        !reachable_module_import_scope_mentions_unqualified_ident(
+        !reachable_module_import_scope_uses_imported_ident(
             project,
             reduced,
             render_plan,
@@ -10869,6 +10869,421 @@ fn external_use_target_should_drop(
             module_path,
             leaf,
         )
+    }
+}
+
+fn reachable_module_import_scope_uses_imported_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    if reachable_module_uses_imported_ident(project, reduced, package, module_path, ident) {
+        return true;
+    }
+
+    if retained_impl_attrs_mention_unqualified_ident(project, reduced, package, module_path, ident)
+        || retained_impl_non_fn_items_mention_unqualified_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || retained_root_macro_impl_items_mention_unqualified_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || retained_macro_invocations_mention_unqualified_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || retained_foreign_items_mention_unqualified_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+    {
+        return true;
+    }
+
+    if project
+        .files
+        .values()
+        .find(|source| source.package == package && source.module_path == module_path)
+        .is_some_and(|source| {
+            inline_child_modules_import_scope_mentions_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &source.syntax.items,
+                ident,
+                None,
+            )
+        })
+    {
+        return true;
+    }
+
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .filter(|source| source.module_path.len() == module_path.len() + 1)
+        .filter(|source| path_has_prefix(&source.module_path, module_path))
+        .filter(|source| {
+            module_should_render(project, reduced, render_plan, package, &source.module_path)
+        })
+        .any(|source| {
+            child_module_import_scope_mentions_parent_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                source.module_path.as_slice(),
+                &source.syntax.items,
+                ident,
+                None,
+            )
+        })
+}
+
+fn reachable_module_uses_imported_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && function_uses_imported_ident(&record.item, ident)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                record.module_path == module_path && method_uses_imported_ident(&record.item, ident)
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package == package && item.module_path == module_path)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    item_uses_imported_ident(project, reduced, package, item, record, ident)
+                })
+            })
+}
+
+fn function_uses_imported_ident(function: &syn::ItemFn, ident: &str) -> bool {
+    let mut visitor = ImportUsageVisitor::new(ident);
+    visitor.push_scope();
+    visitor.visit_signature(&function.sig);
+    visitor.visit_block(&function.block);
+    visitor.found
+}
+
+fn method_uses_imported_ident(function: &syn::ImplItemFn, ident: &str) -> bool {
+    let mut visitor = ImportUsageVisitor::new(ident);
+    visitor.push_scope();
+    visitor.visit_signature(&function.sig);
+    visitor.visit_block(&function.block);
+    visitor.found
+}
+
+fn item_uses_imported_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    item_id: &ItemId,
+    record: &crate::model::ItemRecord,
+    ident: &str,
+) -> bool {
+    if let Item::Struct(item_struct) = &record.item {
+        let mut visitor = ImportUsageVisitor::new(ident);
+        visitor.visit_generics(&item_struct.generics);
+        for attr in &item_struct.attrs {
+            visitor.visit_attribute(attr);
+        }
+        if root_item_should_render(reduced, item_id) {
+            visitor.visit_item(&record.item);
+            return visitor.found;
+        }
+        if let syn::Fields::Named(fields) = &item_struct.fields {
+            for field in &fields.named {
+                if struct_field_should_remain(
+                    project,
+                    reduced,
+                    None,
+                    package,
+                    &item_id.module_path,
+                    item_struct,
+                    field,
+                ) {
+                    visitor.visit_field(field);
+                }
+            }
+        } else {
+            visitor.visit_item(&record.item);
+        }
+        return visitor.found;
+    }
+
+    if let Item::Trait(item_trait) = &record.item {
+        let mut visitor = ImportUsageVisitor::new(ident);
+        if root_item_should_render(reduced, item_id)
+            || trait_has_reachable_impl_methods(
+                reduced,
+                package,
+                &item_id.module_path,
+                &item_id.name,
+            )
+        {
+            visitor.visit_item(&record.item);
+            return visitor.found;
+        }
+
+        visitor.visit_generics(&item_trait.generics);
+        for bound in &item_trait.supertraits {
+            visitor.visit_type_param_bound(bound);
+        }
+        for attr in item_trait
+            .attrs
+            .iter()
+            .filter(|attr| is_inert_type_surface_attr(attr))
+        {
+            visitor.visit_attribute(attr);
+        }
+        for item in &item_trait.items {
+            if trait_item_should_remain_for_type_surface(
+                project,
+                reduced,
+                package,
+                &item_id.module_path,
+                &item_id.name,
+                item,
+            ) {
+                visitor.visit_trait_item(item);
+            }
+        }
+        return visitor.found;
+    }
+
+    let mut visitor = ImportUsageVisitor::new(ident);
+    visitor.visit_item(&record.item);
+    visitor.found
+}
+
+struct ImportUsageVisitor<'a> {
+    ident: &'a str,
+    scopes: Vec<BTreeSet<String>>,
+    found: bool,
+}
+
+impl<'a> ImportUsageVisitor<'a> {
+    fn new(ident: &'a str) -> Self {
+        Self {
+            ident,
+            scopes: vec![BTreeSet::new()],
+            found: false,
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(BTreeSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+        if self.scopes.is_empty() {
+            self.scopes.push(BTreeSet::new());
+        }
+    }
+
+    fn add_bindings_from_pat(&mut self, pat: &syn::Pat) {
+        let mut bindings = BTreeSet::new();
+        collect_pat_bindings(pat, &mut bindings);
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.extend(bindings);
+        }
+    }
+
+    fn is_value_bound(&self, ident: &str) -> bool {
+        self.scopes.iter().rev().any(|scope| scope.contains(ident))
+    }
+
+    fn visit_signature(&mut self, signature: &syn::Signature) {
+        for generic in &signature.generics.params {
+            visit::visit_generic_param(self, generic);
+        }
+        if let Some(where_clause) = &signature.generics.where_clause {
+            visit::visit_where_clause(self, where_clause);
+        }
+        for input in &signature.inputs {
+            match input {
+                syn::FnArg::Receiver(receiver) => visit::visit_receiver(self, receiver),
+                syn::FnArg::Typed(input) => {
+                    self.visit_pat(&input.pat);
+                    self.visit_type(&input.ty);
+                    self.add_bindings_from_pat(&input.pat);
+                }
+            }
+        }
+        visit::visit_return_type(self, &signature.output);
+    }
+
+    fn path_uses_import(&mut self, path: &syn::Path) {
+        if path.leading_colon.is_some() {
+            return;
+        }
+        let Some(first) = path.segments.first() else {
+            return;
+        };
+        if first.ident != self.ident {
+            return;
+        }
+        if path.segments.len() > 1 || !self.is_value_bound(self.ident) {
+            self.found = true;
+        }
+    }
+}
+
+impl Visit<'_> for ImportUsageVisitor<'_> {
+    fn visit_block(&mut self, block: &syn::Block) {
+        self.push_scope();
+        for statement in &block.stmts {
+            self.visit_stmt(statement);
+        }
+        self.pop_scope();
+    }
+
+    fn visit_stmt(&mut self, statement: &syn::Stmt) {
+        match statement {
+            syn::Stmt::Local(local) => {
+                self.visit_pat(&local.pat);
+                if let Some(init) = &local.init {
+                    self.visit_expr(&init.expr);
+                    if let Some((_else_token, diverge)) = &init.diverge {
+                        self.visit_expr(diverge);
+                    }
+                }
+                self.add_bindings_from_pat(&local.pat);
+            }
+            syn::Stmt::Item(item) => self.visit_item(item),
+            syn::Stmt::Expr(expr, _) => self.visit_expr(expr),
+            syn::Stmt::Macro(item) => self.visit_macro(&item.mac),
+        }
+    }
+
+    fn visit_arm(&mut self, arm: &syn::Arm) {
+        self.visit_pat(&arm.pat);
+        self.push_scope();
+        self.add_bindings_from_pat(&arm.pat);
+        if let Some((_if_token, guard)) = &arm.guard {
+            self.visit_expr(guard);
+        }
+        self.visit_expr(&arm.body);
+        self.pop_scope();
+    }
+
+    fn visit_expr_closure(&mut self, closure: &syn::ExprClosure) {
+        self.push_scope();
+        for input in &closure.inputs {
+            self.visit_pat(input);
+            self.add_bindings_from_pat(input);
+        }
+        visit::visit_return_type(self, &closure.output);
+        self.visit_expr(&closure.body);
+        self.pop_scope();
+    }
+
+    fn visit_expr_for_loop(&mut self, loop_expr: &syn::ExprForLoop) {
+        self.visit_expr(&loop_expr.expr);
+        self.visit_pat(&loop_expr.pat);
+        self.push_scope();
+        self.add_bindings_from_pat(&loop_expr.pat);
+        self.visit_block(&loop_expr.body);
+        self.pop_scope();
+    }
+
+    fn visit_path(&mut self, path: &syn::Path) {
+        self.path_uses_import(path);
+        visit::visit_path(self, path);
+    }
+
+    fn visit_macro(&mut self, item_macro: &syn::Macro) {
+        if item_macro
+            .path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == self.ident)
+            || token_stream_mentions_unqualified_ident(&item_macro.tokens, self.ident)
+        {
+            self.found = true;
+        }
+        visit::visit_macro(self, item_macro);
+    }
+}
+
+fn collect_pat_bindings(pat: &syn::Pat, bindings: &mut BTreeSet<String>) {
+    match pat {
+        syn::Pat::Ident(ident) => {
+            bindings.insert(ident.ident.to_string());
+            if let Some((_at, subpat)) = &ident.subpat {
+                collect_pat_bindings(subpat, bindings);
+            }
+        }
+        syn::Pat::Or(pat) => {
+            for case in &pat.cases {
+                collect_pat_bindings(case, bindings);
+            }
+        }
+        syn::Pat::Paren(pat) => collect_pat_bindings(&pat.pat, bindings),
+        syn::Pat::Reference(pat) => collect_pat_bindings(&pat.pat, bindings),
+        syn::Pat::Rest(_)
+        | syn::Pat::Lit(_)
+        | syn::Pat::Macro(_)
+        | syn::Pat::Path(_)
+        | syn::Pat::Range(_)
+        | syn::Pat::Verbatim(_)
+        | syn::Pat::Wild(_) => {}
+        syn::Pat::Slice(pat) => {
+            for elem in &pat.elems {
+                collect_pat_bindings(elem, bindings);
+            }
+        }
+        syn::Pat::Struct(pat) => {
+            for field in &pat.fields {
+                collect_pat_bindings(&field.pat, bindings);
+            }
+        }
+        syn::Pat::Tuple(pat) => {
+            for elem in &pat.elems {
+                collect_pat_bindings(elem, bindings);
+            }
+        }
+        syn::Pat::TupleStruct(pat) => {
+            for elem in &pat.elems {
+                collect_pat_bindings(elem, bindings);
+            }
+        }
+        syn::Pat::Type(pat) => collect_pat_bindings(&pat.pat, bindings),
+        _ => {}
     }
 }
 

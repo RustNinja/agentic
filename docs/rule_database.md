@@ -45,6 +45,7 @@ file.
 | `import.dependency_barrel.renamed_type.001` | covered | Renamed dependency type reexports used through a local barrel keep the concrete dependency target item while pruning dead sibling dependency aliases and helper reexports |
 | `import.dependency_barrel.multi_hop_function.001` | covered | Multi-hop local and dependency barrel reexports resolve live function aliases through support packages while pruning dead support helper functions, dead dependency aliases, and dead leaf items |
 | `import.module_scoped.dead_item_only.001` | covered | Module-local imports used only by pruned dead items are removed even when the same symbol is live in another module |
+| `import.external_group_shadowed_local.001` | covered | Private external grouped import leaves are retained only for actual path/macro uses, so local bindings with the same name do not keep dead sibling imports |
 | `dyn.owned.registry.001` | covered | Stored `Box<dyn Trait>` and callback aliases are hard production hazards |
 | `dyn.pruned_private_field.001` | covered | Dynamic hazards on private struct fields that are pruned from the rendered slice do not block production readiness |
 | `struct.private_generic_field_usage.001` | covered | Private generic fields are pruned when other retained fields already keep the struct type parameter used |

@@ -746,3 +746,27 @@ slice still passed production feedback with zero compiler errors or warnings.
 Remaining review hazards are now unresolved retained-owner RA queries,
 macro/derive/invocation surfaces, trait-object surfaces, and syntactic fallback
 evidence rather than budget starvation.
+
+The next Litter probe exposed a narrower import-use false positive in
+`codex-ipc/src/client/reconnect.rs`: the source imports
+`tracing::{error, info, warn}`, but a compact slice only needs `warn!` while
+retained code still has local pattern bindings named `error`. A raw token check
+kept the removed `tracing::error` import leaf because the local binding text
+matched the import name. Private external import pruning now walks retained
+functions, methods, and item surfaces with a scoped syn visitor, records local
+bindings from `let`, match arms, closures, and loops, and counts an import leaf
+only when it is actually used as a path/macro name rather than as a shadowing
+local variable. Macro bodies remain fail-closed by token scan because macro
+expansion is not yet semantically modeled.
+
+That change also had to share the renderer's existing surface boundary. Traits
+retained only as object/type surfaces are scanned only through generics,
+supertraits, inert surface attrs, and trait items that will actually be rendered;
+pruned trait method signatures no longer retain method-only imports or
+dependencies. The regression suite caught the inverse macro case as well:
+`tokio::select!` macro bodies must retain imports such as `Duration` that appear
+inside macro tokens. The generic fixture
+`prunes_external_group_imports_shadowed_by_local_bindings` now covers the local
+shadow case, `async.select_reconnect_loop.001` covers macro-body retention, and
+the Litter random-five probe generated `client/reconnect.rs` with
+`use tracing::warn;`, zero feedback errors, and zero warnings.

@@ -1199,6 +1199,46 @@ fn prunes_unused_external_pub_reexport_names() {
 }
 
 #[test]
+fn prunes_external_group_imports_shadowed_by_local_bindings() {
+    let workspace = temp_path("external-shadowed-import-workspace");
+    let output = temp_path("external-shadowed-import-output");
+    let target_dir = temp_path("external-shadowed-import-target");
+    write_external_shadowed_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("external_shadowed_import_like/src/lib.rs"));
+    assert!(
+        !lib.contains("std::fmt") && !lib.contains("{fmt"),
+        "local variable named like a removed external import must not retain the import\n{lib}",
+    );
+    assert!(
+        lib.contains("PathBuf"),
+        "live sibling import should remain\n{lib}",
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external-shadowed-import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
 fn retains_renamed_external_imports_used_only_by_retained_macro_invocations() {
     let workspace = temp_path("macro-rename-workspace");
     let output = temp_path("macro-rename-output");
@@ -9193,6 +9233,44 @@ pub fn selected() -> u32 {
         via_loop += selected_value;
     }
     selected_value + closure(2) + via_match + via_loop
+}
+"#,
+    );
+}
+
+fn write_external_shadowed_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["external_shadowed_import_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("external_shadowed_import_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external_shadowed_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("external_shadowed_import_like/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use std::{fmt, path::PathBuf};
+
+#[opensourced]
+pub fn selected() -> PathBuf {
+    let fmt = "local binding only";
+    let _ = fmt.len();
+    PathBuf::new()
 }
 "#,
     );

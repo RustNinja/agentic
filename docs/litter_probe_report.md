@@ -73,6 +73,15 @@ not slicer failures.
 - The renamed-surface and default-trait hardening pass did not regress the pinned
   corpus: the same five-root batch still generated 116 files and reached
   `production_ready=accepted` with zero warnings under `--deny-warnings`.
+- A 2026-05-06 fresh `/tmp/litter-fresh` rerun found a grouped-import
+  minimality bug in `codex-ipc/src/client/reconnect.rs`: `use tracing::{error,
+  info, warn}` survived because retained code had local `Err(error)` bindings
+  even though only `warn!` remained live. The renderer now uses scoped import-use
+  analysis for private external imports, so the generated file contains
+  `use tracing::warn;`. The same five-root batch generated 122 files, had zero
+  preflight errors, zero feedback errors, zero warnings, and remained
+  `review_required` only because semantic review hazards such as retained
+  macros, trait objects, and unresolved RA queries still require review.
 - The closure/trait-impl/hazard-scan pass also did not regress the pinned
   corpus: the same five-root batch still generated 116 files, had zero preflight
   errors, zero feedback errors, zero warnings, and reached
