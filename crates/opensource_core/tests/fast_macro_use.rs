@@ -553,6 +553,32 @@ fn slices_fast_fixture_from_multiple_root_angles() {
             ],
         },
         SliceAngle {
+            label: "ffi-barrel-subscription-root",
+            roots: &["open_app_store_subscription"],
+            present: &[
+                "pub fn open_app_store_subscription",
+                "mod ffi_barrel",
+                "pub mod app_store",
+                "pub use app_store::{AppStore, AppStoreSubscription}",
+                "pub struct AppStore",
+                "pub struct AppStoreSubscription",
+                "pub struct AppStoreUpdateRecord",
+                "VecDeque",
+                "pub fn subscribe_updates",
+                "pub fn next_update",
+                "record.score()",
+            ],
+            absent: &[
+                "ReconnectController",
+                "AlleycatBridge",
+                "dead_start_turn",
+                "dead_poll",
+                "pub fn open_facade_reexport",
+                "pub fn open_layered_client",
+                "include_str!(\"guidelines/core.md\")",
+            ],
+        },
+        SliceAngle {
             label: "layered-object-root",
             roots: &["LayeredClient"],
             present: &[

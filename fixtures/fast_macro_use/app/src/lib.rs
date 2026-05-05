@@ -122,7 +122,7 @@ mod serde_helpers {
     }
 }
 
-#[allow(unused_imports)]
+#[allow(dead_code, unused_imports)]
 mod runtime_shared {
     use super::SharedAlias;
     use std::sync::OnceLock;
@@ -708,6 +708,89 @@ mod private_facade {
 pub use private_facade::dead_facade as dead_facade_alias;
 pub use private_facade::FacadeObject;
 
+#[allow(dead_code, unused_imports)]
+mod ffi_barrel {
+    pub mod app_store {
+        use super::super::{SharedAlias, WireDto};
+        use std::collections::VecDeque;
+
+        #[derive(Clone, macro_helpers::FixtureRecord)]
+        #[fixture_serde(rename_all = "snake_case")]
+        pub struct AppStoreUpdateRecord {
+            dto: WireDto,
+        }
+
+        impl AppStoreUpdateRecord {
+            pub fn score(&self) -> SharedAlias {
+                self.dto.score()
+            }
+        }
+
+        #[derive(macro_helpers::FixtureObject)]
+        pub struct AppStoreSubscription {
+            updates: VecDeque<AppStoreUpdateRecord>,
+        }
+
+        #[macro_helpers::fixture_export]
+        impl AppStoreSubscription {
+            pub fn next_update(&mut self) -> Option<AppStoreUpdateRecord> {
+                self.updates.pop_front()
+            }
+
+            pub fn dead_poll(&mut self) -> SharedAlias {
+                99
+            }
+        }
+
+        #[derive(macro_helpers::FixtureObject)]
+        pub struct AppStore {
+            dto: WireDto,
+        }
+
+        #[macro_helpers::fixture_export]
+        impl AppStore {
+            #[macro_helpers::fixture_constructor]
+            pub fn new(dto: WireDto) -> Self {
+                Self { dto }
+            }
+
+            pub fn subscribe_updates(&self) -> AppStoreSubscription {
+                let mut updates = VecDeque::new();
+                updates.push_back(AppStoreUpdateRecord {
+                    dto: self.dto.clone(),
+                });
+                AppStoreSubscription { updates }
+            }
+
+            pub fn snapshot(&self) -> SharedAlias {
+                self.dto.score()
+            }
+
+            pub fn dead_start_turn(&self) -> SharedAlias {
+                99
+            }
+        }
+    }
+
+    pub mod reconnect {
+        pub struct ReconnectController;
+
+        impl ReconnectController {
+            pub fn reconnect(&self) -> u32 {
+                1
+            }
+        }
+    }
+
+    pub mod alleycat {
+        pub struct AlleycatBridge;
+    }
+
+    pub use alleycat::AlleycatBridge;
+    pub use app_store::{AppStore, AppStoreSubscription};
+    pub use reconnect::ReconnectController;
+}
+
 #[fixture_export(callback_interface)]
 pub trait ReconnectCallback {
     fn reconnect(&self, label: String) -> SharedAlias;
@@ -979,6 +1062,15 @@ pub fn open_conversion_roundtrip(event: ServerEvent) -> SharedAlias {
 
 pub fn open_facade_reexport(dto: WireDto) -> SharedAlias {
     FacadeObject::new(dto).score()
+}
+
+pub fn open_app_store_subscription(dto: WireDto) -> SharedAlias {
+    let store = ffi_barrel::AppStore::new(dto);
+    let mut subscription = store.subscribe_updates();
+    subscription
+        .next_update()
+        .map(|record| record.score())
+        .unwrap_or(0)
 }
 
 pub fn open_layered_client(value: SharedAlias) -> SharedAlias {

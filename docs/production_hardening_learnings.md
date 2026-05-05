@@ -552,3 +552,10 @@ macro invocation arguments must be walked before expansion. Parseable expression
 macro arguments are now visited as normal Rust expressions, which keeps
 dependencies such as `self.dto.score()` inside retained helper macros without
 requiring project-specific macro knowledge.
+
+The fixture also now includes a private FFI barrel shaped like Litter's mobile
+client modules: one selected app-store subscription module is reexported beside
+dead reconnect/alleycat siblings. The expected behavior is strict barrel
+pruning: keep the selected object, subscription, update record, `VecDeque`
+state, and exact live `pub use`; remove unrelated sibling exports and dead
+object methods.
