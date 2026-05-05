@@ -29,16 +29,17 @@ base reducer and rustc feedback/repair as the production gate. The default
 `opensource_cli` feature set enables `ra-hir`, and the CLI defaults to
 `--analyzer ra-hir`; users can still pass `--analyzer syn` or build with
 `--no-default-features` for the fast syntactic fallback. The `--production`
-preset now defaults to `--analyzer ra-hir-proc-macros`, but the bounded default
-keeps dependency artifacts excluded and therefore skips the proc-macro load
-request instead of attempting an incompatible rust-analyzer configuration. The
-fast `ra-hir` path also keeps proc macros disabled and excludes dependency
-crates from the HIR load.
-The `codex/slice-ra-feedback` proof-of-concept adds `--analyzer ra-feedback`,
-which keeps the bounded HIR inventory but also asks rust-analyzer outgoing call
-hierarchy for selected-root and syntactic-retained owner files, records those
-project-local edges into the same additive reduction hint map, then lets the
-existing `syn` renderer prune items outside the retained set.
+preset now defaults to `--analyzer ra-hir-proc-macros` and enables the bounded
+RA outgoing-call feedback closure, but the bounded default keeps dependency
+artifacts excluded and therefore skips the proc-macro load request instead of
+attempting an incompatible rust-analyzer configuration. The fast `ra-hir` path
+keeps proc macros disabled, excludes dependency crates from the HIR load, and
+does not query call hierarchy.
+`--analyzer ra-feedback` remains an explicit bounded mode for testing the same
+outgoing call hierarchy closure without requesting proc-macro/build-script
+discovery. Both paths record project-local call hierarchy edges into the same
+additive reduction hint map, then let the existing `syn` renderer prune items
+outside the retained set.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that

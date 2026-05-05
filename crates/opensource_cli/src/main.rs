@@ -3424,8 +3424,8 @@ fn usage() -> String {
         "[--preflight-report <path>] ",
         "<workspace-root-or-Cargo.toml> <output-root>\n",
         "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn; ",
-        "ra-feedback enables the proof-of-concept RA outgoing-call closure; ",
-        "--production defaults to ra-hir-proc-macros when available"
+        "ra-feedback exposes the bounded RA outgoing-call closure explicitly; ",
+        "--production defaults to ra-hir-proc-macros with RA feedback closure when available"
     )
     .to_string()
 }

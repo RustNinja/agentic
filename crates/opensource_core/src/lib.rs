@@ -4155,6 +4155,63 @@ pub fn entry() -> u32 {
 
     #[test]
     #[cfg(feature = "ra-hir")]
+    fn production_default_records_outgoing_call_closure_edges() {
+        let root = temp_output("production-ra-feedback-source");
+        let output = temp_output("production-ra-feedback-reduction");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"
+use opensourced::opensourced;
+
+pub fn helper() -> u32 {
+    1
+}
+
+#[opensourced]
+pub fn entry() -> u32 {
+    helper()
+}
+"#,
+        );
+        let report = generate_with_analyzer(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output,
+            },
+            AnalyzerMode::production_default_for_build(),
+        )
+        .expect("production RA-backed generation should succeed");
+
+        assert_eq!(
+            report.analyzer.mode,
+            AnalyzerMode::production_default_for_build()
+        );
+        assert!(report
+            .analyzer
+            .notes
+            .iter()
+            .any(|note| note.contains("RA feedback closure:")));
+        assert!(report.analyzer.semantic_hints.total_edges() > 0);
+        assert!(report
+            .reachable
+            .iter()
+            .any(|callable| callable.to_string() == "app::helper"));
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
     fn ra_feedback_repeatedly_prunes_selected_same_module_item_sets() {
         struct SliceCase<'a> {
             name: &'a str,

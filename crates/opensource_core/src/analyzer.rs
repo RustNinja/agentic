@@ -221,7 +221,7 @@ fn load_report_with_project(
             project,
             AnalyzerMode::RustAnalyzerHirProcMacros,
             rust_analyzer::ProcMacroExpansionMode::Enabled,
-            rust_analyzer::RaFeedbackMode::Disabled,
+            rust_analyzer::RaFeedbackMode::Enabled,
         ),
     }
 }
