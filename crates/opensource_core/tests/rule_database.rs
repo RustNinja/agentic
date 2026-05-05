@@ -77,6 +77,39 @@ fn retains_renamed_local_type_and_trait_imports_used_only_by_surfaces() {
 }
 
 #[test]
+fn retains_renamed_dependency_barrel_reexport_targets() {
+    let workspace = temp_path("rule-renamed-dependency-barrel-workspace");
+    let output = temp_path("rule-renamed-dependency-barrel-output");
+    let target_dir = temp_path("rule-renamed-dependency-barrel-target");
+    write_renamed_dependency_barrel_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("renamed dependency barrel rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("dependency_barrel_rule/src/lib.rs"));
+    assert!(app.contains("SharedRecord as BarrelRecord"), "{app}");
+    assert!(app.contains("SharedMode as BarrelMode"), "{app}");
+    assert!(
+        app.contains("use super::records::{BarrelMode, BarrelRecord}"),
+        "{app}"
+    );
+    assert!(!app.contains("dead_shared_barrel"), "{app}");
+    assert!(!app.contains("dead_barrel_helper"), "{app}");
+    assert!(!app.contains("dead_helper"), "{app}");
+
+    let shared = read(output.join("shared_rule/src/lib.rs"));
+    assert!(shared.contains("pub struct SharedRecord"), "{shared}");
+    assert!(shared.contains("pub enum SharedMode"), "{shared}");
+    assert!(!shared.contains("pub struct DeadRecord"), "{shared}");
+    assert!(!shared.contains("pub fn dead_shared"), "{shared}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
 fn prunes_module_scoped_imports_used_only_by_dead_items() {
     let workspace = temp_path("rule-module-import-liveness-workspace");
     let output = temp_path("rule-module-import-liveness-output");
@@ -2077,6 +2110,105 @@ pub fn selected() -> ApiSurface {
 
 pub fn dead_api() -> DeadAlias {
     DeadAlias
+}
+"#,
+    );
+}
+
+fn write_renamed_dependency_barrel_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["dependency_barrel_rule", "shared_rule"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("dependency_barrel_rule/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "dependency_barrel_rule"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+shared_rule = {{ path = "../shared_rule" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("dependency_barrel_rule/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[allow(unused_imports)]
+mod dependency_barrel {
+    pub mod records {
+        pub use shared_rule::dead_shared as dead_shared_barrel;
+        pub use shared_rule::{SharedMode as BarrelMode, SharedRecord as BarrelRecord};
+    }
+
+    pub mod helpers {
+        use super::records::{BarrelMode, BarrelRecord};
+
+        pub fn score_record(record: BarrelRecord, mode: BarrelMode) -> u32 {
+            record.value + mode.score()
+        }
+
+        pub fn dead_helper() -> u32 {
+            99
+        }
+    }
+
+    pub use helpers::dead_helper as dead_barrel_helper;
+    pub use helpers::score_record;
+    pub use records::*;
+}
+
+#[opensourced]
+pub fn selected(value: u32) -> u32 {
+    let record = dependency_barrel::BarrelRecord { value };
+    let mode = dependency_barrel::BarrelMode::Fast(record.value);
+    dependency_barrel::score_record(record, mode)
+}
+"#,
+    );
+    write(
+        root.join("shared_rule/Cargo.toml"),
+        r#"[package]
+name = "shared_rule"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("shared_rule/src/lib.rs"),
+        r#"
+#[derive(Clone, Copy)]
+pub struct SharedRecord {
+    pub value: u32,
+}
+
+#[derive(Clone, Copy)]
+pub enum SharedMode {
+    Fast(u32),
+    Slow,
+}
+
+impl SharedMode {
+    pub fn score(&self) -> u32 {
+        match self {
+            SharedMode::Fast(value) => *value,
+            SharedMode::Slow => 1,
+        }
+    }
+}
+
+pub struct DeadRecord;
+
+pub fn dead_shared() -> u32 {
+    99
 }
 "#,
     );

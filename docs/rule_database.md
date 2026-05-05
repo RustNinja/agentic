@@ -42,6 +42,7 @@ file.
 | `import.reexport.grouped.001` | covered | Grouped public reexports prune removed names while keeping live names |
 | `import.reexport.alias_removed.001` | covered | A removed public alias is pruned even when the alias text appears as a local binding |
 | `import.renamed_surface_alias.001` | covered | Renamed local type and trait imports used only by retained struct/impl surfaces keep their resolved target items and prune dead sibling aliases |
+| `import.dependency_barrel.renamed_type.001` | covered | Renamed dependency type reexports used through a local barrel keep the concrete dependency target item while pruning dead sibling dependency aliases and helper reexports |
 | `import.module_scoped.dead_item_only.001` | covered | Module-local imports used only by pruned dead items are removed even when the same symbol is live in another module |
 | `dyn.owned.registry.001` | covered | Stored `Box<dyn Trait>` and callback aliases are hard production hazards |
 | `dyn.pruned_private_field.001` | covered | Dynamic hazards on private struct fields that are pruned from the rendered slice do not block production readiness |
