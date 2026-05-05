@@ -40,25 +40,28 @@ outgoing call hierarchy closure without requesting proc-macro/build-script
 discovery. Both paths record project-local call hierarchy edges into the same
 additive reduction hint map, then let the existing `syn` renderer prune items
 outside the retained set.
-Generation reports now expose an explicit usage classification:
-`usage.used`, `usage.unused_candidate`, `usage.blocked_by_unknown`,
-`usage.prunable`, and `usage.unknown`. `used` means reachable from selected
-roots through the current syntactic and semantic edge map; `unused_candidate`
-means indexed but unreachable in that graph; `blocked_by_unknown` means an
-unreachable item is not safe to call prunable because retained unknown surfaces
-may still reference it; `prunable` means graph-unreachable and not blocked by
-unknown surfaces; `unknown` mirrors production hazards that prevent treating the
+Generation reports now expose an explicit usage classification backed by a
+first-class `UsageDecisionIndex`: `usage.used`, `usage.unused_candidate`,
+`usage.blocked_by_unknown`, `usage.prunable`, and `usage.unknown`. `used` means
+reachable from selected roots through the current syntactic and semantic edge
+map; `unused_candidate` means indexed but unreachable from selected roots;
+`blocked_by_unknown` means an unreachable item or callable was retained because
+a scoped unknown surface explicitly mentions it or one of its retained
+dependencies; `prunable` means graph-unreachable and not blocked by unknown
+surfaces; `unknown` mirrors production hazards that prevent treating the
 classification as a complete proof. `usage.unused` remains a compatibility
 alias for `usage.unused_candidate`.
 `usage.evidence` records one explanation per indexed callable/item, including
 whether it was a selected root, whether it was reachable, and whether semantic
-or syntactic fallback evidence participated in the retained graph. The first
-blocked/prunable rule is deliberately conservative: while any unknown surface
-remains, graph-unreachable items are candidates blocked by unknown rather than
-fully prunable. The production invariant is fail-closed: treat only
-`usage.prunable` as safe to remove without more evidence, and keep/report
-anything represented by `unknown` until compiler feedback or deeper semantics
-discharges it.
+or syntactic fallback evidence participated in the retained graph. The renderer
+receives the same usage decision index used by the report, so source deletion is
+guarded by the classification instead of recomputing ad hoc liveness. Unknown
+semantic availability warnings are reported as unknowns but no longer globally
+block every unrelated unused item. Scoped macro/include/dyn/callback hazards
+promote only explicitly mentioned symbols into a pre-render retained closure.
+The production invariant is fail-closed: remove only prunable source, and
+keep/report anything blocked by unknown until compiler feedback or deeper
+semantics discharges it.
 Production proc-macro mode stays bounded by default because full Cargo
 dependency build-artifact discovery timed out on the pinned Litter corpus; set
 `OPENSOURCE_RA_PROC_MACRO_LOAD_DEPS=1` only when a workspace can afford that

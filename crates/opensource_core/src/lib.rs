@@ -153,6 +153,105 @@ pub struct UsageClassifiedItems {
     pub items: Vec<ItemId>,
 }
 
+#[derive(Debug, Clone, Default)]
+pub struct UsageDecisionIndex {
+    used_callables: BTreeSet<CallableId>,
+    used_items: BTreeSet<ItemId>,
+    blocked_by_unknown_callables: BTreeSet<CallableId>,
+    blocked_by_unknown_items: BTreeSet<ItemId>,
+    prunable_callables: BTreeSet<CallableId>,
+    prunable_items: BTreeSet<ItemId>,
+}
+
+impl UsageDecisionIndex {
+    fn from_reductions(
+        project: &Project,
+        root_reduced: &ReducedProject,
+        render_reduced: &ReducedProject,
+    ) -> Self {
+        let used_callables = root_reduced.reachable.clone();
+        let used_items = root_reduced.reachable_items.clone();
+        let blocked_by_unknown_callables = render_reduced
+            .reachable
+            .difference(&used_callables)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let blocked_by_unknown_items = render_reduced
+            .reachable_items
+            .difference(&used_items)
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let retained_callables = render_reduced.reachable.clone();
+        let retained_items = render_reduced.reachable_items.clone();
+        let prunable_callables = project
+            .functions
+            .keys()
+            .chain(project.methods.keys())
+            .filter(|id| !retained_callables.contains(*id))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+        let prunable_items = project
+            .items
+            .keys()
+            .filter(|id| !retained_items.contains(*id))
+            .cloned()
+            .collect::<BTreeSet<_>>();
+
+        Self {
+            used_callables,
+            used_items,
+            blocked_by_unknown_callables,
+            blocked_by_unknown_items,
+            prunable_callables,
+            prunable_items,
+        }
+    }
+
+    pub fn should_render_callable(&self, callable: &CallableId) -> bool {
+        !self.can_remove_callable(callable)
+    }
+
+    pub fn should_render_item(&self, item: &ItemId) -> bool {
+        !self.can_remove_item(item)
+    }
+
+    pub fn can_remove_callable(&self, callable: &CallableId) -> bool {
+        self.prunable_callables.contains(callable)
+    }
+
+    pub fn can_remove_item(&self, item: &ItemId) -> bool {
+        self.prunable_items.contains(item)
+    }
+
+    pub fn is_blocked_by_unknown_item(&self, item: &ItemId) -> bool {
+        self.blocked_by_unknown_items.contains(item)
+    }
+
+    fn used_callables(&self) -> Vec<CallableId> {
+        self.used_callables.iter().cloned().collect()
+    }
+
+    fn used_items(&self) -> Vec<ItemId> {
+        self.used_items.iter().cloned().collect()
+    }
+
+    fn blocked_by_unknown_callables(&self) -> Vec<CallableId> {
+        self.blocked_by_unknown_callables.iter().cloned().collect()
+    }
+
+    fn blocked_by_unknown_items(&self) -> Vec<ItemId> {
+        self.blocked_by_unknown_items.iter().cloned().collect()
+    }
+
+    fn prunable_callables(&self) -> Vec<CallableId> {
+        self.prunable_callables.iter().cloned().collect()
+    }
+
+    fn prunable_items(&self) -> Vec<ItemId> {
+        self.prunable_items.iter().cloned().collect()
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct UsageClassificationEvidence {
     pub callables: Vec<UsageCallableEvidence>,
@@ -249,8 +348,18 @@ pub fn generate_with_analyzer_feedback(
     };
     let reduce_ms = elapsed_ms(phase_started);
 
+    let pre_render_production =
+        pre_render_production_readiness_report(&analyzer, &project, &reduced);
+    let (render_reduced, usage_decisions) =
+        usage_guarded_render_reduction(&project, &reduced, &analyzer, &pre_render_production)?;
+
     let phase_started = Instant::now();
-    let files_written = render::write_reduced_workspace(&project, &reduced, &options.output_root)?;
+    let files_written = render::write_reduced_workspace(
+        &project,
+        &render_reduced,
+        &usage_decisions,
+        &options.output_root,
+    )?;
     let render_ms = elapsed_ms(phase_started);
     let timings = GenerateTimingReport {
         total_ms: elapsed_ms(total_started),
@@ -261,19 +370,23 @@ pub fn generate_with_analyzer_feedback(
         render_ms,
     };
 
-    let mut packages = reduced.packages.iter().cloned().collect::<Vec<_>>();
+    let mut packages = render_reduced.packages.iter().cloned().collect::<Vec<_>>();
     packages.sort();
 
-    let mut reachable = reduced.reachable.iter().cloned().collect::<Vec<_>>();
+    let mut reachable = render_reduced.reachable.iter().cloned().collect::<Vec<_>>();
     reachable.sort();
 
-    let mut reachable_items = reduced.reachable_items.iter().cloned().collect::<Vec<_>>();
+    let mut reachable_items = render_reduced
+        .reachable_items
+        .iter()
+        .cloned()
+        .collect::<Vec<_>>();
     reachable_items.sort();
     let targets = target_report(&project, &packages);
-    let source_map = source_map_report(&project, &reduced);
+    let source_map = source_map_report(&project, &render_reduced);
     let production =
-        production_readiness_report(&analyzer, &project, &reduced, &options.output_root);
-    let usage = usage_classification_report(&project, &reduced, &production);
+        production_readiness_report(&analyzer, &project, &render_reduced, &options.output_root);
+    let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
 
     Ok(GenerateReport {
         analyzer,
@@ -290,6 +403,34 @@ pub fn generate_with_analyzer_feedback(
         files_written,
         timings,
     })
+}
+
+fn usage_guarded_render_reduction(
+    project: &Project,
+    reduced: &ReducedProject,
+    analyzer: &AnalyzerReport,
+    pre_render_production: &ProductionReadinessReport,
+) -> Result<(ReducedProject, UsageDecisionIndex), Box<dyn std::error::Error>> {
+    let mut blocked_roots = deletion_blocked_extra_roots(project, reduced, pre_render_production);
+    blocked_roots.sort();
+    blocked_roots.dedup();
+
+    let mut render_reduced = if blocked_roots.is_empty() {
+        reduced.clone()
+    } else if analyzer.semantic_hints.is_empty() {
+        reduce::reduce_with_extra_roots(project, &blocked_roots)?
+    } else {
+        reduce::reduce_with_extra_roots_and_semantics(
+            project,
+            &blocked_roots,
+            &analyzer.semantic_hints,
+        )?
+    };
+    render_reduced.root = reduced.root.clone();
+    render_reduced.roots = reduced.roots.clone();
+
+    let usage_decisions = UsageDecisionIndex::from_reductions(project, reduced, &render_reduced);
+    Ok((render_reduced, usage_decisions))
 }
 
 fn target_report(project: &Project, packages: &[String]) -> Vec<GeneratedTargetReport> {
@@ -757,42 +898,235 @@ fn source_map_report(project: &model::Project, reduced: &model::ReducedProject) 
     SourceMapReport { callables, items }
 }
 
+#[derive(Default)]
+struct DeletionBlockerScope {
+    global: bool,
+    idents: BTreeSet<String>,
+}
+
+impl DeletionBlockerScope {
+    fn from_report(report: &ProductionReadinessReport) -> Self {
+        let mut scope = Self::default();
+        for hazard in &report.hazards {
+            if !hazard_blocks_unused_pruning(&hazard.code) {
+                continue;
+            }
+            if hazard.details.is_empty() {
+                scope.global = true;
+                continue;
+            }
+            for detail in &hazard.details {
+                collect_text_idents(&detail.subject, &mut scope.idents);
+                if let Some(cfg) = &detail.cfg {
+                    collect_text_idents(cfg, &mut scope.idents);
+                }
+            }
+        }
+        scope
+    }
+
+    fn covers_callable(&self, callable: &CallableId) -> bool {
+        if self.global {
+            return true;
+        }
+        callable_idents(callable)
+            .iter()
+            .any(|ident| self.idents.contains(ident))
+    }
+
+    fn covers_item(&self, item: &ItemId) -> bool {
+        if self.global {
+            return true;
+        }
+        item_idents(item)
+            .iter()
+            .any(|ident| self.idents.contains(ident))
+    }
+}
+
+fn callable_idents(callable: &CallableId) -> BTreeSet<String> {
+    match callable {
+        CallableId::Free { name, .. } => std::iter::once(name.clone()).collect(),
+        CallableId::Method { method, .. } => std::iter::once(method.clone()).collect(),
+    }
+}
+
+fn item_idents(item: &ItemId) -> BTreeSet<String> {
+    std::iter::once(item.name.clone()).collect()
+}
+
+fn collect_text_idents(text: &str, idents: &mut BTreeSet<String>) {
+    let mut current = String::new();
+    for ch in text.chars() {
+        if ch == '_' || ch.is_ascii_alphanumeric() {
+            current.push(ch);
+            continue;
+        }
+        push_text_ident(&mut current, idents);
+    }
+    push_text_ident(&mut current, idents);
+}
+
+fn push_text_ident(current: &mut String, idents: &mut BTreeSet<String>) {
+    if current
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        && !rust_keyword_or_common_macro_word(current)
+    {
+        idents.insert(std::mem::take(current));
+    } else {
+        current.clear();
+    }
+}
+
+fn rust_keyword_or_common_macro_word(ident: &str) -> bool {
+    matches!(
+        ident,
+        "as" | "async"
+            | "await"
+            | "break"
+            | "const"
+            | "continue"
+            | "crate"
+            | "dyn"
+            | "else"
+            | "enum"
+            | "extern"
+            | "false"
+            | "fn"
+            | "for"
+            | "if"
+            | "impl"
+            | "in"
+            | "let"
+            | "loop"
+            | "macro"
+            | "match"
+            | "mod"
+            | "move"
+            | "mut"
+            | "pub"
+            | "ref"
+            | "return"
+            | "self"
+            | "Self"
+            | "static"
+            | "struct"
+            | "super"
+            | "trait"
+            | "true"
+            | "type"
+            | "unsafe"
+            | "use"
+            | "where"
+            | "while"
+    )
+}
+
+fn hazard_blocks_unused_pruning(code: &str) -> bool {
+    matches!(
+        code,
+        "source_include_macros"
+            | "out_dir_source_include_macros"
+            | "custom_attribute_macros"
+            | "custom_derive_macros"
+            | "function_pointer_surfaces"
+            | "trait_object_surfaces"
+            | "dynamic_callback_boundaries"
+    )
+}
+
+fn deletion_blocked_extra_roots(
+    project: &Project,
+    reduced: &ReducedProject,
+    production: &ProductionReadinessReport,
+) -> Vec<RootId> {
+    let scope = DeletionBlockerScope::from_report(production);
+    if !scope.global && scope.idents.is_empty() {
+        return Vec::new();
+    }
+
+    let mut roots = Vec::new();
+    roots.extend(project.functions.iter().filter_map(|(id, record)| {
+        if reduced.reachable.contains(id)
+            || !reduced.packages.contains(id.package())
+            || callable_record_is_test(&record.item.attrs)
+            || !scope.covers_callable(id)
+        {
+            return None;
+        }
+        Some(RootId::Callable(id.clone()))
+    }));
+    roots.extend(project.methods.iter().filter_map(|(id, record)| {
+        if reduced.reachable.contains(id)
+            || !reduced.packages.contains(id.package())
+            || callable_record_is_test(&record.item.attrs)
+            || !scope.covers_callable(id)
+        {
+            return None;
+        }
+        Some(RootId::Callable(id.clone()))
+    }));
+    roots.extend(project.items.iter().filter_map(|(id, record)| {
+        if reduced.reachable_items.contains(id)
+            || !reduced.packages.contains(&id.package)
+            || id.kind == model::ItemKind::Mod
+            || item_record_is_test(&record.item)
+            || !scope.covers_item(id)
+        {
+            return None;
+        }
+        Some(RootId::Item(id.clone()))
+    }));
+    roots
+}
+
+fn callable_record_is_test(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attribute| {
+        reduce::is_cfg_test_attr(attribute) || reduce::is_test_attr(attribute.path())
+    })
+}
+
+fn item_record_is_test(item: &Item) -> bool {
+    callable_record_is_test(item_attrs(item))
+}
+
 fn usage_classification_report(
     project: &model::Project,
     reduced: &model::ReducedProject,
+    decisions: &UsageDecisionIndex,
     production: &ProductionReadinessReport,
 ) -> UsageClassificationReport {
-    let mut used_callables = project
-        .functions
-        .keys()
-        .chain(project.methods.keys())
-        .filter(|id| reduced.reachable.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut used_callables = decisions.used_callables();
     used_callables.sort();
 
-    let mut unused_callables = project
-        .functions
-        .keys()
-        .chain(project.methods.keys())
-        .filter(|id| !reduced.reachable.contains(*id))
+    let mut blocked_by_unknown_callables = decisions.blocked_by_unknown_callables();
+    blocked_by_unknown_callables.sort();
+
+    let mut prunable_callables = decisions.prunable_callables();
+    prunable_callables.sort();
+
+    let mut unused_callables = blocked_by_unknown_callables
+        .iter()
         .cloned()
+        .chain(prunable_callables.iter().cloned())
         .collect::<Vec<_>>();
     unused_callables.sort();
 
-    let mut used_items = project
-        .items
-        .keys()
-        .filter(|id| reduced.reachable_items.contains(*id))
-        .cloned()
-        .collect::<Vec<_>>();
+    let mut used_items = decisions.used_items();
     used_items.sort();
 
-    let mut unused_items = project
-        .items
-        .keys()
-        .filter(|id| !reduced.reachable_items.contains(*id))
+    let mut blocked_by_unknown_items = decisions.blocked_by_unknown_items();
+    blocked_by_unknown_items.sort();
+
+    let mut prunable_items = decisions.prunable_items();
+    prunable_items.sort();
+
+    let mut unused_items = blocked_by_unknown_items
+        .iter()
         .cloned()
+        .chain(prunable_items.iter().cloned())
         .collect::<Vec<_>>();
     unused_items.sort();
 
@@ -807,46 +1141,20 @@ fn usage_classification_report(
         })
         .collect::<Vec<_>>();
 
-    let has_unknown = !unknown.is_empty();
-    let mut blocked_by_unknown_callables = if has_unknown {
-        unused_callables.clone()
-    } else {
-        Vec::new()
-    };
-    let mut prunable_callables = if has_unknown {
-        Vec::new()
-    } else {
-        unused_callables.clone()
-    };
-    let mut blocked_by_unknown_items = if has_unknown {
-        unused_items.clone()
-    } else {
-        Vec::new()
-    };
-    let mut prunable_items = if has_unknown {
-        Vec::new()
-    } else {
-        unused_items.clone()
-    };
-    blocked_by_unknown_callables.sort();
-    prunable_callables.sort();
-    blocked_by_unknown_items.sort();
-    prunable_items.sort();
-
     let status = if unknown.is_empty() {
         "classified".to_string()
     } else {
         "classified_with_unknowns".to_string()
     };
-    let evidence = usage_classification_evidence(
-        project,
-        reduced,
-        &used_callables,
-        &unused_callables,
-        &used_items,
-        &unused_items,
-        unknown.len(),
-    );
+    let evidence_input = UsageEvidenceInput {
+        used_callables: &used_callables,
+        blocked_by_unknown_callables: &blocked_by_unknown_callables,
+        prunable_callables: &prunable_callables,
+        used_items: &used_items,
+        blocked_by_unknown_items: &blocked_by_unknown_items,
+        prunable_items: &prunable_items,
+    };
+    let evidence = usage_classification_evidence(project, reduced, &evidence_input);
 
     UsageClassificationReport {
         status,
@@ -890,16 +1198,22 @@ fn usage_classification_report(
     }
 }
 
+struct UsageEvidenceInput<'a> {
+    used_callables: &'a [CallableId],
+    blocked_by_unknown_callables: &'a [CallableId],
+    prunable_callables: &'a [CallableId],
+    used_items: &'a [ItemId],
+    blocked_by_unknown_items: &'a [ItemId],
+    prunable_items: &'a [ItemId],
+}
+
 fn usage_classification_evidence(
     project: &model::Project,
     reduced: &model::ReducedProject,
-    used_callables: &[CallableId],
-    unused_callables: &[CallableId],
-    used_items: &[ItemId],
-    unused_items: &[ItemId],
-    unknown_surfaces: usize,
+    input: &UsageEvidenceInput<'_>,
 ) -> UsageClassificationEvidence {
-    let has_unknown = unknown_surfaces > 0;
+    let blocked_surface_count =
+        input.blocked_by_unknown_callables.len() + input.blocked_by_unknown_items.len();
     let selected_callable_roots = reduced
         .roots
         .iter()
@@ -917,7 +1231,8 @@ fn usage_classification_evidence(
         })
         .collect::<BTreeSet<_>>();
 
-    let mut callables = used_callables
+    let mut callables = input
+        .used_callables
         .iter()
         .map(|id| {
             usage_callable_evidence(
@@ -925,26 +1240,29 @@ fn usage_classification_evidence(
                 "used",
                 selected_callable_roots.contains(id),
                 &reduced.evidence,
-                unknown_surfaces,
+                0,
             )
         })
-        .chain(unused_callables.iter().map(|id| {
+        .chain(input.blocked_by_unknown_callables.iter().map(|id| {
             usage_callable_evidence(
                 id,
-                if has_unknown {
-                    "blocked_by_unknown"
-                } else {
-                    "prunable"
-                },
+                "blocked_by_unknown",
                 false,
                 &reduced.evidence,
-                unknown_surfaces,
+                blocked_surface_count,
             )
         }))
+        .chain(
+            input
+                .prunable_callables
+                .iter()
+                .map(|id| usage_callable_evidence(id, "prunable", false, &reduced.evidence, 0)),
+        )
         .collect::<Vec<_>>();
     callables.sort_by_key(|entry| entry.id.to_string());
 
-    let mut items = used_items
+    let mut items = input
+        .used_items
         .iter()
         .map(|id| {
             usage_item_evidence(
@@ -952,22 +1270,24 @@ fn usage_classification_evidence(
                 "used",
                 selected_item_roots.contains(id),
                 &reduced.evidence,
-                unknown_surfaces,
+                0,
             )
         })
-        .chain(unused_items.iter().map(|id| {
+        .chain(input.blocked_by_unknown_items.iter().map(|id| {
             usage_item_evidence(
                 id,
-                if has_unknown {
-                    "blocked_by_unknown"
-                } else {
-                    "prunable"
-                },
+                "blocked_by_unknown",
                 false,
                 &reduced.evidence,
-                unknown_surfaces,
+                blocked_surface_count,
             )
         }))
+        .chain(
+            input
+                .prunable_items
+                .iter()
+                .map(|id| usage_item_evidence(id, "prunable", false, &reduced.evidence, 0)),
+        )
         .collect::<Vec<_>>();
     items.sort_by_key(|entry| entry.id.to_string());
 
@@ -1091,9 +1411,28 @@ fn production_readiness_report(
     reduced: &ReducedProject,
     output_root: &Path,
 ) -> ProductionReadinessReport {
+    production_readiness_report_inner(analyzer, project, reduced, Some(output_root))
+}
+
+fn pre_render_production_readiness_report(
+    analyzer: &AnalyzerReport,
+    project: &Project,
+    reduced: &ReducedProject,
+) -> ProductionReadinessReport {
+    production_readiness_report_inner(analyzer, project, reduced, None)
+}
+
+fn production_readiness_report_inner(
+    analyzer: &AnalyzerReport,
+    project: &Project,
+    reduced: &ReducedProject,
+    output_root: Option<&Path>,
+) -> ProductionReadinessReport {
     let mut hazards = Vec::new();
     add_workspace_production_hazards(project, reduced, &mut hazards);
-    add_generated_support_package_production_hazards(output_root, &mut hazards);
+    if let Some(output_root) = output_root {
+        add_generated_support_package_production_hazards(output_root, &mut hazards);
+    }
     add_cfg_gated_root_production_hazards(project, reduced, &mut hazards);
     add_syntactic_production_hazards(project, reduced, &mut hazards);
     add_reduction_evidence_production_hazards(reduced, &mut hazards);
@@ -3281,7 +3620,7 @@ impl SyntacticHazardVisitor {
             attribute,
             format!(
                 "#[{}]",
-                format_token_stream(&attribute.path().to_token_stream())
+                format_token_stream(&attribute.meta.to_token_stream())
             ),
         )
     }
@@ -4306,11 +4645,13 @@ mod tests {
     use super::generate_with_analyzer;
     use super::{
         add_semantic_inventory_hazard, default_feature_closure, generate,
-        generate_with_analyzer_feedback, semantic_hazard_metrics, usage_evidence_reason,
-        write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
-        GenerateOptions, SemanticFileReport, SemanticHazardScope, SemanticReductionHints,
-        SemanticReport,
+        generate_with_analyzer_feedback, production_hazard_with_details,
+        production_readiness_status, semantic_hazard_metrics, usage_classification_report,
+        usage_evidence_reason, usage_guarded_render_reduction, write_generate_report, AnalyzerMode,
+        AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions, ProductionHazardDetail,
+        SemanticFileReport, SemanticHazardScope, SemanticReductionHints, SemanticReport,
     };
+    use super::{manifest, parse, reduce, render};
 
     #[test]
     fn reduces_fixture_to_reachable_callables() {
@@ -4403,10 +4744,10 @@ mod tests {
             .map(ToString::to_string)
             .collect::<BTreeSet<_>>();
         assert_eq!(usage_unused_callables, usage_unused_candidate_callables);
-        assert!(usage_blocked_callables.contains("b::unused_public"));
+        assert!(usage_blocked_callables.is_empty());
         assert!(
-            usage_prunable_callables.is_empty(),
-            "unknown semantic surfaces should block graph-unreachable callables from being reported as prunable",
+            usage_prunable_callables.contains("b::unused_public"),
+            "semantic inventory warnings alone should not block a graph-unreachable callable from being reported as prunable",
         );
         assert!(
             usage_used_callables.is_disjoint(&usage_unused_callables),
@@ -4420,11 +4761,11 @@ mod tests {
             report.usage.summary.unused_candidate_callables,
             report.usage.summary.unused_callables,
         );
+        assert_eq!(report.usage.summary.blocked_by_unknown_callables, 0);
         assert_eq!(
-            report.usage.summary.blocked_by_unknown_callables,
+            report.usage.summary.prunable_callables,
             report.usage.summary.unused_callables,
         );
-        assert_eq!(report.usage.summary.prunable_callables, 0);
         let root_evidence = report
             .usage
             .evidence
@@ -4458,10 +4799,10 @@ mod tests {
             .iter()
             .find(|entry| entry.id.to_string() == "b::unused_public")
             .expect("unused callable should have usage evidence");
-        assert_eq!(unused_evidence.classification, "blocked_by_unknown");
+        assert_eq!(unused_evidence.classification, "prunable");
         assert!(unused_evidence
             .reason
-            .contains("retained unknown surfaces may still reference it"));
+            .contains("not blocked by retained unknown surfaces"));
         assert!(unused_evidence
             .evidence
             .iter()
@@ -4469,7 +4810,7 @@ mod tests {
         assert!(unused_evidence
             .evidence
             .iter()
-            .any(|detail| detail == "prunable=false"));
+            .any(|detail| detail == "prunable=true"));
         assert_eq!(
             report.usage.evidence.callables.len(),
             report.usage.summary.indexed_callables,
@@ -4522,10 +4863,15 @@ mod tests {
             .iter()
             .map(ToString::to_string)
             .collect::<BTreeSet<_>>();
-        assert!(usage_blocked_items.contains("d::UnusedEnum(Enum)"));
+        assert!(usage_blocked_items.is_empty());
         assert!(
-            report.usage.prunable.items.is_empty(),
-            "unknown semantic surfaces should block graph-unreachable items from being reported as prunable",
+            report
+                .usage
+                .prunable
+                .items
+                .iter()
+                .any(|item| item.to_string() == "d::UnusedEnum(Enum)"),
+            "semantic inventory warnings alone should not block a graph-unreachable item from being reported as prunable",
         );
         assert!(
             usage_used_items.is_disjoint(&usage_unused_items),
@@ -4535,11 +4881,11 @@ mod tests {
             report.usage.summary.indexed_items,
             report.usage.summary.used_items + report.usage.summary.unused_items,
         );
+        assert_eq!(report.usage.summary.blocked_by_unknown_items, 0);
         assert_eq!(
-            report.usage.summary.blocked_by_unknown_items,
+            report.usage.summary.prunable_items,
             report.usage.summary.unused_items,
         );
-        assert_eq!(report.usage.summary.prunable_items, 0);
         let item_evidence = report
             .usage
             .evidence
@@ -4558,7 +4904,7 @@ mod tests {
             .iter()
             .find(|entry| entry.id.to_string() == "d::UnusedEnum(Enum)")
             .expect("unused item should have usage evidence");
-        assert_eq!(unused_item_evidence.classification, "blocked_by_unknown");
+        assert_eq!(unused_item_evidence.classification, "prunable");
         assert_eq!(
             report.usage.evidence.items.len(),
             report.usage.summary.indexed_items,
@@ -4611,6 +4957,135 @@ mod tests {
             .any(|detail| detail == "unused_candidate=true"));
         assert!(details.iter().any(|detail| detail == "prunable=true"));
         assert!(details.iter().any(|detail| detail == "unknown_surfaces=0"));
+    }
+
+    #[test]
+    fn usage_decision_index_blocks_scoped_unused_candidates_from_pruning() {
+        let root = temp_output("usage-decision-blocker-source");
+        let output = temp_output("usage-decision-blocker-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub mod risky;
+pub mod safe;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    risky::selected()
+}
+"#,
+        );
+        write(
+            root.join("app/src/risky.rs"),
+            r#"pub fn selected() -> i32 {
+    1
+}
+
+pub fn maybe_macro_helper() -> i32 {
+    private_leaf()
+}
+
+fn private_leaf() -> i32 {
+    2
+}
+"#,
+        );
+        write(
+            root.join("app/src/safe.rs"),
+            r#"pub fn unrelated_dead_code() -> i32 {
+    99
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::Syn,
+            loaded: true,
+            engine: "syn".to_string(),
+            notes: Vec::new(),
+            semantic: None,
+            semantic_hints: SemanticReductionHints::default(),
+        };
+        let blocker = production_readiness_status(vec![production_hazard_with_details(
+            "custom_attribute_macros",
+            "warning",
+            "synthetic retained custom attribute may reference helper",
+            vec![ProductionHazardDetail {
+                subject: "app::risky: #[custom_attr::decorate(maybe_macro_helper)]".to_string(),
+                package: Some("app".to_string()),
+                module_path: Some("risky".to_string()),
+                file: None,
+                start_line: None,
+                cfg: None,
+                suggested_cargo_args: Vec::new(),
+            }],
+        )]);
+        let (render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &blocker)
+                .expect("usage-guarded render reduction should work");
+        render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
+            .expect("render should succeed");
+        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &blocker);
+
+        let used_callables = usage
+            .used
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !used_callables.contains("app::risky::maybe_macro_helper"),
+            "synthetic blocker must not relabel the candidate as used: {used_callables:?}",
+        );
+        let blocked_callables = usage
+            .blocked_by_unknown
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            blocked_callables.contains("app::risky::maybe_macro_helper"),
+            "unused sibling named by a retained unknown macro surface should be retained as blocked_by_unknown: {blocked_callables:?}",
+        );
+        assert!(
+            blocked_callables.contains("app::risky::private_leaf"),
+            "dependencies of a blocked callable should also be retained as blocked_by_unknown: {blocked_callables:?}",
+        );
+        let prunable_callables = usage
+            .prunable
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            prunable_callables.contains("app::safe::unrelated_dead_code"),
+            "unused code outside the unknown surface scope should remain prunable: {prunable_callables:?}",
+        );
+
+        let risky_source = fs::read_to_string(output.join("app/src/risky.rs")).unwrap();
+        assert!(risky_source.contains("maybe_macro_helper"));
+        assert!(risky_source.contains("private_leaf"));
+        assert!(
+            !output.join("app/src/safe.rs").exists(),
+            "prunable module outside the unknown surface scope should not be rendered",
+        );
     }
 
     #[test]
@@ -4724,16 +5199,16 @@ theme = []
         assert!(value["usage"]["blocked_by_unknown"]["callables"]
             .as_array()
             .unwrap()
-            .iter()
-            .any(|callable| callable == "a::internal_entry"));
+            .is_empty());
         assert!(value["usage"]["prunable"]["callables"]
             .as_array()
             .unwrap()
-            .is_empty());
+            .iter()
+            .any(|callable| callable == "a::internal_entry"));
         assert_eq!(
             value["usage"]["summary"]["prunable_callables"].as_u64(),
-            Some(0),
-            "unknown surfaces should keep graph-unreachable callables out of the prunable bucket",
+            Some(report.usage.summary.unused_callables as u64),
+            "semantic analyzer availability warnings alone should not block graph-unreachable callables from prunable",
         );
         assert!(value["usage"]["unknown"]
             .as_array()
@@ -4755,7 +5230,7 @@ theme = []
             .iter()
             .find(|entry| entry["id"] == "a::internal_entry")
             .expect("unused callable usage evidence should be serialized");
-        assert_eq!(unused_evidence["classification"], "blocked_by_unknown");
+        assert_eq!(unused_evidence["classification"], "prunable");
         assert!(unused_evidence["evidence"]
             .as_array()
             .unwrap()
@@ -4765,7 +5240,7 @@ theme = []
             .as_array()
             .unwrap()
             .iter()
-            .any(|detail| detail == "prunable=false"));
+            .any(|detail| detail == "prunable=true"));
     }
 
     #[test]

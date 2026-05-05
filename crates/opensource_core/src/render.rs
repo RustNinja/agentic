@@ -20,12 +20,14 @@ use crate::{
     manifest::Package,
     model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId, SourceFile},
     reduce::{is_cfg_test_attr, is_opensourced_attr, is_test_attr},
+    UsageDecisionIndex,
 };
 
 const OUTPUT_MARKER: &str = ".slicers-output";
 const SUPPORT_PACKAGE_DIR: &str = "support";
 
 struct RenderPlan {
+    usage: UsageDecisionIndex,
     reachable_items: BTreeSet<ItemId>,
     callable_idents_by_package: BTreeMap<String, BTreeSet<String>>,
     mentions: ReachableMentionIndex,
@@ -33,7 +35,7 @@ struct RenderPlan {
 }
 
 impl RenderPlan {
-    fn build(project: &Project, reduced: &ReducedProject) -> Self {
+    fn build(project: &Project, reduced: &ReducedProject, usage: &UsageDecisionIndex) -> Self {
         let mut reachable_items = BTreeSet::new();
         let mut rendered_item_idents = BTreeSet::new();
         let callable_idents = reachable_reduced_callable_ident_index(project, reduced);
@@ -94,6 +96,7 @@ impl RenderPlan {
         }
 
         Self {
+            usage: usage.clone(),
             mentions: ReachableMentionIndex::build(project, reduced, &reachable_items),
             reachable_items,
             callable_idents_by_package: callable_idents.by_package,
@@ -101,8 +104,20 @@ impl RenderPlan {
         }
     }
 
+    fn callable_should_render(&self, callable: &CallableId) -> bool {
+        self.usage.should_render_callable(callable)
+    }
+
     fn item_should_render(&self, item: &ItemId) -> bool {
-        self.reachable_items.contains(item)
+        self.reachable_items.contains(item) || self.usage.is_blocked_by_unknown_item(item)
+    }
+
+    fn can_remove_callable(&self, callable: &CallableId) -> bool {
+        self.usage.can_remove_callable(callable)
+    }
+
+    fn can_remove_item(&self, item: &ItemId) -> bool {
+        !self.item_should_render(item)
     }
 
     fn package_mentions_ident(&self, package: &str, ident: &str) -> bool {
@@ -310,12 +325,13 @@ fn insert_render_plan_item(
 pub fn write_reduced_workspace(
     project: &Project,
     reduced: &ReducedProject,
+    usage: &UsageDecisionIndex,
     output_root: &Path,
 ) -> Result<usize, Box<dyn std::error::Error>> {
     prepare_output_root(&project.workspace.root, output_root)?;
     write_output_marker(output_root)?;
 
-    let render_plan = RenderPlan::build(project, reduced);
+    let render_plan = RenderPlan::build(project, reduced, usage);
     let package_usages = package_source_usages(project, reduced, &render_plan);
     let support_packages = SupportPackagePlan::build(project, reduced, &package_usages)?;
 
@@ -5929,7 +5945,7 @@ fn transform_items(
                     module_path: module_path.to_vec(),
                     name: function.sig.ident.to_string(),
                 };
-                reduced.reachable.contains(&id).then(|| {
+                render_plan.callable_should_render(&id).then(|| {
                     let mut function = function.clone();
                     strip_opensourced_attrs(&mut function.attrs);
                     if !preserve_uniffi_surface {
@@ -6169,7 +6185,7 @@ fn transform_items(
                             trait_input_type_paths: trait_input_type_paths.clone(),
                             method: method.sig.ident.to_string(),
                         };
-                        if reduced.reachable.contains(&id)
+                        if render_plan.callable_should_render(&id)
                             || retained_impl_surfaces_call_inherent_associated_function(
                                 project,
                                 reduced,
@@ -10385,13 +10401,13 @@ fn local_use_target_resolves_to_removed_symbol(
     target_path: &[String],
 ) -> bool {
     if let Some(callable) = find_use_function(project, target_package, target_path) {
-        return !reduced.reachable.contains(&callable);
+        return render_plan.can_remove_callable(&callable);
     }
     if let Some(item) = find_use_item(project, target_package, target_path) {
         if item.kind == ItemKind::Mod {
             let mut module_path = item.module_path.clone();
             module_path.push(item.name.clone());
-            return !render_plan.item_should_render(&item)
+            return render_plan.can_remove_item(&item)
                 && !module_should_render(
                     project,
                     reduced,
@@ -10400,7 +10416,7 @@ fn local_use_target_resolves_to_removed_symbol(
                     &module_path,
                 );
         }
-        return !render_plan.item_should_render(&item);
+        return render_plan.can_remove_item(&item);
     }
     false
 }
@@ -10568,7 +10584,7 @@ fn use_target_should_drop(
         if !is_public_use && !leaf_is_used_in_module {
             return true;
         }
-        return !reduced.reachable.contains(&callable);
+        return render_plan.can_remove_callable(&callable);
     }
     if let Some(item) = find_use_item(project, &target_package, &target_path) {
         if !is_public_use && item.kind == ItemKind::Trait && !leaf_is_used_in_module {
@@ -10587,7 +10603,7 @@ fn use_target_should_drop(
         if (is_public_use || leaf_is_used_in_module) && item.kind == ItemKind::Mod {
             return false;
         }
-        return !render_plan.item_should_render(&item);
+        return render_plan.can_remove_item(&item);
     }
     if let Some((alias_package, alias_path)) =
         resolve_reexported_use_path(project, &target_package, &target_path)
@@ -10596,7 +10612,7 @@ fn use_target_should_drop(
             if !is_public_use && !leaf_is_used_in_module {
                 return true;
             }
-            return !reduced.reachable.contains(&callable);
+            return render_plan.can_remove_callable(&callable);
         }
         if let Some(item) = find_use_item(project, &alias_package, &alias_path) {
             if !is_public_use && item.kind == ItemKind::Trait && !leaf_is_used_in_module {
@@ -10615,7 +10631,7 @@ fn use_target_should_drop(
             if (is_public_use || leaf_is_used_in_module) && item.kind == ItemKind::Mod {
                 return false;
             }
-            return !render_plan.item_should_render(&item);
+            return render_plan.can_remove_item(&item);
         }
         return project_has_module(project, &alias_package, &alias_path)
             && !module_should_render(project, reduced, render_plan, &alias_package, &alias_path);
