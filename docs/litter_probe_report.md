@@ -117,6 +117,9 @@ not slicer failures.
   alias/code-name roots. Live aliases stay in the support facade, dead aliases
   are pruned, and the downstream copied dependency is restricted to the concrete
   original dependency symbols that remain.
+- Restricted copied support rendering now drops impl blocks for removed local
+  self types. This keeps live type methods intact while preventing dead support
+  impls from reintroducing removed types or redundant helper surfaces.
 - RA HIR helps, but the accepted heavy slices still show many unresolved
   method/path warning surfaces before feedback discharge. The next generic work
   should reduce support-package copying and improve semantic precision around

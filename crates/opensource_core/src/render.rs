@@ -2399,6 +2399,7 @@ fn transform_restricted_support_file(
     syntax: &syn::File,
     live_set: &SupportLiveSet,
 ) -> syn::File {
+    let named_items = support_named_item_names(&syntax.items);
     let live_usage = support_live_item_usage(syntax, live_set);
     let public_use_names = live_set
         .public_exports
@@ -2423,6 +2424,9 @@ fn transform_restricted_support_file(
                 Some(Item::Use(item_use))
             }
             Item::Use(_) | Item::ExternCrate(_) => Some(item.clone()),
+            Item::Impl(item_impl) => {
+                support_impl_should_render(item_impl, &named_items, live_set).then(|| item.clone())
+            }
             _ => {
                 if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
                     Some(item.clone())
@@ -2515,6 +2519,45 @@ fn support_live_set_exposes_names(
             .public_exports
             .iter()
             .any(|name| names.contains(name))
+}
+
+fn support_impl_should_render(
+    item_impl: &syn::ItemImpl,
+    named_items: &BTreeMap<String, Item>,
+    live_set: &SupportLiveSet,
+) -> bool {
+    if let Some(self_name) = support_type_path_leaf(&item_impl.self_ty) {
+        if named_items.contains_key(&self_name) {
+            return live_set.item_names.contains(&self_name)
+                || live_set.public_exports.contains(&self_name);
+        }
+    }
+
+    if let Some((_, trait_path, _)) = &item_impl.trait_ {
+        if let Some(trait_name) = trait_path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        {
+            if named_items.contains_key(&trait_name) {
+                return live_set.item_names.contains(&trait_name)
+                    || live_set.public_exports.contains(&trait_name);
+            }
+        }
+    }
+
+    true
+}
+
+fn support_type_path_leaf(ty: &Type) -> Option<String> {
+    let Type::Path(type_path) = ty else {
+        return None;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
 }
 
 fn support_named_item_names(items: &[Item]) -> BTreeMap<String, Item> {

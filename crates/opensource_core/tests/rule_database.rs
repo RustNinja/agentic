@@ -4663,6 +4663,12 @@ pub struct FacadeDead {
     pub value: String,
 }
 
+impl FacadeDead {
+    pub fn dead_value(&self) -> &str {
+        &self.value
+    }
+}
+
 pub fn dead_inner(value: &str) -> String {
     format!("{value}{}", dead_leaf::suffix())
 }
@@ -4757,6 +4763,12 @@ impl LeafLive {
 
 pub struct LeafDead {
     label: String,
+}
+
+impl LeafDead {
+    pub fn label(&self) -> &str {
+        &self.label
+    }
 }
 
 pub fn dead_suffix() -> &'static str {
