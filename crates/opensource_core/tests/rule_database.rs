@@ -2709,6 +2709,290 @@ fn prunes_private_child_wildcard_with_selected_public_reexports() {
 }
 
 #[test]
+fn prunes_nested_private_facade_reexport_chains_without_dead_siblings() {
+    let workspace = temp_path("rule-nested-private-facade-workspace");
+    let output = temp_path("rule-nested-private-facade-output");
+    let target_dir = temp_path("rule-nested-private-facade-target");
+    write_nested_private_facade_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("nested private facade rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("nested_private_facade_rule/src/lib.rs"));
+    assert!(
+        lib.contains("pub use crate::protocol::{live_factory, LiveClient}"),
+        "{lib}"
+    );
+    assert!(
+        lib.contains("pub use inner::{live_factory, LiveClient}"),
+        "{lib}"
+    );
+    assert!(lib.contains("pub struct LiveClient"), "{lib}");
+    assert!(!lib.contains("DeadClient"), "{lib}");
+    assert!(!lib.contains("dead_factory"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_uniffi_enum_struct_variant_payload_surfaces() {
+    let workspace = temp_path("rule-uniffi-struct-enum-workspace");
+    let output = temp_path("rule-uniffi-struct-enum-output");
+    let target_dir = temp_path("rule-uniffi-struct-enum-target");
+    write_uniffi_struct_variant_enum_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("uniffi struct variant enum rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("uniffi_struct_enum_rule/src/lib.rs"));
+    assert!(lib.contains("Started {"), "{lib}");
+    assert!(lib.contains("Failed {"), "{lib}");
+    assert!(lib.contains("pub struct SessionId"), "{lib}");
+    assert!(lib.contains("pub struct StartConfig"), "{lib}");
+    assert!(lib.contains("pub enum ClientError"), "{lib}");
+    assert!(!lib.contains("DeadEvent"), "{lib}");
+    assert!(!lib.contains("DeadPayload"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_nested_discriminated_serde_response_envelopes() {
+    let workspace = temp_path("rule-serde-response-envelope-workspace");
+    let output = temp_path("rule-serde-response-envelope-output");
+    let target_dir = temp_path("rule-serde-response-envelope-target");
+    write_serde_response_envelope_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde response envelope rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_response_envelope_rule/src/lib.rs"));
+    assert!(
+        lib.contains("#[serde(tag = \"kind\", content = \"payload\")]"),
+        "{lib}"
+    );
+    assert!(lib.contains("#[serde(tag = \"event\")]"), "{lib}");
+    assert!(lib.contains("pub struct TokenPayload"), "{lib}");
+    assert!(lib.contains("pub struct ErrorPayload"), "{lib}");
+    assert!(!lib.contains("DeadEnvelope"), "{lib}");
+    assert!(!lib.contains("DeadPayload"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_multiple_deserialize_with_helper_paths() {
+    let workspace = temp_path("rule-serde-multi-helper-workspace");
+    let output = temp_path("rule-serde-multi-helper-output");
+    let target_dir = temp_path("rule-serde-multi-helper-target");
+    write_serde_multi_helper_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("serde multi-helper rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("serde_multi_helper_rule/src/lib.rs"));
+    assert!(
+        lib.contains("deserialize_with = \"helpers::de_count\""),
+        "{lib}"
+    );
+    assert!(
+        lib.contains("deserialize_with = \"helpers::de_tags\""),
+        "{lib}"
+    );
+    assert!(lib.contains("fn de_count"), "{lib}");
+    assert!(lib.contains("fn de_tags"), "{lib}");
+    assert!(!lib.contains("dead_helper"), "{lib}");
+    assert!(!lib.contains("DeadWire"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_generic_try_into_error_bridge_dependencies() {
+    let workspace = temp_path("rule-generic-try-into-bridge-workspace");
+    let output = temp_path("rule-generic-try-into-bridge-output");
+    let target_dir = temp_path("rule-generic-try-into-bridge-target");
+    write_generic_try_into_bridge_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("generic try_into bridge rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("generic_try_into_bridge_rule/src/lib.rs"));
+    assert!(lib.contains("fn bridge<T>(input: T)"), "{lib}");
+    assert!(
+        lib.contains("impl TryFrom<WireRequest> for InternalRequest"),
+        "{lib}"
+    );
+    assert!(lib.contains("impl From<WireError> for ApiError"), "{lib}");
+    assert!(
+        lib.contains("impl From<InternalRequest> for PublicRequest"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadWireRequest"), "{lib}");
+    assert!(!lib.contains("DeadInternalRequest"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_error_wire_fallback_conversion_dependencies() {
+    let workspace = temp_path("rule-error-wire-fallback-workspace");
+    let output = temp_path("rule-error-wire-fallback-output");
+    let target_dir = temp_path("rule-error-wire-fallback-target");
+    write_error_wire_fallback_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("error wire fallback rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("error_wire_fallback_rule/src/lib.rs"));
+    assert!(lib.contains("Unknown {"), "{lib}");
+    assert!(lib.contains("impl From<WireError> for ApiError"), "{lib}");
+    assert!(
+        lib.contains("parse_wire(value).map_err(ApiError::from)"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadError"), "{lib}");
+    assert!(!lib.contains("dead_parse"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn copies_concat_include_str_array_assets_only() {
+    let workspace = temp_path("rule-concat-include-array-workspace");
+    let output = temp_path("rule-concat-include-array-output");
+    let target_dir = temp_path("rule-concat-include-array-target");
+    write_concat_include_array_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("concat include array rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("concat_include_array_rule/src/lib.rs"));
+    assert!(
+        lib.contains("include_str!(concat!(\"frames/\", \"intro.txt\"))"),
+        "{lib}"
+    );
+    assert!(
+        lib.contains("include_str!(concat!(\"frames/\", \"outro.txt\"))"),
+        "{lib}"
+    );
+    assert!(!lib.contains("dead.txt"), "{lib}");
+    assert!(output
+        .join("concat_include_array_rule/src/frames/intro.txt")
+        .exists());
+    assert!(output
+        .join("concat_include_array_rule/src/frames/outro.txt")
+        .exists());
+    assert!(!output
+        .join("concat_include_array_rule/src/frames/dead.txt")
+        .exists());
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn copies_once_lock_struct_initializer_include_asset_only() {
+    let workspace = temp_path("rule-once-lock-include-workspace");
+    let output = temp_path("rule-once-lock-include-output");
+    let target_dir = temp_path("rule-once-lock-include-target");
+    write_once_lock_include_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("once lock include rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("once_lock_include_rule/src/lib.rs"));
+    assert!(lib.contains("OnceLock<Schema>"), "{lib}");
+    assert!(lib.contains("include_str!(\"schema/live.json\")"), "{lib}");
+    assert!(!lib.contains("schema/dead.json"), "{lib}");
+    assert!(output
+        .join("once_lock_include_rule/src/schema/live.json")
+        .exists());
+    assert!(!output
+        .join("once_lock_include_rule/src/schema/dead.json")
+        .exists());
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_method_facade_trait_object_boundary_as_warning() {
+    let workspace = temp_path("rule-method-facade-dyn-boundary-workspace");
+    let output = temp_path("rule-method-facade-dyn-boundary-output");
+    let target_dir = temp_path("rule-method-facade-dyn-boundary-target");
+    write_method_facade_dyn_boundary_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("method facade dyn boundary rule should reduce");
+
+    assert_eq!(report.production.status, "requires_feedback");
+    assert_no_error_hazards(&report.production.hazards);
+    assert!(report.production.hazards.iter().any(|hazard| {
+        hazard.code == "dynamic_callback_boundaries"
+            && hazard
+                .details
+                .iter()
+                .any(|detail| detail.subject.contains("& dyn Boundary"))
+    }));
+    let lib = read(output.join("method_facade_dyn_boundary_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Boundary"), "{lib}");
+    assert!(
+        lib.contains("pub fn selected(handler: &dyn Boundary)"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadBoundary"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn prunes_local_facade_glob_reexports_to_selected_symbols() {
+    let workspace = temp_path("rule-local-facade-glob-workspace");
+    let output = temp_path("rule-local-facade-glob-output");
+    let target_dir = temp_path("rule-local-facade-glob-target");
+    write_local_facade_glob_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("local facade glob rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("local_facade_glob_rule/src/lib.rs"));
+    assert!(lib.contains("pub use api::*"), "{lib}");
+    assert!(lib.contains("pub fn selected_value"), "{lib}");
+    assert!(!lib.contains("dead_value"), "{lib}");
+    assert!(!lib.contains("DeadDto"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn flags_retained_source_include_macros_as_production_blockers() {
     let workspace = temp_path("rule-source-include-workspace");
     let output = temp_path("rule-source-include-output");
@@ -5801,6 +6085,476 @@ pub use dead::dead_helper;
 #[opensourced]
 pub fn selected() -> u32 {
     selected_helper()
+}
+"#,
+    );
+}
+
+fn write_nested_private_facade_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "nested_private_facade_rule",
+        r#"use opensourced::opensourced;
+
+mod protocol {
+    mod inner {
+        pub struct LiveClient {
+            pub id: String,
+        }
+
+        pub struct DeadClient {
+            pub id: String,
+        }
+
+        impl LiveClient {
+            pub fn new(id: String) -> Self {
+                Self { id }
+            }
+        }
+
+        pub fn live_factory(id: String) -> LiveClient {
+            LiveClient::new(id)
+        }
+
+        pub fn dead_factory(id: String) -> DeadClient {
+            DeadClient { id }
+        }
+    }
+
+    pub use inner::{dead_factory, DeadClient, live_factory, LiveClient};
+}
+
+pub mod facade {
+    pub use crate::protocol::{dead_factory, DeadClient, live_factory, LiveClient};
+}
+
+#[opensourced]
+pub fn selected(id: String) -> facade::LiveClient {
+    facade::live_factory(id)
+}
+"#,
+    );
+}
+
+fn write_uniffi_struct_variant_enum_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "uniffi_struct_enum_rule",
+        r#"use opensourced::opensourced;
+
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct SessionId {
+    pub value: String,
+}
+
+#[cfg_attr(feature = "ffi", derive(uniffi::Record))]
+pub struct StartConfig {
+    pub id: SessionId,
+}
+
+#[cfg_attr(feature = "ffi", derive(uniffi::Error))]
+pub enum ClientError {
+    Offline,
+}
+
+#[cfg_attr(feature = "ffi", derive(uniffi::Enum))]
+pub enum ClientEvent {
+    Started { config: StartConfig },
+    Failed { error: ClientError },
+}
+
+pub enum DeadEvent {
+    Dead { payload: DeadPayload },
+}
+
+pub struct DeadPayload {
+    pub value: String,
+}
+
+#[opensourced]
+pub fn selected(config: StartConfig) -> ClientEvent {
+    ClientEvent::Started { config }
+}
+"#,
+    );
+}
+
+fn write_serde_response_envelope_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_response_envelope_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", content = "payload")]
+pub enum Envelope {
+    Event(ResponseEvent),
+    Error(ErrorPayload),
+}
+
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "event")]
+pub enum ResponseEvent {
+    Token { token: TokenPayload },
+    Done,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct TokenPayload {
+    pub text: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct ErrorPayload {
+    pub message: String,
+}
+
+#[derive(Serialize, Deserialize)]
+pub enum DeadEnvelope {
+    Dead(DeadPayload),
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct DeadPayload {
+    pub value: String,
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> serde_json::Result<Envelope> {
+    serde_json::from_str::<Envelope>(input)
+}
+"#,
+    );
+}
+
+fn write_serde_multi_helper_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "serde_multi_helper_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+        r#"use opensourced::opensourced;
+use serde::Deserialize;
+
+#[derive(Deserialize)]
+struct Wire {
+    #[serde(default, deserialize_with = "helpers::de_count")]
+    count: usize,
+    #[serde(default, deserialize_with = "helpers::de_tags")]
+    tags: Vec<String>,
+}
+
+#[derive(Deserialize)]
+struct DeadWire {
+    value: String,
+}
+
+mod helpers {
+    use serde::{Deserialize, Deserializer};
+
+    pub fn de_count<'de, D>(deserializer: D) -> Result<usize, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        usize::deserialize(deserializer)
+    }
+
+    pub fn de_tags<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        Vec::<String>::deserialize(deserializer)
+    }
+
+    pub fn dead_helper() -> usize {
+        99
+    }
+}
+
+#[opensourced]
+pub fn selected(input: &str) -> usize {
+    serde_json::from_str::<Wire>(input)
+        .ok()
+        .map(|wire| wire.count + wire.tags.len())
+        .unwrap_or_default()
+}
+"#,
+    );
+}
+
+fn write_generic_try_into_bridge_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "generic_try_into_bridge_rule",
+        r#"use opensourced::opensourced;
+use std::convert::{TryFrom, TryInto};
+
+pub enum WireError {
+    Bad,
+}
+
+pub enum ApiError {
+    Wire(WireError),
+}
+
+impl From<WireError> for ApiError {
+    fn from(error: WireError) -> Self {
+        Self::Wire(error)
+    }
+}
+
+pub struct WireRequest {
+    pub value: String,
+}
+
+pub struct InternalRequest {
+    value: String,
+}
+
+pub struct PublicRequest {
+    pub value: String,
+}
+
+pub struct DeadWireRequest {
+    pub value: String,
+}
+
+pub struct DeadInternalRequest {
+    value: String,
+}
+
+impl TryFrom<WireRequest> for InternalRequest {
+    type Error = WireError;
+
+    fn try_from(value: WireRequest) -> Result<Self, Self::Error> {
+        if value.value.is_empty() {
+            Err(WireError::Bad)
+        } else {
+            Ok(Self { value: value.value })
+        }
+    }
+}
+
+impl TryFrom<DeadWireRequest> for DeadInternalRequest {
+    type Error = WireError;
+
+    fn try_from(value: DeadWireRequest) -> Result<Self, Self::Error> {
+        Ok(Self { value: value.value })
+    }
+}
+
+impl From<InternalRequest> for PublicRequest {
+    fn from(value: InternalRequest) -> Self {
+        Self { value: value.value }
+    }
+}
+
+fn bridge<T>(input: T) -> Result<PublicRequest, ApiError>
+where
+    T: TryInto<InternalRequest, Error = WireError>,
+{
+    let internal = input.try_into()?;
+    Ok(internal.into())
+}
+
+#[opensourced]
+pub fn selected(input: WireRequest) -> Result<PublicRequest, ApiError> {
+    bridge(input)
+}
+"#,
+    );
+}
+
+fn write_error_wire_fallback_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "error_wire_fallback_rule",
+        r#"use opensourced::opensourced;
+
+pub enum WireError {
+    Timeout,
+    Unknown { code: String, message: String },
+}
+
+pub enum ApiError {
+    Wire(WireError),
+}
+
+impl From<WireError> for ApiError {
+    fn from(error: WireError) -> Self {
+        Self::Wire(error)
+    }
+}
+
+pub enum DeadError {
+    Dead,
+}
+
+fn parse_wire(value: &str) -> Result<String, WireError> {
+    match value {
+        "timeout" => Err(WireError::Timeout),
+        "" => Err(WireError::Unknown {
+            code: "empty".to_string(),
+            message: "empty input".to_string(),
+        }),
+        other => Ok(other.to_string()),
+    }
+}
+
+fn dead_parse() -> Result<String, DeadError> {
+    Err(DeadError::Dead)
+}
+
+#[opensourced]
+pub fn selected(value: &str) -> Result<String, ApiError> {
+    parse_wire(value).map_err(ApiError::from)
+}
+"#,
+    );
+}
+
+fn write_concat_include_array_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "concat_include_array_rule",
+        r#"use opensourced::opensourced;
+
+const FRAMES: &[&str] = &[
+    include_str!(concat!("frames/", "intro.txt")),
+    include_str!(concat!("frames/", "outro.txt")),
+];
+
+const DEAD_FRAMES: &[&str] = &[include_str!(concat!("frames/", "dead.txt"))];
+
+#[opensourced]
+pub fn selected() -> usize {
+    FRAMES.iter().map(|frame| frame.len()).sum()
+}
+
+pub fn dead_selected() -> usize {
+    DEAD_FRAMES.len()
+}
+"#,
+    );
+    write(
+        root.join("concat_include_array_rule/src/frames/intro.txt"),
+        "intro",
+    );
+    write(
+        root.join("concat_include_array_rule/src/frames/outro.txt"),
+        "outro",
+    );
+    write(
+        root.join("concat_include_array_rule/src/frames/dead.txt"),
+        "dead",
+    );
+}
+
+fn write_once_lock_include_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "once_lock_include_rule",
+        r#"use opensourced::opensourced;
+use std::sync::OnceLock;
+
+pub struct Schema {
+    pub raw: &'static str,
+}
+
+static SCHEMA: OnceLock<Schema> = OnceLock::new();
+
+fn live_schema() -> &'static Schema {
+    SCHEMA.get_or_init(|| Schema {
+        raw: include_str!("schema/live.json"),
+    })
+}
+
+fn dead_schema() -> Schema {
+    Schema {
+        raw: include_str!("schema/dead.json"),
+    }
+}
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    live_schema().raw
+}
+"#,
+    );
+    write(
+        root.join("once_lock_include_rule/src/schema/live.json"),
+        "{}",
+    );
+    write(
+        root.join("once_lock_include_rule/src/schema/dead.json"),
+        "{}",
+    );
+}
+
+fn write_method_facade_dyn_boundary_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "method_facade_dyn_boundary_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Boundary {
+    fn score(&self) -> u32;
+}
+
+pub trait DeadBoundary {
+    fn score(&self) -> u32;
+}
+
+pub mod facade {
+    pub use crate::{Boundary, DeadBoundary};
+}
+
+#[opensourced]
+pub fn selected(handler: &dyn Boundary) -> u32 {
+    handler.score()
+}
+"#,
+    );
+}
+
+fn write_local_facade_glob_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "local_facade_glob_rule",
+        r#"use opensourced::opensourced;
+
+mod api {
+    pub struct LiveDto {
+        pub value: u32,
+    }
+
+    pub struct DeadDto {
+        pub value: u32,
+    }
+
+    pub fn selected_value() -> u32 {
+        helper()
+    }
+
+    fn helper() -> u32 {
+        7
+    }
+
+    pub fn dead_value() -> u32 {
+        99
+    }
+}
+
+pub use api::*;
+
+#[opensourced]
+pub fn selected() -> u32 {
+    selected_value()
 }
 "#,
     );

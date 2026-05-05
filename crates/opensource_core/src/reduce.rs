@@ -3228,7 +3228,7 @@ fn reachable_macro_impl_surface_dependencies(
     project: &Project,
     candidate_packages: &BTreeSet<String>,
     roots: &[RootId],
-    reachable: &BTreeSet<CallableId>,
+    _reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
@@ -3240,7 +3240,7 @@ fn reachable_macro_impl_surface_dependencies(
             )
     }) {
         if !item_is_root(roots, item)
-            && !item_is_reachable_callable_signature_surface(project, reachable, item)
+            && !item_is_root_callable_signature_surface(project, roots, item)
         {
             continue;
         }
@@ -3255,12 +3255,15 @@ fn item_is_root(roots: &[RootId], item: &ItemId) -> bool {
         .any(|root| matches!(root, RootId::Item(root_item) if root_item == item))
 }
 
-fn item_is_reachable_callable_signature_surface(
+fn item_is_root_callable_signature_surface(
     project: &Project,
-    reachable: &BTreeSet<CallableId>,
+    roots: &[RootId],
     item: &ItemId,
 ) -> bool {
-    reachable.iter().any(|callable| {
+    roots.iter().any(|root| {
+        let RootId::Callable(callable) = root else {
+            return false;
+        };
         if callable.package() != item.package {
             return false;
         }
@@ -3551,8 +3554,10 @@ struct DependencyVisitor<'a> {
     dependencies: DependencySet,
     generic_trait_bounds: HashMap<String, Vec<ItemId>>,
     generic_associated_type_bindings: HashMap<String, HashMap<String, TypeRef>>,
+    generic_conversion_bounds: HashMap<String, Vec<GenericConversionBound>>,
     variable_trait_bounds: HashMap<String, Vec<ItemId>>,
     variable_associated_type_bindings: HashMap<String, HashMap<String, TypeRef>>,
+    variable_conversion_bounds: HashMap<String, Vec<GenericConversionBound>>,
     variables: HashMap<String, TypeRef>,
     variable_candidates: HashMap<String, Vec<TypeRef>>,
     variable_type_arguments: HashMap<String, Vec<TypeRef>>,
@@ -3573,8 +3578,10 @@ impl<'a> DependencyVisitor<'a> {
             dependencies: DependencySet::default(),
             generic_trait_bounds: HashMap::new(),
             generic_associated_type_bindings: HashMap::new(),
+            generic_conversion_bounds: HashMap::new(),
             variable_trait_bounds: HashMap::new(),
             variable_associated_type_bindings: HashMap::new(),
+            variable_conversion_bounds: HashMap::new(),
             variables: HashMap::new(),
             variable_candidates: HashMap::new(),
             variable_type_arguments: HashMap::new(),
@@ -3597,8 +3604,10 @@ impl<'a> DependencyVisitor<'a> {
             let trait_items = self.trait_items_from_bounds(&type_parameter.bounds);
             let associated_type_bindings =
                 self.associated_type_bindings_from_bounds(&type_parameter.bounds);
+            let conversion_bounds = self.conversion_bounds_from_bounds(&type_parameter.bounds);
             self.insert_generic_trait_bounds(name.clone(), trait_items);
-            self.insert_generic_associated_type_bindings(name, associated_type_bindings);
+            self.insert_generic_associated_type_bindings(name.clone(), associated_type_bindings);
+            self.insert_generic_conversion_bounds(name, conversion_bounds);
         }
 
         let Some(where_clause) = &generics.where_clause else {
@@ -3614,8 +3623,10 @@ impl<'a> DependencyVisitor<'a> {
             let trait_items = self.trait_items_from_bounds(&predicate.bounds);
             let associated_type_bindings =
                 self.associated_type_bindings_from_bounds(&predicate.bounds);
+            let conversion_bounds = self.conversion_bounds_from_bounds(&predicate.bounds);
             self.insert_generic_trait_bounds(name.clone(), trait_items);
-            self.insert_generic_associated_type_bindings(name, associated_type_bindings);
+            self.insert_generic_associated_type_bindings(name.clone(), associated_type_bindings);
+            self.insert_generic_conversion_bounds(name, conversion_bounds);
         }
     }
 
@@ -3752,6 +3763,18 @@ impl<'a> DependencyVisitor<'a> {
             .extend(associated_type_bindings);
     }
 
+    fn insert_generic_conversion_bounds(
+        &mut self,
+        name: String,
+        mut conversion_bounds: Vec<GenericConversionBound>,
+    ) {
+        if conversion_bounds.is_empty() {
+            return;
+        }
+        let bounds = self.generic_conversion_bounds.entry(name).or_default();
+        bounds.append(&mut conversion_bounds);
+    }
+
     fn associated_type_bindings_from_bounds(
         &self,
         bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
@@ -3777,6 +3800,22 @@ impl<'a> DependencyVisitor<'a> {
             }
         }
         bindings
+    }
+
+    fn conversion_bounds_from_bounds(
+        &self,
+        bounds: &syn::punctuated::Punctuated<syn::TypeParamBound, syn::Token![+]>,
+    ) -> Vec<GenericConversionBound> {
+        bounds
+            .iter()
+            .filter_map(|bound| {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    return None;
+                };
+                self.resolver
+                    .conversion_bound_from_trait_path(&trait_bound.path)
+            })
+            .collect()
     }
 
     fn trait_items_from_bounds(
@@ -3817,6 +3856,9 @@ impl<'a> DependencyVisitor<'a> {
                         ident.ident.to_string(),
                         bindings.clone(),
                     );
+                }
+                if let Some(bounds) = self.generic_conversion_bounds.get(&name) {
+                    self.insert_variable_conversion_bounds(ident.ident.to_string(), bounds.clone());
                 }
             }
             if let Some(type_ref) = self.resolver.resolve_receiver_type(&input.ty) {
@@ -3949,6 +3991,18 @@ impl<'a> DependencyVisitor<'a> {
             .entry(name)
             .or_default()
             .extend(associated_type_bindings);
+    }
+
+    fn insert_variable_conversion_bounds(
+        &mut self,
+        name: String,
+        mut conversion_bounds: Vec<GenericConversionBound>,
+    ) {
+        if conversion_bounds.is_empty() {
+            return;
+        }
+        let bounds = self.variable_conversion_bounds.entry(name).or_default();
+        bounds.append(&mut conversion_bounds);
     }
 
     fn trait_items_from_type(&self, ty: &Type) -> Vec<ItemId> {
@@ -5575,6 +5629,85 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_generic_conversion_call_arg_dependencies(
+        &mut self,
+        call: &ExprCall,
+        resolved_callables: &[CallableId],
+    ) {
+        for callable in resolved_callables {
+            let return_error = self.resolver.return_error_type_from_callable(callable);
+            for (arg_index, argument) in call.args.iter().enumerate() {
+                let Some((input_type, _)) = self.resolver.callable_typed_input(callable, arg_index)
+                else {
+                    continue;
+                };
+                let Some(generic_name) = generic_parameter_name_from_type(input_type) else {
+                    continue;
+                };
+                let Some(argument_type) = self
+                    .receiver_type(argument)
+                    .or_else(|| self.infer_expr_type(argument))
+                else {
+                    continue;
+                };
+                for bound in self
+                    .resolver
+                    .generic_conversion_bounds_for_callable(callable, &generic_name)
+                {
+                    for conversion in self.resolver.resolve_conversion_impls_from_to(
+                        &argument_type,
+                        &bound.target,
+                        &bound.impl_trait_name,
+                        &bound.method_name,
+                    ) {
+                        self.dependencies.callables.insert(conversion);
+                    }
+                    if let (Some(source_error), Some(target_error)) =
+                        (bound.error.as_ref(), return_error.as_ref())
+                    {
+                        for conversion in self.resolver.resolve_conversion_impls_from_to(
+                            source_error,
+                            target_error,
+                            "From",
+                            "from",
+                        ) {
+                            self.dependencies.callables.insert(conversion);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn receiver_has_generic_conversion_bound(
+        &self,
+        expression: &Expr,
+        impl_trait_name: &str,
+        method_name: &str,
+    ) -> bool {
+        let Expr::Path(path) = expression else {
+            return false;
+        };
+        if path.qself.is_some() || path.path.segments.len() != 1 {
+            return false;
+        }
+        let Some(name) = path
+            .path
+            .segments
+            .first()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return false;
+        };
+        self.variable_conversion_bounds
+            .get(&name)
+            .is_some_and(|bounds| {
+                bounds.iter().any(|bound| {
+                    bound.impl_trait_name == impl_trait_name && bound.method_name == method_name
+                })
+            })
+    }
+
     fn visit_closure_with_input_types(
         &mut self,
         closure: &syn::ExprClosure,
@@ -5823,6 +5956,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.dependencies.callables.insert(callable.clone());
             }
             self.add_call_closure_arg_dependencies(call, &resolved_callables);
+            self.add_generic_conversion_call_arg_dependencies(call, &resolved_callables);
             self.add_external_call_arg_trait_impls(call);
             if resolved_callables.is_empty() && path.path.segments.len() >= 2 {
                 if let Some(method) = path.path.segments.last() {
@@ -6122,8 +6256,16 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_collect_method_trait_dependencies();
             }
         } else if call.method == "into" {
+            if self.receiver_has_generic_conversion_bound(&call.receiver, "From", "from") {
+                visit::visit_expr_method_call(self, call);
+                return;
+            }
             self.add_conversion_impls_by_trait("From", "from");
         } else if call.method == "try_into" {
+            if self.receiver_has_generic_conversion_bound(&call.receiver, "TryFrom", "try_from") {
+                visit::visit_expr_method_call(self, call);
+                return;
+            }
             self.add_conversion_impls_by_trait("TryFrom", "try_from");
         } else if call.method == "parse" {
             self.add_parse_method_trait_dependencies();
@@ -6347,6 +6489,14 @@ struct TypeRef {
     type_path: Vec<String>,
 }
 
+#[derive(Clone, Debug)]
+struct GenericConversionBound {
+    impl_trait_name: String,
+    method_name: String,
+    target: TypeRef,
+    error: Option<TypeRef>,
+}
+
 #[derive(Clone)]
 struct Resolver<'a> {
     project: &'a Project,
@@ -6502,6 +6652,128 @@ impl Resolver<'_> {
                 let segments = self.apply_alias(path_segments(path));
                 self.resolve_trait_item(&segments)
             })
+    }
+
+    fn conversion_bound_from_trait_path(&self, path: &Path) -> Option<GenericConversionBound> {
+        let segment = path.segments.last()?;
+        let (impl_trait_name, method_name) = match segment.ident.to_string().as_str() {
+            "Into" => ("From", "from"),
+            "TryInto" => ("TryFrom", "try_from"),
+            _ => return None,
+        };
+        let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
+        let target = arguments.args.iter().find_map(|argument| {
+            let GenericArgument::Type(ty) = argument else {
+                return None;
+            };
+            self.resolve_receiver_type(ty)
+        })?;
+        let error = arguments.args.iter().find_map(|argument| {
+            let GenericArgument::AssocType(associated_type) = argument else {
+                return None;
+            };
+            (associated_type.ident == "Error")
+                .then(|| self.resolve_receiver_type(&associated_type.ty))
+                .flatten()
+        });
+        Some(GenericConversionBound {
+            impl_trait_name: impl_trait_name.to_string(),
+            method_name: method_name.to_string(),
+            target,
+            error,
+        })
+    }
+
+    fn generic_conversion_bounds_for_callable(
+        &self,
+        callable: &CallableId,
+        generic_name: &str,
+    ) -> Vec<GenericConversionBound> {
+        match callable {
+            CallableId::Free { .. } => {
+                let Some(record) = self.project.functions.get(callable) else {
+                    return Vec::new();
+                };
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.generic_conversion_bounds_from_generics(
+                    &record.item.sig.generics,
+                    generic_name,
+                )
+            }
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let Some(record) = self.project.methods.get(callable) else {
+                    return Vec::new();
+                };
+                let resolver = Resolver {
+                    project: self.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(TypeRef {
+                        package: package.clone(),
+                        type_path: type_path.clone(),
+                    }),
+                };
+                let mut bounds = resolver
+                    .generic_conversion_bounds_from_generics(&record.impl_generics, generic_name);
+                bounds.extend(resolver.generic_conversion_bounds_from_generics(
+                    &record.item.sig.generics,
+                    generic_name,
+                ));
+                bounds
+            }
+        }
+    }
+
+    fn generic_conversion_bounds_from_generics(
+        &self,
+        generics: &syn::Generics,
+        generic_name: &str,
+    ) -> Vec<GenericConversionBound> {
+        let mut bounds = Vec::new();
+        for parameter in &generics.params {
+            let syn::GenericParam::Type(type_parameter) = parameter else {
+                continue;
+            };
+            if type_parameter.ident != generic_name {
+                continue;
+            }
+            bounds.extend(type_parameter.bounds.iter().filter_map(|bound| {
+                let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                    return None;
+                };
+                self.conversion_bound_from_trait_path(&trait_bound.path)
+            }));
+        }
+        if let Some(where_clause) = &generics.where_clause {
+            for predicate in &where_clause.predicates {
+                let syn::WherePredicate::Type(predicate) = predicate else {
+                    continue;
+                };
+                if generic_parameter_name_from_type(&predicate.bounded_ty).as_deref()
+                    != Some(generic_name)
+                {
+                    continue;
+                }
+                bounds.extend(predicate.bounds.iter().filter_map(|bound| {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        return None;
+                    };
+                    self.conversion_bound_from_trait_path(&trait_bound.path)
+                }));
+            }
+        }
+        bounds
     }
 
     fn resolve_trait_item_method(

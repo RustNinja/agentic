@@ -172,6 +172,16 @@ file.
 | `include.bytes.fast_fixture.001` | covered | The fast fixture now exercises `include_bytes!` beside `include_str!` literal and `concat!` assets |
 | `trait.generic_header_bounds.001` | covered | Rendered struct/trait/impl headers keep local generic and where-clause bounds even when the retained method body only mentions `Self` or fields |
 | `import.inline_facade_reexport.001` | covered | Private inline modules reexporting public facade objects prune dead aliases while retaining imports required by the live facade object surface |
+| `import.nested_private_facade_chain.001` | covered | Nested private facade modules reexport only selected live constructors and client objects while pruning dead sibling facade names |
+| `uniffi.enum.struct_variants.001` | covered | UniFFI-style enum roots with struct variants retain every variant payload DTO/error surface and prune dead enum families |
+| `serde.nested_discriminated_response.001` | covered | Nested discriminated serde envelopes retain both outer and inner tagged contracts plus payload DTOs while pruning dead envelope families |
+| `serde.multi_deserialize_with_helpers.001` | covered | Multiple `deserialize_with = "module::helper"` fields retain every referenced helper and shared helper imports while pruning unused helper functions |
+| `trait.conversion.generic_try_into_bridge.001` | covered | Generic `T: TryInto<Target, Error = E>` helper functions retain only the concrete call-site conversion impl and matching error bridge |
+| `error.wire_fallback_conversion.001` | covered | Wire error fallback enums and `map_err(ApiError::from)` retain unknown/fallback variants and exact error conversion impls without dead parsers |
+| `include.str.concat_array_assets.001` | covered | Arrays of `include_str!(concat!(...))` assets copy only the live asset set and omit dead sibling files |
+| `include.str.once_lock_initializer_asset.001` | covered | `OnceLock::get_or_init` struct initializers retain `include_str!` assets referenced only inside retained initializer closures |
+| `dyn.boundary.facade_method_input.001` | covered | Facade-exported borrowed `&dyn Trait` method boundaries stay feedback warnings and prune dead callback traits |
+| `import.facade_glob_selected_symbol.001` | covered | Local facade glob reexports can remain syntactically broad while the child module is item-pruned to selected live symbols |
 
 ## Workflow
 
@@ -206,6 +216,16 @@ Recent Litter-driven rules came from these source patterns:
 | `macro.compile_env_in_retained_body.001` | `third_party/codex/codex-rs/utils/cargo-bin/src/lib.rs:118`, `third_party/codex/codex-rs/utils/cargo-bin/src/lib.rs:127` |
 | `manifest.dependency_crate_alias.001` | `codex-ipc/src/conversation_state.rs:3`, `codex-mobile-client/src/store/reducer.rs:5`, `codex-mobile-client/src/ffi/client.rs:8` |
 | `import.private_child_wildcard_selected_reexport.001` | `codex-mobile-client/src/mobile_client/mod.rs:47`, `codex-mobile-client/src/mobile_client/mod.rs:56` |
+| `import.nested_private_facade_chain.001` | `third_party/codex/codex-rs/codex-mcp/src/lib.rs:1`, `third_party/codex/codex-rs/codex-mcp/src/mcp/mod.rs:1` |
+| `uniffi.enum.struct_variants.001` | `codex-mobile-client/src/conversation_uniffi.rs:182`, `codex-mobile-client/src/conversation_uniffi.rs:201`, `codex-mobile-client/src/conversation_uniffi.rs:222` |
+| `serde.nested_discriminated_response.001` | `codex-ipc/src/protocol/envelope.rs:4`, `codex-ipc/src/protocol/envelope.rs:26`, `codex-ipc/src/protocol/envelope.rs:40` |
+| `serde.multi_deserialize_with_helpers.001` | `codex-mobile-client/src/parser.rs:208`, `codex-mobile-client/src/parser.rs:445`, `codex-mobile-client/src/parser.rs:504` |
+| `trait.conversion.generic_try_into_bridge.001` | `codex-mobile-client/src/ffi/client.rs:35`, `codex-mobile-client/src/ffi/errors.rs:1`, `codex-mobile-client/src/lib.rs:155` |
+| `error.wire_fallback_conversion.001` | `codex-ipc/src/error.rs:4`, `codex-ipc/src/error.rs:42`, `codex-ipc/src/conversation_state.rs:84` |
+| `include.str.concat_array_assets.001` | `third_party/codex/codex-rs/tui/src/frames.rs:4`, `third_party/codex/codex-rs/tui/src/frames.rs:47` |
+| `include.str.once_lock_initializer_asset.001` | `third_party/codex/codex-rs/hooks/src/engine/schema_loader.rs:21`, `third_party/codex/codex-rs/hooks/src/engine/schema_loader.rs:64` |
+| `dyn.boundary.facade_method_input.001` | `third_party/codex/codex-rs/codex-client/src/transport.rs:18`, `third_party/codex/codex-rs/codex-client/src/sse.rs:12` |
+| `import.facade_glob_selected_symbol.001` | `codex-ipc/src/lib.rs:20`, `codex-ipc/src/lib.rs:37` |
 
 ## Litter Patterns To Convert Next
 

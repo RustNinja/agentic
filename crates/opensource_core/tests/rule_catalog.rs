@@ -18,7 +18,15 @@ struct RuleCatalogEntry {
     validation_mode: &'static str,
     expected_behavior: &'static str,
     failure_mode: &'static str,
+    coverage: CoverageStrategy,
     promotion_hint: String,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+struct CoverageStrategy {
+    family: &'static str,
+    executable_seed: &'static str,
+    enforcement: &'static str,
 }
 
 const GROUPS: &[Axis] = &[
@@ -352,6 +360,14 @@ fn build_catalog() -> Vec<RuleCatalogEntry> {
             let validation_mode = axis_at(VALIDATION_MODES, index, 11, 4);
             let expected_behavior = axis_at(EXPECTED_BEHAVIORS, index, 13, 5);
             let failure_mode = axis_at(FAILURE_MODES, index, 17, 6);
+            let coverage = coverage_strategy(
+                group.id,
+                root_kind.id,
+                edge_shape.id,
+                dependency_surface.id,
+                expected_behavior.id,
+                failure_mode.id,
+            );
             RuleCatalogEntry {
                 id: format!(
                     "{}.{}.{}.{}.{}.{}",
@@ -369,6 +385,7 @@ fn build_catalog() -> Vec<RuleCatalogEntry> {
                 validation_mode: validation_mode.id,
                 expected_behavior: expected_behavior.id,
                 failure_mode: failure_mode.id,
+                coverage,
                 promotion_hint: format!(
                     "promote:{}:{}:{}:{}",
                     group.id, root_kind.id, edge_shape.id, failure_mode.id
@@ -376,6 +393,127 @@ fn build_catalog() -> Vec<RuleCatalogEntry> {
             }
         })
         .collect()
+}
+
+fn coverage_strategy(
+    group: &'static str,
+    root_kind: &'static str,
+    edge_shape: &'static str,
+    dependency_surface: &'static str,
+    expected_behavior: &'static str,
+    failure_mode: &'static str,
+) -> CoverageStrategy {
+    match group {
+        "import" => strategy(
+            "import.reexport_and_alias_pruning",
+            "import.reexport.grouped.001",
+            "executable_fixture",
+        ),
+        "macro" => {
+            let seed = match edge_shape {
+                "derive_helper_attr" | "attribute_macro_surface" => {
+                    "macro.proc_attr_import_retention.001"
+                }
+                "item_macro_invocation" => "macro.item_invocation.generated_api.001",
+                _ => "macro.metavariable_method.001",
+            };
+            strategy(
+                "macro.expansion_surface_closure",
+                seed,
+                "executable_fixture",
+            )
+        }
+        "trait" => strategy(
+            "trait.impl_projection_and_conversion_closure",
+            "trait.associated_projection.001",
+            "executable_fixture",
+        ),
+        "dyn" => {
+            let seed = if edge_shape == "fn_pointer_surface" {
+                "ffi.callback_direct_input.001"
+            } else {
+                "dyn.callback.future_alias.001"
+            };
+            strategy(
+                "dyn.dispatch_and_callback_boundaries",
+                seed,
+                "production_hazard_fixture",
+            )
+        }
+        "include" => {
+            let seed = if edge_shape == "source_include" {
+                "include.source.static.001"
+            } else {
+                "include.str.static_concat.001"
+            };
+            let enforcement = if edge_shape == "source_include" {
+                "production_hazard_fixture"
+            } else {
+                "executable_fixture"
+            };
+            strategy("include.assets_and_source_boundaries", seed, enforcement)
+        }
+        "build" => strategy(
+            "build.generated_source_and_env_hazards",
+            "build.out_dir_source_include.001",
+            "production_hazard_fixture",
+        ),
+        "uniffi" => strategy(
+            "uniffi.exported_surface_closure",
+            "uniffi.object.split_impl_wrapper.001",
+            "executable_fixture",
+        ),
+        "manifest" => strategy(
+            "manifest.support_package_pruning",
+            "manifest.support_dependency_item_pruning.001",
+            "executable_fixture",
+        ),
+        "repair" => strategy(
+            "repair.compiler_feedback_convergence",
+            "repair.feedback_loop_guards.001",
+            "catalog_guard",
+        ),
+        "cfg" => strategy(
+            "cfg.move_intact_or_fail_closed",
+            "catalog.cfg_move_intact_policy.001",
+            "catalog_guard",
+        ),
+        _ if root_kind == "ffi_export" => strategy(
+            "uniffi.exported_surface_closure",
+            "uniffi.object.split_impl_wrapper.001",
+            "executable_fixture",
+        ),
+        _ if dependency_surface == "path_package"
+            || dependency_surface == "workspace_package"
+            || dependency_surface == "target_dependency"
+            || dependency_surface == "optional_feature_dep"
+            || failure_mode == "overcopied_support"
+            || expected_behavior == "copy_support_package" =>
+        {
+            strategy(
+                "manifest.support_package_pruning",
+                "manifest.support_dependency_item_pruning.001",
+                "executable_fixture",
+            )
+        }
+        _ => strategy(
+            "core.direct_item_surface_closure",
+            "struct.private_generic_field_usage.001",
+            "executable_fixture",
+        ),
+    }
+}
+
+fn strategy(
+    family: &'static str,
+    executable_seed: &'static str,
+    enforcement: &'static str,
+) -> CoverageStrategy {
+    CoverageStrategy {
+        family,
+        executable_seed,
+        enforcement,
+    }
 }
 
 fn axis_at(axes: &[Axis], index: usize, multiplier: usize, offset: usize) -> &Axis {
@@ -404,6 +542,12 @@ fn catalog_generates_at_least_one_thousand_generic_rules() {
         assert!(!entry.validation_mode.is_empty(), "{entry:?}");
         assert!(!entry.expected_behavior.is_empty(), "{entry:?}");
         assert!(!entry.failure_mode.is_empty(), "{entry:?}");
+        assert_valid_identifier(entry.coverage.family);
+        assert_valid_identifier(entry.coverage.executable_seed);
+        assert!(
+            is_valid_enforcement(entry.coverage.enforcement),
+            "{entry:?}"
+        );
         assert!(entry.promotion_hint.starts_with("promote:"), "{entry:?}");
     }
 }
@@ -467,6 +611,46 @@ fn catalog_entries_are_not_tied_to_known_real_project_names() {
             );
         }
     }
+}
+
+#[test]
+fn catalog_maps_every_record_to_an_enforceable_coverage_family() {
+    let catalog = build_catalog();
+
+    for entry in &catalog {
+        assert!(!entry.coverage.family.is_empty(), "{entry:?}");
+        assert!(!entry.coverage.executable_seed.is_empty(), "{entry:?}");
+        assert!(
+            is_valid_enforcement(entry.coverage.enforcement),
+            "{entry:?}"
+        );
+    }
+
+    let family_counts = count_entries_by(&catalog, |entry| entry.coverage.family);
+    assert!(
+        family_counts.len() >= 10,
+        "coverage families should stay broad but varied: {family_counts:?}"
+    );
+    assert!(
+        family_counts
+            .values()
+            .all(|count| *count <= TARGET_RULE_COUNT / 3),
+        "one coverage family is hiding too much rule variety: {family_counts:?}"
+    );
+
+    let executable_backed = catalog
+        .iter()
+        .filter(|entry| {
+            matches!(
+                entry.coverage.enforcement,
+                "executable_fixture" | "production_hazard_fixture"
+            )
+        })
+        .count();
+    assert!(
+        executable_backed >= 900,
+        "most catalog rules should map to executable or hazard fixture families, got {executable_backed}"
+    );
 }
 
 #[test]
@@ -543,6 +727,13 @@ fn assert_valid_identifier(id: &str) {
     assert!(!id.ends_with('.'), "invalid rule id: {id}");
 }
 
+fn is_valid_enforcement(enforcement: &str) -> bool {
+    matches!(
+        enforcement,
+        "executable_fixture" | "production_hazard_fixture" | "catalog_guard"
+    )
+}
+
 fn assert_axis_coverage(
     catalog: &[RuleCatalogEntry],
     axis_name: &str,
@@ -556,6 +747,17 @@ fn assert_axis_coverage(
         .map(|axis| format!("{} ({})", axis.id, axis.purpose))
         .collect();
     assert!(missing.is_empty(), "missing {axis_name} axes: {missing:?}");
+}
+
+fn count_entries_by(
+    entries: &[RuleCatalogEntry],
+    value: impl Fn(&RuleCatalogEntry) -> &'static str,
+) -> BTreeMap<&'static str, usize> {
+    let mut counts = BTreeMap::new();
+    for entry in entries {
+        *counts.entry(value(entry)).or_insert(0) += 1;
+    }
+    counts
 }
 
 fn count_by<'a>(

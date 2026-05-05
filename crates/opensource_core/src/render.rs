@@ -8077,9 +8077,7 @@ fn root_item_impl_surface_should_render(
                 ItemKind::Union,
                 ItemKind::Type,
             ],
-        ) || type_path_is_reachable_callable_signature_surface(
-            project, reduced, package, type_path,
-        ))
+        ) || type_path_is_root_callable_signature_surface(project, reduced, package, type_path))
         && impl_surface_has_macro_contract_attrs(item_impl)
 }
 
@@ -8272,7 +8270,7 @@ fn path_item_is_root(
     })
 }
 
-fn type_path_is_reachable_callable_signature_surface(
+fn type_path_is_root_callable_signature_surface(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
@@ -8281,7 +8279,10 @@ fn type_path_is_reachable_callable_signature_surface(
     let Some(name) = type_path.last() else {
         return false;
     };
-    reduced.reachable.iter().any(|callable| {
+    reduced.roots.iter().any(|root| {
+        let RootId::Callable(callable) = root else {
+            return false;
+        };
         callable.package() == package
             && (project.functions.get(callable).is_some_and(|record| {
                 token_stream_mentions_ident(&record.item.sig.to_token_stream(), name)

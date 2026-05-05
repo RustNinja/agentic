@@ -21,6 +21,23 @@ shape, dependency surface, validation mode, expected behavior, and failure mode.
 | Expected behavior | retain live closure, prune dead siblings, copy assets/support packages, report hazards, repair feedback, move cfg intact |
 | Failure mode | missing live edge, dead retention, malformed source, missing asset, overcopied support, unmodeled macro/dyn/generated source, cfg not proven |
 
+## Coverage Families
+
+Every generated catalog row is also mapped to an enforceable coverage family.
+The validator keeps that mapping honest: each row has a family, an executable
+seed rule, and an enforcement level. The levels are:
+
+| Enforcement | Meaning |
+| --- | --- |
+| `executable_fixture` | At least one representative `rule_database.rs` fixture asserts output pruning and usually runs `cargo check` |
+| `production_hazard_fixture` | A representative fixture asserts the structured warning/error that keeps production fail-closed |
+| `catalog_guard` | A policy guard covers broad combinations that should not explode into a fixture matrix, such as cfg movement and compiler-feedback convergence |
+
+This means the 1,200 records are coverage obligations. They are not counted as
+1,200 generated-workspace checks. One high-quality executable fixture can cover
+many axis combinations by family, but the docs and tests keep that distinction
+explicit.
+
 ## Promotion Workflow
 
 When a real repo probe fails or retains too much output:

@@ -610,6 +610,23 @@ or types that appear in retained callable signatures, and retained macro bodies
 are scanned for `env!`/`option_env!` hazards before feedback-only macro warnings
 decide production status.
 
+The current rule pass raises the executable database to 122 cases and adds an
+enforceable coverage-family map for all 1,200 generated catalog records. The new
+fixtures cover nested private facade chains, UniFFI enum struct variants, nested
+serde response envelopes, multiple serde helper paths, generic
+`T: TryInto<Target, Error = E>` bridges, wire-error fallback conversions,
+`concat!` include arrays, `OnceLock` include initializers, borrowed dyn facade
+boundaries, and local facade glob pruning. The concrete bug found by the batch
+was generic conversion over-retention: a generic helper body with
+`input.try_into()?` kept every local `TryFrom<_>` candidate because `T` was not
+known while analyzing the helper body. The reducer now treats generic
+`Into`/`TryInto` receiver calls as bounded generic operations inside the helper,
+then resolves the exact concrete conversion impl at the call site where the
+actual argument type is known. The same validation pass caught an FFI impl
+surface over-retention bug: macro/export impl methods are now expanded only for
+item roots or root callable API signatures, so internal helper return types keep
+only methods that are actually called.
+
 The fixture also now includes a private FFI barrel shaped like Litter's mobile
 client modules: one selected app-store subscription module is reexported beside
 dead reconnect/alleycat siblings. The expected behavior is strict barrel
