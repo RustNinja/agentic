@@ -4990,7 +4990,14 @@ fn collect_path_like_string_idents(value: &str, idents: &mut BTreeSet<String>) {
     {
         return;
     }
-    for segment in value.split("::") {
+    let segments = value.split("::").collect::<Vec<_>>();
+    if segments
+        .iter()
+        .any(|segment| type_surface_wrapper_or_builtin_ident(segment))
+    {
+        return;
+    }
+    for segment in segments {
         if segment
             .chars()
             .next()
@@ -6497,13 +6504,15 @@ fn private_leaf() -> i32 {
 
 #[opensourced]
 pub fn entry() -> WireDto {
-    WireDto { value: 1 }
+    WireDto { value: 1, optional: None }
 }
 
 #[derive(serde::Serialize)]
 pub struct WireDto {
     #[serde(with = "wire_helper")]
     pub value: u32,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optional: Option<u32>,
 }
 
 pub mod wire_helper {
@@ -6520,6 +6529,14 @@ pub fn Serialize() -> u32 {
 }
 
 pub fn with() -> u32 {
+    9
+}
+
+pub fn Option() -> u32 {
+    9
+}
+
+pub fn is_none() -> u32 {
     9
 }
 
@@ -6545,6 +6562,14 @@ pub fn unrelated_dead() -> u32 {
             helper_surface.blocked_idents,
             vec!["wire_helper".to_string()]
         );
+        assert!(
+            report.macro_surfaces.surfaces.iter().all(|surface| {
+                !surface.blocked_idents.contains(&"Option".to_string())
+                    && !surface.blocked_idents.contains(&"is_none".to_string())
+            }),
+            "std/prelude helper paths must not become macro blockers: {:?}",
+            report.macro_surfaces.surfaces
+        );
 
         let prunable_callables = report
             .usage
@@ -6567,6 +6592,14 @@ pub fn unrelated_dead() -> u32 {
         assert!(
             !blocked_callables.contains("app::with"),
             "helper meta key `with` must not be retained as blocked_by_unknown: {blocked_callables:?}",
+        );
+        assert!(
+            !blocked_callables.contains("app::Option"),
+            "std wrapper path `Option::is_none` must not retain local Option-named code: {blocked_callables:?}",
+        );
+        assert!(
+            !blocked_callables.contains("app::is_none"),
+            "std helper method `Option::is_none` must not retain local is_none code: {blocked_callables:?}",
         );
         assert!(
             prunable_callables.contains("app::unrelated_dead"),
