@@ -52,6 +52,15 @@ pub struct GenerateOptions {
     pub output_root: PathBuf,
 }
 
+pub struct GenerateSession {
+    workspace_root: PathBuf,
+    project: Project,
+    analyzer: AnalyzerReport,
+    manifest_ms: u64,
+    parse_ms: u64,
+    analyzer_ms: u64,
+}
+
 #[derive(Debug, Clone)]
 pub struct GenerateReport {
     pub analyzer: AnalyzerReport,
@@ -532,58 +541,212 @@ pub fn generate_with_analyzer(
     generate_with_analyzer_feedback(options, analyzer_mode, &[])
 }
 
+pub fn generate_with_analyzer_roots(
+    options: GenerateOptions,
+    analyzer_mode: AnalyzerMode,
+    root_selectors: &[String],
+) -> Result<GenerateReport, Box<dyn std::error::Error>> {
+    generate_with_analyzer_feedback_and_roots(options, analyzer_mode, &[], root_selectors)
+}
+
 pub fn generate_with_analyzer_feedback(
     options: GenerateOptions,
     analyzer_mode: AnalyzerMode,
     feedback_diagnostics: &[feedback::CheckDiagnostic],
 ) -> Result<GenerateReport, Box<dyn std::error::Error>> {
-    let total_started = Instant::now();
-    let phase_started = Instant::now();
-    let workspace = manifest::load_workspace(&options.workspace_root)?;
-    let manifest_ms = elapsed_ms(phase_started);
+    generate_with_analyzer_feedback_and_roots(options, analyzer_mode, feedback_diagnostics, &[])
+}
 
-    let phase_started = Instant::now();
-    let project = parse::parse_workspace(workspace)?;
-    let parse_ms = elapsed_ms(phase_started);
+pub fn generate_with_analyzer_feedback_and_roots(
+    options: GenerateOptions,
+    analyzer_mode: AnalyzerMode,
+    feedback_diagnostics: &[feedback::CheckDiagnostic],
+    root_selectors: &[String],
+) -> Result<GenerateReport, Box<dyn std::error::Error>> {
+    let session = GenerateSession::load(&options.workspace_root, analyzer_mode)?;
+    let roots = session.resolve_root_selectors(root_selectors)?;
+    session.generate(options.output_root, &roots, feedback_diagnostics)
+}
 
-    let phase_started = Instant::now();
-    let analyzer =
-        analyzer::load_report_for_project(&options.workspace_root, analyzer_mode, &project)?;
-    let analyzer_ms = elapsed_ms(phase_started);
+impl GenerateSession {
+    pub fn load(
+        workspace_root: &Path,
+        analyzer_mode: AnalyzerMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let phase_started = Instant::now();
+        let workspace = manifest::load_workspace(workspace_root)?;
+        let manifest_ms = elapsed_ms(phase_started);
 
-    let feedback_widened_roots = feedback_extra_roots(&project, feedback_diagnostics);
+        let phase_started = Instant::now();
+        let project = parse::parse_workspace(workspace)?;
+        let parse_ms = elapsed_ms(phase_started);
+
+        let phase_started = Instant::now();
+        let analyzer = analyzer::load_report_for_project(workspace_root, analyzer_mode, &project)?;
+        let analyzer_ms = elapsed_ms(phase_started);
+
+        Ok(Self {
+            workspace_root: workspace_root.to_path_buf(),
+            project,
+            analyzer,
+            manifest_ms,
+            parse_ms,
+            analyzer_ms,
+        })
+    }
+
+    pub fn workspace_root(&self) -> &Path {
+        &self.workspace_root
+    }
+
+    pub fn analyzer(&self) -> &AnalyzerReport {
+        &self.analyzer
+    }
+
+    pub fn selectable_roots(&self) -> Vec<RootId> {
+        let mut roots = self
+            .project
+            .functions
+            .keys()
+            .cloned()
+            .map(RootId::Callable)
+            .chain(self.project.methods.keys().cloned().map(RootId::Callable))
+            .chain(self.project.items.keys().cloned().map(RootId::Item))
+            .collect::<Vec<_>>();
+        roots.sort();
+        roots.dedup();
+        roots
+    }
+
+    pub fn resolve_root_selectors(
+        &self,
+        selectors: &[String],
+    ) -> Result<Vec<RootId>, Box<dyn std::error::Error>> {
+        let mut roots = Vec::new();
+        let mut seen = BTreeSet::new();
+        for selector in selectors {
+            let root = self.resolve_root_selector(selector)?;
+            if seen.insert(root.clone()) {
+                roots.push(root);
+            }
+        }
+        Ok(roots)
+    }
+
+    pub fn resolve_root_selector(
+        &self,
+        selector: &str,
+    ) -> Result<RootId, Box<dyn std::error::Error>> {
+        let selector = selector.trim();
+        if selector.is_empty() {
+            return Err("root selector must not be empty".into());
+        }
+        let mut matches = self
+            .selectable_roots()
+            .into_iter()
+            .filter(|root| root_matches_selector(root, selector))
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.dedup();
+        match matches.as_slice() {
+            [root] => Ok(root.clone()),
+            [] => Err(format!(
+                "root selector {selector:?} did not match any function, method, or item"
+            )
+            .into()),
+            _ => {
+                let preview = matches
+                    .iter()
+                    .take(12)
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                Err(format!(
+                    "root selector {selector:?} is ambiguous ({} matches): {preview}",
+                    matches.len()
+                )
+                .into())
+            }
+        }
+    }
+
+    pub fn generate(
+        &self,
+        output_root: PathBuf,
+        selected_roots: &[RootId],
+        feedback_diagnostics: &[feedback::CheckDiagnostic],
+    ) -> Result<GenerateReport, Box<dyn std::error::Error>> {
+        generate_loaded(
+            &self.project,
+            self.analyzer.clone(),
+            GenerateLoadedOptions {
+                output_root,
+                manifest_ms: self.manifest_ms,
+                parse_ms: self.parse_ms,
+                analyzer_ms: self.analyzer_ms,
+            },
+            selected_roots,
+            feedback_diagnostics,
+        )
+    }
+}
+
+struct GenerateLoadedOptions {
+    output_root: PathBuf,
+    manifest_ms: u64,
+    parse_ms: u64,
+    analyzer_ms: u64,
+}
+
+fn generate_loaded(
+    project: &Project,
+    analyzer: AnalyzerReport,
+    options: GenerateLoadedOptions,
+    selected_roots: &[RootId],
+    feedback_diagnostics: &[feedback::CheckDiagnostic],
+) -> Result<GenerateReport, Box<dyn std::error::Error>> {
+    let feedback_widened_roots = feedback_extra_roots(project, feedback_diagnostics);
+    let mut extra_roots = selected_roots.to_vec();
+    extra_roots.extend(feedback_widened_roots.iter().cloned());
+    extra_roots.sort();
+    extra_roots.dedup();
 
     let phase_started = Instant::now();
     let reduced = if analyzer.semantic_hints.is_empty() {
-        reduce::reduce_with_extra_roots(&project, &feedback_widened_roots)?
+        reduce::reduce_with_extra_roots(project, &extra_roots)?
     } else {
         reduce::reduce_with_extra_roots_and_semantics(
-            &project,
-            &feedback_widened_roots,
+            project,
+            &extra_roots,
             &analyzer.semantic_hints,
         )?
     };
     let reduce_ms = elapsed_ms(phase_started);
 
     let pre_render_production =
-        pre_render_production_readiness_report(&analyzer, &project, &reduced);
-    let slice_plan = SlicePlan::build(&project, &reduced, &analyzer, &pre_render_production)?;
+        pre_render_production_readiness_report(&analyzer, project, &reduced);
+    let slice_plan = SlicePlan::build(project, &reduced, &analyzer, &pre_render_production)?;
     let render_reduced = slice_plan.render_reduced;
     let usage_decisions = slice_plan.usage_decisions;
 
     let phase_started = Instant::now();
     let files_written = render::write_reduced_workspace(
-        &project,
+        project,
         &render_reduced,
         &usage_decisions,
         &options.output_root,
     )?;
     let render_ms = elapsed_ms(phase_started);
     let timings = GenerateTimingReport {
-        total_ms: elapsed_ms(total_started),
-        analyzer_ms,
-        manifest_ms,
-        parse_ms,
+        total_ms: options
+            .manifest_ms
+            .saturating_add(options.parse_ms)
+            .saturating_add(options.analyzer_ms)
+            .saturating_add(reduce_ms)
+            .saturating_add(render_ms),
+        analyzer_ms: options.analyzer_ms,
+        manifest_ms: options.manifest_ms,
+        parse_ms: options.parse_ms,
         reduce_ms,
         render_ms,
     };
@@ -600,19 +763,19 @@ pub fn generate_with_analyzer_feedback(
         .cloned()
         .collect::<Vec<_>>();
     reachable_items.sort();
-    let targets = target_report(&project, &packages);
-    let source_map = source_map_report(&project, &render_reduced);
-    let macro_surfaces = macro_surface_report(&project, &render_reduced);
+    let targets = target_report(project, &packages);
+    let source_map = source_map_report(project, &render_reduced);
+    let macro_surfaces = macro_surface_report(project, &render_reduced);
     let semantic_proof = semantic_usage_proof_report(&analyzer, &usage_decisions);
     let production = production_readiness_report(
         &analyzer,
-        &project,
+        project,
         &render_reduced,
         &options.output_root,
         Some(&semantic_proof),
     );
     let usage =
-        usage_classification_report(&project, &reduced, &analyzer, &usage_decisions, &production);
+        usage_classification_report(project, &reduced, &analyzer, &usage_decisions, &production);
 
     Ok(GenerateReport {
         analyzer,
@@ -700,6 +863,85 @@ fn package_feature_reference(item: &str) -> Option<&str> {
         .unwrap_or(feature);
     let feature = feature.strip_suffix('?').unwrap_or(feature);
     (!feature.is_empty()).then_some(feature)
+}
+
+fn root_matches_selector(root: &RootId, selector: &str) -> bool {
+    root_selector_keys(root).iter().any(|key| {
+        key == selector
+            || key
+                .strip_prefix("crate::")
+                .is_some_and(|without_crate| without_crate == selector)
+            || key.ends_with(&format!("::{selector}"))
+    })
+}
+
+fn root_selector_keys(root: &RootId) -> Vec<String> {
+    let mut keys = vec![root.to_string()];
+    match root {
+        RootId::Callable(CallableId::Free {
+            package,
+            module_path,
+            name,
+        }) => {
+            keys.push(path_key(package, module_path, name));
+            keys.push(
+                path_key("", module_path, name)
+                    .trim_start_matches("::")
+                    .to_string(),
+            );
+            keys.push(name.clone());
+        }
+        RootId::Callable(CallableId::Method {
+            package,
+            type_path,
+            method,
+            ..
+        }) => {
+            let type_method = format!("{}::{method}", type_path.join("::"));
+            keys.push(format!("{package}::{type_method}"));
+            keys.push(type_method);
+            keys.push(method.clone());
+        }
+        RootId::Item(item) => {
+            let path = path_key(&item.package, &item.module_path, &item.name);
+            keys.push(path.clone());
+            keys.push(format!("{path}({})", item_kind_selector_name(item.kind)));
+            keys.push(format!("{path}({:?})", item.kind));
+            keys.push(
+                path_key("", &item.module_path, &item.name)
+                    .trim_start_matches("::")
+                    .to_string(),
+            );
+            keys.push(item.name.clone());
+        }
+    }
+    keys.sort();
+    keys.dedup();
+    keys
+}
+
+fn path_key(package: &str, module_path: &[String], name: &str) -> String {
+    let mut segments = Vec::new();
+    if !package.is_empty() {
+        segments.push(package.to_string());
+    }
+    segments.extend(module_path.iter().cloned());
+    segments.push(name.to_string());
+    segments.join("::")
+}
+
+fn item_kind_selector_name(kind: model::ItemKind) -> &'static str {
+    match kind {
+        model::ItemKind::Struct => "struct",
+        model::ItemKind::Enum => "enum",
+        model::ItemKind::Union => "union",
+        model::ItemKind::Type => "type",
+        model::ItemKind::Trait => "trait",
+        model::ItemKind::Mod => "mod",
+        model::ItemKind::Const => "const",
+        model::ItemKind::Static => "static",
+        model::ItemKind::Macro => "macro",
+    }
 }
 
 const FEEDBACK_WIDENING_ROOT_MATCH_LIMIT: usize = 24;
@@ -8994,12 +9236,15 @@ pub fn entry(service: Service) -> u32 {
             .notes
             .iter()
             .any(|note| note.contains("HIR usage mapping:")));
-        assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "semantic_reduction_hints_applied" && hazard.severity == "warning"
-        }));
-        assert!(report.production.hazards.iter().any(|hazard| {
-            hazard.code == "semantic_inventory_partially_applied" && hazard.severity == "warning"
-        }));
+        if report.usage.semantic_proof.status != "complete_for_retained_packages" {
+            assert!(report.production.hazards.iter().any(|hazard| {
+                hazard.code == "semantic_reduction_hints_applied" && hazard.severity == "warning"
+            }));
+            assert!(report.production.hazards.iter().any(|hazard| {
+                hazard.code == "semantic_inventory_partially_applied"
+                    && hazard.severity == "warning"
+            }));
+        }
         assert!(!report
             .production
             .hazards

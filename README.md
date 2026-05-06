@@ -105,6 +105,32 @@ cargo run -p opensource_cli --bin slicers -- --slice-report /tmp/slicers-report.
 cargo check --manifest-path /tmp/slicers-proof/Cargo.toml
 ```
 
+The CLI can also select roots without editing the source tree. `--root` and
+`--roots-file` add in-memory roots equivalent to placing `#[opensourced]` on
+those functions/items; existing `#[opensourced]` markers still work and are
+combined with explicit roots.
+
+```sh
+cargo run -p opensource_cli --bin slicers -- \
+  --root my_crate::module::function \
+  --preflight \
+  /path/to/source/Cargo.toml /tmp/slicers-rootless
+```
+
+For failure mining, use `--batch-roots` or `--random-roots` so the CLI loads the
+workspace and rust-analyzer database once, then emits one generated workspace
+per selected root under the output directory. Each row is written to
+`batch-report.jsonl`; when validation runs and no package scope was supplied,
+the generated `cargo check` is scoped to the root package.
+
+```sh
+cargo run -p opensource_cli --bin slicers -- \
+  --production \
+  --random-roots 10 \
+  --random-seed 42 \
+  /path/to/source/Cargo.toml /tmp/slicers-mine
+```
+
 The default `slicers` binary now enables the `ra-hir` feature and uses
 rust-analyzer HIR semantics by default. RA-resolved project-local method and
 path targets are mapped into the slicer's generic `CallableId` / `ItemId`

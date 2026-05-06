@@ -2,6 +2,8 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     ffi::{OsStr, OsString},
     fs,
+    fs::OpenOptions,
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
@@ -11,11 +13,12 @@ use std::{
 use serde::Serialize;
 
 use opensource_core::{
-    check_workspace, generate_with_analyzer, generate_with_analyzer_feedback,
+    check_workspace, generate_with_analyzer_feedback_and_roots, generate_with_analyzer_roots,
     marked_workspace_packages, preflight_workspace, repair_workspace, write_generate_report,
     write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
-    CheckOptions, CheckReport, GenerateOptions, GeneratedTargetReport, PreflightDiagnostic,
-    PreflightOptions, PreflightReport, RepairOptions,
+    CheckOptions, CheckReport, GenerateOptions, GenerateReport, GenerateSession,
+    GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
+    RootId,
 };
 
 fn main() {
@@ -33,6 +36,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     apply_default_marked_package_scope(&mut options)?;
+
+    if options.batch_roots {
+        return run_batch_roots(&options);
+    }
 
     let mut validation = ValidationReport::new(&options);
 
@@ -80,12 +87,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let report = generate_with_analyzer(
+    let report = generate_with_analyzer_roots(
         GenerateOptions {
             workspace_root: options.workspace_root.clone(),
             output_root: options.output_root.clone(),
         },
         options.analyzer_mode,
+        &options.root_selectors,
     )?;
 
     println!(
@@ -329,6 +337,11 @@ struct CliOptions {
     run_preflight: bool,
     preflight_report: Option<PathBuf>,
     production_preset: bool,
+    root_selectors: Vec<String>,
+    random_roots: Option<usize>,
+    random_seed: u64,
+    batch_roots: bool,
+    batch_report: Option<PathBuf>,
     workspace_root: PathBuf,
     output_root: PathBuf,
 }
@@ -363,6 +376,23 @@ struct ValidationGateReport {
     semantic_warning_hazards: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     review_warning_hazards: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchRootReport {
+    root: String,
+    output_root: PathBuf,
+    status: String,
+    files_written: Option<usize>,
+    production_status: Option<String>,
+    production_hazards: Option<usize>,
+    preflight_errors: Option<usize>,
+    preflight_warnings: Option<usize>,
+    check_success: Option<bool>,
+    check_errors: Option<usize>,
+    check_warnings: Option<usize>,
+    duration_ms: u64,
+    error: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -469,6 +499,11 @@ where
     let mut run_preflight = false;
     let mut preflight_report = None;
     let mut production_preset = false;
+    let mut root_selectors = Vec::new();
+    let mut random_roots = None;
+    let mut random_seed = 0;
+    let mut batch_roots = false;
+    let mut batch_report = None;
     let mut positional = Vec::new();
     let mut args = args.into_iter();
 
@@ -561,6 +596,34 @@ where
                 args.next()
                     .ok_or("--preflight-report requires a following path")?,
             ));
+        } else if arg == OsStr::new("--root") {
+            let value = args
+                .next()
+                .ok_or("--root requires a following function, method, or item selector")?;
+            root_selectors.push(
+                value
+                    .to_str()
+                    .ok_or("--root value must be valid UTF-8")?
+                    .to_string(),
+            );
+        } else if arg == OsStr::new("--roots-file") {
+            let path = PathBuf::from(
+                args.next()
+                    .ok_or("--roots-file requires a following path")?,
+            );
+            root_selectors.extend(read_root_selectors_file(&path)?);
+        } else if arg == OsStr::new("--random-roots") {
+            random_roots = Some(parse_usize_arg("--random-roots", args.next())?);
+            batch_roots = true;
+        } else if arg == OsStr::new("--random-seed") {
+            random_seed = parse_u64_arg("--random-seed", args.next())?;
+        } else if arg == OsStr::new("--batch-roots") {
+            batch_roots = true;
+        } else if arg == OsStr::new("--batch-report") {
+            batch_report = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--batch-report requires a following path")?,
+            ));
         } else if arg == OsStr::new("--help") || arg == OsStr::new("-h") {
             println!("{}", usage());
             std::process::exit(0);
@@ -603,6 +666,11 @@ where
         run_preflight,
         preflight_report,
         production_preset,
+        root_selectors,
+        random_roots,
+        random_seed,
+        batch_roots,
+        batch_report,
         workspace_root,
         output_root: output_root.clone(),
     })
@@ -683,6 +751,293 @@ fn production_should_add_locked_arg(
             .any(|arg| matches!(arg.as_str(), "--locked" | "--frozen"))
 }
 
+fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+    fs::create_dir_all(&options.output_root)?;
+    let report_path = batch_report_path(options);
+    if let Some(parent) = report_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&report_path, "")?;
+
+    let baseline = if options.run_baseline_check {
+        let report = run_baseline_check(options)?;
+        write_baseline_report(options, &report)?;
+        print_baseline(
+            &report,
+            options.feedback_limit,
+            Some(&baseline_report_path(options)),
+        );
+        if !report.success && !options.allow_baseline_failures {
+            return Err("source workspace failed baseline cargo check".into());
+        }
+        Some(report)
+    } else {
+        None
+    };
+
+    let session = GenerateSession::load(&options.workspace_root, options.analyzer_mode)?;
+    println!(
+        "analyzer: {} ({})",
+        session.analyzer().mode.as_str(),
+        session.analyzer().engine
+    );
+    for note in &session.analyzer().notes {
+        println!("  analyzer note: {note}");
+    }
+
+    let mut roots = session.resolve_root_selectors(&options.root_selectors)?;
+    if let Some(count) = options.random_roots {
+        roots.extend(select_random_roots(
+            session.selectable_roots(),
+            count,
+            options.random_seed,
+        ));
+    }
+    roots.sort();
+    roots.dedup();
+    if roots.is_empty() {
+        return Err(
+            "--batch-roots requires at least one --root, --roots-file entry, or --random-roots"
+                .into(),
+        );
+    }
+
+    println!(
+        "batch roots: {} slice(s); report: {}",
+        roots.len(),
+        report_path.display()
+    );
+    for (index, root) in roots.iter().enumerate() {
+        let output_root = options.output_root.join(batch_output_dir_name(index, root));
+        let started = std::time::Instant::now();
+        let row = match run_batch_root(options, &session, root, &output_root, baseline.as_ref()) {
+            Ok(mut row) => {
+                row.duration_ms = elapsed_ms(started);
+                row
+            }
+            Err(error) => BatchRootReport {
+                root: root.to_string(),
+                output_root,
+                status: "failed".to_string(),
+                files_written: None,
+                production_status: None,
+                production_hazards: None,
+                preflight_errors: None,
+                preflight_warnings: None,
+                check_success: None,
+                check_errors: None,
+                check_warnings: None,
+                duration_ms: elapsed_ms(started),
+                error: Some(error.to_string()),
+            },
+        };
+        println!(
+            "batch {}/{}: {} {}",
+            index + 1,
+            roots.len(),
+            row.status,
+            row.root
+        );
+        append_batch_report_row(&report_path, &row)?;
+    }
+    Ok(())
+}
+
+fn run_batch_root(
+    options: &CliOptions,
+    session: &GenerateSession,
+    root: &RootId,
+    output_root: &Path,
+    baseline: Option<&CheckReport>,
+) -> Result<BatchRootReport, Box<dyn std::error::Error>> {
+    let mut diagnostics = Vec::<CheckDiagnostic>::new();
+    let attempts = options
+        .feedback_iterations
+        .max(options.feedback_repair_iterations)
+        .max(usize::from(options.run_check));
+    let attempts = attempts.max(1);
+    let mut last_report = None;
+    let mut last_preflight = None;
+
+    for attempt in 1..=attempts {
+        let report = session.generate(output_root.to_path_buf(), &[root.clone()], &diagnostics)?;
+        write_generate_report(&report, &output_root.join("slice-report.json"))?;
+        last_report = Some(report);
+
+        if options.run_preflight || attempts > 1 {
+            let preflight = preflight_workspace(PreflightOptions {
+                manifest_path: output_root.join("Cargo.toml"),
+            })?;
+            write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
+            if !preflight.success {
+                let row = batch_row_from_reports(
+                    root,
+                    output_root,
+                    "preflight_failed",
+                    last_report.as_ref(),
+                    Some(&preflight),
+                    None,
+                    None,
+                );
+                return Ok(row);
+            }
+            last_preflight = Some(preflight);
+        }
+
+        if !batch_runs_check(options) {
+            return Ok(batch_row_from_reports(
+                root,
+                output_root,
+                "generated",
+                last_report.as_ref(),
+                last_preflight.as_ref(),
+                None,
+                None,
+            ));
+        }
+
+        let check = check_workspace(CheckOptions {
+            manifest_path: output_root.join("Cargo.toml"),
+            target_dir: Some(output_root.join("target-feedback")),
+            timeout: options.feedback_timeout,
+            cargo_args: batch_cargo_args(options, root),
+        })?;
+        write_report(&check, &output_root.join("slice-feedback.json"))?;
+        if feedback_is_accepted(&check, baseline, options.deny_warnings) {
+            return Ok(batch_row_from_reports(
+                root,
+                output_root,
+                "accepted",
+                last_report.as_ref(),
+                last_preflight.as_ref(),
+                Some(&check),
+                None,
+            ));
+        }
+        if attempt == attempts || check.error_count() == 0 {
+            return Ok(batch_row_from_reports(
+                root,
+                output_root,
+                "check_failed",
+                last_report.as_ref(),
+                last_preflight.as_ref(),
+                Some(&check),
+                Some("generated workspace did not pass batch feedback gate".to_string()),
+            ));
+        }
+        diagnostics.extend(check.diagnostics);
+    }
+
+    Ok(batch_row_from_reports(
+        root,
+        output_root,
+        "failed",
+        last_report.as_ref(),
+        last_preflight.as_ref(),
+        None,
+        Some("batch loop ended without a final report".to_string()),
+    ))
+}
+
+fn batch_row_from_reports(
+    root: &RootId,
+    output_root: &Path,
+    status: &str,
+    report: Option<&GenerateReport>,
+    preflight: Option<&PreflightReport>,
+    check: Option<&CheckReport>,
+    error: Option<String>,
+) -> BatchRootReport {
+    BatchRootReport {
+        root: root.to_string(),
+        output_root: output_root.to_path_buf(),
+        status: status.to_string(),
+        files_written: report.map(|report| report.files_written),
+        production_status: report.map(|report| report.production.status.clone()),
+        production_hazards: report.map(|report| report.production.hazards.len()),
+        preflight_errors: preflight.map(PreflightReport::error_count),
+        preflight_warnings: preflight.map(PreflightReport::warning_count),
+        check_success: check.map(|check| check.success),
+        check_errors: check.map(CheckReport::error_count),
+        check_warnings: check.map(CheckReport::warning_count),
+        duration_ms: 0,
+        error,
+    }
+}
+
+fn batch_runs_check(options: &CliOptions) -> bool {
+    options.run_check || options.feedback_iterations > 0 || options.feedback_repair_iterations > 0
+}
+
+fn batch_cargo_args(options: &CliOptions, root: &RootId) -> Vec<String> {
+    if cargo_args_have_package_scope(&options.cargo_check_args) {
+        return options.cargo_check_args.clone();
+    }
+    let mut args = vec!["-p".to_string(), root.package().to_string()];
+    args.extend(options.cargo_check_args.clone());
+    args
+}
+
+fn batch_report_path(options: &CliOptions) -> PathBuf {
+    options
+        .batch_report
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("batch-report.jsonl"))
+}
+
+fn append_batch_report_row(
+    report_path: &Path,
+    row: &BatchRootReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let mut file = OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(report_path)?;
+    serde_json::to_writer(&mut file, row)?;
+    file.write_all(b"\n")?;
+    Ok(())
+}
+
+fn batch_output_dir_name(index: usize, root: &RootId) -> String {
+    let mut slug = root
+        .to_string()
+        .chars()
+        .map(|character| {
+            if character.is_ascii_alphanumeric() || matches!(character, '-' | '_') {
+                character
+            } else {
+                '_'
+            }
+        })
+        .collect::<String>();
+    while slug.contains("__") {
+        slug = slug.replace("__", "_");
+    }
+    let slug = slug.trim_matches('_');
+    let slug = if slug.is_empty() { "root" } else { slug };
+    let max_len = slug.len().min(96);
+    format!("{:04}-{}", index + 1, &slug[..max_len])
+}
+
+fn select_random_roots(mut roots: Vec<RootId>, count: usize, seed: u64) -> Vec<RootId> {
+    roots.sort_by_key(|root| stable_root_score(root, seed));
+    roots.truncate(count.min(roots.len()));
+    roots
+}
+
+fn stable_root_score(root: &RootId, seed: u64) -> u64 {
+    let mut hash = seed ^ 0xcbf2_9ce4_8422_2325;
+    for byte in root.to_string().bytes() {
+        hash ^= u64::from(byte);
+        hash = hash.wrapping_mul(0x1000_0000_01b3);
+    }
+    hash
+}
+
+fn elapsed_ms(started: std::time::Instant) -> u64 {
+    started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
+}
+
 fn parse_usize_arg(
     flag: &str,
     value: Option<std::ffi::OsString>,
@@ -696,6 +1051,27 @@ fn parse_usize_arg(
         return Err(format!("{flag} must be greater than zero").into());
     }
     Ok(parsed)
+}
+
+fn parse_u64_arg(
+    flag: &str,
+    value: Option<std::ffi::OsString>,
+) -> Result<u64, Box<dyn std::error::Error>> {
+    let value = value.ok_or_else(|| format!("{flag} requires a following number"))?;
+    let value = value
+        .to_str()
+        .ok_or_else(|| format!("{flag} value must be valid UTF-8"))?;
+    Ok(value.parse::<u64>()?)
+}
+
+fn read_root_selectors_file(path: &Path) -> Result<Vec<String>, Box<dyn std::error::Error>> {
+    let contents = fs::read_to_string(path)?;
+    Ok(contents
+        .lines()
+        .map(str::trim)
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .map(str::to_string)
+        .collect())
 }
 
 fn parse_feedback_timeout(
@@ -1216,13 +1592,14 @@ fn try_widen_from_feedback(
     }
 
     state.diagnostics.extend(report.diagnostics.clone());
-    let widened_report = generate_with_analyzer_feedback(
+    let widened_report = generate_with_analyzer_feedback_and_roots(
         GenerateOptions {
             workspace_root: options.workspace_root.clone(),
             output_root: options.output_root.clone(),
         },
         options.analyzer_mode,
         &state.diagnostics,
+        &options.root_selectors,
     )?;
     let widened_roots = widened_report
         .feedback_widened_roots
@@ -3478,11 +3855,13 @@ fn usage() -> String {
         "[--feedback-target-dir <path>] [--cargo-check-arg <arg>] [--repair-report <path>] ",
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
         "[--baseline-target-dir <path>] [--slice-report <path>] [--validation-report <path>] ",
-        "[--preflight-report <path>] ",
+        "[--preflight-report <path>] [--root <selector>] [--roots-file <path>] ",
+        "[--random-roots <n>] [--random-seed <n>] [--batch-roots] [--batch-report <path>] ",
         "<workspace-root-or-Cargo.toml> <output-root>\n",
         "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn; ",
         "ra-feedback exposes the bounded RA outgoing-call closure explicitly; ",
-        "--production defaults to ra-hir-proc-macros with RA feedback closure when available"
+        "--production defaults to ra-hir-proc-macros with RA feedback closure when available; ",
+        "--root selects functions/items in memory without editing source, while #[opensourced] roots still work"
     )
     .to_string()
 }
@@ -3499,7 +3878,7 @@ fn same_path(left: &Path, right: &Path) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use std::{fs, path::PathBuf};
+    use std::{ffi::OsString, fs, path::PathBuf};
 
     use opensource_core::{
         AnalyzerMode, CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport,
@@ -3513,7 +3892,7 @@ mod tests {
         parse_args_from, production_readiness_blocks_validation,
         production_validation_matrix_entries, record_final_production_readiness,
         record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
-        run_plain_check_gate, semantic_hazard_warning_count, slice_report_path,
+        run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count, slice_report_path,
         try_widen_from_feedback, uncovered_validation_targets, validation_report_path,
         FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
@@ -4487,6 +4866,78 @@ resolver = "2"
             slice_report_path(&options),
             Some(PathBuf::from("custom.json"))
         );
+    }
+
+    #[test]
+    fn explicit_root_options_select_roots_without_source_markers() {
+        let options = parse_options([
+            "--analyzer",
+            "syn",
+            "--root",
+            "app::selected",
+            "--batch-roots",
+            "--random-seed",
+            "7",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
+        assert_eq!(options.root_selectors, ["app::selected"]);
+        assert!(options.batch_roots);
+        assert_eq!(options.random_seed, 7);
+    }
+
+    #[test]
+    fn batch_roots_generate_without_mutating_source_markers() {
+        let source = temp_path("cli-rootless-batch-source");
+        let output = temp_path("cli-rootless-batch-output");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"pub fn selected() -> usize {
+    helper()
+}
+
+pub fn helper() -> usize {
+    1
+}
+
+pub fn dead() -> usize {
+    0
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            OsString::from("--analyzer"),
+            OsString::from("syn"),
+            OsString::from("--batch-roots"),
+            OsString::from("--root"),
+            OsString::from("app::selected"),
+            OsString::from("--preflight"),
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+
+        run_batch_roots(&options).expect("rootless batch should generate");
+
+        let generated = fs::read_to_string(output.join("0001-app_selected/app/src/lib.rs"))
+            .expect("generated source should exist");
+        assert!(generated.contains("pub fn selected"), "{generated}");
+        assert!(generated.contains("pub fn helper"), "{generated}");
+        assert!(!generated.contains("pub fn dead"), "{generated}");
+        let original = fs::read_to_string(source.join("app/src/lib.rs")).unwrap();
+        assert!(!original.contains("opensourced"), "{original}");
+        let report = fs::read_to_string(output.join("batch-report.jsonl")).unwrap();
+        assert!(report.contains("\"status\":\"generated\""), "{report}");
     }
 
     #[test]

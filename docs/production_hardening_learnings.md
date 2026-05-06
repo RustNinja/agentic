@@ -877,3 +877,13 @@ forwarded `Box<dyn Trait>` values, stored `Arc<dyn Trait>` registries, `dyn Fn`
 callbacks, future aliases, and local function-pointer fields still remain review
 hazards. This keeps unknown retention scoped without pretending callback
 registries are statically proven.
+
+Root mining should not require source edits. The CLI now accepts explicit
+`--root` and `--roots-file` selectors that are resolved to the same internal
+`RootId` graph roots as `#[opensourced]`, but without writing markers or adding
+temporary macro dependencies to the source checkout. Batch mode reuses one
+parsed project and one analyzer report for many selected roots, then writes one
+output workspace per root plus a JSONL status row. This is the faster failure
+mining path: keep the original repo warm and immutable, run many independent
+slices, classify failures from generated preflight/check reports, and promote
+real failures into generic fixtures or fail-closed hazards.
