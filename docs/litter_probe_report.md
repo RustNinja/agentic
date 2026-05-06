@@ -213,6 +213,16 @@ not slicer failures.
   `production_ready=accepted`; `custom_attribute_macros` dropped to zero,
   macro-blocked unknown surfaces dropped to one, and `usage.blocked_by_unknown`
   remained zero.
+- The known derive-contract pass removed the remaining serde/thiserror macro
+  blockers without relaxing arbitrary derive handling. Dependency/import-proven
+  serde `Serialize`/`Deserialize` and thiserror `Error` derives now reuse the
+  slicer's existing field/helper/trait contract modeling; unrecognized custom
+  derives still produce production feedback warnings. The pinned five-root batch
+  again generated 119 files with zero preflight errors, zero feedback errors,
+  zero warnings, and `production_ready=accepted`; all `custom_*_macros` and
+  function-like macro invocation hazards disappeared, macro surfaces dropped to
+  zero, macro-blocked unknown surfaces dropped to zero, and
+  `usage.blocked_by_unknown` remained zero.
 
 ## Next Rule Targets
 

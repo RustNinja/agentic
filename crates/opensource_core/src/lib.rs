@@ -2498,6 +2498,8 @@ fn generated_support_package_syntactic_hazard_counts(
                 &syntax,
                 &BTreeSet::new(),
                 &BTreeSet::new(),
+                &BTreeSet::new(),
+                &BTreeSet::new(),
             ),
         };
         visitor.visit_file(&syntax);
@@ -4105,6 +4107,10 @@ struct SyntacticHazardVisitor {
 struct MacroInvocationContext {
     async_trait_macro_roots: BTreeSet<String>,
     async_trait_attribute_imports: BTreeSet<String>,
+    serde_derive_macro_roots: BTreeSet<String>,
+    serde_derive_imports: BTreeSet<String>,
+    thiserror_derive_macro_roots: BTreeSet<String>,
+    thiserror_derive_imports: BTreeSet<String>,
     format_like_macro_roots: BTreeSet<String>,
     format_like_macro_imports: BTreeSet<String>,
     local_macro_definitions: BTreeSet<String>,
@@ -4118,11 +4124,21 @@ impl MacroInvocationContext {
     ) -> Self {
         let roots = format_like_macro_roots_for_package(project, package);
         let async_trait_roots = async_trait_macro_roots_for_package(project, package);
+        let serde_derive_roots = serde_derive_macro_roots_for_package(project, package);
+        let thiserror_derive_roots = thiserror_derive_macro_roots_for_package(project, package);
         match source {
-            Some(source) => Self::for_syntax(&source.syntax, &roots, &async_trait_roots),
+            Some(source) => Self::for_syntax(
+                &source.syntax,
+                &roots,
+                &async_trait_roots,
+                &serde_derive_roots,
+                &thiserror_derive_roots,
+            ),
             None => Self {
                 format_like_macro_roots: roots,
                 async_trait_macro_roots: async_trait_roots,
+                serde_derive_macro_roots: serde_derive_roots,
+                thiserror_derive_macro_roots: thiserror_derive_roots,
                 ..Self::default()
             },
         }
@@ -4132,12 +4148,26 @@ impl MacroInvocationContext {
         syntax: &syn::File,
         roots: &BTreeSet<String>,
         async_trait_roots: &BTreeSet<String>,
+        serde_derive_roots: &BTreeSet<String>,
+        thiserror_derive_roots: &BTreeSet<String>,
     ) -> Self {
         Self {
             async_trait_macro_roots: async_trait_roots.clone(),
             async_trait_attribute_imports: async_trait_attribute_imports_from_file(
                 syntax,
                 async_trait_roots,
+            ),
+            serde_derive_macro_roots: serde_derive_roots.clone(),
+            serde_derive_imports: known_derive_imports_from_file(
+                syntax,
+                serde_derive_roots,
+                &["Serialize", "Deserialize"],
+            ),
+            thiserror_derive_macro_roots: thiserror_derive_roots.clone(),
+            thiserror_derive_imports: known_derive_imports_from_file(
+                syntax,
+                thiserror_derive_roots,
+                &["Error"],
             ),
             format_like_macro_roots: roots.clone(),
             format_like_macro_imports: format_like_macro_imports_from_file(syntax, roots),
@@ -4210,7 +4240,7 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
                 .conditional_compilation_details
                 .push(self.cfg_attr_detail(attribute));
         }
-        let custom_derives = custom_derive_macro_paths(attribute);
+        let custom_derives = custom_derive_macro_paths(attribute, &self.macro_context);
         self.counts.custom_derive_macros += custom_derives.len();
         for derive_path in custom_derives {
             self.record_macro_surface("derive_macro", &derive_path, attribute, Vec::new());
@@ -4845,6 +4875,38 @@ fn async_trait_macro_roots_for_package(project: &Project, package: &str) -> BTre
     roots
 }
 
+fn serde_derive_macro_roots_for_package(project: &Project, package: &str) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    let Some(package) = project.workspace.packages.get(package) else {
+        return roots;
+    };
+    for dependency in &package.dependencies {
+        let package_name = rust_path_ident_for_package(&dependency.package);
+        let alias = rust_path_ident_for_package(&dependency.alias);
+        if matches!(package_name.as_str(), "serde" | "serde_derive")
+            || matches!(alias.as_str(), "serde" | "serde_derive")
+        {
+            roots.insert(alias);
+        }
+    }
+    roots
+}
+
+fn thiserror_derive_macro_roots_for_package(project: &Project, package: &str) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    let Some(package) = project.workspace.packages.get(package) else {
+        return roots;
+    };
+    for dependency in &package.dependencies {
+        let package_name = rust_path_ident_for_package(&dependency.package);
+        let alias = rust_path_ident_for_package(&dependency.alias);
+        if package_name == "thiserror" || alias == "thiserror" {
+            roots.insert(alias);
+        }
+    }
+    roots
+}
+
 fn rust_path_ident_for_package(package: &str) -> String {
     package.replace('-', "_")
 }
@@ -4880,6 +4942,81 @@ fn async_trait_attribute_imports_from_file(
         collect_async_trait_attribute_imports_from_item(item, roots, &mut imports);
     }
     imports
+}
+
+fn known_derive_imports_from_file(
+    syntax: &syn::File,
+    roots: &BTreeSet<String>,
+    derive_names: &[&str],
+) -> BTreeSet<String> {
+    let derive_names = derive_names.iter().copied().collect::<BTreeSet<_>>();
+    let mut imports = BTreeSet::new();
+    for item in &syntax.items {
+        collect_known_derive_imports_from_item(item, roots, &derive_names, &mut imports);
+    }
+    imports
+}
+
+fn collect_known_derive_imports_from_item(
+    item: &Item,
+    roots: &BTreeSet<String>,
+    derive_names: &BTreeSet<&str>,
+    imports: &mut BTreeSet<String>,
+) {
+    match item {
+        Item::Use(item_use) => {
+            collect_known_derive_imports(&item_use.tree, Vec::new(), roots, derive_names, imports);
+        }
+        Item::Mod(item_mod) => {
+            if let Some((_, items)) = &item_mod.content {
+                for item in items {
+                    collect_known_derive_imports_from_item(item, roots, derive_names, imports);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_known_derive_imports(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    roots: &BTreeSet<String>,
+    derive_names: &BTreeSet<&str>,
+    imports: &mut BTreeSet<String>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_known_derive_imports(&path.tree, prefix, roots, derive_names, imports);
+        }
+        UseTree::Name(name) => {
+            let local = name.ident.to_string();
+            if use_prefix_is_known_macro_root(&prefix, roots)
+                && derive_names.contains(local.as_str())
+            {
+                imports.insert(local);
+            }
+        }
+        UseTree::Rename(rename) => {
+            let original = rename.ident.to_string();
+            if use_prefix_is_known_macro_root(&prefix, roots)
+                && derive_names.contains(original.as_str())
+            {
+                imports.insert(rename.rename.to_string());
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_known_derive_imports(item, prefix.clone(), roots, derive_names, imports);
+            }
+        }
+        UseTree::Glob(_) => {
+            if use_prefix_is_known_macro_root(&prefix, roots) {
+                imports.extend(derive_names.iter().map(|name| (*name).to_string()));
+            }
+        }
+    }
 }
 
 fn collect_async_trait_attribute_imports_from_item(
@@ -5141,7 +5278,10 @@ fn add_meta_macro_paths(meta: &Meta, paths: &mut CfgAttrNestedMacroPaths) {
     }
 }
 
-fn custom_derive_macro_paths(attribute: &Attribute) -> Vec<String> {
+fn custom_derive_macro_paths(
+    attribute: &Attribute,
+    context: &MacroInvocationContext,
+) -> Vec<String> {
     if !attribute.path().is_ident("derive") {
         return Vec::new();
     }
@@ -5152,6 +5292,7 @@ fn custom_derive_macro_paths(attribute: &Attribute) -> Vec<String> {
             paths
                 .iter()
                 .filter(|path| !derive_path_is_builtin(path))
+                .filter(|path| !modeled_known_derive_macro_path(path, context))
                 .map(format_path)
                 .collect()
         })
@@ -5446,6 +5587,47 @@ fn derive_path_is_builtin(path: &syn::Path) -> bool {
                 | "PartialEq"
                 | "PartialOrd"
         )
+    })
+}
+
+fn modeled_known_derive_macro_path(path: &syn::Path, context: &MacroInvocationContext) -> bool {
+    modeled_serde_derive_macro_path(path, context)
+        || modeled_thiserror_derive_macro_path(path, context)
+}
+
+fn modeled_serde_derive_macro_path(path: &syn::Path, context: &MacroInvocationContext) -> bool {
+    let Some(last) = path.segments.last() else {
+        return false;
+    };
+    let name = last.ident.to_string();
+    if !matches!(name.as_str(), "Serialize" | "Deserialize") {
+        return false;
+    }
+    if path.segments.len() == 1 {
+        return context.serde_derive_imports.contains(&name);
+    }
+    path.segments.first().is_some_and(|root| {
+        context
+            .serde_derive_macro_roots
+            .contains(&root.ident.to_string())
+    })
+}
+
+fn modeled_thiserror_derive_macro_path(path: &syn::Path, context: &MacroInvocationContext) -> bool {
+    let Some(last) = path.segments.last() else {
+        return false;
+    };
+    let name = last.ident.to_string();
+    if name != "Error" {
+        return false;
+    }
+    if path.segments.len() == 1 {
+        return context.thiserror_derive_imports.contains(&name);
+    }
+    path.segments.first().is_some_and(|root| {
+        context
+            .thiserror_derive_macro_roots
+            .contains(&root.ident.to_string())
     })
 }
 
@@ -8975,6 +9157,68 @@ pub trait Service {
     }
 
     #[test]
+    fn dependency_proven_serde_and_thiserror_derives_are_modeled() {
+        let root = temp_output("known-derive-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\nthiserror = \"2\"\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[opensourced]
+pub fn entry() -> Result<Wire, AppError> {
+    Ok(Wire { value: 1 })
+}
+
+#[derive(Serialize, Deserialize)]
+pub struct Wire {
+    pub value: u32,
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum AppError {
+    #[error("bad {code}")]
+    Bad { code: u32 },
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("known-derive-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            !report
+                .production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "custom_derive_macros"),
+            "dependency/import-proven serde and thiserror derives should not be unknown macro blockers: {:?}",
+            report.production.hazards
+        );
+        assert!(report.macro_surfaces.surfaces.iter().all(|surface| {
+            !(surface.kind == "derive_macro"
+                && matches!(
+                    surface.path.as_str(),
+                    "Serialize" | "Deserialize" | "thiserror::Error"
+                ))
+        }));
+    }
+
+    #[test]
     fn reports_syntactic_method_fallback_production_hazards() {
         let root = temp_output("method-fallback-hazard-source");
         let opensourced_path = workspace_root().join("crates/opensourced");
@@ -9932,7 +10176,7 @@ pub fn entry() -> Payload {
 }
 
 #[custom_attr::decorate]
-#[derive(Debug, serde::Serialize)]
+#[derive(Debug, CustomSerialize)]
 pub struct Payload {
     value: i32,
 }
@@ -9966,7 +10210,7 @@ pub struct Payload {
             .find(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "warning")
             .expect("custom derive hazard should be reported");
         assert!(derive_hazard.details.iter().any(|detail| detail.subject
-            == "app::Payload: derive serde::Serialize"
+            == "app::Payload: derive CustomSerialize"
             && detail.start_line == Some(9)));
         assert!(report.macro_surfaces.surfaces.iter().any(|surface| {
             surface.kind == "attribute_macro"
@@ -9975,7 +10219,7 @@ pub struct Payload {
         }));
         assert!(report.macro_surfaces.surfaces.iter().any(|surface| {
             surface.kind == "derive_macro"
-                && surface.path == "serde::Serialize"
+                && surface.path == "CustomSerialize"
                 && surface.owner.as_deref() == Some("Payload")
         }));
         assert_eq!(report.production.status, "requires_feedback");
