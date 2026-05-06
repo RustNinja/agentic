@@ -770,3 +770,14 @@ inside macro tokens. The generic fixture
 shadow case, `async.select_reconnect_loop.001` covers macro-body retention, and
 the Litter random-five probe generated `client/reconnect.rs` with
 `use tracing::warn;`, zero feedback errors, and zero warnings.
+
+The same rule now applies to renamed import aliases. A private
+`use crate::shared::OtherValue as local_shadow` can point at an item that is
+retained elsewhere while still being unused in the current module. Raw alias
+text was not enough because a local `let local_shadow = ...` made the alias look
+live. Private renamed imports now require an actual retained path/macro use of
+the visible alias, unless the import has an implicit scope effect such as a
+trait import needed for method resolution. The fixture
+`prunes_renamed_imports_shadowed_by_local_binding_when_target_is_retained_elsewhere`
+keeps the target item in the module that actually uses it while pruning the
+shadowed alias from the unrelated module.

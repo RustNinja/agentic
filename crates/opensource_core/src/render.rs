@@ -10238,6 +10238,28 @@ fn prune_use_tree(
         UseTree::Rename(rename) => {
             prefix.push(rename.ident.to_string());
             let alias = rename.rename.to_string();
+            let alias_is_reachable = renamed_use_alias_is_reachable(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &alias,
+                is_public_use,
+            );
+            if !is_public_use
+                && !alias_is_reachable
+                && !renamed_use_target_has_implicit_scope_effect(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    &prefix,
+                )
+            {
+                return None;
+            }
             (!use_target_resolves_to_removed_symbol(
                 project,
                 reduced,
@@ -10253,19 +10275,12 @@ fn prune_use_tree(
                 module_path,
                 &prefix,
                 is_public_use,
-            ) || renamed_use_alias_is_reachable(
-                project,
-                reduced,
-                render_plan,
-                package,
-                module_path,
-                &alias,
-                is_public_use,
-            ) || (is_public_use
-                && (reachable_reduced_packages_mention_ident(project, reduced, &alias)
-                    || public_reexport_name_is_referenced_by_reduced_package(
-                        project, reduced, package, &alias,
-                    )))))
+            ) || alias_is_reachable
+                || (is_public_use
+                    && (reachable_reduced_packages_mention_ident(project, reduced, &alias)
+                        || public_reexport_name_is_referenced_by_reduced_package(
+                            project, reduced, package, &alias,
+                        )))))
             .then(|| UseTree::Rename(rename.clone()))
         }
         UseTree::Group(group) => {
@@ -10301,6 +10316,50 @@ fn prune_use_tree(
     }
 }
 
+fn renamed_use_target_has_implicit_scope_effect(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+) -> bool {
+    if target
+        .first()
+        .is_some_and(|first| use_name_is_external_dependency(project, package, first))
+        || target
+            .first()
+            .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
+    {
+        return external_trait_import_should_remain(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            target,
+            false,
+        );
+    }
+
+    let Some((target_package, target_path)) =
+        resolve_use_target_path(project, package, module_path, target)
+    else {
+        return false;
+    };
+    find_use_item(project, &target_package, &target_path).is_some_and(|item| {
+        item.kind == ItemKind::Trait
+            && local_trait_import_should_remain(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &item,
+            )
+    })
+}
+
 fn renamed_use_alias_is_reachable(
     project: &Project,
     reduced: &ReducedProject,
@@ -10310,7 +10369,7 @@ fn renamed_use_alias_is_reachable(
     alias: &str,
     is_public_use: bool,
 ) -> bool {
-    if reachable_module_import_scope_mentions_ident(
+    if reachable_module_import_scope_uses_imported_ident(
         project,
         reduced,
         render_plan,
