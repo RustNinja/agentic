@@ -809,3 +809,19 @@ parent's `helper` import only because the child has a local binding named
 imported name through a retained path, macro token, signature, retained
 attribute, or other explicit surface. Existing `use super::*` cases that need
 parent imports for child signatures and trait-method resolution remain covered.
+
+RA unresolved query reporting is now node-level instead of count-only. Each
+unresolved retained-owner method call or path records kind, category, reason,
+file span, snippet, AST kind, symbol, and owning callable/item when known. The
+production gate suppresses generic unresolved-method/path hazards when all
+diagnostics for that kind are benign, while macro-context and project-local
+dependency-risk unresolved nodes remain explicit review hazards and keep the
+usage classifier fail-closed. On the Litter `codex-ipc` random-five probe, the
+same slice still passed feedback cargo check with zero warnings, all 9
+unresolved method calls were classified benign, unresolved path diagnostics
+split into 97 benign, 75 macro-blocked, and 2 dependency-risk local anchors
+(`TurnStartParams` and `ReasoningEffort`). The important classifier fix was to
+evaluate only the unresolved path's actual `A::B` segments, not every
+identifier inside rendered generic arguments; otherwise benign external paths
+such as `Result<String, LocalError>` and `String::new` inherited local tokens
+from nested syntax and looked risky.

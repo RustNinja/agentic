@@ -27,7 +27,8 @@ use syn::{
 };
 
 pub use analyzer::{
-    AnalyzerMode, AnalyzerReport, SemanticFileReport, SemanticReport, SemanticUsageReport,
+    AnalyzerMode, AnalyzerReport, SemanticFileReport, SemanticReport, SemanticUnresolvedCategory,
+    SemanticUnresolvedDiagnostic, SemanticUnresolvedKind, SemanticUsageReport,
 };
 pub use feedback::{
     check_workspace, write_report, CheckDiagnostic, CheckOptions, CheckReport, CheckSpan,
@@ -148,6 +149,9 @@ pub struct UsageClassificationSummary {
     pub unused_callables: usize,
     pub unused_items: usize,
     pub unknown_surfaces: usize,
+    pub benign_unknown_surfaces: usize,
+    pub macro_blocked_unknown_surfaces: usize,
+    pub dependency_risk_unknown_surfaces: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -424,6 +428,7 @@ pub struct UsageItemEvidence {
 
 #[derive(Debug, Clone)]
 pub struct UsageUnknownSurface {
+    pub category: String,
     pub code: String,
     pub severity: String,
     pub message: String,
@@ -1333,12 +1338,25 @@ fn usage_classification_report(
         .hazards
         .iter()
         .map(|hazard| UsageUnknownSurface {
+            category: unknown_surface_category(hazard).to_string(),
             code: hazard.code.clone(),
             severity: hazard.severity.clone(),
             message: hazard.message.clone(),
             details: hazard.details.clone(),
         })
         .collect::<Vec<_>>();
+    let benign_unknown_surfaces = unknown
+        .iter()
+        .filter(|surface| surface.category == "benign")
+        .count();
+    let macro_blocked_unknown_surfaces = unknown
+        .iter()
+        .filter(|surface| surface.category == "macro_blocked")
+        .count();
+    let dependency_risk_unknown_surfaces = unknown
+        .iter()
+        .filter(|surface| surface.category == "dependency_risk")
+        .count();
 
     let status = if unknown.is_empty() {
         "classified".to_string()
@@ -1371,6 +1389,9 @@ fn usage_classification_report(
             unused_callables: unused_callables.len(),
             unused_items: unused_items.len(),
             unknown_surfaces: unknown.len(),
+            benign_unknown_surfaces,
+            macro_blocked_unknown_surfaces,
+            dependency_risk_unknown_surfaces,
         },
         used: UsageClassifiedItems {
             callables: used_callables,
@@ -1395,6 +1416,40 @@ fn usage_classification_report(
         unknown,
         evidence,
     }
+}
+
+fn unknown_surface_category(hazard: &ProductionHazardReport) -> &'static str {
+    match hazard.code.as_str() {
+        "custom_attribute_macros" | "custom_derive_macros" | "custom_macro_invocations" => {
+            "macro_blocked"
+        }
+        "semantic_unresolved_method_calls" | "semantic_unresolved_paths" => {
+            semantic_unresolved_hazard_category(hazard)
+        }
+        "semantic_reduction_hints_applied" | "semantic_inventory_partially_applied" => "benign",
+        _ => "dependency_risk",
+    }
+}
+
+fn semantic_unresolved_hazard_category(hazard: &ProductionHazardReport) -> &'static str {
+    if hazard.details.is_empty() {
+        return "dependency_risk";
+    }
+    if hazard
+        .details
+        .iter()
+        .any(|detail| detail.subject.starts_with("category=dependency_risk;"))
+    {
+        return "dependency_risk";
+    }
+    if hazard
+        .details
+        .iter()
+        .any(|detail| detail.subject.starts_with("category=macro_blocked;"))
+    {
+        return "macro_blocked";
+    }
+    "benign"
 }
 
 struct UsageEvidenceInput<'a> {
@@ -1836,6 +1891,7 @@ struct SemanticHazardMetrics {
     unqueried_method_calls: usize,
     unresolved_paths: usize,
     unqueried_paths: usize,
+    unresolved_diagnostics: Vec<SemanticUnresolvedDiagnostic>,
 }
 
 fn add_semantic_query_hazards(
@@ -1869,16 +1925,45 @@ fn add_semantic_query_hazards(
             ),
         ));
     }
-    if metrics.unresolved_method_calls > 0 {
+    let unresolved_method_diagnostics =
+        unresolved_diagnostics_for_kind(&metrics, SemanticUnresolvedKind::MethodCall);
+    let unresolved_method_calls = non_benign_unresolved_count(
+        metrics.unresolved_method_calls,
+        &unresolved_method_diagnostics,
+    );
+    if unresolved_method_calls > 0 {
         hazards.push(production_hazard(
             "semantic_unresolved_method_calls",
             "warning",
             format!(
                 "{} queried {}method call(s) did not resolve semantically",
-                metrics.unresolved_method_calls,
+                unresolved_method_calls,
                 scope.query_prefix()
             ),
         ));
+        let last = hazards
+            .last_mut()
+            .expect("semantic unresolved method hazard was just pushed");
+        last.details = semantic_unresolved_details(unresolved_method_diagnostics);
+    }
+    let unresolved_path_diagnostics =
+        unresolved_diagnostics_for_kind(&metrics, SemanticUnresolvedKind::Path);
+    let unresolved_paths =
+        non_benign_unresolved_count(metrics.unresolved_paths, &unresolved_path_diagnostics);
+    if unresolved_paths > 0 {
+        hazards.push(production_hazard(
+            "semantic_unresolved_paths",
+            "warning",
+            format!(
+                "{} queried {}path(s) did not resolve semantically",
+                unresolved_paths,
+                scope.query_prefix()
+            ),
+        ));
+        let last = hazards
+            .last_mut()
+            .expect("semantic unresolved path hazard was just pushed");
+        last.details = semantic_unresolved_details(unresolved_path_diagnostics);
     }
     if metrics.unqueried_method_calls > 0 {
         hazards.push(production_hazard(
@@ -1887,17 +1972,6 @@ fn add_semantic_query_hazards(
             format!(
                 "{} {}method call(s) were not queried because the semantic budget was exhausted",
                 metrics.unqueried_method_calls,
-                scope.query_prefix()
-            ),
-        ));
-    }
-    if metrics.unresolved_paths > 0 {
-        hazards.push(production_hazard(
-            "semantic_unresolved_paths",
-            "warning",
-            format!(
-                "{} queried {}path(s) did not resolve semantically",
-                metrics.unresolved_paths,
                 scope.query_prefix()
             ),
         ));
@@ -1915,6 +1989,60 @@ fn add_semantic_query_hazards(
     }
 }
 
+fn unresolved_diagnostics_for_kind(
+    metrics: &SemanticHazardMetrics,
+    kind: SemanticUnresolvedKind,
+) -> Vec<&SemanticUnresolvedDiagnostic> {
+    metrics
+        .unresolved_diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.kind == kind)
+        .collect()
+}
+
+fn non_benign_unresolved_count(
+    fallback_count: usize,
+    diagnostics: &[&SemanticUnresolvedDiagnostic],
+) -> usize {
+    if diagnostics.is_empty() {
+        return fallback_count;
+    }
+    diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.category != SemanticUnresolvedCategory::Benign)
+        .count()
+}
+
+fn semantic_unresolved_details(
+    diagnostics: Vec<&SemanticUnresolvedDiagnostic>,
+) -> Vec<ProductionHazardDetail> {
+    diagnostics
+        .into_iter()
+        .filter(|diagnostic| diagnostic.category != SemanticUnresolvedCategory::Benign)
+        .map(|diagnostic| ProductionHazardDetail {
+            subject: format!(
+                "category={}; kind={}; reason={}; owner={}; symbol={}; snippet={}",
+                diagnostic.category.as_str(),
+                diagnostic.kind.as_str(),
+                diagnostic.reason,
+                diagnostic
+                    .owner
+                    .as_ref()
+                    .map(semantic_owner_to_string)
+                    .unwrap_or_else(|| "none".to_string()),
+                diagnostic.symbol.as_deref().unwrap_or("none"),
+                diagnostic.snippet
+            ),
+            package: None,
+            module_path: None,
+            file: Some(diagnostic.file.clone()),
+            start_line: Some(diagnostic.start_line),
+            cfg: None,
+            suggested_cargo_args: Vec::new(),
+        })
+        .collect()
+}
+
 fn semantic_hazard_metrics(
     semantic: &SemanticReport,
     retained_paths: &BTreeSet<PathBuf>,
@@ -1927,6 +2055,12 @@ fn semantic_hazard_metrics(
     }
 
     if semantic.selected_root_source_files > 0 {
+        let unresolved_diagnostics = semantic
+            .file_reports
+            .iter()
+            .filter(|file_report| file_report.selected_root_file)
+            .flat_map(|file_report| file_report.unresolved_diagnostics.iter().cloned())
+            .collect();
         return (
             SemanticHazardScope::SelectedRoots,
             SemanticHazardMetrics {
@@ -1937,6 +2071,7 @@ fn semantic_hazard_metrics(
                 unqueried_method_calls: semantic.selected_root_unqueried_method_calls,
                 unresolved_paths: semantic.selected_root_unresolved_paths,
                 unqueried_paths: semantic.selected_root_unqueried_paths,
+                unresolved_diagnostics,
             },
         );
     }
@@ -1951,6 +2086,7 @@ fn semantic_hazard_metrics(
             unqueried_method_calls: semantic.unqueried_method_calls,
             unresolved_paths: semantic.unresolved_paths,
             unqueried_paths: semantic.unqueried_paths,
+            unresolved_diagnostics: semantic.unresolved_diagnostics.clone(),
         },
     )
 }
@@ -1972,6 +2108,9 @@ fn semantic_file_metrics_for_paths(
         metrics.unqueried_method_calls += file_report.unqueried_method_calls;
         metrics.unresolved_paths += file_report.unresolved_paths;
         metrics.unqueried_paths += file_report.unqueried_paths;
+        metrics
+            .unresolved_diagnostics
+            .extend(file_report.unresolved_diagnostics.iter().cloned());
     }
     metrics
 }
@@ -4654,6 +4793,9 @@ struct UsageClassificationSummaryJson {
     unused_callables: usize,
     unused_items: usize,
     unknown_surfaces: usize,
+    benign_unknown_surfaces: usize,
+    macro_blocked_unknown_surfaces: usize,
+    dependency_risk_unknown_surfaces: usize,
 }
 
 impl UsageClassificationSummaryJson {
@@ -4672,6 +4814,9 @@ impl UsageClassificationSummaryJson {
             unused_callables: summary.unused_callables,
             unused_items: summary.unused_items,
             unknown_surfaces: summary.unknown_surfaces,
+            benign_unknown_surfaces: summary.benign_unknown_surfaces,
+            macro_blocked_unknown_surfaces: summary.macro_blocked_unknown_surfaces,
+            dependency_risk_unknown_surfaces: summary.dependency_risk_unknown_surfaces,
         }
     }
 }
@@ -4758,6 +4903,7 @@ impl UsageItemEvidenceJson {
 
 #[derive(Serialize)]
 struct UsageUnknownSurfaceJson {
+    category: String,
     code: String,
     severity: String,
     message: String,
@@ -4767,6 +4913,7 @@ struct UsageUnknownSurfaceJson {
 impl UsageUnknownSurfaceJson {
     fn from_report(surface: &UsageUnknownSurface) -> Self {
         Self {
+            category: surface.category.clone(),
             code: surface.code.clone(),
             severity: surface.severity.clone(),
             message: surface.message.clone(),
@@ -5066,6 +5213,7 @@ struct SemanticReportJson {
     selected_root_resolved_paths: usize,
     selected_root_unresolved_paths: usize,
     selected_root_unqueried_paths: usize,
+    unresolved_diagnostics: Vec<SemanticUnresolvedDiagnosticJson>,
     file_reports: Vec<SemanticFileReportJson>,
 }
 
@@ -5088,6 +5236,23 @@ struct SemanticFileReportJson {
     resolved_paths: usize,
     unresolved_paths: usize,
     unqueried_paths: usize,
+    unresolved_diagnostics: Vec<SemanticUnresolvedDiagnosticJson>,
+}
+
+#[derive(Serialize)]
+struct SemanticUnresolvedDiagnosticJson {
+    kind: String,
+    category: String,
+    reason: String,
+    file: PathBuf,
+    start_line: usize,
+    start_column: usize,
+    end_line: usize,
+    end_column: usize,
+    snippet: String,
+    ast_kind: String,
+    symbol: Option<String>,
+    owner: Option<String>,
 }
 
 impl SemanticReportJson {
@@ -5128,6 +5293,11 @@ impl SemanticReportJson {
             selected_root_resolved_paths: report.selected_root_resolved_paths,
             selected_root_unresolved_paths: report.selected_root_unresolved_paths,
             selected_root_unqueried_paths: report.selected_root_unqueried_paths,
+            unresolved_diagnostics: report
+                .unresolved_diagnostics
+                .iter()
+                .map(SemanticUnresolvedDiagnosticJson::from_report)
+                .collect(),
             file_reports: report
                 .file_reports
                 .iter()
@@ -5157,7 +5327,38 @@ impl SemanticFileReportJson {
             resolved_paths: report.resolved_paths,
             unresolved_paths: report.unresolved_paths,
             unqueried_paths: report.unqueried_paths,
+            unresolved_diagnostics: report
+                .unresolved_diagnostics
+                .iter()
+                .map(SemanticUnresolvedDiagnosticJson::from_report)
+                .collect(),
         }
+    }
+}
+
+impl SemanticUnresolvedDiagnosticJson {
+    fn from_report(report: &SemanticUnresolvedDiagnostic) -> Self {
+        Self {
+            kind: report.kind.as_str().to_string(),
+            category: report.category.as_str().to_string(),
+            reason: report.reason.clone(),
+            file: report.file.clone(),
+            start_line: report.start_line,
+            start_column: report.start_column,
+            end_line: report.end_line,
+            end_column: report.end_column,
+            snippet: report.snippet.clone(),
+            ast_kind: report.ast_kind.clone(),
+            symbol: report.symbol.clone(),
+            owner: report.owner.as_ref().map(semantic_owner_to_string),
+        }
+    }
+}
+
+fn semantic_owner_to_string(owner: &SemanticOwnerId) -> String {
+    match owner {
+        SemanticOwnerId::Callable(callable) => callable.to_string(),
+        SemanticOwnerId::Item(item) => item.to_string(),
     }
 }
 
@@ -5174,14 +5375,17 @@ mod tests {
     #[cfg(feature = "ra-hir")]
     use super::generate_with_analyzer;
     use super::model::ItemKind;
+    use super::non_benign_unresolved_count;
     use super::{
         add_semantic_inventory_hazard, default_feature_closure, generate,
         generate_with_analyzer_feedback, production_hazard_with_details,
-        production_readiness_status, semantic_hazard_metrics, usage_classification_report,
-        usage_evidence_reason, usage_guarded_render_reduction, write_generate_report, AnalyzerMode,
-        AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions, ItemId,
-        ProductionHazardDetail, SemanticFileReport, SemanticHazardScope, SemanticOwnerId,
-        SemanticReductionHints, SemanticReport, SemanticUsageReport, UsageDecision,
+        production_readiness_status, semantic_hazard_metrics, semantic_unresolved_details,
+        unknown_surface_category, usage_classification_report, usage_evidence_reason,
+        usage_guarded_render_reduction, write_generate_report, AnalyzerMode, AnalyzerReport,
+        CallableId, CheckDiagnostic, GenerateOptions, ItemId, ProductionHazardDetail,
+        SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
+        SemanticReport, SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic,
+        SemanticUnresolvedKind, SemanticUsageReport, UsageDecision,
     };
     use super::{manifest, parse, reduce, render};
 
@@ -6562,6 +6766,62 @@ theme = []
         assert_eq!(metrics.failed_files, 1);
         assert_eq!(metrics.unresolved_method_calls, 6);
         assert_eq!(metrics.unqueried_paths, 4);
+    }
+
+    #[test]
+    fn benign_unresolved_diagnostics_do_not_count_as_semantic_hazards() {
+        let diagnostic = semantic_unresolved_diagnostic(
+            SemanticUnresolvedKind::MethodCall,
+            SemanticUnresolvedCategory::Benign,
+            "external trait method",
+        );
+        let diagnostics = vec![&diagnostic];
+
+        assert_eq!(non_benign_unresolved_count(1, &diagnostics), 0);
+        assert!(semantic_unresolved_details(diagnostics).is_empty());
+    }
+
+    #[test]
+    fn dependency_risk_unresolved_diagnostics_remain_scoped_hazards() {
+        let diagnostic = semantic_unresolved_diagnostic(
+            SemanticUnresolvedKind::Path,
+            SemanticUnresolvedCategory::DependencyRisk,
+            "local enum variant",
+        );
+        let diagnostics = vec![&diagnostic];
+        let details = semantic_unresolved_details(diagnostics);
+
+        assert_eq!(non_benign_unresolved_count(1, &[&diagnostic]), 1);
+        assert_eq!(details.len(), 1);
+        assert!(details[0].subject.contains("category=dependency_risk;"));
+
+        let hazard = production_hazard_with_details(
+            "semantic_unresolved_paths",
+            "warning",
+            "unresolved path",
+            details,
+        );
+        assert_eq!(unknown_surface_category(&hazard), "dependency_risk");
+    }
+
+    #[test]
+    fn semantic_unresolved_hazard_category_prefers_benign_when_all_details_are_benign() {
+        let hazard = production_hazard_with_details(
+            "semantic_unresolved_method_calls",
+            "warning",
+            "unresolved method",
+            vec![ProductionHazardDetail {
+                subject: "category=benign; kind=method_call; snippet=reader.read()".to_string(),
+                package: None,
+                module_path: None,
+                file: Some(PathBuf::from("/tmp/src/lib.rs")),
+                start_line: Some(1),
+                cfg: None,
+                suggested_cargo_args: Vec::new(),
+            }],
+        );
+
+        assert_eq!(unknown_surface_category(&hazard), "benign");
     }
 
     #[test]
@@ -8892,6 +9152,27 @@ pub fn entry() -> usize {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
+    }
+
+    fn semantic_unresolved_diagnostic(
+        kind: SemanticUnresolvedKind,
+        category: SemanticUnresolvedCategory,
+        reason: &str,
+    ) -> SemanticUnresolvedDiagnostic {
+        SemanticUnresolvedDiagnostic {
+            kind,
+            category,
+            reason: reason.to_string(),
+            file: PathBuf::from("/tmp/src/lib.rs"),
+            start_line: 1,
+            start_column: 0,
+            end_line: 1,
+            end_column: 12,
+            snippet: "unresolved()".to_string(),
+            ast_kind: kind.as_str().to_string(),
+            symbol: Some("unresolved".to_string()),
+            owner: None,
+        }
     }
 
     fn project_callable_named(project: &super::model::Project, expected: &str) -> CallableId {

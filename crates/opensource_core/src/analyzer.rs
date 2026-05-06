@@ -121,6 +121,7 @@ pub struct SemanticReport {
     pub selected_root_resolved_paths: usize,
     pub selected_root_unresolved_paths: usize,
     pub selected_root_unqueried_paths: usize,
+    pub unresolved_diagnostics: Vec<SemanticUnresolvedDiagnostic>,
     pub file_reports: Vec<SemanticFileReport>,
 }
 
@@ -143,6 +144,55 @@ pub struct SemanticFileReport {
     pub resolved_paths: usize,
     pub unresolved_paths: usize,
     pub unqueried_paths: usize,
+    pub unresolved_diagnostics: Vec<SemanticUnresolvedDiagnostic>,
+}
+
+#[derive(Debug, Clone, Eq, PartialEq)]
+pub struct SemanticUnresolvedDiagnostic {
+    pub kind: SemanticUnresolvedKind,
+    pub category: SemanticUnresolvedCategory,
+    pub reason: String,
+    pub file: PathBuf,
+    pub start_line: usize,
+    pub start_column: usize,
+    pub end_line: usize,
+    pub end_column: usize,
+    pub snippet: String,
+    pub ast_kind: String,
+    pub symbol: Option<String>,
+    pub owner: Option<SemanticOwnerId>,
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SemanticUnresolvedKind {
+    MethodCall,
+    Path,
+}
+
+impl SemanticUnresolvedKind {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::MethodCall => "method_call",
+            Self::Path => "path",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Eq, PartialEq)]
+pub enum SemanticUnresolvedCategory {
+    Benign,
+    MacroBlocked,
+    DependencyRisk,
+}
+
+impl SemanticUnresolvedCategory {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::Benign => "benign",
+            Self::MacroBlocked => "macro_blocked",
+            Self::DependencyRisk => "dependency_risk",
+        }
+    }
 }
 
 #[derive(Debug, Clone, Default, Eq, PartialEq)]
@@ -347,6 +397,7 @@ mod rust_analyzer {
 
     use super::{
         AnalyzerMode, AnalyzerReport, SemanticFileReport, SemanticProvider, SemanticReport,
+        SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic, SemanticUnresolvedKind,
         SemanticUsageReport,
     };
 
@@ -806,6 +857,10 @@ mod rust_analyzer {
                         .queried_paths
                         .saturating_sub(file_report.resolved_paths);
                     file_summary.unqueried_paths = file_report.unqueried_paths;
+                    file_summary.unresolved_diagnostics = file_report.unresolved_diagnostics;
+                    report
+                        .unresolved_diagnostics
+                        .extend(file_summary.unresolved_diagnostics.iter().cloned());
                     if selected_root_file {
                         report.selected_root_analyzed_files += 1;
                         report.selected_root_method_calls += file_summary.method_calls;
@@ -1287,6 +1342,8 @@ mod rust_analyzer {
     ) -> SemanticReport {
         let source = context.semantics.parse_guess_edition(file_id);
         let mut report = SemanticReport::default();
+        let source_text = source.syntax().text().to_string();
+        let file_path = normalize_vfs_path(context.vfs_path).unwrap_or_default();
 
         for node in source.syntax().descendants() {
             if let Some(method_call) = ast::MethodCallExpr::cast(node.clone()) {
@@ -1313,6 +1370,15 @@ mod rust_analyzer {
                             context.hints,
                         );
                     }
+                } else {
+                    report
+                        .unresolved_diagnostics
+                        .push(unresolved_method_diagnostic(
+                            &file_path,
+                            &source_text,
+                            context,
+                            &method_call,
+                        ));
                 }
                 if context
                     .semantics
@@ -1354,11 +1420,195 @@ mod rust_analyzer {
                             context.hints,
                         );
                     }
+                } else {
+                    report
+                        .unresolved_diagnostics
+                        .push(unresolved_path_diagnostic(
+                            &file_path,
+                            &source_text,
+                            context,
+                            &path,
+                        ));
                 }
             }
         }
 
         report
+    }
+
+    fn unresolved_method_diagnostic(
+        file_path: &Path,
+        source_text: &str,
+        context: &FileSemanticContext<'_>,
+        method_call: &ast::MethodCallExpr,
+    ) -> SemanticUnresolvedDiagnostic {
+        let syntax = method_call.syntax();
+        let symbol = method_call
+            .name_ref()
+            .map(|name| name.syntax().text().to_string());
+        let (category, reason) =
+            classify_unresolved_method(context.semantic_index, &symbol, syntax);
+        unresolved_diagnostic(
+            SemanticUnresolvedKind::MethodCall,
+            category,
+            reason,
+            file_path,
+            source_text,
+            context,
+            syntax,
+            symbol,
+        )
+    }
+
+    fn unresolved_path_diagnostic(
+        file_path: &Path,
+        source_text: &str,
+        context: &FileSemanticContext<'_>,
+        path: &ast::Path,
+    ) -> SemanticUnresolvedDiagnostic {
+        let syntax = path.syntax();
+        let symbol = path
+            .segment()
+            .and_then(|segment| segment.name_ref())
+            .map(|name| name.syntax().text().to_string());
+        let segments = path_segments(path);
+        let (category, reason) =
+            classify_unresolved_path(context.semantic_index, syntax, &segments);
+        unresolved_diagnostic(
+            SemanticUnresolvedKind::Path,
+            category,
+            reason,
+            file_path,
+            source_text,
+            context,
+            syntax,
+            symbol,
+        )
+    }
+
+    fn unresolved_diagnostic(
+        kind: SemanticUnresolvedKind,
+        category: SemanticUnresolvedCategory,
+        reason: &'static str,
+        file_path: &Path,
+        source_text: &str,
+        context: &FileSemanticContext<'_>,
+        syntax: &ra_ap_syntax::SyntaxNode,
+        symbol: Option<String>,
+    ) -> SemanticUnresolvedDiagnostic {
+        let range = syntax.text_range();
+        let start = text_size_to_usize(range.start());
+        let end = text_size_to_usize(range.end());
+        let (start_line, start_column) = line_column_from_text(source_text, start);
+        let (end_line, end_column) = line_column_from_text(source_text, end);
+        let owner = context
+            .semantic_index
+            .and_then(|index| index.owner_at_vfs_offset(context.vfs_path, range.start()));
+        SemanticUnresolvedDiagnostic {
+            kind,
+            category,
+            reason: reason.to_string(),
+            file: file_path.to_path_buf(),
+            start_line,
+            start_column,
+            end_line,
+            end_column,
+            snippet: compact_node_snippet(syntax),
+            ast_kind: format!("{:?}", syntax.kind()),
+            symbol,
+            owner,
+        }
+    }
+
+    fn classify_unresolved_method(
+        index: Option<&ProjectSemanticIndex>,
+        symbol: &Option<String>,
+        syntax: &ra_ap_syntax::SyntaxNode,
+    ) -> (SemanticUnresolvedCategory, &'static str) {
+        if syntax_has_macro_or_attr_ancestor(syntax) {
+            return (
+                SemanticUnresolvedCategory::MacroBlocked,
+                "unresolved_method_inside_macro_or_attribute_context",
+            );
+        }
+        if symbol
+            .as_deref()
+            .is_some_and(|name| index.is_some_and(|index| index.has_project_method_name(name)))
+        {
+            return (
+                SemanticUnresolvedCategory::DependencyRisk,
+                "unresolved_method_name_matches_project_method",
+            );
+        }
+        (
+            SemanticUnresolvedCategory::Benign,
+            "unresolved_method_has_no_project_local_method_match",
+        )
+    }
+
+    fn classify_unresolved_path(
+        index: Option<&ProjectSemanticIndex>,
+        syntax: &ra_ap_syntax::SyntaxNode,
+        segments: &[String],
+    ) -> (SemanticUnresolvedCategory, &'static str) {
+        if syntax_has_macro_or_attr_ancestor(syntax) {
+            return (
+                SemanticUnresolvedCategory::MacroBlocked,
+                "unresolved_path_inside_macro_or_attribute_context",
+            );
+        }
+        if index.is_some_and(|index| index.path_has_project_local_anchor(segments)) {
+            return (
+                SemanticUnresolvedCategory::DependencyRisk,
+                "unresolved_path_anchor_matches_project_local_identifier",
+            );
+        }
+        (
+            SemanticUnresolvedCategory::Benign,
+            "unresolved_path_has_no_project_local_identifier",
+        )
+    }
+
+    fn path_segments(path: &ast::Path) -> Vec<String> {
+        let mut segments = Vec::new();
+        collect_path_segments(path, &mut segments);
+        segments
+    }
+
+    fn collect_path_segments(path: &ast::Path, segments: &mut Vec<String>) {
+        if let Some(qualifier) = path.qualifier() {
+            collect_path_segments(&qualifier, segments);
+        }
+        if let Some(segment) = path.segment() {
+            if let Some(name) = segment.name_ref() {
+                segments.push(name.syntax().text().to_string());
+            }
+        }
+    }
+
+    fn is_relative_path_anchor(segment: &str) -> bool {
+        matches!(segment, "crate" | "self" | "super")
+    }
+
+    fn syntax_has_macro_or_attr_ancestor(syntax: &ra_ap_syntax::SyntaxNode) -> bool {
+        syntax.ancestors().any(|ancestor| {
+            let kind = format!("{:?}", ancestor.kind());
+            kind.contains("MACRO") || kind.contains("ATTR")
+        })
+    }
+
+    fn compact_node_snippet(syntax: &ra_ap_syntax::SyntaxNode) -> String {
+        let mut snippet = syntax
+            .text()
+            .to_string()
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        const MAX_SNIPPET_LEN: usize = 160;
+        if snippet.len() > MAX_SNIPPET_LEN {
+            snippet.truncate(MAX_SNIPPET_LEN);
+        }
+        snippet
     }
 
     fn add_resolved_function_hint(
@@ -1555,12 +1805,16 @@ mod rust_analyzer {
         root_files: BTreeSet<PathBuf>,
         retained_files: BTreeSet<PathBuf>,
         retained_owners: BTreeSet<SemanticOwnerId>,
+        local_idents: BTreeSet<String>,
+        method_names: BTreeSet<String>,
     }
 
     impl ProjectSemanticIndex {
         fn build(project: &Project) -> Self {
             let mut files = HashMap::new();
             let mut root_files = BTreeSet::new();
+            let mut local_idents = BTreeSet::new();
+            let mut method_names = BTreeSet::new();
             let retention = retained_scope(project, &SemanticReductionHints::default());
             for source in project.files.values() {
                 let path = normalize_fs_path(&source.path);
@@ -1575,6 +1829,7 @@ mod rust_analyzer {
                 if has_opensourced_attr(&record.item.attrs) {
                     root_files.insert(normalize_fs_path(&record.span.file));
                 }
+                local_idents.insert(callable_name(id).to_string());
                 if let Some(file) = files.get_mut(&normalize_fs_path(&record.span.file)) {
                     file.callables.push(IndexedCallable {
                         id: id.clone(),
@@ -1585,6 +1840,11 @@ mod rust_analyzer {
             for (id, record) in &project.methods {
                 if has_opensourced_attr(&record.item.attrs) {
                     root_files.insert(normalize_fs_path(&record.span.file));
+                }
+                local_idents.insert(callable_name(id).to_string());
+                method_names.insert(callable_name(id).to_string());
+                if let CallableId::Method { type_path, .. } = id {
+                    local_idents.extend(type_path.iter().cloned());
                 }
                 if let Some(file) = files.get_mut(&normalize_fs_path(&record.span.file)) {
                     file.callables.push(IndexedCallable {
@@ -1597,6 +1857,7 @@ mod rust_analyzer {
                 if item_has_opensourced_attr(&record.item) {
                     root_files.insert(normalize_fs_path(&record.span.file));
                 }
+                local_idents.insert(id.name.clone());
                 if let Some(file) = files.get_mut(&normalize_fs_path(&record.span.file)) {
                     file.items.push(IndexedItem {
                         id: id.clone(),
@@ -1616,6 +1877,8 @@ mod rust_analyzer {
                 root_files,
                 retained_files: retention.files,
                 retained_owners: retention.owners,
+                local_idents,
+                method_names,
             }
         }
 
@@ -1689,6 +1952,27 @@ mod rust_analyzer {
                     SemanticOwnerId::Item(_) => None,
                 })
                 .collect()
+        }
+
+        fn has_project_method_name(&self, name: &str) -> bool {
+            self.method_names.contains(name)
+        }
+
+        fn path_has_project_local_anchor(&self, segments: &[String]) -> bool {
+            match segments {
+                [single] => self.local_idents.contains(single),
+                [first, rest @ ..] if is_relative_path_anchor(first) => rest
+                    .iter()
+                    .any(|segment| self.local_idents.contains(segment)),
+                [first, rest @ ..] => {
+                    self.local_idents.contains(first)
+                        || rest
+                            .iter()
+                            .take(rest.len().saturating_sub(1))
+                            .any(|segment| self.local_idents.contains(segment))
+                }
+                [] => false,
+            }
         }
 
         fn callable_at_vfs_offset(
@@ -2055,6 +2339,22 @@ mod rust_analyzer {
 
     fn text_size_to_usize(offset: TextSize) -> usize {
         u32::from(offset) as usize
+    }
+
+    fn line_column_from_text(text: &str, offset: usize) -> (usize, usize) {
+        let offset = offset.min(text.len());
+        let mut line = 1;
+        let mut line_start = 0;
+        for (index, ch) in text.char_indices() {
+            if index >= offset {
+                break;
+            }
+            if ch == '\n' {
+                line += 1;
+                line_start = index + 1;
+            }
+        }
+        (line, offset.saturating_sub(line_start))
     }
 
     fn is_workspace_rust_file(
