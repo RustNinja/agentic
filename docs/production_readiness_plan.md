@@ -203,12 +203,17 @@ checks from blocking the feedback loop.
   models generated source. Retained build scripts are production-blocking
   because they can also read external state or emit link/env metadata that
   changes compiled behavior. Retained build-script hazards report package and
-  build-script path details.
+  build-script path details. When retained `OUT_DIR` source includes are backed
+  by simple Rust source string literals in the retained build script, those
+  literal bodies are scanned for referenced helper paths and only those helpers
+  are kept as `blocked_by_unknown`.
 - Retained `include!` Rust source files must fail closed even when their paths
   are static and copied, because the included Rust is outside the current
-  reachability graph. Include and compile-time environment hazards report
-  package/module/file/line details so a production run points at the retained
-  source surface directly.
+  reachability graph. Static package-local included Rust is scanned for path
+  references so helpers used only by the included source are retained without
+  retaining unrelated same-named methods or dead siblings. Include and
+  compile-time environment hazards report package/module/file/line details so a
+  production run points at the retained source surface directly.
 - Retained `env!` or `option_env!` macros must fail closed unless they read
   Cargo manifest-derived package metadata, because they can embed machine-local
   compile-time state.
@@ -305,8 +310,9 @@ This branch has moved beyond the initial safety gate. It now has guarded output
 replacement, Cargo metadata-backed workspace/target/dependency discovery,
 preflight validation, compiler feedback widening, conservative repair,
 production validation gates, pinned corpus cases, documented production hazard
-reporting for known unsupported surfaces, and additive rust-analyzer semantic
-edges in the retained graph. The main unfinished production step is expanding
-the semantic oracle from exact local method/path edges into trait impl lookup,
-macro-expanded item inventory, active cfg/module inventory, generated source,
-and dynamic dispatch surfaces.
+reporting for known unsupported surfaces, generated-source helper blocker
+extraction, and additive rust-analyzer semantic edges in the retained graph. The
+main unfinished production step is expanding the semantic oracle from exact
+local method/path edges into trait impl lookup, macro-expanded item inventory,
+active cfg/module inventory, fully modeled generated source, and dynamic
+dispatch surfaces.

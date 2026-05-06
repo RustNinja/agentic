@@ -2486,6 +2486,7 @@ fn generated_support_package_syntactic_hazard_counts(
             include_context: path.parent().map(|source_dir| IncludeContext {
                 package_root: package.root.clone(),
                 source_dir: source_dir.to_path_buf(),
+                build_script_path: generated_support_build_script_path(package),
             }),
             location: HazardLocation {
                 package: package.name.clone(),
@@ -3991,6 +3992,7 @@ fn syntactic_hazard_visitor_for_location(
             source_path.parent().map(|source_dir| IncludeContext {
                 package_root: package.root.clone(),
                 source_dir: source_dir.to_path_buf(),
+                build_script_path: package_build_script_path(package),
             })
         })
     });
@@ -4019,6 +4021,7 @@ fn syntactic_hazard_visitor_for_inline_location(
             source_path.parent().map(|source_dir| IncludeContext {
                 package_root: package.root.clone(),
                 source_dir: source_dir.to_path_buf(),
+                build_script_path: package_build_script_path(package),
             })
         })
     });
@@ -4061,6 +4064,7 @@ struct SyntacticHazardVisitor {
 struct IncludeContext {
     package_root: PathBuf,
     source_dir: PathBuf,
+    build_script_path: Option<PathBuf>,
 }
 
 struct HazardLocation {
@@ -4174,12 +4178,12 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
                 self.counts.out_dir_source_include_macros += 1;
                 self.counts
                     .out_dir_source_include_details
-                    .push(self.span_detail(mac));
+                    .push(self.out_dir_source_include_detail(mac));
             } else {
                 self.counts.source_include_macros += 1;
                 self.counts
                     .source_include_details
-                    .push(self.span_detail(mac));
+                    .push(self.source_include_detail(mac));
             }
         } else if macro_path_ends_with(mac, "include_str")
             || macro_path_ends_with(mac, "include_bytes")
@@ -4244,6 +4248,59 @@ impl SyntacticHazardVisitor {
         detail.subject = format!("{}: {}", detail.subject, node.to_token_stream());
         detail.blocked_idents = type_surface_blocked_idents(&node.to_token_stream());
         detail
+    }
+
+    fn source_include_detail(&self, mac: &Macro) -> ProductionHazardDetail {
+        let mut detail = self.span_detail(mac);
+        detail.blocked_idents = self.static_source_include_blocked_idents(mac);
+        detail
+    }
+
+    fn out_dir_source_include_detail(&self, mac: &Macro) -> ProductionHazardDetail {
+        let mut detail = self.span_detail(mac);
+        detail.blocked_idents = self.build_script_generated_source_blocked_idents();
+        detail
+    }
+
+    fn static_source_include_blocked_idents(&self, mac: &Macro) -> Vec<String> {
+        let Some(path) = static_include_path(&mac.tokens) else {
+            return Vec::new();
+        };
+        let Some(path) = self.resolved_package_include_path(&path) else {
+            return Vec::new();
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return Vec::new();
+        };
+        source_text_blocked_idents(&text)
+    }
+
+    fn build_script_generated_source_blocked_idents(&self) -> Vec<String> {
+        let Some(context) = &self.include_context else {
+            return Vec::new();
+        };
+        let Some(build_script) = &context.build_script_path else {
+            return Vec::new();
+        };
+        let Ok(text) = fs::read_to_string(build_script) else {
+            return Vec::new();
+        };
+        let Ok(tokens) = text.parse::<TokenStream>() else {
+            return Vec::new();
+        };
+        let mut idents = BTreeSet::new();
+        collect_rust_source_string_literal_idents(&tokens, &mut idents);
+        filtered_source_blocker_idents(idents)
+    }
+
+    fn resolved_package_include_path(&self, path: &StaticIncludePath) -> Option<PathBuf> {
+        let context = self.include_context.as_ref()?;
+        let candidate = match path {
+            StaticIncludePath::Absolute(path) => path.clone(),
+            StaticIncludePath::SourceRelative(path) => context.source_dir.join(path),
+            StaticIncludePath::PackageRelative(path) => context.package_root.join(path),
+        };
+        include_candidate_inside_package(context, &candidate).then_some(candidate)
     }
 
     fn attribute_macro_detail(
@@ -4393,6 +4450,119 @@ impl SyntacticHazardVisitor {
                 .external_file_include_details
                 .push(self.span_detail(mac));
         }
+    }
+}
+
+fn include_candidate_inside_package(context: &IncludeContext, candidate: &Path) -> bool {
+    let package_root_lexical = normalize_path_lexically(&context.package_root);
+    let candidate_lexical = normalize_path_lexically(candidate);
+    let lexical_inside = candidate_lexical.starts_with(&package_root_lexical);
+    match (
+        candidate.canonicalize(),
+        context.package_root.canonicalize(),
+    ) {
+        (Ok(candidate), Ok(package_root)) => candidate.starts_with(package_root),
+        _ => lexical_inside,
+    }
+}
+
+fn source_text_blocked_idents(text: &str) -> Vec<String> {
+    let mut visitor = SourceIncludeReferenceVisitor::default();
+    if let Ok(file) = syn::parse_file(text) {
+        visitor.visit_file(&file);
+        return filtered_source_blocker_idents(visitor.idents);
+    }
+    if let Ok(expr) = syn::parse_str::<syn::Expr>(text) {
+        visitor.visit_expr(&expr);
+        return filtered_source_blocker_idents(visitor.idents);
+    }
+    if let Ok(ty) = syn::parse_str::<syn::Type>(text) {
+        visitor.visit_type(&ty);
+        return filtered_source_blocker_idents(visitor.idents);
+    }
+    Vec::new()
+}
+
+fn collect_rust_source_string_literal_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
+    for token in tokens.clone() {
+        match token {
+            proc_macro2::TokenTree::Literal(literal) => {
+                let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) else {
+                    continue;
+                };
+                let value = literal.value();
+                if !string_literal_may_contain_rust_source(&value) {
+                    continue;
+                }
+                idents.extend(source_text_blocked_idents(&value));
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                collect_rust_source_string_literal_idents(&group.stream(), idents);
+            }
+            proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
+        }
+    }
+}
+
+fn string_literal_may_contain_rust_source(value: &str) -> bool {
+    value.contains("::")
+        || value.contains("fn ")
+        || value.contains("pub ")
+        || value.contains("struct ")
+        || value.contains("enum ")
+        || value.contains("impl ")
+        || value.contains("trait ")
+        || value.contains("const ")
+        || value.contains("static ")
+        || value.contains("let ")
+        || value.contains("->")
+        || value.contains('{')
+}
+
+fn filtered_source_blocker_idents(mut idents: BTreeSet<String>) -> Vec<String> {
+    idents.retain(|ident| {
+        !type_surface_wrapper_or_builtin_ident(ident) && !source_include_noise_ident(ident)
+    });
+    idents.into_iter().collect()
+}
+
+fn source_include_noise_ident(ident: &str) -> bool {
+    matches!(
+        ident,
+        "CARGO_MANIFEST_DIR" | "OUT_DIR" | "include" | "include_str" | "include_bytes"
+    )
+}
+
+#[derive(Default)]
+struct SourceIncludeReferenceVisitor {
+    idents: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for SourceIncludeReferenceVisitor {
+    fn visit_item_impl(&mut self, item_impl: &'ast syn::ItemImpl) {
+        for attribute in &item_impl.attrs {
+            self.visit_attribute(attribute);
+        }
+        self.visit_generics(&item_impl.generics);
+        if let Some((_, trait_path, _)) = &item_impl.trait_ {
+            self.visit_path(trait_path);
+        }
+        for item in &item_impl.items {
+            self.visit_impl_item(item);
+        }
+    }
+
+    fn visit_path(&mut self, path: &'ast syn::Path) {
+        if let Some(segment) = path.segments.last() {
+            let ident = segment.ident.to_string();
+            if !rust_keyword_or_common_macro_word(&ident)
+                && !macro_surface_meta_word(&ident)
+                && !type_surface_wrapper_or_builtin_ident(&ident)
+            {
+                self.idents.insert(ident);
+            }
+        }
+        syn::visit::visit_path(self, path);
     }
 }
 

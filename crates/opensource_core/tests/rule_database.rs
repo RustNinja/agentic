@@ -1612,6 +1612,8 @@ fn flags_out_dir_source_includes_as_production_blockers() {
 
     let lib = read(output.join("out_dir_source_rule/src/lib.rs"));
     assert!(lib.contains("include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"))"));
+    assert!(lib.contains("out_dir_generated_helper"), "{lib}");
+    assert!(!lib.contains("dead_out_dir_helper"), "{lib}");
     assert!(output.join("out_dir_source_rule/build.rs").exists());
     assert_cargo_check(&output, &target_dir, &lib);
 }
@@ -2996,6 +2998,7 @@ fn prunes_local_facade_glob_reexports_to_selected_symbols() {
 fn flags_retained_source_include_macros_as_production_blockers() {
     let workspace = temp_path("rule-source-include-workspace");
     let output = temp_path("rule-source-include-output");
+    let target_dir = temp_path("rule-source-include-target");
     write_source_include_rule_fixture(&workspace);
 
     let report = generate(GenerateOptions {
@@ -3012,7 +3015,10 @@ fn flags_retained_source_include_macros_as_production_blockers() {
         .any(|hazard| { hazard.code == "source_include_macros" && hazard.severity == "error" }));
     let lib = read(output.join("source_include_rule/src/lib.rs"));
     assert!(lib.contains("include!(\"generated_expr.rs\")"), "{lib}");
+    assert!(lib.contains("helper_from_generated_expr"), "{lib}");
     assert!(!lib.contains("dead_generated"), "{lib}");
+    assert!(!lib.contains("dead_helper"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
 }
 
 #[test]
@@ -4544,6 +4550,14 @@ mod generated {
 pub fn selected() -> u32 {
     generated::generated_value()
 }
+
+pub fn out_dir_generated_helper() -> u32 {
+    42
+}
+
+pub fn dead_out_dir_helper() -> u32 {
+    99
+}
 "#,
     );
     let manifest = root.join("out_dir_source_rule/Cargo.toml");
@@ -4562,7 +4576,10 @@ pub fn selected() -> u32 {
 
 fn main() {
     let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR should be set"));
-    fs::write(out_dir.join("generated.rs"), "pub fn generated_value() -> u32 { 42 }\n")
+    fs::write(
+        out_dir.join("generated.rs"),
+        "pub fn generated_value() -> u32 { super::out_dir_generated_helper() }\n",
+    )
         .expect("generated source should be writable");
 }
 "#,
@@ -6825,12 +6842,23 @@ pub fn selected() -> u32 {
     include!("generated_expr.rs")
 }
 
+pub fn helper_from_generated_expr() -> u32 {
+    41
+}
+
 pub fn dead_api() -> u32 {
     include!("dead_generated.rs")
 }
+
+pub fn dead_helper() -> u32 {
+    99
+}
 "#,
     );
-    write(root.join("source_include_rule/src/generated_expr.rs"), "41");
+    write(
+        root.join("source_include_rule/src/generated_expr.rs"),
+        "helper_from_generated_expr()",
+    );
     write(root.join("source_include_rule/src/dead_generated.rs"), "99");
 }
 

@@ -119,7 +119,8 @@ file.
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
 | `import.reexport.chain_hub.001` | covered | Reexport chains prune dead grouped names at each public hub |
 | `include.str.static_concat.001` | covered | Literal and `concat!` `include_str!` assets are copied while dead siblings are pruned |
-| `build.out_dir_source_include.001` | covered | Retained `include!(concat!(env!("OUT_DIR"), ...))` is production-blocking |
+| `build.out_dir_source_include.001` | covered | Retained `include!(concat!(env!("OUT_DIR"), ...))` is production-blocking, and simple build-script generated Rust literals retain only referenced helper paths while pruning unrelated dead helpers |
+| `include.source.static_helper_refs.001` | covered | Static package-local `include!` Rust is scanned for referenced helper paths so helpers used only by included source are retained without keeping unrelated dead siblings |
 | `macro.item_invocation.generated_api.001` | covered | Live macro-generated item invocations survive while dead sibling invocations are pruned |
 | `macro.metavariable_method.001` | covered | Methods referenced through `$receiver.method()` in retained `macro_rules!` bodies are resolved from invocation argument types |
 | `trait.associated_projection.001` | covered | Associated type/const projections retain the live impl and prune dead projection impls |
@@ -275,8 +276,9 @@ contracts.
   internal types.
 - Macro bodies that call methods on metavariables, where the invocation argument
   type is the only generic way to retain the required method.
-- Direct callback API boundaries, source `include!` blockers, dependency aliases
-  inside macro bodies, and inline script-bundle modules.
+- Direct callback API boundaries, source `include!` blockers, generated-source
+  helper references, dependency aliases inside macro bodies, and inline
+  script-bundle modules.
 - Support path dependencies that compile but over-copy examples, tests, benches,
   dev/build-only path packages, and fixture assets.
 - Support path dependencies with library test modules, orphan Rust files,
