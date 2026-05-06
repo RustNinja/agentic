@@ -7535,6 +7535,12 @@ impl Resolver<'_> {
     }
 
     fn resolve_receiver_type(&self, ty: &Type) -> Option<TypeRef> {
+        match ty {
+            Type::Reference(reference) => return self.resolve_receiver_type(&reference.elem),
+            Type::Group(group) => return self.resolve_receiver_type(&group.elem),
+            Type::Paren(paren) => return self.resolve_receiver_type(&paren.elem),
+            _ => {}
+        }
         if let Type::Path(type_path) = ty {
             if let Some(type_ref) = self.resolve_single_type_argument(&type_path.path) {
                 return Some(type_ref);
@@ -7545,9 +7551,6 @@ impl Resolver<'_> {
         }
 
         match ty {
-            Type::Reference(reference) => self.resolve_receiver_type(&reference.elem),
-            Type::Group(group) => self.resolve_receiver_type(&group.elem),
-            Type::Paren(paren) => self.resolve_receiver_type(&paren.elem),
             Type::Path(_) => None,
             _ => None,
         }

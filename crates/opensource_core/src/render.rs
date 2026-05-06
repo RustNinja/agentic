@@ -2392,6 +2392,10 @@ fn build_restricted_support_sources(
             }
 
             let mut macro_probe_usage = live_usage.clone();
+            let live_assoc_import_items = support_combined_assoc_items(
+                &live_set.assoc_item_names,
+                &live_usage.dependency_public_names,
+            );
             for item in &module.syntax.items {
                 let Item::Use(item_use) = item else {
                     continue;
@@ -2412,7 +2416,7 @@ fn build_restricted_support_sources(
                     SupportUseNeeds {
                         live_idents: &live_usage.idents,
                         live_exports: &live_set.public_exports,
-                        live_assoc_items: &live_usage.dependency_public_names,
+                        live_assoc_items: &live_assoc_import_items,
                     },
                     &mut live,
                 ) else {
@@ -2451,6 +2455,10 @@ fn build_restricted_support_sources(
                 }
             }
 
+            let live_assoc_import_items = support_combined_assoc_items(
+                &live_set.assoc_item_names,
+                &live_usage.dependency_public_names,
+            );
             for item in &module.syntax.items {
                 let Item::Use(item_use) = item else {
                     continue;
@@ -2463,7 +2471,7 @@ fn build_restricted_support_sources(
                     SupportUseNeeds {
                         live_idents: &live_usage.idents,
                         live_exports: &live_set.public_exports,
-                        live_assoc_items: &live_usage.dependency_public_names,
+                        live_assoc_items: &live_assoc_import_items,
                     },
                     &mut live,
                 ) else {
@@ -3036,6 +3044,20 @@ fn mark_support_live_use_imports(
         }
         UseTree::Glob(_) => mark_support_live_glob_imports(ctx, source_file, &prefix, needs, live),
     }
+}
+
+fn support_combined_assoc_items(
+    first: &BTreeMap<String, BTreeSet<String>>,
+    second: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut combined = first.clone();
+    for (name, assoc_items) in second {
+        combined
+            .entry(name.clone())
+            .or_default()
+            .extend(assoc_items.iter().cloned());
+    }
+    combined
 }
 
 fn support_reexport_mark_to_option(mark: SupportReexportMark) -> Option<bool> {
@@ -4464,6 +4486,15 @@ impl SupportAssocUsageVisitor {
 }
 
 impl Visit<'_> for SupportAssocUsageVisitor {
+    fn visit_item_impl(&mut self, node: &syn::ItemImpl) {
+        let previous = self.self_type.clone();
+        if let Some(self_type) = support_impl_self_named_item(node) {
+            self.self_type = Some(self_type);
+        }
+        visit::visit_item_impl(self, node);
+        self.self_type = previous;
+    }
+
     fn visit_item_fn(&mut self, node: &syn::ItemFn) {
         self.push_fn_arg_scope(&node.sig.inputs);
         visit::visit_block(self, &node.block);
@@ -4504,6 +4535,19 @@ impl Visit<'_> for SupportAssocUsageVisitor {
             }
         }
         visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            if let Some(assoc_path) =
+                support_assoc_call_path_from_path(&path.path, self.self_type.as_deref())
+            {
+                if support_required_assoc_segments(&assoc_path).is_some() {
+                    self.assoc_paths.insert(assoc_path);
+                }
+            }
+        }
+        visit::visit_expr_call(self, node);
     }
 }
 
@@ -4571,6 +4615,27 @@ fn support_type_path_from_assoc_path(path: &syn::Path) -> Option<Vec<String>> {
         return None;
     }
     support_type_path_from_segments(type_path)
+}
+
+fn support_assoc_call_path_from_path(
+    path: &syn::Path,
+    self_type: Option<&str>,
+) -> Option<Vec<String>> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let (assoc_name, type_segments) = segments.split_last()?;
+    if !support_assoc_item_name_is_precise(assoc_name) {
+        return None;
+    }
+    let mut type_path = support_type_path_from_segments(type_segments)?;
+    if type_path.as_slice() == ["Self"] {
+        type_path = vec![self_type?.to_string()];
+    }
+    type_path.push(assoc_name.clone());
+    Some(type_path)
 }
 
 fn support_type_path_from_path(path: &syn::Path) -> Option<Vec<String>> {
@@ -13564,6 +13629,15 @@ fn use_prefix_should_drop(
                 return false;
             }
             if is_public_use {
+                if !module_should_render(
+                    project,
+                    reduced,
+                    render_plan,
+                    &target_package,
+                    &target_path,
+                ) {
+                    return true;
+                }
                 let exposes_referenced_name = public_glob_prefix_exposes_referenced_name(
                     project,
                     reduced,
@@ -13573,16 +13647,6 @@ fn use_prefix_should_drop(
                     &target_package,
                     &target_path,
                 );
-                if !module_should_render(
-                    project,
-                    reduced,
-                    render_plan,
-                    &target_package,
-                    &target_path,
-                ) && !exposes_referenced_name
-                {
-                    return true;
-                }
                 return !exposes_referenced_name;
             }
             if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {

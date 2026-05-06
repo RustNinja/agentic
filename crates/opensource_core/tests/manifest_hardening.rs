@@ -1199,6 +1199,88 @@ fn prunes_unused_external_pub_reexport_names() {
 }
 
 #[test]
+fn prunes_public_glob_reexports_to_removed_local_modules() {
+    let workspace = temp_path("public-glob-removed-module-workspace");
+    let output = temp_path("public-glob-removed-module-output");
+    let target_dir = temp_path("public-glob-removed-module-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub mod live;
+pub mod removed;
+
+pub use live::*;
+pub use removed::*;
+
+#[opensourced]
+pub fn selected() -> usize {
+    live::value()
+}
+"#,
+    );
+    write(
+        workspace.join("app/src/live.rs"),
+        r#"pub fn value() -> usize {
+    7
+}
+"#,
+    );
+    write(
+        workspace.join("app/src/removed.rs"),
+        r#"pub struct Removed;
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("app/src/lib.rs"));
+    assert!(!lib.contains("pub mod removed"), "{lib}");
+    assert!(!lib.contains("pub use removed::*"), "{lib}");
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated public glob removed module slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
 fn prunes_external_group_imports_shadowed_by_local_bindings() {
     let workspace = temp_path("external-shadowed-import-workspace");
     let output = temp_path("external-shadowed-import-output");
@@ -1912,6 +1994,106 @@ fn retains_return_type_methods_and_trait_impls_for_dependency_items() {
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         helper,
+    );
+}
+
+#[test]
+fn retains_methods_called_through_borrowed_transparent_wrapper_return() {
+    let workspace = temp_path("borrowed-wrapper-return-workspace");
+    let output = temp_path("borrowed-wrapper-return-output");
+    let target_dir = temp_path("borrowed-wrapper-return-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use std::sync::Arc;
+
+pub struct PendingRequests {
+    count: usize,
+}
+
+impl PendingRequests {
+    pub fn new() -> Self {
+        Self { count: 1 }
+    }
+
+    pub fn insert(&self, value: usize) -> usize {
+        self.count + value
+    }
+
+    pub fn unused(&self) -> usize {
+        0
+    }
+}
+
+pub struct Connection {
+    pending: Arc<PendingRequests>,
+}
+
+impl Connection {
+    pub fn new() -> Self {
+        Self {
+            pending: Arc::new(PendingRequests::new()),
+        }
+    }
+
+    pub fn pending(&self) -> &Arc<PendingRequests> {
+        &self.pending
+    }
+}
+
+#[opensourced]
+pub fn selected() -> usize {
+    let connection = Connection::new();
+    connection.pending().insert(41)
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("app/src/lib.rs"));
+    assert!(source.contains("pub fn insert"), "{source}");
+    assert!(!source.contains("pub fn unused"), "{source}");
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated borrowed wrapper return slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
     );
 }
 
@@ -4875,6 +5057,179 @@ pub fn selected() -> String {
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
         provider_lib,
+    );
+}
+
+#[test]
+fn retains_support_assoc_constructor_on_imported_self_alias() {
+    let workspace = temp_path("support-imported-self-alias-workspace");
+    let output = temp_path("support-imported-self-alias-output");
+    let target_dir = temp_path("support-imported-self-alias-target");
+    let provider_a = temp_path("support-imported-self-alias-provider-a");
+    let provider_b = temp_path("support-imported-self-alias-provider-b");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider_b = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider_b)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> provider_b::TextElement {
+    provider_b::selected()
+}
+"#,
+    );
+    write(
+        provider_a.join("Cargo.toml"),
+        r#"[package]
+name = "provider_a"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        provider_a.join("src/lib.rs"),
+        r#"#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextElement {
+    pub byte_range: ByteRange,
+    placeholder: Option<String>,
+}
+
+impl TextElement {
+    pub fn new(byte_range: ByteRange, placeholder: Option<String>) -> Self {
+        Self { byte_range, placeholder }
+    }
+
+    pub fn placeholder(&self) -> Option<&str> {
+        self.placeholder.as_deref()
+    }
+}
+"#,
+    );
+    write(
+        provider_b.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "provider_b"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+provider_a = {{ path = "{}" }}
+"#,
+            manifest_path(&provider_a)
+        ),
+    );
+    write(
+        provider_b.join("src/lib.rs"),
+        r#"use provider_a::ByteRange as CoreByteRange;
+use provider_a::TextElement as CoreTextElement;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ByteRange {
+    pub start: usize,
+    pub end: usize,
+}
+
+impl From<ByteRange> for CoreByteRange {
+    fn from(value: ByteRange) -> Self {
+        Self { start: value.start, end: value.end }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TextElement {
+    pub byte_range: ByteRange,
+    placeholder: Option<String>,
+}
+
+impl TextElement {
+    pub fn new(byte_range: ByteRange, placeholder: Option<String>) -> Self {
+        Self { byte_range, placeholder }
+    }
+
+    pub fn from_core(value: CoreTextElement) -> Self {
+        Self::new(
+            ByteRange {
+                start: value.byte_range.start,
+                end: value.byte_range.end,
+            },
+            value.placeholder().map(str::to_string),
+        )
+    }
+}
+
+impl From<TextElement> for CoreTextElement {
+    fn from(value: TextElement) -> Self {
+        Self::new(value.byte_range.into(), value.placeholder)
+    }
+}
+
+pub fn selected() -> TextElement {
+    let local = TextElement::new(ByteRange { start: 1, end: 2 }, Some("x".to_string()));
+    let core: CoreTextElement = local.into();
+    TextElement::from_core(core)
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_a_lib = read(output.join("support/provider_a/src/lib.rs"));
+    assert!(
+        provider_a_lib.contains("pub fn new"),
+        "imported Self::new target should stay live\n{provider_a_lib}"
+    );
+
+    fs::rename(&provider_a, provider_a.with_extension("moved"))
+        .expect("original provider_a package should move away");
+    fs::rename(&provider_b, provider_b.with_extension("moved"))
+        .expect("original provider_b package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated imported self alias support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider_a/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_a_lib,
     );
 }
 
