@@ -179,6 +179,13 @@ not slicer failures.
   `dnakov-litter-codex-ipc-random5` batch stayed at 119 generated files, zero
   preflight errors, zero feedback errors, zero warnings, and
   `production_ready=accepted`.
+- A subsequent fallback-noise pass stopped reporting generic
+  `syntactic_method_fallbacks` when unresolved method calls retained zero local
+  candidate methods by name. On the same Litter corpus, the generated slice
+  stayed at 119 files and `production_ready=accepted`; `syntactic_method_fallbacks`
+  disappeared, only the capped-fallback marker remained, unknown surfaces dropped
+  from 7 to 6, and dependency-risk unknown surfaces dropped from 2 to 1 without
+  increasing `usage.blocked_by_unknown`.
 
 ## Next Rule Targets
 

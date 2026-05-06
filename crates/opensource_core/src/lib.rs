@@ -3404,7 +3404,7 @@ fn add_reduction_evidence_production_hazards(
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
     let evidence = &reduced.evidence;
-    if evidence.unresolved_method_fallbacks > 0 {
+    if evidence.unresolved_method_candidate_matches > 0 {
         hazards.push(production_hazard(
             "syntactic_method_fallbacks",
             "warning",
@@ -8556,6 +8556,51 @@ impl Worker {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "syntactic_method_fallbacks"));
+    }
+
+    #[test]
+    fn suppresses_syntactic_method_fallback_hazard_without_local_candidate_retention() {
+        let root = temp_output("method-fallback-no-candidates-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+macro_rules! make_number {
+    () => {
+        7u32
+    };
+}
+
+#[opensourced]
+pub fn entry() -> u32 {
+    make_number!().count_ones()
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("method-fallback-no-candidates-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .all(|hazard| hazard.code != "syntactic_method_fallbacks"));
     }
 
     #[test]

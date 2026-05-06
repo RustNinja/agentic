@@ -16,6 +16,7 @@ Use stable group prefixes when adding cases:
 | `struct.*` | struct fields, generic field usage, rendered data surfaces |
 | `type.*` | type aliases, prelude-name shadowing, surface alias dependencies |
 | `trait.*` | trait impls, associated types/consts, UFCS, blanket impls, projections |
+| `semantic.*` | RA/syntactic semantic fallback classification and production-review noise |
 | `dyn.*` | function pointers, `dyn Trait`, callback registries, async callback aliases |
 | `include.*` | `include!`, `include_str!`, `include_bytes!`, copied/dead assets |
 | `build.*` | build scripts, `OUT_DIR`, `cargo:rustc-env`, generated files |
@@ -79,6 +80,7 @@ file.
 | `macro.serde_with_module_helpers.001` | covered | Serde `with = "module"` helper modules retain both `serialize` and `deserialize` functions plus their trait imports while pruning dead helper modules |
 | `macro.helper_attr.data_string_not_blocker.001` | covered | Serde/thiserror helper-attribute data strings such as rename/tag/error messages do not become macro blockers, while path-valued helper keys still retain the named helper |
 | `dyn.async_trait_object.001` | covered | `async_trait` trait-object API surfaces report hard dynamic-dispatch hazards while method-only macro-expanded trait contents remain pruned until semantic dispatch is proven |
+| `semantic.method_fallback.no_local_candidates.001` | covered | Unresolved syntactic method fallback calls that retain zero local candidate methods do not create production review hazards |
 | `dyn.returned_trait_object_boundary.001` | covered | Returned `Box<dyn Trait>` API surfaces report hard dynamic-dispatch hazards while retaining the trait object type surface |
 | `ffi.extern_called_symbol.001` | covered | Retained calls to foreign `extern "C"` functions keep only the called foreign declarations and prune dead sibling declarations |
 | `ffi.extern_static_symbol.001` | covered | Retained reads of foreign `extern "C"` statics keep only the referenced static declaration and the imports used by that foreign item |
