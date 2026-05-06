@@ -23,7 +23,7 @@ use quote::ToTokens;
 use serde::Serialize;
 use syn::{
     parse::Parser, punctuated::Punctuated, spanned::Spanned, visit::Visit, Attribute, Item, Macro,
-    Meta,
+    Meta, UseTree,
 };
 
 pub use analyzer::{
@@ -2494,6 +2494,7 @@ fn generated_support_package_syntactic_hazard_counts(
                 file: Some(path),
                 owner: None,
             },
+            macro_context: MacroInvocationContext::for_syntax(&syntax, &BTreeSet::new()),
         };
         visitor.visit_file(&syntax);
         counts.add(visitor.counts.support_package_blocking_subset());
@@ -3973,15 +3974,16 @@ fn retained_module_boundary_hazard_counts(
         let Some(item_mod) = module_item_for_path(project, &package, &module_path) else {
             continue;
         };
-        let file = module_path
+        let source = module_path
             .split_last()
             .and_then(|(_, parent_module_path)| {
                 source_for_module(project, &package, parent_module_path)
-            })
-            .map(|source| source.path.clone());
+            });
+        let file = source.map(|source| source.path.clone());
         let mut visitor = SyntacticHazardVisitor {
             counts: SyntacticHazardCounts::default(),
             include_context: None,
+            macro_context: MacroInvocationContext::for_project_source(project, &package, source),
             location: HazardLocation {
                 package,
                 module_path,
@@ -4016,7 +4018,8 @@ fn syntactic_hazard_visitor_for_location(
     module_path: &[String],
     owner: Option<String>,
 ) -> SyntacticHazardVisitor {
-    let file = source_for_module(project, package, module_path).map(|source| source.path.clone());
+    let source = source_for_module(project, package, module_path);
+    let file = source.map(|source| source.path.clone());
     let include_context = project.workspace.packages.get(package).and_then(|package| {
         file.as_ref().and_then(|source_path| {
             source_path.parent().map(|source_dir| IncludeContext {
@@ -4029,6 +4032,7 @@ fn syntactic_hazard_visitor_for_location(
     SyntacticHazardVisitor {
         counts: SyntacticHazardCounts::default(),
         include_context,
+        macro_context: MacroInvocationContext::for_project_source(project, package, source),
         location: HazardLocation {
             package: package.to_string(),
             module_path: module_path.to_vec(),
@@ -4044,8 +4048,8 @@ fn syntactic_hazard_visitor_for_inline_location(
     source_module_path: &[String],
     rendered_module_path: &[String],
 ) -> SyntacticHazardVisitor {
-    let file =
-        source_for_module(project, package, source_module_path).map(|source| source.path.clone());
+    let source = source_for_module(project, package, source_module_path);
+    let file = source.map(|source| source.path.clone());
     let include_context = project.workspace.packages.get(package).and_then(|package| {
         file.as_ref().and_then(|source_path| {
             source_path.parent().map(|source_dir| IncludeContext {
@@ -4058,6 +4062,7 @@ fn syntactic_hazard_visitor_for_inline_location(
     SyntacticHazardVisitor {
         counts: SyntacticHazardCounts::default(),
         include_context,
+        macro_context: MacroInvocationContext::for_project_source(project, package, source),
         location: HazardLocation {
             package: package.to_string(),
             module_path: rendered_module_path.to_vec(),
@@ -4088,7 +4093,40 @@ fn source_for_module<'a>(
 struct SyntacticHazardVisitor {
     counts: SyntacticHazardCounts,
     include_context: Option<IncludeContext>,
+    macro_context: MacroInvocationContext,
     location: HazardLocation,
+}
+
+#[derive(Clone, Default)]
+struct MacroInvocationContext {
+    format_like_macro_roots: BTreeSet<String>,
+    format_like_macro_imports: BTreeSet<String>,
+    local_macro_definitions: BTreeSet<String>,
+}
+
+impl MacroInvocationContext {
+    fn for_project_source(
+        project: &Project,
+        package: &str,
+        source: Option<&model::SourceFile>,
+    ) -> Self {
+        let roots = format_like_macro_roots_for_package(project, package);
+        match source {
+            Some(source) => Self::for_syntax(&source.syntax, &roots),
+            None => Self {
+                format_like_macro_roots: roots,
+                ..Self::default()
+            },
+        }
+    }
+
+    fn for_syntax(syntax: &syn::File, roots: &BTreeSet<String>) -> Self {
+        Self {
+            format_like_macro_roots: roots.clone(),
+            format_like_macro_imports: format_like_macro_imports_from_file(syntax, roots),
+            local_macro_definitions: local_macro_definitions_from_file(syntax),
+        }
+    }
 }
 
 struct IncludeContext {
@@ -4227,7 +4265,7 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
                 self.counts.compile_env_details.push(self.span_detail(mac));
             }
         }
-        if macro_invocation_requires_expansion_boundary(mac) {
+        if macro_invocation_requires_expansion_boundary(mac, &self.macro_context) {
             let path = format_path(&mac.path);
             let blocked_idents = macro_surface_blocked_idents(&mac.path, &mac.tokens);
             self.record_macro_surface("macro_invocation", &path, mac, blocked_idents.clone());
@@ -4717,10 +4755,16 @@ fn macro_path_ends_with(mac: &Macro, name: &str) -> bool {
         .is_some_and(|segment| segment.ident == name)
 }
 
-fn macro_invocation_requires_expansion_boundary(mac: &Macro) -> bool {
+fn macro_invocation_requires_expansion_boundary(
+    mac: &Macro,
+    context: &MacroInvocationContext,
+) -> bool {
     let Some(last) = mac.path.segments.last() else {
         return false;
     };
+    if format_like_logging_macro_invocation(mac, context) {
+        return false;
+    }
     if !builtin_macro_name(&last.ident.to_string()) {
         return true;
     }
@@ -4733,6 +4777,161 @@ fn macro_invocation_requires_expansion_boundary(mac: &Macro) -> bool {
     mac.path.segments.first().is_none_or(|segment| {
         !matches!(segment.ident.to_string().as_str(), "std" | "core" | "alloc")
     })
+}
+
+fn format_like_logging_macro_invocation(mac: &Macro, context: &MacroInvocationContext) -> bool {
+    let Some(last) = mac.path.segments.last() else {
+        return false;
+    };
+    let name = last.ident.to_string();
+    if !format_like_logging_macro_name(&name) {
+        return false;
+    }
+    if mac.path.segments.len() == 1 {
+        return context.format_like_macro_imports.contains(&name)
+            && !context.local_macro_definitions.contains(&name);
+    }
+    mac.path.segments.first().is_some_and(|root| {
+        context
+            .format_like_macro_roots
+            .contains(&root.ident.to_string())
+    })
+}
+
+fn format_like_macro_roots_for_package(project: &Project, package: &str) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    let Some(package) = project.workspace.packages.get(package) else {
+        return roots;
+    };
+    for dependency in &package.dependencies {
+        let package_name = rust_path_ident_for_package(&dependency.package);
+        let alias = rust_path_ident_for_package(&dependency.alias);
+        if format_like_logging_macro_root(&package_name) || format_like_logging_macro_root(&alias) {
+            roots.insert(alias);
+        }
+    }
+    roots
+}
+
+fn rust_path_ident_for_package(package: &str) -> String {
+    package.replace('-', "_")
+}
+
+fn format_like_logging_macro_root(root: &str) -> bool {
+    matches!(root, "tracing" | "log")
+}
+
+fn format_like_logging_macro_name(name: &str) -> bool {
+    matches!(
+        name,
+        "trace" | "debug" | "info" | "warn" | "error" | "event" | "span"
+    )
+}
+
+fn format_like_macro_imports_from_file(
+    syntax: &syn::File,
+    roots: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut imports = BTreeSet::new();
+    for item in &syntax.items {
+        collect_format_like_macro_imports_from_item(item, roots, &mut imports);
+    }
+    imports
+}
+
+fn collect_format_like_macro_imports_from_item(
+    item: &Item,
+    roots: &BTreeSet<String>,
+    imports: &mut BTreeSet<String>,
+) {
+    match item {
+        Item::Use(item_use) => {
+            collect_format_like_macro_imports(&item_use.tree, Vec::new(), roots, imports);
+        }
+        Item::Mod(item_mod) => {
+            if let Some((_, items)) = &item_mod.content {
+                for item in items {
+                    collect_format_like_macro_imports_from_item(item, roots, imports);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_format_like_macro_imports(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    roots: &BTreeSet<String>,
+    imports: &mut BTreeSet<String>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_format_like_macro_imports(&path.tree, prefix, roots, imports);
+        }
+        UseTree::Name(name) => {
+            let local = name.ident.to_string();
+            if use_prefix_is_format_like_macro_root(&prefix, roots)
+                && format_like_logging_macro_name(&local)
+            {
+                imports.insert(local);
+            }
+        }
+        UseTree::Rename(rename) => {
+            if use_prefix_is_format_like_macro_root(&prefix, roots)
+                && format_like_logging_macro_name(&rename.ident.to_string())
+            {
+                imports.insert(rename.rename.to_string());
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_format_like_macro_imports(item, prefix.clone(), roots, imports);
+            }
+        }
+        UseTree::Glob(_) => {
+            if use_prefix_is_format_like_macro_root(&prefix, roots) {
+                imports.extend(
+                    ["trace", "debug", "info", "warn", "error", "event", "span"]
+                        .into_iter()
+                        .map(str::to_string),
+                );
+            }
+        }
+    }
+}
+
+fn use_prefix_is_format_like_macro_root(prefix: &[String], roots: &BTreeSet<String>) -> bool {
+    prefix
+        .first()
+        .is_some_and(|root| roots.contains(&rust_path_ident_for_package(root)))
+}
+
+fn local_macro_definitions_from_file(syntax: &syn::File) -> BTreeSet<String> {
+    let mut definitions = BTreeSet::new();
+    for item in &syntax.items {
+        collect_local_macro_definitions_from_item(item, &mut definitions);
+    }
+    definitions
+}
+
+fn collect_local_macro_definitions_from_item(item: &Item, definitions: &mut BTreeSet<String>) {
+    match item {
+        Item::Macro(item_macro) => {
+            if let Some(ident) = &item_macro.ident {
+                definitions.insert(ident.to_string());
+            }
+        }
+        Item::Mod(item_mod) => {
+            if let Some((_, items)) = &item_mod.content {
+                for item in items {
+                    collect_local_macro_definitions_from_item(item, definitions);
+                }
+            }
+        }
+        _ => {}
+    }
 }
 
 fn builtin_macro_name(name: &str) -> bool {
@@ -8533,6 +8732,72 @@ pub fn entry() -> Vec<i32> {
                 && surface.owner.as_deref() == Some("entry")
         }));
         assert_eq!(report.production.status, "requires_feedback");
+    }
+
+    #[test]
+    fn imported_logging_macros_are_modeled_as_format_like() {
+        let root = temp_output("logging-macro-source");
+        let output = temp_output("logging-macro-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\ntracing = \"0.1\"\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use tracing::{debug, warn};
+
+#[opensourced]
+pub fn entry() -> u32 {
+    debug!(answer = macro_only_helper(), "macro dependency");
+    warn!("entry finished");
+    1
+}
+
+fn macro_only_helper() -> u32 {
+    7
+}
+
+fn dead() -> u32 {
+    9
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            !report
+                .production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "custom_macro_invocations"),
+            "imported tracing/logging macros should not require expansion feedback: {:?}",
+            report.production.hazards
+        );
+        assert!(report.macro_surfaces.surfaces.iter().all(|surface| {
+            !(surface.kind == "macro_invocation"
+                && matches!(surface.path.as_str(), "debug" | "warn"))
+        }));
+
+        let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(
+            generated.contains("fn macro_only_helper"),
+            "logging macro token dependencies must still retain called helpers:\n{generated}"
+        );
+        assert!(!generated.contains("fn dead"));
     }
 
     #[test]

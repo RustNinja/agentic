@@ -195,6 +195,15 @@ not slicer failures.
   corpus stayed at 119 generated files and `production_ready=accepted`;
   `syntactic_method_fallback_cap` disappeared, dependency-risk unknown surfaces
   dropped to zero, and `usage.blocked_by_unknown` remained zero.
+- The imported logging macro pass removed the remaining function-like macro
+  invocation warnings from the pinned five-root batch without name-specific
+  Litter logic: `tracing`/`log` macros such as `trace!`, `debug!`, and `warn!`
+  are now classified as format-like only when package dependency and `use`
+  evidence prove the macro source. The corpus still generated 119 files with
+  zero preflight errors, zero feedback errors, zero warnings, and
+  `production_ready=accepted`; `custom_macro_invocations` dropped to zero, macro
+  invocation surfaces dropped to zero, and `usage.blocked_by_unknown` remained
+  zero.
 
 ## Next Rule Targets
 
