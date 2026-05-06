@@ -4075,6 +4075,118 @@ pub fn dead_external() -> &'static str {
 }
 
 #[test]
+fn prunes_support_conversion_impls_when_any_local_header_type_is_dead() {
+    let workspace = temp_path("support-dead-conversion-impl-workspace");
+    let output = temp_path("support-dead-conversion-impl-output");
+    let target_dir = temp_path("support-dead-conversion-impl-target");
+    let provider = temp_path("support-dead-conversion-impl-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    provider::LiveModel::new(value).render()
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"pub struct LiveModel {
+    value: String,
+}
+
+pub struct DeadPolicy {
+    value: String,
+}
+
+impl LiveModel {
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+        }
+    }
+
+    pub fn render(self) -> String {
+        self.value
+    }
+}
+
+impl From<DeadPolicy> for LiveModel {
+    fn from(value: DeadPolicy) -> Self {
+        Self { value: value.value }
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(
+        provider_lib.contains("pub struct LiveModel"),
+        "{provider_lib}"
+    );
+    assert!(!provider_lib.contains("DeadPolicy"), "{provider_lib}");
+    assert!(
+        !provider_lib.contains("impl From<DeadPolicy>"),
+        "{provider_lib}"
+    );
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated dead conversion impl support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+    );
+}
+
+#[test]
 fn prunes_support_items_named_only_as_macro_variant_tokens() {
     let workspace = temp_path("support-macro-variant-workspace");
     let output = temp_path("support-macro-variant-output");

@@ -3452,10 +3452,14 @@ fn support_impl_header_mentions_live_named_item(
         trait_path.to_tokens(&mut tokens);
     }
 
-    named_items.keys().any(|name| {
-        (live_set.item_names.contains(name) || live_set.public_exports.contains(name))
-            && token_stream_mentions_ident(&tokens, name)
-    })
+    let mentioned_local_names = named_items
+        .keys()
+        .filter(|name| token_stream_mentions_ident(&tokens, name))
+        .collect::<Vec<_>>();
+    !mentioned_local_names.is_empty()
+        && mentioned_local_names.iter().all(|name| {
+            live_set.item_names.contains(*name) || live_set.public_exports.contains(*name)
+        })
 }
 
 fn support_named_item_names(items: &[Item]) -> BTreeMap<String, Item> {
