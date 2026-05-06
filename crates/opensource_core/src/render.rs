@@ -2225,6 +2225,7 @@ fn build_restricted_support_sources(
                     &named_items,
                     &mut live,
                     &mut live_usage,
+                    true,
                 ) else {
                     debug_support_prune(
                         package_root,
@@ -2253,6 +2254,7 @@ fn build_restricted_support_sources(
                     &named_items,
                     &mut live,
                     &mut live_usage,
+                    true,
                 ) else {
                     debug_support_prune(
                         package_root,
@@ -2278,6 +2280,7 @@ fn build_restricted_support_sources(
                     &named_items,
                     &mut live,
                     &mut live_usage,
+                    false,
                 ) else {
                     return Ok(None);
                 };
@@ -2437,9 +2440,11 @@ fn mark_support_token_dependencies(
     named_items: &BTreeMap<String, Item>,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
     live_usage: &mut TokenUsage,
+    allow_bare_ident_dependencies: bool,
 ) -> Option<bool> {
     let mut changed = false;
     collect_token_usage(tokens, live_usage);
+    let path_candidates = token_path_candidates(tokens);
 
     for candidate in named_items.keys() {
         if live
@@ -2454,10 +2459,15 @@ fn mark_support_token_dependencies(
         if matches!(candidate_item, Item::Mod(item_mod) if item_mod.content.is_none()) {
             continue;
         }
-        if token_stream_mentions_ident(tokens, candidate)
-            || token_path_candidates(tokens)
+        let macro_invocation_names_local_macro = matches!(candidate_item, Item::Macro(_))
+            && path_candidates
                 .iter()
-                .any(|segments| segments.first().is_some_and(|first| first == candidate))
+                .any(|segments| matches!(segments.as_slice(), [first] if first == candidate));
+        if macro_invocation_names_local_macro
+            || (allow_bare_ident_dependencies && token_stream_mentions_ident(tokens, candidate))
+            || path_candidates.iter().any(|segments| {
+                segments.len() > 1 && segments.first().is_some_and(|first| first == candidate)
+            })
         {
             changed |= live
                 .entry(source_file.to_path_buf())
@@ -3040,6 +3050,7 @@ fn transform_restricted_support_file(
     let live_usage = live_usage_override
         .cloned()
         .unwrap_or_else(|| support_live_item_usage(syntax, live_set));
+    let live_derive_idents = support_live_derive_idents(syntax, live_set);
     let public_use_names = live_set
         .public_exports
         .union(&live_usage.idents)
@@ -3071,6 +3082,7 @@ fn transform_restricted_support_file(
                     &item_use.tree,
                     Vec::new(),
                     &live_usage.idents,
+                    &live_derive_idents,
                 )?;
                 Some(Item::Use(item_use))
             }
@@ -3094,15 +3106,59 @@ fn support_live_item_usage(syntax: &syn::File, live_set: &SupportLiveSet) -> Tok
     let mut usage = TokenUsage::default();
     let named_items = support_named_item_names(&syntax.items);
     for item in &syntax.items {
-        let should_collect = support_item_name(item).is_some_and(|name| {
-            live_set.item_names.contains(&name) || live_set.public_exports.contains(&name)
-        }) || matches!(item, Item::Impl(item_impl) if support_impl_should_render(item_impl, &named_items, live_set))
-            || matches!(item, Item::Macro(item_macro) if item_macro.ident.is_none());
-        if should_collect {
+        if support_item_should_collect_live_usage(item, &named_items, live_set) {
             collect_token_usage(&item.to_token_stream(), &mut usage);
         }
     }
     usage
+}
+
+fn support_live_derive_idents(syntax: &syn::File, live_set: &SupportLiveSet) -> BTreeSet<String> {
+    let mut derives = BTreeSet::new();
+    let named_items = support_named_item_names(&syntax.items);
+    for item in &syntax.items {
+        if !support_item_should_collect_live_usage(item, &named_items, live_set) {
+            continue;
+        }
+        let Some(attrs) = item_attrs(item) else {
+            continue;
+        };
+        collect_derive_attr_idents(attrs, &mut derives);
+    }
+    derives
+}
+
+fn support_item_should_collect_live_usage(
+    item: &Item,
+    named_items: &BTreeMap<String, Item>,
+    live_set: &SupportLiveSet,
+) -> bool {
+    support_item_name(item).is_some_and(|name| {
+        live_set.item_names.contains(&name) || live_set.public_exports.contains(&name)
+    }) || matches!(item, Item::Impl(item_impl) if support_impl_should_render(item_impl, named_items, live_set))
+        || matches!(item, Item::Macro(item_macro) if item_macro.ident.is_none())
+}
+
+fn collect_derive_attr_idents(attrs: &[syn::Attribute], derives: &mut BTreeSet<String>) {
+    for attr in attrs {
+        if !attr.path().is_ident("derive") {
+            continue;
+        }
+        let Ok(paths) =
+            attr.parse_args_with(Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+        else {
+            continue;
+        };
+        for path in paths {
+            if let Some(ident) = path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string())
+            {
+                derives.insert(ident);
+            }
+        }
+    }
 }
 
 fn prune_support_public_use_tree(
@@ -3172,6 +3228,7 @@ fn prune_support_private_use_tree(
     tree: &UseTree,
     mut prefix: Vec<String>,
     live_names: &BTreeSet<String>,
+    live_derive_idents: &BTreeSet<String>,
 ) -> Option<UseTree> {
     match tree {
         UseTree::Path(path) => {
@@ -3184,6 +3241,7 @@ fn prune_support_private_use_tree(
                 &path.tree,
                 prefix,
                 live_names,
+                live_derive_idents,
             )?);
             Some(UseTree::Path(path))
         }
@@ -3196,13 +3254,23 @@ fn prune_support_private_use_tree(
             } else {
                 name.ident.to_string()
             };
-            live_names
-                .contains(&visible_name)
-                .then(|| UseTree::Name(name.clone()))
+            support_private_import_name_should_render(
+                &prefix,
+                &name.ident.to_string(),
+                &visible_name,
+                live_names,
+                live_derive_idents,
+            )
+            .then(|| UseTree::Name(name.clone()))
         }
-        UseTree::Rename(rename) => live_names
-            .contains(&rename.rename.to_string())
-            .then(|| UseTree::Rename(rename.clone())),
+        UseTree::Rename(rename) => support_private_import_name_should_render(
+            &prefix,
+            &rename.ident.to_string(),
+            &rename.rename.to_string(),
+            live_names,
+            live_derive_idents,
+        )
+        .then(|| UseTree::Rename(rename.clone())),
         UseTree::Group(group) => {
             let mut group = group.clone();
             group.items = group
@@ -3216,6 +3284,7 @@ fn prune_support_private_use_tree(
                         item,
                         prefix.clone(),
                         live_names,
+                        live_derive_idents,
                     )
                 })
                 .collect::<Punctuated<_, syn::Token![,]>>();
@@ -3231,6 +3300,27 @@ fn prune_support_private_use_tree(
                 .then(|| UseTree::Glob(glob.clone()))
         }
     }
+}
+
+fn support_private_import_name_should_render(
+    prefix: &[String],
+    imported_name: &str,
+    visible_name: &str,
+    live_names: &BTreeSet<String>,
+    live_derive_idents: &BTreeSet<String>,
+) -> bool {
+    if support_import_is_derive_only(prefix, imported_name) {
+        return live_derive_idents.contains(imported_name)
+            || live_derive_idents.contains(visible_name);
+    }
+    live_names.contains(visible_name)
+}
+
+fn support_import_is_derive_only(prefix: &[String], imported_name: &str) -> bool {
+    imported_name == "Error"
+        && prefix
+            .first()
+            .is_some_and(|first| dependency_code_name(first) == "thiserror")
 }
 
 fn support_live_set_exposes_names(

@@ -4075,6 +4075,224 @@ pub fn dead_external() -> &'static str {
 }
 
 #[test]
+fn prunes_support_items_named_only_as_macro_variant_tokens() {
+    let workspace = temp_path("support-macro-variant-workspace");
+    let output = temp_path("support-macro-variant-output");
+    let target_dir = temp_path("support-macro-variant-target");
+    let provider = temp_path("support-macro-variant-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> String {
+    format!("{:?}", provider::selected_status())
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"macro_rules! define_status {
+    (pub enum $Name:ident { $($Variant:ident),+ $(,)? }) => {
+        #[derive(Debug)]
+        pub enum $Name {
+            $($Variant),+
+        }
+    };
+}
+
+pub struct DeadVariant;
+
+define_status!(pub enum LiveStatus {
+    Ready,
+    DeadVariant,
+});
+
+pub fn selected_status() -> LiveStatus {
+    LiveStatus::Ready
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(
+        provider_lib.contains("macro_rules! define_status"),
+        "{provider_lib}"
+    );
+    assert!(provider_lib.contains("define_status!"), "{provider_lib}");
+    assert!(
+        provider_lib.contains("pub fn selected_status"),
+        "{provider_lib}"
+    );
+    assert!(
+        !provider_lib.contains("pub struct DeadVariant"),
+        "{provider_lib}"
+    );
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro variant support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+    );
+}
+
+#[test]
+fn prunes_support_derive_imports_when_only_macro_tokens_match_name() {
+    let workspace = temp_path("support-macro-derived-name-workspace");
+    let output = temp_path("support-macro-derived-name-output");
+    let target_dir = temp_path("support-macro-derived-name-target");
+    let provider = temp_path("support-macro-derived-name-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> String {
+    format!("{:?}", provider::selected_status())
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+thiserror = "2"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"use thiserror::Error;
+
+macro_rules! define_status {
+    (pub enum $Name:ident { $($Variant:ident),+ $(,)? }) => {
+        #[derive(Debug)]
+        pub enum $Name {
+            $($Variant),+
+        }
+    };
+}
+
+define_status!(pub enum LiveStatus {
+    Ready,
+    Error,
+});
+
+pub fn selected_status() -> LiveStatus {
+    LiveStatus::Ready
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_manifest = read(output.join("support/provider/Cargo.toml"));
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(
+        !provider_manifest.contains("thiserror"),
+        "{provider_manifest}"
+    );
+    assert!(!provider_lib.contains("thiserror::Error"), "{provider_lib}");
+    assert!(provider_lib.contains("Error"), "{provider_lib}");
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro derive-name support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/Cargo.toml:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_manifest,
+        provider_lib,
+    );
+}
+
+#[test]
 fn copies_only_reachable_support_library_modules_and_static_assets() {
     let workspace = temp_path("support-module-closure-workspace");
     let output = temp_path("support-module-closure-output");
