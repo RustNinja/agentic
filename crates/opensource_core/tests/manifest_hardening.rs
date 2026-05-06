@@ -3410,6 +3410,507 @@ edition = "2021"
 }
 
 #[test]
+fn prunes_support_package_items_referenced_through_crate_alias() {
+    let workspace = temp_path("support-crate-alias-workspace");
+    let output = temp_path("support-crate-alias-output");
+    let target_dir = temp_path("support-crate-alias-target");
+    let helper = temp_path("support-crate-alias-helper");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use external_helper as upstream;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    upstream::decorate(upstream::LivePayload::new(value))
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"pub mod dead;
+pub mod live;
+
+pub use dead::{DeadPayload, dead_export};
+pub use live::{LivePayload, decorate};
+"#,
+    );
+    write(
+        helper.join("src/live.rs"),
+        r#"pub struct LivePayload {
+    value: String,
+}
+
+impl LivePayload {
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+        }
+    }
+}
+
+pub fn decorate(payload: LivePayload) -> String {
+    format!("live:{}", payload.value)
+}
+"#,
+    );
+    write(
+        helper.join("src/dead.rs"),
+        r#"pub struct DeadPayload {
+    value: String,
+}
+
+pub fn dead_export(payload: DeadPayload) -> String {
+    payload.value
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let app = read(output.join("app/src/lib.rs"));
+    let helper_lib = read(output.join("support/external-helper/src/lib.rs"));
+    let helper_live = read(output.join("support/external-helper/src/live.rs"));
+    assert!(app.contains("use external_helper as upstream"), "{app}");
+    assert!(helper_lib.contains("pub mod live"), "{helper_lib}");
+    assert!(
+        helper_lib.contains("pub use live::{LivePayload, decorate}"),
+        "{helper_lib}"
+    );
+    assert!(!helper_lib.contains("dead"), "{helper_lib}");
+    assert!(
+        helper_live.contains("pub struct LivePayload"),
+        "{helper_live}"
+    );
+    assert!(helper_live.contains("pub fn decorate"), "{helper_live}");
+    assert!(!output.join("support/external-helper/src/dead.rs").exists());
+
+    fs::rename(&helper, helper.with_extension("moved"))
+        .expect("original helper package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated aliased support dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napp/src/lib.rs:\n{}\nhelper/src/lib.rs:\n{}\nhelper/src/live.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        app,
+        helper_lib,
+        helper_live,
+    );
+}
+
+#[test]
+fn prunes_support_package_items_with_parent_module_dependencies() {
+    let workspace = temp_path("support-parent-module-workspace");
+    let output = temp_path("support-parent-module-output");
+    let target_dir = temp_path("support-parent-module-target");
+    let helper = temp_path("support-parent-module-helper");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    external_helper::LivePayload::new(value).decorate()
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"mod dead;
+mod helper;
+mod nested;
+
+pub use nested::LivePayload;
+"#,
+    );
+    write(
+        helper.join("src/helper.rs"),
+        r#"pub fn label(value: &str) -> String {
+    format!("parent:{value}")
+}
+
+pub fn dead_label(value: &str) -> String {
+    format!("dead:{value}")
+}
+"#,
+    );
+    write(
+        helper.join("src/nested.rs"),
+        r#"pub struct LivePayload {
+    value: String,
+}
+
+impl LivePayload {
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+        }
+    }
+
+    pub fn decorate(self) -> String {
+        super::helper::label(&self.value)
+    }
+}
+"#,
+    );
+    write(
+        helper.join("src/dead.rs"),
+        r#"pub fn dead_export() -> String {
+    super::helper::dead_label("unused")
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let helper_lib = read(output.join("support/external-helper/src/lib.rs"));
+    let helper_nested = read(output.join("support/external-helper/src/nested.rs"));
+    let helper_helper = read(output.join("support/external-helper/src/helper.rs"));
+    assert!(helper_lib.contains("mod helper"), "{helper_lib}");
+    assert!(helper_lib.contains("mod nested"), "{helper_lib}");
+    assert!(!helper_lib.contains("dead"), "{helper_lib}");
+    assert!(
+        helper_nested.contains("super::helper::label"),
+        "{helper_nested}"
+    );
+    assert!(helper_helper.contains("pub fn label"), "{helper_helper}");
+    assert!(!helper_helper.contains("dead_label"), "{helper_helper}");
+    assert!(!output.join("support/external-helper/src/dead.rs").exists());
+
+    fs::rename(&helper, helper.with_extension("moved"))
+        .expect("original helper package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated parent-module support dependency slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nhelper/src/lib.rs:\n{}\nhelper/src/nested.rs:\n{}\nhelper/src/helper.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper_lib,
+        helper_nested,
+        helper_helper,
+    );
+}
+
+#[test]
+fn retains_support_package_runtime_used_by_proc_macro_expansion() {
+    let workspace = temp_path("support-proc-macro-runtime-workspace");
+    let output = temp_path("support-proc-macro-runtime-output");
+    let target_dir = temp_path("support-proc-macro-runtime-target");
+    let external = temp_path("support-proc-macro-runtime-external");
+    let provider = external.join("provider");
+    let derive_runtime = external.join("derive-runtime");
+    let runtime_dep = external.join("runtime-dep");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    provider::render_wire(provider::Wire {
+        value: value.to_string(),
+    })
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+derive-runtime = {{ path = "{}" }}
+runtime-dep = {{ path = "{}" }}
+"#,
+            manifest_path(&derive_runtime),
+            manifest_path(&runtime_dep)
+        ),
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"mod dead;
+mod runtime;
+mod wire;
+
+pub use wire::{Wire, render_wire};
+"#,
+    );
+    write(
+        provider.join("src/runtime.rs"),
+        r#"pub trait RuntimeTrait {
+    fn marker(&self) -> &'static str;
+}
+
+pub fn dead_runtime() -> &'static str {
+    "dead"
+}
+"#,
+    );
+    write(
+        provider.join("src/wire.rs"),
+        r#"use crate::runtime::RuntimeTrait;
+use derive_runtime::UseRuntime;
+
+#[derive(UseRuntime)]
+pub struct Wire {
+    pub value: String,
+}
+
+pub fn render_wire(wire: Wire) -> String {
+    format!("{}:{}", wire.value, wire.marker())
+}
+"#,
+    );
+    write(
+        provider.join("src/dead.rs"),
+        r#"pub fn dead_provider() -> &'static str {
+    "dead"
+}
+"#,
+    );
+    write(
+        derive_runtime.join("Cargo.toml"),
+        r#"[package]
+name = "derive-runtime"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+    );
+    write(
+        derive_runtime.join("src/lib.rs"),
+        r#"extern crate proc_macro;
+
+use proc_macro::TokenStream;
+
+macro_rules! quote {
+    ($($tokens:tt)*) => {
+        stringify!($($tokens)*)
+    };
+}
+
+#[proc_macro_derive(UseRuntime)]
+pub fn use_runtime(input: TokenStream) -> TokenStream {
+    let input = input.to_string();
+    let name = input
+        .split_whitespace()
+        .skip_while(|token| *token != "struct")
+        .nth(1)
+        .expect("derive input should contain a struct name")
+        .trim_matches('{')
+        .trim_matches(';')
+        .split('<')
+        .next()
+        .expect("struct name should not be empty");
+    quote! {
+        impl crate::runtime::RuntimeTrait for __SLICERS_DERIVE_TARGET__ {
+            fn marker(&self) -> &'static str {
+                ::runtime_dep::marker()
+            }
+        }
+    }
+    .replace("__SLICERS_DERIVE_TARGET__", name)
+    .parse()
+    .expect("generated derive output should parse")
+}
+"#,
+    );
+    write(
+        runtime_dep.join("Cargo.toml"),
+        r#"[package]
+name = "runtime-dep"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        runtime_dep.join("src/lib.rs"),
+        r#"pub fn marker() -> &'static str {
+    "macro"
+}
+
+pub fn dead_marker() -> &'static str {
+    "dead"
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    let provider_runtime = read(output.join("support/provider/src/runtime.rs"));
+    let provider_wire = read(output.join("support/provider/src/wire.rs"));
+    let provider_manifest = read(output.join("support/provider/Cargo.toml"));
+    let runtime_dep_source = read(output.join("support/runtime-dep/src/lib.rs"));
+    assert!(provider_lib.contains("mod runtime"), "{provider_lib}");
+    assert!(
+        provider_lib.contains("pub use wire::{Wire, render_wire}"),
+        "{provider_lib}"
+    );
+    assert!(!provider_lib.contains("dead"), "{provider_lib}");
+    assert!(
+        provider_runtime.contains("pub trait RuntimeTrait"),
+        "{provider_runtime}"
+    );
+    assert!(
+        !provider_runtime.contains("dead_runtime"),
+        "{provider_runtime}"
+    );
+    assert!(
+        provider_wire.contains("derive_runtime::UseRuntime"),
+        "{provider_wire}"
+    );
+    assert!(
+        provider_manifest.contains("[dependencies.runtime-dep]"),
+        "{provider_manifest}"
+    );
+    assert!(
+        runtime_dep_source.contains("pub fn marker"),
+        "{runtime_dep_source}"
+    );
+    assert!(
+        !runtime_dep_source.contains("dead_marker"),
+        "{runtime_dep_source}"
+    );
+    assert!(!output.join("support/provider/src/dead.rs").exists());
+
+    fs::rename(&external, external.with_extension("moved"))
+        .expect("original support packages should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated proc-macro runtime support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/Cargo.toml:\n{}\nprovider/src/lib.rs:\n{}\nprovider/src/runtime.rs:\n{}\nprovider/src/wire.rs:\n{}\nruntime-dep/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_manifest,
+        provider_lib,
+        provider_runtime,
+        provider_wire,
+        runtime_dep_source,
+    );
+}
+
+#[test]
 fn copies_only_reachable_support_library_modules_and_static_assets() {
     let workspace = temp_path("support-module-closure-workspace");
     let output = temp_path("support-module-closure-output");

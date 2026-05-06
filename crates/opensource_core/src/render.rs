@@ -627,6 +627,7 @@ struct SupportPackage {
     output_rel_dir: PathBuf,
     manifest: Value,
     workspace: Option<SupportWorkspace>,
+    required_names: Option<BTreeSet<String>>,
     source_plan: SupportSourcePlan,
 }
 
@@ -893,6 +894,7 @@ impl SupportPackagePlan {
 struct SupportPackagePlanBuilder<'a> {
     project: &'a Project,
     pending: BTreeSet<PathBuf>,
+    pending_broad_roots: BTreeSet<PathBuf>,
     pending_required_names: BTreeMap<PathBuf, BTreeSet<String>>,
     packages: BTreeMap<PathBuf, SupportPackage>,
     workspace_manifests: BTreeMap<PathBuf, Value>,
@@ -913,6 +915,7 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         Self {
             project,
             pending: BTreeSet::new(),
+            pending_broad_roots: BTreeSet::new(),
             pending_required_names: BTreeMap::new(),
             packages: BTreeMap::new(),
             workspace_manifests: BTreeMap::new(),
@@ -1010,10 +1013,10 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                 return Ok(());
             };
             if !self.generated_workspace_roots.contains_key(&root) {
-                self.add_pending_dependency_root(
+                self.add_or_update_dependency_root(
                     root,
                     package_usage.dependency_public_names(alias),
-                );
+                )?;
             }
             return Ok(());
         }
@@ -1072,9 +1075,19 @@ impl<'a> SupportPackagePlanBuilder<'a> {
         if self.generated_workspace_roots.contains_key(&root) {
             return Ok(());
         }
-        if !self.packages.contains_key(&root) {
-            self.add_pending_dependency_root(root, required_names);
+        self.add_or_update_dependency_root(root, required_names)?;
+        Ok(())
+    }
+
+    fn add_or_update_dependency_root(
+        &mut self,
+        root: PathBuf,
+        required_names: Option<BTreeSet<String>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        if self.packages.contains_key(&root) {
+            return self.update_existing_dependency_root(root, required_names);
         }
+        self.add_pending_dependency_root(root, required_names);
         Ok(())
     }
 
@@ -1085,11 +1098,70 @@ impl<'a> SupportPackagePlanBuilder<'a> {
     ) {
         self.pending.insert(root.clone());
         if let Some(required_names) = required_names.filter(|names| !names.is_empty()) {
+            if self.pending_broad_roots.contains(&root) {
+                return;
+            }
             self.pending_required_names
                 .entry(root)
                 .or_default()
                 .extend(required_names);
+        } else {
+            self.pending_broad_roots.insert(root.clone());
+            self.pending_required_names.remove(&root);
         }
+    }
+
+    fn update_existing_dependency_root(
+        &mut self,
+        root: PathBuf,
+        required_names: Option<BTreeSet<String>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let requested_broad = required_names.as_ref().is_none_or(BTreeSet::is_empty);
+        let Some(package) = self.packages.get(&root) else {
+            return Ok(());
+        };
+        let Some(existing_names) = &package.required_names else {
+            return Ok(());
+        };
+
+        let updated_required_names = if requested_broad {
+            None
+        } else {
+            let mut names = existing_names.clone();
+            names.extend(required_names.unwrap_or_default());
+            if &names == existing_names {
+                return Ok(());
+            }
+            Some(names)
+        };
+
+        let package_root = package.root.clone();
+        let manifest = package.manifest.clone();
+        let workspace = package.workspace.clone();
+        let source_plan = if let Some(names) = &updated_required_names {
+            build_support_source_plan(&package_root, &manifest, workspace.as_ref(), names)?
+        } else {
+            debug_support_prune(
+                &package_root,
+                "broad copy: widened by a later support dependency requirement",
+            );
+            SupportSourcePlan::default()
+        };
+
+        let package = self
+            .packages
+            .get_mut(&root)
+            .expect("support package was checked as existing");
+        package.required_names = updated_required_names;
+        package.source_plan = source_plan.clone();
+
+        self.collect_support_manifest_dependency_paths(
+            &package_root,
+            &manifest,
+            workspace.as_ref(),
+            &source_plan,
+        )?;
+        Ok(())
     }
 
     fn finish(mut self) -> Result<SupportPackagePlan, Box<dyn std::error::Error>> {
@@ -1097,10 +1169,15 @@ impl<'a> SupportPackagePlanBuilder<'a> {
             if self.packages.contains_key(&root) {
                 continue;
             }
-            let required_names = self
-                .pending_required_names
-                .remove(&root)
-                .unwrap_or_default();
+            let required_names = if self.pending_broad_roots.remove(&root) {
+                None
+            } else {
+                Some(
+                    self.pending_required_names
+                        .remove(&root)
+                        .unwrap_or_default(),
+                )
+            };
             let manifest = read_toml_value(&root.join("Cargo.toml"))?;
             let name = manifest_package_name(&manifest).unwrap_or_else(|| {
                 root.file_name()
@@ -1115,8 +1192,11 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                     .or_insert_with(|| workspace.manifest.clone());
                 self.collect_patch_replace_paths(&workspace.root, &workspace.manifest)?;
             }
-            let source_plan =
-                build_support_source_plan(&root, &manifest, workspace.as_ref(), &required_names)?;
+            let source_plan = if let Some(required_names) = &required_names {
+                build_support_source_plan(&root, &manifest, workspace.as_ref(), required_names)?
+            } else {
+                SupportSourcePlan::default()
+            };
             self.collect_support_manifest_dependency_paths(
                 &root,
                 &manifest,
@@ -1131,6 +1211,7 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                     output_rel_dir,
                     manifest,
                     workspace,
+                    required_names,
                     source_plan,
                 },
             );
@@ -1672,40 +1753,65 @@ fn build_support_source_plan(
     workspace: Option<&SupportWorkspace>,
     required_names: &BTreeSet<String>,
 ) -> Result<SupportSourcePlan, Box<dyn std::error::Error>> {
-    if required_names.is_empty() || manifest_build_script_path(package_root, manifest).is_some() {
+    if required_names.is_empty() {
+        debug_support_prune(package_root, "broad copy: no required public names");
+        return Ok(SupportSourcePlan::default());
+    }
+    if manifest_build_script_path(package_root, manifest).is_some() {
+        debug_support_prune(package_root, "broad copy: build script present");
         return Ok(SupportSourcePlan::default());
     }
 
     let Some(lib_path) = support_library_source_path_from(package_root, manifest) else {
+        debug_support_prune(package_root, "broad copy: no library source path");
         return Ok(SupportSourcePlan::default());
     };
     let Ok(package_root) = package_root.canonicalize() else {
+        debug_support_prune(package_root, "broad copy: package root canonicalize failed");
         return Ok(SupportSourcePlan::default());
     };
     let Ok(lib_path) = lib_path.canonicalize() else {
+        debug_support_prune(
+            &package_root,
+            "broad copy: library path canonicalize failed",
+        );
         return Ok(SupportSourcePlan::default());
     };
     if !lib_path.starts_with(&package_root) {
+        debug_support_prune(&package_root, "broad copy: library outside package root");
         return Ok(SupportSourcePlan::default());
     }
 
     let text = match fs::read_to_string(&lib_path) {
         Ok(text) => text,
-        Err(_) => return Ok(SupportSourcePlan::default()),
+        Err(_) => {
+            debug_support_prune(&package_root, "broad copy: library read failed");
+            return Ok(SupportSourcePlan::default());
+        }
     };
     let syntax = match syn::parse_file(&text) {
         Ok(syntax) => syntax,
-        Err(_) => return Ok(SupportSourcePlan::default()),
+        Err(_) => {
+            debug_support_prune(&package_root, "broad copy: library parse failed");
+            return Ok(SupportSourcePlan::default());
+        }
     };
     let dependency_roots = support_source_dependency_roots(&package_root, manifest, workspace)?;
+    let macro_expansions =
+        support_macro_expansions_for_manifest(&package_root, manifest, workspace)?;
     let Some(transformed_sources) = build_restricted_support_sources(
         &package_root,
         &lib_path,
         &syntax,
         &dependency_roots,
         required_names,
+        &macro_expansions,
     )?
     else {
+        debug_support_prune(
+            &package_root,
+            &format!("broad copy: restricted source closure failed for {required_names:?}"),
+        );
         return Ok(SupportSourcePlan::default());
     };
 
@@ -1713,11 +1819,22 @@ fn build_support_source_plan(
     for syntax in transformed_sources.values() {
         usage.record_file(syntax);
     }
+    for expansion in &macro_expansions {
+        if support_macro_expansion_is_live(&usage, expansion) {
+            usage.merge(&expansion.usage);
+        }
+    }
 
     Ok(SupportSourcePlan {
         transformed_sources: Some(transformed_sources),
         usage: Some(usage),
     })
+}
+
+fn debug_support_prune(package_root: &Path, message: &str) {
+    if env::var_os("SLICERS_DEBUG_SUPPORT_PRUNE").is_some() {
+        eprintln!("support prune {}: {message}", package_root.display());
+    }
 }
 
 fn support_source_dependency_roots(
@@ -1766,9 +1883,230 @@ fn collect_support_source_dependency_roots(
     Ok(())
 }
 
+fn support_macro_expansions_for_manifest(
+    package_root: &Path,
+    manifest: &Value,
+    workspace: Option<&SupportWorkspace>,
+) -> Result<Vec<SupportMacroExpansion>, Box<dyn std::error::Error>> {
+    let mut expansions = BTreeMap::<(PathBuf, String), SupportMacroExpansion>::new();
+    if let Some(manifest) = manifest.as_table() {
+        collect_support_macro_expansions_from_manifest_table(
+            package_root,
+            workspace,
+            manifest,
+            &mut expansions,
+        )?;
+    }
+
+    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            collect_support_macro_expansions_from_manifest_table(
+                package_root,
+                workspace,
+                target,
+                &mut expansions,
+            )?;
+        }
+    }
+
+    Ok(expansions.into_values().collect())
+}
+
+fn collect_support_macro_expansions_from_manifest_table(
+    package_root: &Path,
+    workspace: Option<&SupportWorkspace>,
+    table_parent: &Table,
+    expansions: &mut BTreeMap<(PathBuf, String), SupportMacroExpansion>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(dependencies) = table_parent.get("dependencies").and_then(Value::as_table) else {
+        return Ok(());
+    };
+    for (alias, value) in dependencies {
+        let (value, manifest_dir) =
+            materialized_dependency_value_for_workspace(package_root, workspace, alias, value)?;
+        let package = dependency_package_name(alias, &value);
+        if is_marker_dependency(alias, &package) {
+            continue;
+        }
+        let Some(root) = dependency_path_root(&value, &manifest_dir)? else {
+            continue;
+        };
+        let key = (root.clone(), alias.clone());
+        if expansions.contains_key(&key) {
+            continue;
+        }
+        let Some(expansion) = support_proc_macro_expansion(alias, &root)? else {
+            continue;
+        };
+        expansions.insert(key, expansion);
+    }
+    Ok(())
+}
+
+fn support_proc_macro_expansion(
+    alias: &str,
+    package_root: &Path,
+) -> Result<Option<SupportMacroExpansion>, Box<dyn std::error::Error>> {
+    let manifest = read_toml_value(&package_root.join("Cargo.toml"))?;
+    if !manifest_is_proc_macro_crate(&manifest) {
+        return Ok(None);
+    }
+    let Some(lib_path) = support_library_source_path_from(package_root, &manifest) else {
+        return Ok(None);
+    };
+    let Ok(package_root) = package_root.canonicalize() else {
+        return Ok(None);
+    };
+    let Ok(lib_path) = lib_path.canonicalize() else {
+        return Ok(None);
+    };
+    if !lib_path.starts_with(&package_root) {
+        return Ok(None);
+    }
+    let text = match fs::read_to_string(&lib_path) {
+        Ok(text) => text,
+        Err(_) => return Ok(None),
+    };
+    let syntax = match syn::parse_file(&text) {
+        Ok(syntax) => syntax,
+        Err(_) => return Ok(None),
+    };
+
+    let mut modules = BTreeMap::new();
+    let root_module_dir = lib_path.parent().unwrap_or(&package_root).to_path_buf();
+    if !collect_support_module_sources_with_syntax(
+        &package_root,
+        &lib_path,
+        &root_module_dir,
+        None,
+        syntax,
+        &mut modules,
+    )? {
+        return Ok(None);
+    }
+
+    let mut export_names = BTreeSet::new();
+    let mut quote_bodies = Vec::new();
+    for module in modules.values() {
+        collect_proc_macro_export_names(&module.syntax, &mut export_names);
+        collect_macro_expansion_quote_bodies(&module.syntax.to_token_stream(), &mut quote_bodies);
+    }
+    if export_names.is_empty() || quote_bodies.is_empty() {
+        return Ok(None);
+    }
+
+    let mut usage = TokenUsage::default();
+    let mut paths = Vec::new();
+    for body in quote_bodies {
+        collect_token_usage(&body, &mut usage);
+        paths.extend(token_path_candidates(&body));
+    }
+    if usage.idents.is_empty() && usage.path_roots.is_empty() {
+        return Ok(None);
+    }
+
+    Ok(Some(SupportMacroExpansion {
+        alias: alias.to_string(),
+        export_names,
+        usage,
+        paths,
+    }))
+}
+
+fn manifest_is_proc_macro_crate(manifest: &Value) -> bool {
+    manifest
+        .get("lib")
+        .and_then(|lib| lib.get("proc-macro"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn collect_proc_macro_export_names(syntax: &syn::File, export_names: &mut BTreeSet<String>) {
+    for item in &syntax.items {
+        let Item::Fn(item_fn) = item else {
+            continue;
+        };
+        for attr in &item_fn.attrs {
+            if let Some(export_name) = proc_macro_export_name(attr, &item_fn.sig.ident) {
+                export_names.insert(export_name);
+            }
+        }
+    }
+}
+
+fn proc_macro_export_name(attr: &syn::Attribute, fn_ident: &syn::Ident) -> Option<String> {
+    if attr.path().is_ident("proc_macro") || attr.path().is_ident("proc_macro_attribute") {
+        return Some(fn_ident.to_string());
+    }
+
+    if !attr.path().is_ident("proc_macro_derive") {
+        return None;
+    }
+    let args = attr
+        .parse_args_with(Punctuated::<Meta, syn::Token![,]>::parse_terminated)
+        .ok()?;
+    args.iter().find_map(|meta| match meta {
+        Meta::Path(path) => path.get_ident().map(ToString::to_string),
+        Meta::List(_) | Meta::NameValue(_) => None,
+    })
+}
+
+fn collect_macro_expansion_quote_bodies(tokens: &TokenStream, bodies: &mut Vec<TokenStream>) {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            collect_macro_expansion_quote_bodies(&group.stream(), bodies);
+        }
+    }
+
+    let mut index = 0;
+    while index + 2 < token_trees.len() {
+        let TokenTree::Ident(ident) = &token_trees[index] else {
+            index += 1;
+            continue;
+        };
+        let macro_name = ident.to_string();
+        let is_expansion_macro = matches!(
+            macro_name.as_str(),
+            "quote" | "quote_spanned" | "parse_quote"
+        );
+        if is_expansion_macro
+            && matches!(token_trees.get(index + 1), Some(TokenTree::Punct(punct)) if punct.as_char() == '!')
+        {
+            if let Some(TokenTree::Group(group)) = token_trees.get(index + 2) {
+                bodies.push(group.stream());
+                index += 3;
+                continue;
+            }
+        }
+        index += 1;
+    }
+}
+
+fn support_macro_expansion_is_live(
+    live_usage: &TokenUsage,
+    expansion: &SupportMacroExpansion,
+) -> bool {
+    if !live_usage.mentions_dependency(&expansion.alias) {
+        return false;
+    }
+    let imported_names = live_usage
+        .dependency_public_names(&expansion.alias)
+        .unwrap_or_default();
+    expansion.export_names.iter().any(|name| {
+        live_usage.mentions_ident(name)
+            || live_usage.use_idents.contains(name)
+            || imported_names.contains(name)
+    })
+}
+
 #[derive(Clone)]
 struct SupportModuleSource {
     module_dir: PathBuf,
+    parent_file: Option<PathBuf>,
     syntax: syn::File,
 }
 
@@ -1781,6 +2119,13 @@ struct SupportLiveSet {
 struct SupportUseNeeds<'a> {
     live_idents: &'a BTreeSet<String>,
     live_exports: &'a BTreeSet<String>,
+}
+
+struct SupportMacroExpansion {
+    alias: String,
+    export_names: BTreeSet<String>,
+    usage: TokenUsage,
+    paths: Vec<Vec<String>>,
 }
 
 struct SupportResolveContext<'a> {
@@ -1807,6 +2152,7 @@ fn build_restricted_support_sources(
     syntax: &syn::File,
     dependency_roots: &BTreeSet<String>,
     required_names: &BTreeSet<String>,
+    macro_expansions: &[SupportMacroExpansion],
 ) -> Result<Option<BTreeMap<PathBuf, syn::File>>, Box<dyn std::error::Error>> {
     let mut modules = BTreeMap::new();
     let root_module_dir = lib_path.parent().unwrap_or(package_root).to_path_buf();
@@ -1814,9 +2160,14 @@ fn build_restricted_support_sources(
         package_root,
         lib_path,
         &root_module_dir,
+        None,
         syntax.clone(),
         &mut modules,
     )? {
+        debug_support_prune(
+            package_root,
+            "restricted fail: module source collection failed",
+        );
         return Ok(None);
     }
 
@@ -1829,15 +2180,27 @@ fn build_restricted_support_sources(
     };
     for required_name in required_names {
         if !seed_support_required_name(&ctx, required_name, &mut live) {
+            debug_support_prune(
+                package_root,
+                &format!("restricted fail: could not seed required name {required_name}"),
+            );
             return Ok(None);
         }
     }
 
+    let mut live_usage_by_file = BTreeMap::<PathBuf, TokenUsage>::new();
     let mut changed = true;
     while changed {
         changed = false;
         for (source_file, live_set) in live.clone() {
             let Some(module) = modules.get(&source_file) else {
+                debug_support_prune(
+                    package_root,
+                    &format!(
+                        "restricted fail: live source missing {}",
+                        source_file.display()
+                    ),
+                );
                 return Ok(None);
             };
             let named_items = support_named_item_names(&module.syntax.items);
@@ -1845,47 +2208,135 @@ fn build_restricted_support_sources(
 
             for name in &live_set.item_names {
                 let Some(item) = named_items.get(name) else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: live item {name} missing in {}",
+                            source_file.display()
+                        ),
+                    );
                     return Ok(None);
                 };
                 let tokens = item.to_token_stream();
-                if token_path_candidates(&tokens)
-                    .iter()
-                    .any(|segments| segments.first().is_some_and(|first| first == "super"))
-                {
+                let Some(inserted) = mark_support_token_dependencies(
+                    &ctx,
+                    &source_file,
+                    &tokens,
+                    &named_items,
+                    &mut live,
+                    &mut live_usage,
+                ) else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: token dependency unsupported in {}::{name}",
+                            source_file.display()
+                        ),
+                    );
                     return Ok(None);
-                }
-                collect_token_usage(&tokens, &mut live_usage);
+                };
+                changed |= inserted;
+            }
 
-                for candidate in named_items.keys() {
-                    if live
-                        .get(&source_file)
-                        .is_some_and(|live_set| live_set.item_names.contains(candidate))
-                    {
-                        continue;
-                    }
-                    let Some(candidate_item) = named_items.get(candidate) else {
-                        continue;
-                    };
-                    if matches!(candidate_item, Item::Mod(item_mod) if item_mod.content.is_none()) {
-                        continue;
-                    }
-                    if token_stream_mentions_ident(&tokens, candidate)
-                        || token_path_candidates(&tokens).iter().any(|segments| {
-                            segments.first().is_some_and(|first| first == candidate)
-                        })
-                    {
-                        changed |= live
-                            .entry(source_file.clone())
-                            .or_default()
-                            .item_names
-                            .insert(candidate.clone());
-                    }
+            for item in &module.syntax.items {
+                let Item::Impl(item_impl) = item else {
+                    continue;
+                };
+                if !support_impl_should_render(item_impl, &named_items, &live_set) {
+                    continue;
                 }
+                let tokens = item.to_token_stream();
+                let Some(inserted) = mark_support_token_dependencies(
+                    &ctx,
+                    &source_file,
+                    &tokens,
+                    &named_items,
+                    &mut live,
+                    &mut live_usage,
+                ) else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: impl dependency unsupported in {}",
+                            source_file.display()
+                        ),
+                    );
+                    return Ok(None);
+                };
+                changed |= inserted;
+            }
 
-                for segments in token_path_candidates(&tokens) {
+            for item in &module.syntax.items {
+                if !matches!(item, Item::Macro(item_macro) if item_macro.ident.is_none()) {
+                    continue;
+                }
+                let tokens = item.to_token_stream();
+                let Some(inserted) = mark_support_token_dependencies(
+                    &ctx,
+                    &source_file,
+                    &tokens,
+                    &named_items,
+                    &mut live,
+                    &mut live_usage,
+                ) else {
+                    return Ok(None);
+                };
+                changed |= inserted;
+            }
+
+            let mut macro_probe_usage = live_usage.clone();
+            for item in &module.syntax.items {
+                let Item::Use(item_use) = item else {
+                    continue;
+                };
+                if support_use_tree_imports_live_name(
+                    &item_use.tree,
+                    Vec::new(),
+                    &live_usage.idents,
+                    &live_set.public_exports,
+                ) {
+                    macro_probe_usage.record_use(item_use);
+                }
+                let Some(inserted) = mark_support_live_use_imports(
+                    &ctx,
+                    &source_file,
+                    &item_use.tree,
+                    Vec::new(),
+                    SupportUseNeeds {
+                        live_idents: &live_usage.idents,
+                        live_exports: &live_set.public_exports,
+                    },
+                    &mut live,
+                ) else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: use dependency unsupported in {}",
+                            source_file.display()
+                        ),
+                    );
+                    return Ok(None);
+                };
+                changed |= inserted;
+            }
+
+            for expansion in macro_expansions {
+                if !support_macro_expansion_is_live(&macro_probe_usage, expansion) {
+                    continue;
+                }
+                live_usage.merge(&expansion.usage);
+                macro_probe_usage.merge(&expansion.usage);
+                for segments in &expansion.paths {
                     let Some(inserted) =
-                        mark_support_path_target(&ctx, &source_file, &segments, &mut live)
+                        mark_support_path_target(&ctx, &source_file, segments, &mut live)
                     else {
+                        debug_support_prune(
+                            package_root,
+                            &format!(
+                                "restricted fail: proc-macro expansion dependency unsupported in {}",
+                                source_file.display()
+                            ),
+                        );
                         return Ok(None);
                     };
                     changed |= inserted;
@@ -1907,15 +2358,30 @@ fn build_restricted_support_sources(
                     },
                     &mut live,
                 ) else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: expanded use dependency unsupported in {}",
+                            source_file.display()
+                        ),
+                    );
                     return Ok(None);
                 };
                 changed |= inserted;
             }
+            live_usage_by_file.insert(source_file.clone(), live_usage);
         }
     }
 
     for (source_file, live_set) in &live {
         let Some(module) = modules.get(source_file) else {
+            debug_support_prune(
+                package_root,
+                &format!(
+                    "restricted fail: final live source missing {}",
+                    source_file.display()
+                ),
+            );
             return Ok(None);
         };
         for item_name in &live_set.item_names {
@@ -1931,6 +2397,12 @@ fn build_restricted_support_sources(
                 && support_external_module_source(package_root, &module.module_dir, item_mod)
                     .is_some_and(|(child_file, _)| !live.contains_key(&child_file))
             {
+                debug_support_prune(
+                    package_root,
+                    &format!(
+                        "restricted fail: external module {item_name} was retained without child source"
+                    ),
+                );
                 return Ok(None);
             }
         }
@@ -1944,17 +2416,70 @@ fn build_restricted_support_sources(
         let live_set = live.get(source_file).cloned().unwrap_or_default();
         transformed_sources.insert(
             source_file.clone(),
-            transform_restricted_support_file(&ctx, &live, source_file, &module.syntax, &live_set),
+            transform_restricted_support_file(
+                &ctx,
+                &live,
+                source_file,
+                &module.syntax,
+                &live_set,
+                live_usage_by_file.get(source_file),
+            ),
         );
     }
 
     Ok(Some(transformed_sources))
 }
 
+fn mark_support_token_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    tokens: &TokenStream,
+    named_items: &BTreeMap<String, Item>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+    live_usage: &mut TokenUsage,
+) -> Option<bool> {
+    let mut changed = false;
+    collect_token_usage(tokens, live_usage);
+
+    for candidate in named_items.keys() {
+        if live
+            .get(source_file)
+            .is_some_and(|live_set| live_set.item_names.contains(candidate))
+        {
+            continue;
+        }
+        let Some(candidate_item) = named_items.get(candidate) else {
+            continue;
+        };
+        if matches!(candidate_item, Item::Mod(item_mod) if item_mod.content.is_none()) {
+            continue;
+        }
+        if token_stream_mentions_ident(tokens, candidate)
+            || token_path_candidates(tokens)
+                .iter()
+                .any(|segments| segments.first().is_some_and(|first| first == candidate))
+        {
+            changed |= live
+                .entry(source_file.to_path_buf())
+                .or_default()
+                .item_names
+                .insert(candidate.clone());
+        }
+    }
+
+    for segments in token_path_candidates(tokens) {
+        let inserted = mark_support_path_target(ctx, source_file, &segments, live)?;
+        changed |= inserted;
+    }
+
+    Some(changed)
+}
+
 fn collect_support_module_sources_with_syntax(
     package_root: &Path,
     source_file: &Path,
     module_dir: &Path,
+    parent_file: Option<PathBuf>,
     syntax: syn::File,
     modules: &mut BTreeMap<PathBuf, SupportModuleSource>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -1971,6 +2496,7 @@ fn collect_support_module_sources_with_syntax(
         source_file.clone(),
         SupportModuleSource {
             module_dir: module_dir.to_path_buf(),
+            parent_file,
             syntax: syntax.clone(),
         },
     );
@@ -1999,6 +2525,7 @@ fn collect_support_module_sources_with_syntax(
             package_root,
             &child_file,
             &child_dir,
+            Some(source_file.clone()),
             child_syntax,
             modules,
         )? {
@@ -2215,6 +2742,39 @@ fn support_reexport_mark_to_option(mark: SupportReexportMark) -> Option<bool> {
     }
 }
 
+fn support_use_tree_imports_live_name(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    live_idents: &BTreeSet<String>,
+    live_exports: &BTreeSet<String>,
+) -> bool {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            support_use_tree_imports_live_name(&path.tree, prefix, live_idents, live_exports)
+        }
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            live_idents.contains(&visible_name) || live_exports.contains(&visible_name)
+        }
+        UseTree::Rename(rename) => {
+            let visible_name = rename.rename.to_string();
+            live_idents.contains(&visible_name) || live_exports.contains(&visible_name)
+        }
+        UseTree::Group(group) => group.items.iter().any(|item| {
+            support_use_tree_imports_live_name(item, prefix.clone(), live_idents, live_exports)
+        }),
+        UseTree::Glob(_) => false,
+    }
+}
+
 fn mark_support_live_glob_imports(
     ctx: &SupportResolveContext<'_>,
     source_file: &Path,
@@ -2254,10 +2814,13 @@ fn mark_support_path_target(
     segments: &[String],
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
 ) -> Option<bool> {
-    let (target_file, target_segments) = match segments {
+    let (target_file, target_segments): (&Path, &[String]) = match segments {
         [first, rest @ ..] if first == "self" => (source_file, rest),
         [first, rest @ ..] if first == "crate" => (ctx.root_file, rest),
-        [first, ..] if first == "super" => return None,
+        [first, rest @ ..] if first == "super" => {
+            let parent = support_parent_module_file(ctx.modules, source_file)?;
+            (parent.as_path(), rest)
+        }
         _ => (source_file, segments),
     };
     if target_segments.len() < 2 {
@@ -2293,7 +2856,13 @@ fn mark_support_use_target(
                 source_file = ctx.root_file;
                 prefix = &prefix[1..];
             }
-            "super" => return SupportReexportMark::Unsupported,
+            "super" => {
+                let Some(parent) = support_parent_module_file(ctx.modules, source_file) else {
+                    return SupportReexportMark::Unsupported;
+                };
+                source_file = parent.as_path();
+                prefix = &prefix[1..];
+            }
             _ => {}
         }
     }
@@ -2308,14 +2877,14 @@ fn mark_support_use_target(
         }
         return SupportReexportMark::NotMatched;
     };
-    let inserted_module = live
-        .entry(source_file.to_path_buf())
-        .or_default()
-        .item_names
-        .insert(first.clone());
     if prefix.len() == 1 {
         return match seed_support_name_in_file(ctx, &child_file, target_name, live, visited) {
             SupportReexportMark::Matched(inserted_child) => {
+                let inserted_module = live
+                    .entry(source_file.to_path_buf())
+                    .or_default()
+                    .item_names
+                    .insert(first.clone());
                 SupportReexportMark::Matched(inserted_module | inserted_child)
             }
             other => other,
@@ -2323,6 +2892,11 @@ fn mark_support_use_target(
     }
     match mark_support_use_target(ctx, &child_file, &prefix[1..], target_name, live, visited) {
         SupportReexportMark::Matched(inserted_child) => {
+            let inserted_module = live
+                .entry(source_file.to_path_buf())
+                .or_default()
+                .item_names
+                .insert(first.clone());
             SupportReexportMark::Matched(inserted_module | inserted_child)
         }
         other => other,
@@ -2406,6 +2980,13 @@ fn support_child_module_file(
     })
 }
 
+fn support_parent_module_file<'a>(
+    modules: &'a BTreeMap<PathBuf, SupportModuleSource>,
+    source_file: &Path,
+) -> Option<&'a PathBuf> {
+    modules.get(source_file)?.parent_file.as_ref()
+}
+
 fn support_local_use_prefix_target(
     ctx: &SupportResolveContext<'_>,
     source_file: &Path,
@@ -2422,7 +3003,13 @@ fn support_local_use_prefix_target(
                 source_file = ctx.root_file;
                 prefix = &prefix[1..];
             }
-            "super" => return SupportLocalTarget::Unsupported,
+            "super" => {
+                let Some(parent) = support_parent_module_file(ctx.modules, source_file) else {
+                    return SupportLocalTarget::Unsupported;
+                };
+                source_file = parent.as_path();
+                prefix = &prefix[1..];
+            }
             _ => {}
         }
     }
@@ -2447,9 +3034,12 @@ fn transform_restricted_support_file(
     source_file: &Path,
     syntax: &syn::File,
     live_set: &SupportLiveSet,
+    live_usage_override: Option<&TokenUsage>,
 ) -> syn::File {
     let named_items = support_named_item_names(&syntax.items);
-    let live_usage = support_live_item_usage(syntax, live_set);
+    let live_usage = live_usage_override
+        .cloned()
+        .unwrap_or_else(|| support_live_item_usage(syntax, live_set));
     let public_use_names = live_set
         .public_exports
         .union(&live_usage.idents)
@@ -2472,7 +3062,19 @@ fn transform_restricted_support_file(
                 )?;
                 Some(Item::Use(item_use))
             }
-            Item::Use(_) | Item::ExternCrate(_) => Some(item.clone()),
+            Item::Use(item_use) => {
+                let mut item_use = item_use.clone();
+                item_use.tree = prune_support_private_use_tree(
+                    ctx,
+                    live_by_file,
+                    source_file,
+                    &item_use.tree,
+                    Vec::new(),
+                    &live_usage.idents,
+                )?;
+                Some(Item::Use(item_use))
+            }
+            Item::ExternCrate(_) => Some(item.clone()),
             Item::Impl(item_impl) => {
                 support_impl_should_render(item_impl, &named_items, live_set).then(|| item.clone())
             }
@@ -2490,8 +3092,13 @@ fn transform_restricted_support_file(
 
 fn support_live_item_usage(syntax: &syn::File, live_set: &SupportLiveSet) -> TokenUsage {
     let mut usage = TokenUsage::default();
+    let named_items = support_named_item_names(&syntax.items);
     for item in &syntax.items {
-        if support_item_name(item).is_some_and(|name| live_set.item_names.contains(&name)) {
+        let should_collect = support_item_name(item).is_some_and(|name| {
+            live_set.item_names.contains(&name) || live_set.public_exports.contains(&name)
+        }) || matches!(item, Item::Impl(item_impl) if support_impl_should_render(item_impl, &named_items, live_set))
+            || matches!(item, Item::Macro(item_macro) if item_macro.ident.is_none());
+        if should_collect {
             collect_token_usage(&item.to_token_stream(), &mut usage);
         }
     }
@@ -2550,6 +3157,76 @@ fn prune_support_public_use_tree(
             else {
                 return None;
             };
+            let target_live_set = live_by_file.get(&target_file);
+            (support_live_set_exposes_names(target_live_set, live_names)
+                || support_live_set_has_retained_items(target_live_set))
+            .then(|| UseTree::Glob(glob.clone()))
+        }
+    }
+}
+
+fn prune_support_private_use_tree(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+    source_file: &Path,
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    live_names: &BTreeSet<String>,
+) -> Option<UseTree> {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            let mut path = path.clone();
+            path.tree = Box::new(prune_support_private_use_tree(
+                ctx,
+                live_by_file,
+                source_file,
+                &path.tree,
+                prefix,
+                live_names,
+            )?);
+            Some(UseTree::Path(path))
+        }
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            live_names
+                .contains(&visible_name)
+                .then(|| UseTree::Name(name.clone()))
+        }
+        UseTree::Rename(rename) => live_names
+            .contains(&rename.rename.to_string())
+            .then(|| UseTree::Rename(rename.clone())),
+        UseTree::Group(group) => {
+            let mut group = group.clone();
+            group.items = group
+                .items
+                .iter()
+                .filter_map(|item| {
+                    prune_support_private_use_tree(
+                        ctx,
+                        live_by_file,
+                        source_file,
+                        item,
+                        prefix.clone(),
+                        live_names,
+                    )
+                })
+                .collect::<Punctuated<_, syn::Token![,]>>();
+            (!group.items.is_empty()).then_some(UseTree::Group(group))
+        }
+        UseTree::Glob(glob) => {
+            let SupportLocalTarget::Local(target_file) =
+                support_local_use_prefix_target(ctx, source_file, &prefix)
+            else {
+                return None;
+            };
             support_live_set_exposes_names(live_by_file.get(&target_file), live_names)
                 .then(|| UseTree::Glob(glob.clone()))
         }
@@ -2568,6 +3245,12 @@ fn support_live_set_exposes_names(
             .public_exports
             .iter()
             .any(|name| names.contains(name))
+}
+
+fn support_live_set_has_retained_items(live_set: Option<&SupportLiveSet>) -> bool {
+    live_set.is_some_and(|live_set| {
+        !live_set.item_names.is_empty() || !live_set.public_exports.is_empty()
+    })
 }
 
 fn support_impl_should_render(
@@ -5054,6 +5737,7 @@ struct TokenUsage {
     idents: BTreeSet<String>,
     path_roots: BTreeSet<String>,
     use_idents: BTreeSet<String>,
+    dependency_root_aliases: BTreeMap<String, BTreeSet<String>>,
     dependency_public_names: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -5062,18 +5746,46 @@ impl TokenUsage {
         collect_token_usage(&file.to_token_stream(), self);
         for item in &file.items {
             if let Item::Use(item_use) = item {
-                collect_use_tree_idents(&item_use.tree, &mut self.use_idents);
-                collect_use_tree_dependency_public_names(
-                    &item_use.tree,
-                    Vec::new(),
-                    &mut self.dependency_public_names,
-                );
+                self.record_use(item_use);
             }
         }
     }
 
+    fn record_use(&mut self, item_use: &syn::ItemUse) {
+        collect_token_usage(&item_use.to_token_stream(), self);
+        collect_use_tree_idents(&item_use.tree, &mut self.use_idents);
+        collect_use_tree_dependency_root_aliases(
+            &item_use.tree,
+            Vec::new(),
+            &mut self.dependency_root_aliases,
+        );
+        collect_use_tree_dependency_public_names(
+            &item_use.tree,
+            Vec::new(),
+            &mut self.dependency_public_names,
+        );
+    }
+
     fn mentions_ident(&self, ident: &str) -> bool {
         self.idents.contains(ident)
+    }
+
+    fn merge(&mut self, other: &TokenUsage) {
+        self.idents.extend(other.idents.iter().cloned());
+        self.path_roots.extend(other.path_roots.iter().cloned());
+        self.use_idents.extend(other.use_idents.iter().cloned());
+        for (local, targets) in &other.dependency_root_aliases {
+            self.dependency_root_aliases
+                .entry(local.clone())
+                .or_default()
+                .extend(targets.iter().cloned());
+        }
+        for (root, names) in &other.dependency_public_names {
+            self.dependency_public_names
+                .entry(root.clone())
+                .or_default()
+                .extend(names.iter().cloned());
+        }
     }
 
     fn mentions_dependency(&self, alias: &str) -> bool {
@@ -5082,6 +5794,10 @@ impl TokenUsage {
             || self.use_idents.contains(&code_name)
             || (alias != code_name
                 && (self.path_roots.contains(alias) || self.use_idents.contains(alias)))
+            || self.dependency_root_aliases.iter().any(|(local, targets)| {
+                self.path_roots.contains(local)
+                    && (targets.contains(alias) || targets.contains(&code_name))
+            })
             || known_macro_dependency_usage(self, alias, &code_name)
     }
 
@@ -5090,13 +5806,17 @@ impl TokenUsage {
             return None;
         }
         let code_name = dependency_code_name(alias);
-        let mut names = BTreeSet::new();
-        if let Some(alias_names) = self.dependency_public_names.get(alias) {
-            names.extend(alias_names.iter().cloned());
+        let mut roots = BTreeSet::from([alias.to_string(), code_name.clone()]);
+        for (local, targets) in &self.dependency_root_aliases {
+            if targets.contains(alias) || targets.contains(&code_name) {
+                roots.insert(local.clone());
+            }
         }
-        if alias != code_name {
-            if let Some(code_names) = self.dependency_public_names.get(&code_name) {
-                names.extend(code_names.iter().cloned());
+
+        let mut names = BTreeSet::new();
+        for root in roots {
+            if let Some(root_names) = self.dependency_public_names.get(&root) {
+                names.extend(root_names.iter().cloned());
             }
         }
         Some(names)
@@ -5328,6 +6048,41 @@ fn collect_use_tree_idents(tree: &UseTree, idents: &mut BTreeSet<String>) {
         }
         UseTree::Glob(_) => {}
     }
+}
+
+fn collect_use_tree_dependency_root_aliases(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    aliases: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_tree_dependency_root_aliases(&path.tree, prefix, aliases);
+        }
+        UseTree::Rename(rename) => {
+            let Some(target_root) =
+                dependency_root_alias_target(&prefix, &rename.ident.to_string())
+            else {
+                return;
+            };
+            aliases
+                .entry(rename.rename.to_string())
+                .or_default()
+                .insert(target_root);
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_tree_dependency_root_aliases(item, prefix.clone(), aliases);
+            }
+        }
+        UseTree::Name(_) | UseTree::Glob(_) => {}
+    }
+}
+
+fn dependency_root_alias_target(prefix: &[String], ident: &str) -> Option<String> {
+    let target = prefix.first().cloned().unwrap_or_else(|| ident.to_string());
+    (!matches!(target.as_str(), "crate" | "self" | "super")).then_some(target)
 }
 
 fn collect_use_tree_dependency_public_names(
