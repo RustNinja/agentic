@@ -2554,6 +2554,20 @@ fn seed_support_required_name(
     let Some(root_module) = ctx.modules.get(ctx.root_file) else {
         return false;
     };
+    if let Some((prefix, target_name)) = support_required_path(required_name) {
+        let mut visited = BTreeSet::new();
+        return matches!(
+            mark_support_use_target(
+                ctx,
+                ctx.root_file,
+                &prefix,
+                &target_name,
+                live,
+                &mut visited
+            ),
+            SupportReexportMark::Matched(_)
+        );
+    }
     let named_items = support_named_item_names(&root_module.syntax.items);
     if named_items.contains_key(required_name) {
         live.entry(ctx.root_file.to_path_buf())
@@ -2593,6 +2607,19 @@ fn seed_support_required_name(
     }
 
     false
+}
+
+fn support_required_path(required_name: &str) -> Option<(Vec<String>, String)> {
+    let segments = required_name
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if segments.len() < 2 {
+        return None;
+    }
+    let target_name = segments.last()?.clone();
+    Some((segments[..segments.len() - 1].to_vec(), target_name))
 }
 
 fn mark_support_required_reexport(
@@ -3050,6 +3077,18 @@ fn transform_restricted_support_file(
     let live_usage = live_usage_override
         .cloned()
         .unwrap_or_else(|| support_live_item_usage(syntax, live_set));
+    let mut live_import_names = support_live_import_names(&live_usage);
+    let non_enum_usage = support_live_non_enum_item_usage(syntax, live_set);
+    for variant_name in support_live_enum_variant_names(syntax, live_set) {
+        if !non_enum_usage.bare_idents.contains(&variant_name)
+            && !non_enum_usage.path_roots.contains(&variant_name)
+            && !non_enum_usage
+                .local_path_leaf_idents
+                .contains(&variant_name)
+        {
+            live_import_names.remove(&variant_name);
+        }
+    }
     let live_derive_idents = support_live_derive_idents(syntax, live_set);
     let public_use_names = live_set
         .public_exports
@@ -3081,7 +3120,7 @@ fn transform_restricted_support_file(
                     source_file,
                     &item_use.tree,
                     Vec::new(),
-                    &live_usage.idents,
+                    &live_import_names,
                     &live_derive_idents,
                 )?;
                 Some(Item::Use(item_use))
@@ -3102,10 +3141,59 @@ fn transform_restricted_support_file(
     transformed
 }
 
+fn support_live_import_names(usage: &TokenUsage) -> BTreeSet<String> {
+    usage
+        .bare_idents
+        .union(&usage.path_roots)
+        .cloned()
+        .chain(usage.local_path_leaf_idents.iter().cloned())
+        .chain(usage.use_idents.iter().cloned())
+        .collect()
+}
+
+fn support_live_enum_variant_names(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+) -> BTreeSet<String> {
+    syntax
+        .items
+        .iter()
+        .filter_map(|item| {
+            let Item::Enum(item_enum) = item else {
+                return None;
+            };
+            live_set
+                .item_names
+                .contains(&item_enum.ident.to_string())
+                .then_some(item_enum)
+        })
+        .flat_map(|item_enum| {
+            item_enum
+                .variants
+                .iter()
+                .map(|variant| variant.ident.to_string())
+        })
+        .collect()
+}
+
 fn support_live_item_usage(syntax: &syn::File, live_set: &SupportLiveSet) -> TokenUsage {
     let mut usage = TokenUsage::default();
     let named_items = support_named_item_names(&syntax.items);
     for item in &syntax.items {
+        if support_item_should_collect_live_usage(item, &named_items, live_set) {
+            collect_token_usage(&item.to_token_stream(), &mut usage);
+        }
+    }
+    usage
+}
+
+fn support_live_non_enum_item_usage(syntax: &syn::File, live_set: &SupportLiveSet) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+    let named_items = support_named_item_names(&syntax.items);
+    for item in &syntax.items {
+        if matches!(item, Item::Enum(_)) {
+            continue;
+        }
         if support_item_should_collect_live_usage(item, &named_items, live_set) {
             collect_token_usage(&item.to_token_stream(), &mut usage);
         }
@@ -5813,9 +5901,11 @@ impl PackageSourceUsage {
 #[derive(Clone, Default)]
 struct TokenUsage {
     idents: BTreeSet<String>,
+    bare_idents: BTreeSet<String>,
     path_roots: BTreeSet<String>,
+    local_path_leaf_idents: BTreeSet<String>,
     use_idents: BTreeSet<String>,
-    dependency_root_aliases: BTreeMap<String, BTreeSet<String>>,
+    dependency_root_aliases: BTreeMap<String, BTreeSet<Vec<String>>>,
     dependency_public_names: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -5850,7 +5940,10 @@ impl TokenUsage {
 
     fn merge(&mut self, other: &TokenUsage) {
         self.idents.extend(other.idents.iter().cloned());
+        self.bare_idents.extend(other.bare_idents.iter().cloned());
         self.path_roots.extend(other.path_roots.iter().cloned());
+        self.local_path_leaf_idents
+            .extend(other.local_path_leaf_idents.iter().cloned());
         self.use_idents.extend(other.use_idents.iter().cloned());
         for (local, targets) in &other.dependency_root_aliases {
             self.dependency_root_aliases
@@ -5874,7 +5967,11 @@ impl TokenUsage {
                 && (self.path_roots.contains(alias) || self.use_idents.contains(alias)))
             || self.dependency_root_aliases.iter().any(|(local, targets)| {
                 self.path_roots.contains(local)
-                    && (targets.contains(alias) || targets.contains(&code_name))
+                    && targets.iter().any(|target| {
+                        target
+                            .first()
+                            .is_some_and(|root| root == alias || root == &code_name)
+                    })
             })
             || known_macro_dependency_usage(self, alias, &code_name)
     }
@@ -5884,17 +5981,52 @@ impl TokenUsage {
             return None;
         }
         let code_name = dependency_code_name(alias);
-        let mut roots = BTreeSet::from([alias.to_string(), code_name.clone()]);
-        for (local, targets) in &self.dependency_root_aliases {
-            if targets.contains(alias) || targets.contains(&code_name) {
-                roots.insert(local.clone());
-            }
-        }
+        let roots = BTreeSet::from([alias.to_string(), code_name.clone()]);
 
         let mut names = BTreeSet::new();
         for root in roots {
             if let Some(root_names) = self.dependency_public_names.get(&root) {
                 names.extend(root_names.iter().cloned());
+            }
+        }
+        for (local, targets) in &self.dependency_root_aliases {
+            for target in targets {
+                let Some(root) = target.first() else {
+                    continue;
+                };
+                if root != alias && root != &code_name {
+                    continue;
+                }
+                if target.len() == 1 {
+                    if dependency_alias_target_is_module_like(local, target) {
+                        if let Some(local_names) = self.dependency_public_names.get(local) {
+                            for local_name in local_names {
+                                let path = local_name
+                                    .split("::")
+                                    .map(str::to_string)
+                                    .collect::<Vec<_>>();
+                                if let Some(path) = dependency_required_path_string(&path) {
+                                    names.insert(path);
+                                }
+                            }
+                        }
+                    }
+                    continue;
+                }
+                if let Some(target_name) = dependency_required_path_string(&target[1..]) {
+                    names.insert(target_name.clone());
+                    if dependency_alias_target_is_module_like(local, target) {
+                        if let Some(local_names) = self.dependency_public_names.get(local) {
+                            for local_name in local_names {
+                                let mut path = target[1..].to_vec();
+                                path.extend(local_name.split("::").map(str::to_string));
+                                if let Some(path) = dependency_required_path_string(&path) {
+                                    names.insert(path);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
         Some(names)
@@ -6085,6 +6217,28 @@ fn collect_token_usage(tokens: &TokenStream, usage: &mut TokenUsage) {
         }
     }
 
+    for (index, token) in token_trees.iter().enumerate() {
+        let TokenTree::Ident(ident) = token else {
+            continue;
+        };
+        let follows_path_separator = index >= 2
+            && matches!(
+                (&token_trees[index - 2], &token_trees[index - 1]),
+                (TokenTree::Punct(first), TokenTree::Punct(second))
+                    if first.as_char() == ':' && second.as_char() == ':'
+            );
+        let precedes_path_separator = token_trees.get(index + 1..index + 3).is_some_and(|next| {
+            matches!(
+                next,
+                [TokenTree::Punct(first), TokenTree::Punct(second)]
+                    if first.as_char() == ':' && second.as_char() == ':'
+            )
+        });
+        if !follows_path_separator && !precedes_path_separator {
+            usage.bare_idents.insert(ident.to_string());
+        }
+    }
+
     for window in token_trees.windows(3) {
         if let (TokenTree::Ident(candidate), TokenTree::Punct(first), TokenTree::Punct(second)) =
             (&window[0], &window[1], &window[2])
@@ -6096,14 +6250,36 @@ fn collect_token_usage(tokens: &TokenStream, usage: &mut TokenUsage) {
     }
 
     for segments in token_path_candidates(tokens) {
-        if let [root, name, ..] = segments.as_slice() {
-            usage
-                .dependency_public_names
-                .entry(root.clone())
-                .or_default()
-                .insert(name.clone());
+        if let [root, rest @ ..] = segments.as_slice() {
+            if matches!(root.as_str(), "crate" | "self" | "super") {
+                if let Some(leaf) = local_required_leaf_from_path(rest) {
+                    usage.local_path_leaf_idents.insert(leaf);
+                }
+            }
+            if let Some(path) = dependency_required_path_string(rest) {
+                usage
+                    .dependency_public_names
+                    .entry(root.clone())
+                    .or_default()
+                    .insert(path);
+            }
         }
     }
+}
+
+fn local_required_leaf_from_path(path: &[String]) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    path.iter()
+        .find(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+        })
+        .cloned()
+        .or_else(|| path.last().cloned())
 }
 
 fn collect_use_tree_idents(tree: &UseTree, idents: &mut BTreeSet<String>) {
@@ -6131,7 +6307,7 @@ fn collect_use_tree_idents(tree: &UseTree, idents: &mut BTreeSet<String>) {
 fn collect_use_tree_dependency_root_aliases(
     tree: &UseTree,
     mut prefix: Vec<String>,
-    aliases: &mut BTreeMap<String, BTreeSet<String>>,
+    aliases: &mut BTreeMap<String, BTreeSet<Vec<String>>>,
 ) {
     match tree {
         UseTree::Path(path) => {
@@ -6158,9 +6334,11 @@ fn collect_use_tree_dependency_root_aliases(
     }
 }
 
-fn dependency_root_alias_target(prefix: &[String], ident: &str) -> Option<String> {
-    let target = prefix.first().cloned().unwrap_or_else(|| ident.to_string());
-    (!matches!(target.as_str(), "crate" | "self" | "super")).then_some(target)
+fn dependency_root_alias_target(prefix: &[String], ident: &str) -> Option<Vec<String>> {
+    let mut target = prefix.to_vec();
+    target.push(ident.to_string());
+    let root = target.first()?;
+    (!matches!(root.as_str(), "crate" | "self" | "super")).then_some(target)
 }
 
 fn collect_use_tree_dependency_public_names(
@@ -6175,18 +6353,20 @@ fn collect_use_tree_dependency_public_names(
         }
         UseTree::Name(name) => {
             if let Some(root) = prefix.first() {
-                names
-                    .entry(root.clone())
-                    .or_default()
-                    .insert(name.ident.to_string());
+                let mut path = prefix[1..].to_vec();
+                path.push(name.ident.to_string());
+                if let Some(path) = dependency_required_path_string(&path) {
+                    names.entry(root.clone()).or_default().insert(path);
+                }
             }
         }
         UseTree::Rename(rename) => {
             if let Some(root) = prefix.first() {
-                names
-                    .entry(root.clone())
-                    .or_default()
-                    .insert(rename.ident.to_string());
+                let mut path = prefix[1..].to_vec();
+                path.push(rename.ident.to_string());
+                if let Some(path) = dependency_required_path_string(&path) {
+                    names.entry(root.clone()).or_default().insert(path);
+                }
             }
         }
         UseTree::Group(group) => {
@@ -6196,6 +6376,33 @@ fn collect_use_tree_dependency_public_names(
         }
         UseTree::Glob(_) => {}
     }
+}
+
+fn dependency_required_path_string(path: &[String]) -> Option<String> {
+    if path.is_empty() {
+        return None;
+    }
+    let retained_len = path
+        .iter()
+        .position(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+        })
+        .map_or(path.len(), |index| index + 1);
+    Some(path[..retained_len].join("::"))
+}
+
+fn dependency_alias_target_is_module_like(local: &str, target: &[String]) -> bool {
+    local
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+        || target
+            .last()
+            .and_then(|segment| segment.chars().next())
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
 }
 
 fn known_macro_dependency_usage(usage: &TokenUsage, alias: &str, code_name: &str) -> bool {

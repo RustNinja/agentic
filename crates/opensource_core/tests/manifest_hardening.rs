@@ -4293,6 +4293,258 @@ pub fn selected_status() -> LiveStatus {
 }
 
 #[test]
+fn restricts_nested_support_dependency_paths_without_variant_name_leaks() {
+    let workspace = temp_path("support-nested-dependency-path-workspace");
+    let output = temp_path("support-nested-dependency-path-output");
+    let target_dir = temp_path("support-nested-dependency-path-target");
+    let bridge = temp_path("support-nested-dependency-path-bridge");
+    let core = temp_path("support-nested-dependency-path-core");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+bridge = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&bridge)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> String {
+    bridge::selected_wire_label()
+}
+"#,
+    );
+    write(
+        bridge.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+core-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&core)
+        ),
+    );
+    write(
+        bridge.join("src/lib.rs"),
+        r#"mod api;
+pub use api::selected_wire_label;
+"#,
+    );
+    write(
+        bridge.join("src/api.rs"),
+        r#"use core_helper::protocol::Decision as CoreDecision;
+
+pub enum WireDecision {
+    Accept,
+    Cancel,
+}
+
+pub fn selected_wire_label() -> String {
+    match CoreDecision::Approved {
+        CoreDecision::Approved => "accept".to_string(),
+        CoreDecision::Abort => "cancel".to_string(),
+    }
+}
+"#,
+    );
+    write(
+        core.join("Cargo.toml"),
+        r#"[package]
+name = "core-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        core.join("src/lib.rs"),
+        r#"pub mod dead;
+pub mod protocol;
+"#,
+    );
+    write(
+        core.join("src/protocol.rs"),
+        r#"pub enum Decision {
+    Approved,
+    Abort,
+}
+"#,
+    );
+    write(
+        core.join("src/dead.rs"),
+        r#"pub struct DeadPayload;
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let bridge_api = read(output.join("support/bridge/src/api.rs"));
+    let core_lib = read(output.join("support/core-helper/src/lib.rs"));
+    let core_protocol = read(output.join("support/core-helper/src/protocol.rs"));
+    assert!(
+        bridge_api.contains("CoreDecision::Approved"),
+        "{bridge_api}"
+    );
+    assert!(core_lib.contains("pub mod protocol"), "{core_lib}");
+    assert!(!core_lib.contains("dead"), "{core_lib}");
+    assert!(
+        core_protocol.contains("pub enum Decision"),
+        "{core_protocol}"
+    );
+    assert!(
+        !output.join("support/core-helper/src/dead.rs").exists(),
+        "{core_lib}"
+    );
+
+    fs::rename(&bridge, bridge.with_extension("moved"))
+        .expect("original bridge package should move away");
+    fs::rename(&core, core.with_extension("moved"))
+        .expect("original core package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated nested support dependency path slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nbridge/src/api.rs:\n{}\ncore/src/lib.rs:\n{}\ncore/src/protocol.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        bridge_api,
+        core_lib,
+        core_protocol,
+    );
+}
+
+#[test]
+fn prunes_support_imports_named_only_as_qualified_variant_segments() {
+    let workspace = temp_path("support-qualified-variant-import-workspace");
+    let output = temp_path("support-qualified-variant-import-output");
+    let target_dir = temp_path("support-qualified-variant-import-target");
+    let provider = temp_path("support-qualified-variant-import-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> bool {
+    provider::selected()
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"use std::path::Path;
+
+pub enum FileSystemPath {
+    Path { raw: String },
+    Other,
+}
+
+pub fn selected() -> bool {
+    matches!(FileSystemPath::Path { raw: String::new() }, FileSystemPath::Path { .. })
+}
+
+pub fn dead(path: &Path) -> bool {
+    path.exists()
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(
+        provider_lib.contains("FileSystemPath::Path"),
+        "{provider_lib}"
+    );
+    assert!(
+        !provider_lib.contains("use std::path::Path"),
+        "{provider_lib}"
+    );
+    assert!(!provider_lib.contains("pub fn dead"), "{provider_lib}");
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated qualified variant import support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+    );
+}
+
+#[test]
 fn copies_only_reachable_support_library_modules_and_static_assets() {
     let workspace = temp_path("support-module-closure-workspace");
     let output = temp_path("support-module-closure-output");
