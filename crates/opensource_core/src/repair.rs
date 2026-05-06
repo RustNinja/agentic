@@ -101,7 +101,7 @@ pub fn repair_workspace(
         }
 
         let code = diagnostic.code.as_deref();
-        if !matches!(code, Some("dead_code" | "unused_imports")) {
+        if !matches!(code, Some("dead_code" | "unused_imports" | "unused_macros")) {
             skipped_diagnostics += 1;
             continue;
         }
@@ -168,6 +168,18 @@ pub fn repair_workspace(
                                 line_start: span.line_start as usize,
                             },
                         );
+                        repaired = true;
+                    }
+                }
+                Some("unused_macros") => {
+                    if let Some(name) = unused_macro_candidate_name(&diagnostic.message) {
+                        item_candidates_by_file
+                            .entry(path)
+                            .or_default()
+                            .push(DeadItemCandidate {
+                                name,
+                                line_start: span.line_start as usize,
+                            });
                         repaired = true;
                     }
                 }
@@ -240,28 +252,6 @@ pub fn repair_workspace(
         }
         fs::write(path, source)?;
     }
-    for (path, mut candidates) in item_candidates_by_file {
-        if !path.exists() {
-            continue;
-        }
-        if suggestion_changed_files.contains(&path) {
-            continue;
-        }
-        candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
-        candidates.dedup();
-        let mut source = fs::read_to_string(&path)?;
-        let mut removed_items = 0;
-        for candidate in candidates {
-            if remove_item_at_line(&mut source, &candidate) {
-                report.removed_items += 1;
-                removed_items += 1;
-            }
-        }
-        if removed_items > 0 {
-            record_file_change(&mut report, &path, removed_items, 0, 0, 0, 0);
-        }
-        fs::write(path, source)?;
-    }
     for (path, mut candidates) in import_candidates_by_file {
         if !path.exists() {
             continue;
@@ -296,6 +286,28 @@ pub fn repair_workspace(
         }
         if removed_imports > 0 {
             record_file_change(&mut report, &path, 0, removed_imports, 0, 0, 0);
+        }
+        fs::write(path, source)?;
+    }
+    for (path, mut candidates) in item_candidates_by_file {
+        if !path.exists() {
+            continue;
+        }
+        if suggestion_changed_files.contains(&path) {
+            continue;
+        }
+        candidates.sort_by(|left, right| right.line_start.cmp(&left.line_start));
+        candidates.dedup();
+        let mut source = fs::read_to_string(&path)?;
+        let mut removed_items = 0;
+        for candidate in candidates {
+            if remove_item_at_line(&mut source, &candidate) {
+                report.removed_items += 1;
+                removed_items += 1;
+            }
+        }
+        if removed_items > 0 {
+            record_file_change(&mut report, &path, removed_items, 0, 0, 0, 0);
         }
         fs::write(path, source)?;
     }
@@ -555,6 +567,12 @@ fn dead_candidate_name(message: &str, span: &CheckSpan) -> Option<String> {
         return None;
     }
     name_from_span_text(span).or_else(|| name_from_backticks(message).map(str::to_string))
+}
+
+fn unused_macro_candidate_name(message: &str) -> Option<String> {
+    message
+        .starts_with("unused macro definition")
+        .then(|| name_from_backticks(message).map(str::to_string))?
 }
 
 fn dead_code_message_is_item(message: &str) -> bool {
@@ -1467,6 +1485,48 @@ mod tests {
         let source = fs::read_to_string(file).unwrap();
         assert!(!source.contains("std::fmt"));
         assert!(source.contains("pub fn keep"));
+    }
+
+    #[test]
+    fn removes_unused_macro_definition() {
+        let root = temp_output("repair-unused-macro");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "macro_rules! req {\n    () => { 1 };\n}\n\npub(crate) use req;\n\npub fn keep() -> usize {\n    1\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![
+                warning(
+                    "unused_macros",
+                    "unused macro definition: `req`",
+                    "src/lib.rs",
+                    1,
+                    14,
+                    17,
+                    "macro_rules! req {",
+                ),
+                warning(
+                    "unused_imports",
+                    "unused import: `req`",
+                    "src/lib.rs",
+                    5,
+                    16,
+                    19,
+                    "pub(crate) use req;",
+                ),
+            ],
+        })
+        .unwrap();
+
+        assert_eq!(report.removed_items, 1);
+        assert_eq!(report.removed_imports, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(!source.contains("macro_rules! req"), "{source}");
+        assert!(!source.contains("use req"), "{source}");
+        assert!(source.contains("pub fn keep"), "{source}");
     }
 
     #[test]

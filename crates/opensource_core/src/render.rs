@@ -33,6 +33,7 @@ struct RenderPlan {
     callable_idents_by_package: BTreeMap<String, BTreeSet<String>>,
     mentions: ReachableMentionIndex,
     import_scope_mentions: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
+    import_scope_uses: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
 }
 
 impl RenderPlan {
@@ -41,8 +42,9 @@ impl RenderPlan {
         let mut rendered_item_idents = BTreeSet::new();
         let callable_idents = reachable_reduced_callable_ident_index(project, reduced);
         let retained_surface_idents = retained_surface_idents_by_package(project, reduced);
+        let pre_reexport_mentions = reachable_package_token_ident_index(project, reduced);
         let referenced_reexport_target_items =
-            referenced_public_reexport_target_items(project, reduced);
+            referenced_public_reexport_target_items(project, reduced, &pre_reexport_mentions);
 
         for item in &reduced.reachable_items {
             if root_item_should_render(reduced, item)
@@ -111,6 +113,7 @@ impl RenderPlan {
             reachable_items,
             callable_idents_by_package: callable_idents.by_package,
             import_scope_mentions: RefCell::new(BTreeMap::new()),
+            import_scope_uses: RefCell::new(BTreeMap::new()),
         }
     }
 
@@ -5729,6 +5732,7 @@ fn retained_surface_idents_by_package(
 fn referenced_public_reexport_target_items(
     project: &Project,
     reduced: &ReducedProject,
+    mentions: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeSet<ItemId> {
     let mut target_items = BTreeSet::new();
     for package in &reduced.packages {
@@ -5746,7 +5750,7 @@ fn referenced_public_reexport_target_items(
                 let mut visible_targets = Vec::new();
                 collect_use_tree_visible_targets(&item_use.tree, Vec::new(), &mut visible_targets);
                 for (visible_name, target) in visible_targets {
-                    if !reachable_package_mentions_ident(project, reduced, package, &visible_name)
+                    if !package_token_ident_index_mentions(mentions, package, &visible_name)
                         && !public_reexport_name_is_referenced_by_reduced_package(
                             project,
                             reduced,
@@ -5783,6 +5787,45 @@ fn referenced_public_reexport_target_items(
         }
     }
     target_items
+}
+
+fn reachable_package_token_ident_index(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut mentions = BTreeMap::<String, BTreeSet<String>>::new();
+    for callable in &reduced.reachable {
+        let package = callable.package().to_string();
+        let idents = mentions.entry(package).or_default();
+        collect_callable_idents(callable, idents);
+        if let Some(record) = project.functions.get(callable) {
+            collect_token_idents(&record.item.to_token_stream(), idents);
+            expand_alias_surface_idents(&record.aliases, idents);
+        } else if let Some(record) = project.methods.get(callable) {
+            collect_token_idents(&record.item.to_token_stream(), idents);
+            expand_alias_surface_idents(&record.aliases, idents);
+        }
+    }
+    for item in &reduced.reachable_items {
+        let idents = mentions.entry(item.package.clone()).or_default();
+        idents.insert(item.name.clone());
+        idents.extend(item.module_path.iter().cloned());
+        if let Some(record) = project.items.get(item) {
+            collect_token_idents(&record.item.to_token_stream(), idents);
+            expand_alias_surface_idents(&record.aliases, idents);
+        }
+    }
+    mentions
+}
+
+fn package_token_ident_index_mentions(
+    mentions: &BTreeMap<String, BTreeSet<String>>,
+    package: &str,
+    ident: &str,
+) -> bool {
+    mentions
+        .get(package)
+        .is_some_and(|idents| idents.contains(ident))
 }
 
 fn collect_use_tree_visible_targets(
@@ -9353,19 +9396,19 @@ fn module_should_render(
         item.package == package
             && (path_has_prefix(&item.module_path, module_path)
                 || path_has_prefix(&path_from_item(item), module_path))
-    }) || inline_module_fallback_macro_should_render(project, reduced, package, module_path)
+    }) || inline_module_fallback_macro_should_render(project, render_plan, package, module_path)
 }
 
 fn inline_module_fallback_macro_should_render(
     project: &Project,
-    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
 ) -> bool {
     let Some(module_name) = module_path.last() else {
         return false;
     };
-    if !reachable_package_mentions_ident(project, reduced, package, module_name) {
+    if !render_plan.package_mentions_ident(package, module_name) {
         return false;
     }
 
@@ -13629,15 +13672,6 @@ fn use_prefix_should_drop(
                 return false;
             }
             if is_public_use {
-                if !module_should_render(
-                    project,
-                    reduced,
-                    render_plan,
-                    &target_package,
-                    &target_path,
-                ) {
-                    return true;
-                }
                 let exposes_referenced_name = public_glob_prefix_exposes_referenced_name(
                     project,
                     reduced,
@@ -13647,6 +13681,16 @@ fn use_prefix_should_drop(
                     &target_package,
                     &target_path,
                 );
+                if !module_should_render(
+                    project,
+                    reduced,
+                    render_plan,
+                    &target_package,
+                    &target_path,
+                ) && !exposes_referenced_name
+                {
+                    return true;
+                }
                 return !exposes_referenced_name;
             }
             if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {
@@ -13737,7 +13781,41 @@ fn reachable_module_import_scope_uses_imported_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    if reachable_module_uses_imported_ident(project, reduced, package, module_path, ident) {
+    let key = ImportScopeMentionKey::new(package, module_path, ident, None);
+    if let Some(value) = render_plan.import_scope_uses.borrow().get(&key).copied() {
+        return value;
+    }
+    let value = reachable_module_import_scope_uses_imported_ident_uncached(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        ident,
+    );
+    render_plan
+        .import_scope_uses
+        .borrow_mut()
+        .insert(key, value);
+    value
+}
+
+fn reachable_module_import_scope_uses_imported_ident_uncached(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    if reachable_module_uses_imported_ident(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        ident,
+    ) {
         return true;
     }
 
@@ -13903,11 +13981,12 @@ fn child_module_import_scope_uses_parent_ident(
 fn reachable_module_uses_imported_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    reduced
+    if reduced
         .reachable
         .iter()
         .filter(|callable| callable.package() == package)
@@ -13919,15 +13998,11 @@ fn reachable_module_uses_imported_ident(
                 record.module_path == module_path && method_uses_imported_ident(&record.item, ident)
             })
         })
-        || reduced
-            .reachable_items
-            .iter()
-            .filter(|item| item.package == package && item.module_path == module_path)
-            .any(|item| {
-                project.items.get(item).is_some_and(|record| {
-                    item_uses_imported_ident(project, reduced, package, item, record, ident)
-                })
-            })
+    {
+        return true;
+    }
+
+    render_plan.module_mentions_ident(package, module_path, ident)
 }
 
 fn function_uses_imported_ident(function: &syn::ItemFn, ident: &str) -> bool {
@@ -13943,89 +14018,6 @@ fn method_uses_imported_ident(function: &syn::ImplItemFn, ident: &str) -> bool {
     visitor.push_scope();
     visitor.visit_signature(&function.sig);
     visitor.visit_block(&function.block);
-    visitor.found
-}
-
-fn item_uses_imported_ident(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &str,
-    item_id: &ItemId,
-    record: &crate::model::ItemRecord,
-    ident: &str,
-) -> bool {
-    if let Item::Struct(item_struct) = &record.item {
-        let mut visitor = ImportUsageVisitor::new(ident);
-        visitor.visit_generics(&item_struct.generics);
-        for attr in &item_struct.attrs {
-            visitor.visit_attribute(attr);
-        }
-        if root_item_should_render(reduced, item_id) {
-            visitor.visit_item(&record.item);
-            return visitor.found;
-        }
-        if let syn::Fields::Named(fields) = &item_struct.fields {
-            for field in &fields.named {
-                if struct_field_should_remain(
-                    project,
-                    reduced,
-                    None,
-                    package,
-                    &item_id.module_path,
-                    item_struct,
-                    field,
-                ) {
-                    visitor.visit_field(field);
-                }
-            }
-        } else {
-            visitor.visit_item(&record.item);
-        }
-        return visitor.found;
-    }
-
-    if let Item::Trait(item_trait) = &record.item {
-        let mut visitor = ImportUsageVisitor::new(ident);
-        if root_item_should_render(reduced, item_id)
-            || trait_has_reachable_impl_methods(
-                reduced,
-                package,
-                &item_id.module_path,
-                &item_id.name,
-            )
-        {
-            visitor.visit_item(&record.item);
-            return visitor.found;
-        }
-
-        visitor.visit_generics(&item_trait.generics);
-        for bound in &item_trait.supertraits {
-            visitor.visit_type_param_bound(bound);
-        }
-        for attr in item_trait
-            .attrs
-            .iter()
-            .filter(|attr| is_inert_type_surface_attr(attr))
-        {
-            visitor.visit_attribute(attr);
-        }
-        for item in &item_trait.items {
-            if trait_item_should_remain_for_type_surface(
-                project,
-                reduced,
-                package,
-                &item_id.module_path,
-                &item_id.name,
-                item,
-            ) {
-                visitor.visit_trait_item(item);
-            }
-        }
-        return visitor.found;
-    }
-
-    let mut visitor = ImportUsageVisitor::new(ident);
-    visitor.visit_item(&record.item);
     visitor.found
 }
 
@@ -14252,6 +14244,7 @@ fn public_glob_prefix_exposes_referenced_name(
         public_glob_exposed_name_is_used(
             project,
             reduced,
+            render_plan,
             package,
             source_module_path,
             target_package,
@@ -14264,6 +14257,7 @@ fn public_glob_prefix_exposes_referenced_name(
 fn public_glob_exposed_name_is_used(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     source_module_path: &[String],
     target_package: &str,
@@ -14274,6 +14268,19 @@ fn public_glob_exposed_name_is_used(
         && reachable_package_mentions_module_path_ident(
             project,
             reduced,
+            package,
+            source_module_path,
+            name,
+        )
+    {
+        return true;
+    }
+
+    if !source_module_path.is_empty()
+        && rendered_imports_mention_module_path_ident(
+            project,
+            reduced,
+            render_plan,
             package,
             source_module_path,
             name,
@@ -14296,6 +14303,69 @@ fn public_glob_exposed_name_is_used(
                 target_package,
                 name,
             ))
+}
+
+fn rendered_imports_mention_module_path_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .filter(|source| {
+            module_should_render(project, reduced, render_plan, package, &source.module_path)
+        })
+        .any(|source| {
+            source.syntax.items.iter().any(|item| {
+                let Item::Use(item_use) = item else {
+                    return false;
+                };
+                use_tree_mentions_module_path_ident(&item_use.tree, Vec::new(), module_path, ident)
+            })
+        })
+}
+
+fn use_tree_mentions_module_path_ident(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            use_tree_mentions_module_path_ident(&path.tree, prefix, module_path, ident)
+        }
+        UseTree::Name(name) => {
+            if name.ident != "self" {
+                prefix.push(name.ident.to_string());
+            }
+            use_target_mentions_module_path_ident(&prefix, module_path, ident)
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            use_target_mentions_module_path_ident(&prefix, module_path, ident)
+        }
+        UseTree::Group(group) => group.items.iter().any(|nested| {
+            use_tree_mentions_module_path_ident(nested, prefix.clone(), module_path, ident)
+        }),
+        UseTree::Glob(_) => use_target_mentions_module_path_ident(&prefix, module_path, ident),
+    }
+}
+
+fn use_target_mentions_module_path_ident(
+    target: &[String],
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let mut expected = module_path.to_vec();
+    expected.push(ident.to_string());
+    path_ends_with(target, &expected)
 }
 
 fn public_glob_target_name_is_selected_root(

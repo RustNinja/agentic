@@ -937,7 +937,12 @@ fn run_batch_root(
             cargo_args: batch_cargo_args(options, root),
         })?;
         write_report(&check, &output_root.join("slice-feedback.json"))?;
-        if feedback_is_accepted(&check, baseline, options.deny_warnings) {
+        let accepted = if options.feedback_repair_iterations > 0 {
+            feedback_repair_is_accepted(&check, baseline, options.deny_warnings)
+        } else {
+            feedback_is_accepted(&check, baseline, options.deny_warnings)
+        };
+        if accepted {
             return Ok(batch_row_from_reports(
                 root,
                 output_root,
@@ -947,6 +952,66 @@ fn run_batch_root(
                 Some(&check),
                 None,
             ));
+        }
+        if options.feedback_repair_iterations > 0 {
+            let mut repaired_check = check.clone();
+            for _repair_attempt in 1..=options.feedback_repair_iterations {
+                let repair = repair_workspace(RepairOptions {
+                    output_root: output_root.to_path_buf(),
+                    diagnostics: repaired_check.diagnostics.clone(),
+                })?;
+                write_repair_report(&repair, &output_root.join("slice-repair.json"))?;
+                if repair.total_changes() == 0 {
+                    break;
+                }
+                let preflight = preflight_workspace(PreflightOptions {
+                    manifest_path: output_root.join("Cargo.toml"),
+                })?;
+                write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
+                if !preflight.success {
+                    return Ok(batch_row_from_reports(
+                        root,
+                        output_root,
+                        "preflight_failed",
+                        last_report.as_ref(),
+                        Some(&preflight),
+                        Some(&check),
+                        Some("batch repair produced a structurally invalid workspace".to_string()),
+                    ));
+                }
+                last_preflight = Some(preflight);
+                repaired_check = check_workspace(CheckOptions {
+                    manifest_path: output_root.join("Cargo.toml"),
+                    target_dir: Some(batch_feedback_target_dir(options)),
+                    timeout: options.feedback_timeout,
+                    cargo_args: batch_cargo_args(options, root),
+                })?;
+                write_report(&repaired_check, &output_root.join("slice-feedback.json"))?;
+                if feedback_repair_is_accepted(&repaired_check, baseline, options.deny_warnings) {
+                    return Ok(batch_row_from_reports(
+                        root,
+                        output_root,
+                        "accepted",
+                        last_report.as_ref(),
+                        last_preflight.as_ref(),
+                        Some(&repaired_check),
+                        None,
+                    ));
+                }
+            }
+            if attempt == attempts || repaired_check.error_count() == 0 {
+                return Ok(batch_row_from_reports(
+                    root,
+                    output_root,
+                    "check_failed",
+                    last_report.as_ref(),
+                    last_preflight.as_ref(),
+                    Some(&repaired_check),
+                    Some("repaired workspace did not pass batch feedback gate".to_string()),
+                ));
+            }
+            diagnostics.extend(repaired_check.diagnostics);
+            continue;
         }
         if attempt == attempts || check.error_count() == 0 {
             return Ok(batch_row_from_reports(
@@ -3621,6 +3686,7 @@ fn repairable_warning_count(diagnostics: &[CheckDiagnostic]) -> usize {
         .filter(|diagnostic| {
             diagnostic.level == "warning"
                 && (diagnostic.code.as_deref() == Some("unused_imports")
+                    || diagnostic.code.as_deref() == Some("unused_macros")
                     || (diagnostic.code.as_deref() == Some("dead_code")
                         && dead_code_warning_is_repairable(&diagnostic.message)))
         })
