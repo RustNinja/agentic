@@ -232,6 +232,14 @@ not slicer failures.
   callables and 72 retained-package prunable items, all proven by RA mapping and
   reference search with zero unproven, unmapped, failed-query, or retained-owner
   reference cases.
+- The semantic proof gate then used that certificate to clear the last generic
+  semantic production warnings. The five-root batch still generated 119 files
+  with zero preflight errors, zero feedback errors, zero warnings, and
+  `production_ready=accepted`, while `production.hazards` became empty. This is
+  intentionally narrow: only broad `semantic_reduction_hints_applied` and
+  `semantic_inventory_partially_applied` warnings are suppressed when
+  retained-package pruning is fully proven; concrete unresolved/query,
+  macro/generated/dyn/cfg hazards remain fail-closed.
 
 ## Next Rule Targets
 

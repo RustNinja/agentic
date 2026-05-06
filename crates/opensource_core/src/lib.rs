@@ -603,8 +603,14 @@ pub fn generate_with_analyzer_feedback(
     let targets = target_report(&project, &packages);
     let source_map = source_map_report(&project, &render_reduced);
     let macro_surfaces = macro_surface_report(&project, &render_reduced);
-    let production =
-        production_readiness_report(&analyzer, &project, &render_reduced, &options.output_root);
+    let semantic_proof = semantic_usage_proof_report(&analyzer, &usage_decisions);
+    let production = production_readiness_report(
+        &analyzer,
+        &project,
+        &render_reduced,
+        &options.output_root,
+        Some(&semantic_proof),
+    );
     let usage =
         usage_classification_report(&project, &reduced, &analyzer, &usage_decisions, &production);
 
@@ -1904,8 +1910,15 @@ fn production_readiness_report(
     project: &Project,
     reduced: &ReducedProject,
     output_root: &Path,
+    semantic_proof: Option<&SemanticUsageProofReport>,
 ) -> ProductionReadinessReport {
-    production_readiness_report_inner(analyzer, project, reduced, Some(output_root))
+    production_readiness_report_inner(
+        analyzer,
+        project,
+        reduced,
+        Some(output_root),
+        semantic_proof,
+    )
 }
 
 fn pre_render_production_readiness_report(
@@ -1913,7 +1926,7 @@ fn pre_render_production_readiness_report(
     project: &Project,
     reduced: &ReducedProject,
 ) -> ProductionReadinessReport {
-    production_readiness_report_inner(analyzer, project, reduced, None)
+    production_readiness_report_inner(analyzer, project, reduced, None, None)
 }
 
 fn production_readiness_report_inner(
@@ -1921,15 +1934,17 @@ fn production_readiness_report_inner(
     project: &Project,
     reduced: &ReducedProject,
     output_root: Option<&Path>,
+    semantic_proof: Option<&SemanticUsageProofReport>,
 ) -> ProductionReadinessReport {
     let mut hazards = Vec::new();
+    let semantic_pruning_proven = semantic_pruning_proof_complete(semantic_proof);
     add_workspace_production_hazards(project, reduced, &mut hazards);
     if let Some(output_root) = output_root {
         add_generated_support_package_production_hazards(output_root, &mut hazards);
     }
     add_cfg_gated_root_production_hazards(project, reduced, &mut hazards);
     add_syntactic_production_hazards(project, reduced, &mut hazards);
-    add_reduction_evidence_production_hazards(reduced, &mut hazards);
+    add_reduction_evidence_production_hazards(reduced, semantic_pruning_proven, &mut hazards);
 
     if !analyzer.loaded {
         hazards.push(production_hazard(
@@ -1941,6 +1956,7 @@ fn production_readiness_report_inner(
     add_semantic_inventory_hazard(
         analyzer,
         reduced.evidence.semantic_edges_applied,
+        semantic_pruning_proven,
         &mut hazards,
     );
 
@@ -1957,6 +1973,15 @@ fn production_readiness_report_inner(
     add_semantic_usage_reference_hazard(analyzer, project, &mut hazards);
 
     production_readiness_status(hazards)
+}
+
+fn semantic_pruning_proof_complete(proof: Option<&SemanticUsageProofReport>) -> bool {
+    proof.is_some_and(|proof| {
+        proof.status == "complete_for_retained_packages"
+            && proof.summary.analyzer_available
+            && proof.summary.unproven_callables == 0
+            && proof.summary.unproven_items == 0
+    })
 }
 
 fn add_semantic_usage_mapping_hazard(
@@ -2405,8 +2430,12 @@ fn normalize_report_path(path: &Path) -> PathBuf {
 fn add_semantic_inventory_hazard(
     analyzer: &AnalyzerReport,
     semantic_edges_applied: usize,
+    semantic_pruning_proven: bool,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
+    if semantic_pruning_proven {
+        return;
+    }
     if analyzer.semantic.is_some() && analyzer.semantic_hints.is_empty() {
         hazards.push(production_hazard(
             "semantic_inventory_not_applied",
@@ -3554,6 +3583,7 @@ fn add_syntactic_production_hazards(
 
 fn add_reduction_evidence_production_hazards(
     reduced: &ReducedProject,
+    semantic_pruning_proven: bool,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
     let evidence = &reduced.evidence;
@@ -3578,7 +3608,7 @@ fn add_reduction_evidence_production_hazards(
             capped_method_fallback_details(evidence),
         ));
     }
-    if evidence.semantic_edges_applied > 0 {
+    if evidence.semantic_edges_applied > 0 && !semantic_pruning_proven {
         hazards.push(production_hazard(
             "semantic_reduction_hints_applied",
             "warning",
@@ -8309,7 +8339,7 @@ theme = []
         };
         let mut hazards = Vec::new();
 
-        add_semantic_inventory_hazard(&analyzer, 0, &mut hazards);
+        add_semantic_inventory_hazard(&analyzer, 0, false, &mut hazards);
 
         assert!(hazards
             .iter()
