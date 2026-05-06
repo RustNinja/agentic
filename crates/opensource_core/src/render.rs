@@ -2114,11 +2114,13 @@ struct SupportModuleSource {
 struct SupportLiveSet {
     item_names: BTreeSet<String>,
     public_exports: BTreeSet<String>,
+    assoc_item_names: BTreeMap<String, BTreeSet<String>>,
 }
 
 struct SupportUseNeeds<'a> {
     live_idents: &'a BTreeSet<String>,
     live_exports: &'a BTreeSet<String>,
+    live_assoc_items: &'a BTreeMap<String, BTreeSet<String>>,
 }
 
 struct SupportMacroExpansion {
@@ -2217,11 +2219,10 @@ fn build_restricted_support_sources(
                     );
                     return Ok(None);
                 };
-                let tokens = item.to_token_stream();
                 let Some(inserted) = mark_support_token_dependencies(
                     &ctx,
                     &source_file,
-                    &tokens,
+                    &item.to_token_stream(),
                     &named_items,
                     &mut live,
                     &mut live_usage,
@@ -2237,6 +2238,19 @@ fn build_restricted_support_sources(
                     return Ok(None);
                 };
                 changed |= inserted;
+                let Some(inserted) =
+                    mark_support_item_assoc_usage_dependencies(&ctx, &source_file, item, &mut live)
+                else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: item assoc dependency unsupported in {}::{name}",
+                            source_file.display()
+                        ),
+                    );
+                    return Ok(None);
+                };
+                changed |= inserted;
             }
 
             for item in &module.syntax.items {
@@ -2246,7 +2260,8 @@ fn build_restricted_support_sources(
                 if !support_impl_should_render(item_impl, &named_items, &live_set) {
                     continue;
                 }
-                let tokens = item.to_token_stream();
+                let tokens = support_impl_dependency_tokens(item_impl, &named_items, &live_set)
+                    .unwrap_or_else(|| item.to_token_stream());
                 let Some(inserted) = mark_support_token_dependencies(
                     &ctx,
                     &source_file,
@@ -2260,6 +2275,24 @@ fn build_restricted_support_sources(
                         package_root,
                         &format!(
                             "restricted fail: impl dependency unsupported in {}",
+                            source_file.display()
+                        ),
+                    );
+                    return Ok(None);
+                };
+                changed |= inserted;
+                let Some(inserted) = mark_support_impl_self_assoc_dependencies(
+                    &ctx,
+                    &source_file,
+                    item_impl,
+                    &named_items,
+                    &live_set,
+                    &mut live,
+                ) else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: impl self dependency unsupported in {}",
                             source_file.display()
                         ),
                     );
@@ -2308,6 +2341,7 @@ fn build_restricted_support_sources(
                     SupportUseNeeds {
                         live_idents: &live_usage.idents,
                         live_exports: &live_set.public_exports,
+                        live_assoc_items: &live_usage.dependency_public_names,
                     },
                     &mut live,
                 ) else {
@@ -2358,6 +2392,7 @@ fn build_restricted_support_sources(
                     SupportUseNeeds {
                         live_idents: &live_usage.idents,
                         live_exports: &live_set.public_exports,
+                        live_assoc_items: &live_usage.dependency_public_names,
                     },
                     &mut live,
                 ) else {
@@ -2478,11 +2513,53 @@ fn mark_support_token_dependencies(
     }
 
     for segments in token_path_candidates(tokens) {
+        if let Some(inserted) =
+            mark_support_local_assoc_dependencies(ctx, source_file, &segments, live)
+        {
+            changed |= inserted;
+        }
         let inserted = mark_support_path_target(ctx, source_file, &segments, live)?;
         changed |= inserted;
     }
 
     Some(changed)
+}
+
+fn mark_support_local_assoc_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    segments: &[String],
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let Some((prefix, type_name, assoc_name)) = support_required_assoc_segments(segments) else {
+        return Some(false);
+    };
+    if matches!(
+        prefix.first().map(String::as_str),
+        Some("crate" | "self" | "super")
+    ) {
+        return mark_support_path_target(ctx, source_file, segments, live);
+    }
+    let mut target_file = source_file.to_path_buf();
+    for segment in &prefix {
+        let child_file = support_child_module_file(ctx.modules, &target_file, segment)?;
+        target_file = child_file;
+    }
+    let Some(module) = ctx.modules.get(&target_file) else {
+        return None;
+    };
+    let named_items = support_named_item_names(&module.syntax.items);
+    if !named_items.contains_key(&type_name) {
+        return Some(false);
+    }
+    let live_set = live.entry(target_file).or_default();
+    let inserted_type = live_set.item_names.insert(type_name.clone());
+    let inserted_assoc = live_set
+        .assoc_item_names
+        .entry(type_name)
+        .or_default()
+        .insert(assoc_name);
+    Some(inserted_type | inserted_assoc)
 }
 
 fn collect_support_module_sources_with_syntax(
@@ -2554,6 +2631,21 @@ fn seed_support_required_name(
     let Some(root_module) = ctx.modules.get(ctx.root_file) else {
         return false;
     };
+    if let Some((prefix, type_name, assoc_name)) = support_required_assoc_path(required_name) {
+        let mut visited = BTreeSet::new();
+        return matches!(
+            mark_support_use_target_with_assoc(
+                ctx,
+                ctx.root_file,
+                &prefix,
+                &type_name,
+                Some(&assoc_name),
+                live,
+                &mut visited
+            ),
+            SupportReexportMark::Matched(_)
+        );
+    }
     if let Some((prefix, target_name)) = support_required_path(required_name) {
         let mut visited = BTreeSet::new();
         return matches!(
@@ -2591,6 +2683,7 @@ fn seed_support_required_name(
             &item_use.tree,
             Vec::new(),
             required_name,
+            None,
             live,
             &mut visited,
         ) {
@@ -2622,12 +2715,69 @@ fn support_required_path(required_name: &str) -> Option<(Vec<String>, String)> {
     Some((segments[..segments.len() - 1].to_vec(), target_name))
 }
 
+fn support_required_assoc_path(required_name: &str) -> Option<(Vec<String>, String, String)> {
+    let segments = required_name
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    support_required_assoc_segments(&segments)
+}
+
+fn support_required_assoc_segments(segments: &[String]) -> Option<(Vec<String>, String, String)> {
+    if segments.len() < 2 {
+        return None;
+    }
+    let assoc_name = segments.last()?;
+    if !support_assoc_item_name_is_precise(assoc_name) {
+        return None;
+    }
+    let type_name = segments.get(segments.len() - 2)?;
+    if !support_type_like_ident(type_name) {
+        return None;
+    }
+    Some((
+        segments[..segments.len() - 2].to_vec(),
+        type_name.clone(),
+        assoc_name.clone(),
+    ))
+}
+
+fn support_type_like_ident(ident: &str) -> bool {
+    ident
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
+}
+
+fn support_assoc_item_name_is_precise(ident: &str) -> bool {
+    ident
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+}
+
+fn mark_support_live_assoc_item(
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+    source_file: &Path,
+    type_name: &str,
+    assoc_name: &str,
+) -> bool {
+    live.entry(source_file.to_path_buf())
+        .or_default()
+        .assoc_item_names
+        .entry(type_name.to_string())
+        .or_default()
+        .insert(assoc_name.to_string())
+}
+
 fn mark_support_required_reexport(
     ctx: &SupportResolveContext<'_>,
     source_file: &Path,
     tree: &UseTree,
     mut prefix: Vec<String>,
     required_name: &str,
+    assoc_name: Option<&str>,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
     visited: &mut BTreeSet<(PathBuf, String)>,
 ) -> SupportReexportMark {
@@ -2640,6 +2790,7 @@ fn mark_support_required_reexport(
                 &path.tree,
                 prefix,
                 required_name,
+                assoc_name,
                 live,
                 visited,
             )
@@ -2648,17 +2799,26 @@ fn mark_support_required_reexport(
             if name.ident != required_name {
                 return SupportReexportMark::NotMatched;
             }
-            mark_support_use_target(ctx, source_file, &prefix, required_name, live, visited)
+            mark_support_use_target_with_assoc(
+                ctx,
+                source_file,
+                &prefix,
+                required_name,
+                assoc_name,
+                live,
+                visited,
+            )
         }
         UseTree::Rename(rename) => {
             if rename.rename != required_name {
                 return SupportReexportMark::NotMatched;
             }
-            mark_support_use_target(
+            mark_support_use_target_with_assoc(
                 ctx,
                 source_file,
                 &prefix,
                 &rename.ident.to_string(),
+                assoc_name,
                 live,
                 visited,
             )
@@ -2673,6 +2833,7 @@ fn mark_support_required_reexport(
                     item,
                     prefix.clone(),
                     required_name,
+                    assoc_name,
                     live,
                     visited,
                 ) {
@@ -2695,9 +2856,15 @@ fn mark_support_required_reexport(
                 return SupportReexportMark::NotMatched;
             }
             match support_local_use_prefix_target(ctx, source_file, &prefix) {
-                SupportLocalTarget::Local(_) => {
-                    mark_support_use_target(ctx, source_file, &prefix, required_name, live, visited)
-                }
+                SupportLocalTarget::Local(_) => mark_support_use_target_with_assoc(
+                    ctx,
+                    source_file,
+                    &prefix,
+                    required_name,
+                    assoc_name,
+                    live,
+                    visited,
+                ),
                 SupportLocalTarget::External => SupportReexportMark::Unsupported,
                 SupportLocalTarget::Unsupported => SupportReexportMark::Unsupported,
             }
@@ -2720,33 +2887,61 @@ fn mark_support_live_use_imports(
         }
         UseTree::Name(name) => {
             let imported_name = name.ident.to_string();
-            if needs.live_idents.contains(&imported_name)
-                || needs.live_exports.contains(&imported_name)
-            {
+            let is_live_name = needs.live_idents.contains(&imported_name)
+                || needs.live_exports.contains(&imported_name);
+            let live_assoc_items = needs.live_assoc_items.get(&imported_name);
+            if is_live_name || live_assoc_items.is_some() {
+                let mut inserted = false;
                 let mut visited = BTreeSet::new();
-                return support_reexport_mark_to_option(mark_support_use_target(
+                inserted |= support_reexport_mark_to_option(mark_support_use_target(
                     ctx,
                     source_file,
                     &prefix,
                     &imported_name,
                     live,
                     &mut visited,
-                ));
+                ))?;
+                if let Some(assoc_items) = live_assoc_items {
+                    inserted |= mark_support_import_assoc_requirements(
+                        ctx,
+                        source_file,
+                        &prefix,
+                        &imported_name,
+                        assoc_items,
+                        live,
+                    )?;
+                }
+                return Some(inserted);
             }
             Some(false)
         }
         UseTree::Rename(rename) => {
             let local_name = rename.rename.to_string();
-            if needs.live_idents.contains(&local_name) || needs.live_exports.contains(&local_name) {
+            let is_live_name =
+                needs.live_idents.contains(&local_name) || needs.live_exports.contains(&local_name);
+            let live_assoc_items = needs.live_assoc_items.get(&local_name);
+            if is_live_name || live_assoc_items.is_some() {
+                let mut inserted = false;
                 let mut visited = BTreeSet::new();
-                return support_reexport_mark_to_option(mark_support_use_target(
+                inserted |= support_reexport_mark_to_option(mark_support_use_target(
                     ctx,
                     source_file,
                     &prefix,
                     &rename.ident.to_string(),
                     live,
                     &mut visited,
-                ));
+                ))?;
+                if let Some(assoc_items) = live_assoc_items {
+                    inserted |= mark_support_import_assoc_requirements(
+                        ctx,
+                        source_file,
+                        &prefix,
+                        &rename.ident.to_string(),
+                        assoc_items,
+                        live,
+                    )?;
+                }
+                return Some(inserted);
             }
             Some(false)
         }
@@ -2761,6 +2956,7 @@ fn mark_support_live_use_imports(
                     SupportUseNeeds {
                         live_idents: needs.live_idents,
                         live_exports: needs.live_exports,
+                        live_assoc_items: needs.live_assoc_items,
                     },
                     live,
                 )?;
@@ -2821,7 +3017,10 @@ fn mark_support_live_glob_imports(
 ) -> Option<bool> {
     match support_local_use_prefix_target(ctx, source_file, prefix) {
         SupportLocalTarget::External => {
-            if needs.live_idents.is_empty() && needs.live_exports.is_empty() {
+            if needs.live_idents.is_empty()
+                && needs.live_exports.is_empty()
+                && needs.live_assoc_items.is_empty()
+            {
                 Some(false)
             } else {
                 None
@@ -2840,9 +3039,49 @@ fn mark_support_live_glob_imports(
                     SupportReexportMark::Unsupported => return None,
                 }
             }
+            for (visible_name, assoc_items) in needs.live_assoc_items {
+                inserted |= mark_support_import_assoc_requirements(
+                    ctx,
+                    source_file,
+                    prefix,
+                    visible_name,
+                    assoc_items,
+                    live,
+                )?;
+            }
             Some(inserted)
         }
     }
+}
+
+fn mark_support_import_assoc_requirements(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    prefix: &[String],
+    imported_name: &str,
+    assoc_items: &BTreeSet<String>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut inserted = false;
+    for assoc_item in assoc_items {
+        let assoc_segments = assoc_item
+            .split("::")
+            .filter(|segment| !segment.is_empty())
+            .map(str::to_string)
+            .collect::<Vec<_>>();
+        if assoc_segments.len() == 1
+            && !assoc_segments
+                .first()
+                .is_some_and(|segment| support_assoc_item_name_is_precise(segment))
+        {
+            continue;
+        }
+        let mut segments = prefix.to_vec();
+        segments.push(imported_name.to_string());
+        segments.extend(assoc_segments);
+        inserted |= mark_support_path_target(ctx, source_file, &segments, live)?;
+    }
+    Some(inserted)
 }
 
 fn mark_support_path_target(
@@ -2863,6 +3102,19 @@ fn mark_support_path_target(
     if target_segments.len() < 2 {
         return Some(false);
     }
+    if let Some((prefix, type_name, assoc_name)) = support_required_assoc_segments(target_segments)
+    {
+        let mut visited = BTreeSet::new();
+        return support_reexport_mark_to_option(mark_support_use_target_with_assoc(
+            ctx,
+            target_file,
+            &prefix,
+            &type_name,
+            Some(&assoc_name),
+            live,
+            &mut visited,
+        ));
+    }
     let mut visited = BTreeSet::new();
     support_reexport_mark_to_option(mark_support_use_target(
         ctx,
@@ -2879,6 +3131,18 @@ fn mark_support_use_target(
     source_file: &Path,
     prefix: &[String],
     target_name: &str,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+    visited: &mut BTreeSet<(PathBuf, String)>,
+) -> SupportReexportMark {
+    mark_support_use_target_with_assoc(ctx, source_file, prefix, target_name, None, live, visited)
+}
+
+fn mark_support_use_target_with_assoc(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    prefix: &[String],
+    target_name: &str,
+    assoc_name: Option<&str>,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
     visited: &mut BTreeSet<(PathBuf, String)>,
 ) -> SupportReexportMark {
@@ -2905,7 +3169,7 @@ fn mark_support_use_target(
     }
 
     let Some(first) = prefix.first() else {
-        return seed_support_name_in_file(ctx, source_file, target_name, live, visited);
+        return seed_support_name_in_file(ctx, source_file, target_name, assoc_name, live, visited);
     };
 
     let Some(child_file) = support_child_module_file(ctx.modules, source_file, first) else {
@@ -2915,7 +3179,14 @@ fn mark_support_use_target(
         return SupportReexportMark::NotMatched;
     };
     if prefix.len() == 1 {
-        return match seed_support_name_in_file(ctx, &child_file, target_name, live, visited) {
+        return match seed_support_name_in_file(
+            ctx,
+            &child_file,
+            target_name,
+            assoc_name,
+            live,
+            visited,
+        ) {
             SupportReexportMark::Matched(inserted_child) => {
                 let inserted_module = live
                     .entry(source_file.to_path_buf())
@@ -2927,7 +3198,15 @@ fn mark_support_use_target(
             other => other,
         };
     }
-    match mark_support_use_target(ctx, &child_file, &prefix[1..], target_name, live, visited) {
+    match mark_support_use_target_with_assoc(
+        ctx,
+        &child_file,
+        &prefix[1..],
+        target_name,
+        assoc_name,
+        live,
+        visited,
+    ) {
         SupportReexportMark::Matched(inserted_child) => {
             let inserted_module = live
                 .entry(source_file.to_path_buf())
@@ -2944,10 +3223,16 @@ fn seed_support_name_in_file(
     ctx: &SupportResolveContext<'_>,
     source_file: &Path,
     required_name: &str,
+    assoc_name: Option<&str>,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
     visited: &mut BTreeSet<(PathBuf, String)>,
 ) -> SupportReexportMark {
-    let key = (source_file.to_path_buf(), required_name.to_string());
+    let key = (
+        source_file.to_path_buf(),
+        assoc_name
+            .map(|assoc_name| format!("{required_name}::{assoc_name}"))
+            .unwrap_or_else(|| required_name.to_string()),
+    );
     if !visited.insert(key) {
         return SupportReexportMark::Unsupported;
     }
@@ -2956,12 +3241,16 @@ fn seed_support_name_in_file(
     };
     let named_items = support_named_item_names(&module.syntax.items);
     if named_items.contains_key(required_name) {
-        return SupportReexportMark::Matched(
-            live.entry(source_file.to_path_buf())
+        let live_set = live.entry(source_file.to_path_buf()).or_default();
+        let inserted_item = live_set.item_names.insert(required_name.to_string());
+        let inserted_assoc = assoc_name.is_some_and(|assoc_name| {
+            live_set
+                .assoc_item_names
+                .entry(required_name.to_string())
                 .or_default()
-                .item_names
-                .insert(required_name.to_string()),
-        );
+                .insert(assoc_name.to_string())
+        });
+        return SupportReexportMark::Matched(inserted_item | inserted_assoc);
     }
 
     for item in &module.syntax.items {
@@ -2977,6 +3266,7 @@ fn seed_support_name_in_file(
             &item_use.tree,
             Vec::new(),
             required_name,
+            assoc_name,
             live,
             visited,
         ) {
@@ -3127,7 +3417,7 @@ fn transform_restricted_support_file(
             }
             Item::ExternCrate(_) => Some(item.clone()),
             Item::Impl(item_impl) => {
-                support_impl_should_render(item_impl, &named_items, live_set).then(|| item.clone())
+                transform_support_impl(item_impl, &named_items, live_set).map(Item::Impl)
             }
             _ => {
                 if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
@@ -3225,6 +3515,349 @@ fn support_item_should_collect_live_usage(
         live_set.item_names.contains(&name) || live_set.public_exports.contains(&name)
     }) || matches!(item, Item::Impl(item_impl) if support_impl_should_render(item_impl, named_items, live_set))
         || matches!(item, Item::Macro(item_macro) if item_macro.ident.is_none())
+}
+
+fn support_impl_dependency_tokens(
+    item_impl: &syn::ItemImpl,
+    named_items: &BTreeMap<String, Item>,
+    live_set: &SupportLiveSet,
+) -> Option<TokenStream> {
+    transform_support_impl(item_impl, named_items, live_set)
+        .map(|item_impl| item_impl.to_token_stream())
+}
+
+fn transform_support_impl(
+    item_impl: &syn::ItemImpl,
+    named_items: &BTreeMap<String, Item>,
+    live_set: &SupportLiveSet,
+) -> Option<syn::ItemImpl> {
+    if !support_impl_should_render(item_impl, named_items, live_set) {
+        return None;
+    }
+    if item_impl.trait_.is_some() {
+        return Some(item_impl.clone());
+    }
+    let Some(self_name) = support_impl_self_named_item(item_impl) else {
+        return Some(item_impl.clone());
+    };
+    let Some(assoc_items) = live_set
+        .assoc_item_names
+        .get(&self_name)
+        .filter(|assoc_items| !assoc_items.is_empty())
+    else {
+        return Some(item_impl.clone());
+    };
+
+    let mut pruned = item_impl.clone();
+    pruned.items = item_impl
+        .items
+        .iter()
+        .filter(|item| support_impl_item_should_render(item, assoc_items))
+        .cloned()
+        .collect();
+    (!pruned.items.is_empty()).then_some(pruned)
+}
+
+fn support_impl_item_should_render(item: &ImplItem, assoc_items: &BTreeSet<String>) -> bool {
+    match item {
+        ImplItem::Fn(item_fn) => assoc_items.contains(&item_fn.sig.ident.to_string()),
+        // Associated consts, types, and macros can affect method signatures or macro-expanded
+        // impl bodies. Keep them unless a future semantic pass proves an item-level decision.
+        _ => true,
+    }
+}
+
+fn support_impl_self_named_item(item_impl: &syn::ItemImpl) -> Option<String> {
+    let Type::Path(type_path) = item_impl.self_ty.as_ref() else {
+        return None;
+    };
+    type_path
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+}
+
+fn mark_support_item_assoc_usage_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    item: &Item,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut visitor = SupportAssocUsageVisitor::default();
+    visitor.visit_item(item);
+    mark_support_assoc_paths(ctx, source_file, visitor.assoc_paths, live)
+}
+
+fn mark_support_impl_self_assoc_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    item_impl: &syn::ItemImpl,
+    named_items: &BTreeMap<String, Item>,
+    live_set: &SupportLiveSet,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let Some(self_name) = support_impl_self_named_item(item_impl) else {
+        return Some(false);
+    };
+    if live_set
+        .assoc_item_names
+        .get(&self_name)
+        .is_none_or(BTreeSet::is_empty)
+    {
+        return Some(false);
+    }
+    let Some(rendered_impl) = transform_support_impl(item_impl, named_items, live_set) else {
+        return Some(false);
+    };
+    let mut changed = false;
+    let mut assoc_usage = SupportAssocUsageVisitor::new(Some(self_name.clone()));
+    for impl_item in &rendered_impl.items {
+        let ImplItem::Fn(item_fn) = impl_item else {
+            continue;
+        };
+        let mut visitor = SelfAssocUsageVisitor::default();
+        visitor.visit_impl_item_fn(item_fn);
+        for assoc_name in visitor.assoc_items {
+            changed |= mark_support_live_assoc_item(live, source_file, &self_name, &assoc_name);
+        }
+        assoc_usage.visit_impl_item_fn(item_fn);
+    }
+    changed |= mark_support_assoc_paths(ctx, source_file, assoc_usage.assoc_paths, live)?;
+    Some(changed)
+}
+
+fn mark_support_assoc_paths(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    assoc_paths: BTreeSet<Vec<String>>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut changed = false;
+    for assoc_path in assoc_paths {
+        changed |= mark_support_path_target(ctx, source_file, &assoc_path, live)?;
+    }
+    Some(changed)
+}
+
+#[derive(Default)]
+struct SelfAssocUsageVisitor {
+    assoc_items: BTreeSet<String>,
+}
+
+impl Visit<'_> for SelfAssocUsageVisitor {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        if method_call_receiver_is_self(&node.receiver) {
+            self.assoc_items.insert(node.method.to_string());
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            let segments = path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            if let [self_name, assoc_name] = segments.as_slice() {
+                if self_name == "Self" && support_assoc_item_name_is_precise(assoc_name) {
+                    self.assoc_items.insert(assoc_name.clone());
+                }
+            }
+        }
+        visit::visit_expr_call(self, node);
+    }
+}
+
+fn method_call_receiver_is_self(receiver: &Expr) -> bool {
+    match receiver {
+        Expr::Path(path) => path.path.is_ident("self"),
+        Expr::Reference(reference) => method_call_receiver_is_self(&reference.expr),
+        Expr::Paren(paren) => method_call_receiver_is_self(&paren.expr),
+        Expr::Group(group) => method_call_receiver_is_self(&group.expr),
+        _ => false,
+    }
+}
+
+#[derive(Default)]
+struct SupportAssocUsageVisitor {
+    self_type: Option<String>,
+    variable_type_scopes: Vec<BTreeMap<String, Vec<String>>>,
+    assoc_paths: BTreeSet<Vec<String>>,
+}
+
+impl SupportAssocUsageVisitor {
+    fn new(self_type: Option<String>) -> Self {
+        Self {
+            self_type,
+            variable_type_scopes: Vec::new(),
+            assoc_paths: BTreeSet::new(),
+        }
+    }
+
+    fn push_fn_arg_scope(&mut self, inputs: &Punctuated<syn::FnArg, syn::Token![,]>) {
+        let mut scope = BTreeMap::new();
+        for input in inputs {
+            let syn::FnArg::Typed(input) = input else {
+                continue;
+            };
+            let syn::Pat::Ident(pat_ident) = input.pat.as_ref() else {
+                continue;
+            };
+            if let Some(type_path) = support_type_assoc_path(&input.ty) {
+                scope.insert(pat_ident.ident.to_string(), type_path);
+            }
+        }
+        self.variable_type_scopes.push(scope);
+    }
+
+    fn pop_fn_arg_scope(&mut self) {
+        self.variable_type_scopes.pop();
+    }
+
+    fn record_local_type(&mut self, name: String, type_path: Vec<String>) {
+        if let Some(scope) = self.variable_type_scopes.last_mut() {
+            scope.insert(name, type_path);
+        }
+    }
+
+    fn variable_type(&self, name: &str) -> Option<Vec<String>> {
+        self.variable_type_scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+}
+
+impl Visit<'_> for SupportAssocUsageVisitor {
+    fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+        self.push_fn_arg_scope(&node.sig.inputs);
+        visit::visit_block(self, &node.block);
+        self.pop_fn_arg_scope();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &syn::ImplItemFn) {
+        self.push_fn_arg_scope(&node.sig.inputs);
+        visit::visit_block(self, &node.block);
+        self.pop_fn_arg_scope();
+    }
+
+    fn visit_local(&mut self, node: &syn::Local) {
+        if let syn::Pat::Type(pat_type) = &node.pat {
+            if let syn::Pat::Ident(pat_ident) = pat_type.pat.as_ref() {
+                if let Some(type_path) = support_type_assoc_path(&pat_type.ty) {
+                    self.record_local_type(pat_ident.ident.to_string(), type_path);
+                }
+            }
+        } else if let syn::Pat::Ident(pat_ident) = &node.pat {
+            if let Some(init) = &node.init {
+                if let Some(type_path) = support_assoc_receiver_type_path(&init.expr, self) {
+                    self.record_local_type(pat_ident.ident.to_string(), type_path);
+                }
+            }
+        }
+        visit::visit_local(self, node);
+    }
+
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        let method = node.method.to_string();
+        if support_assoc_item_name_is_precise(&method) {
+            if let Some(mut type_path) = support_assoc_receiver_type_path(&node.receiver, self) {
+                type_path.push(method);
+                if support_required_assoc_segments(&type_path).is_some() {
+                    self.assoc_paths.insert(type_path);
+                }
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn support_assoc_receiver_type_path(
+    expr: &Expr,
+    visitor: &SupportAssocUsageVisitor,
+) -> Option<Vec<String>> {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Path(path) => support_type_path_from_assoc_path(&path.path),
+            _ => None,
+        },
+        Expr::MethodCall(method_call) => {
+            support_assoc_receiver_type_path(&method_call.receiver, visitor)
+        }
+        Expr::Struct(expr_struct) => support_type_path_from_path(&expr_struct.path),
+        Expr::Path(expr_path) => {
+            if expr_path.path.is_ident("self") {
+                return visitor
+                    .self_type
+                    .as_ref()
+                    .map(|self_type| vec![self_type.clone()]);
+            }
+            let segments = expr_path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            if segments.len() == 1 {
+                let ident = segments.first()?;
+                if let Some(type_path) = visitor.variable_type(ident) {
+                    return Some(type_path);
+                }
+            }
+            support_type_path_from_segments(&segments)
+        }
+        Expr::Reference(reference) => support_assoc_receiver_type_path(&reference.expr, visitor),
+        Expr::Paren(paren) => support_assoc_receiver_type_path(&paren.expr, visitor),
+        Expr::Group(group) => support_assoc_receiver_type_path(&group.expr, visitor),
+        Expr::Try(expr_try) => support_assoc_receiver_type_path(&expr_try.expr, visitor),
+        Expr::Await(expr_await) => support_assoc_receiver_type_path(&expr_await.base, visitor),
+        _ => None,
+    }
+}
+
+fn support_type_assoc_path(ty: &Type) -> Option<Vec<String>> {
+    match ty {
+        Type::Path(type_path) => support_type_path_from_path(&type_path.path),
+        Type::Reference(reference) => support_type_assoc_path(&reference.elem),
+        Type::Paren(paren) => support_type_assoc_path(&paren.elem),
+        Type::Group(group) => support_type_assoc_path(&group.elem),
+        _ => None,
+    }
+}
+
+fn support_type_path_from_assoc_path(path: &syn::Path) -> Option<Vec<String>> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let (assoc_name, type_path) = segments.split_last()?;
+    if !support_assoc_item_name_is_precise(assoc_name) {
+        return None;
+    }
+    support_type_path_from_segments(type_path)
+}
+
+fn support_type_path_from_path(path: &syn::Path) -> Option<Vec<String>> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    support_type_path_from_segments(&segments)
+}
+
+fn support_type_path_from_segments(segments: &[String]) -> Option<Vec<String>> {
+    if segments.is_empty() {
+        return None;
+    }
+    let type_index = segments
+        .iter()
+        .rposition(|segment| support_type_like_ident(segment))?;
+    Some(segments[..=type_index].to_vec())
 }
 
 fn collect_derive_attr_idents(attrs: &[syn::Attribute], derives: &mut BTreeSet<String>) {
@@ -5916,6 +6549,8 @@ struct TokenUsage {
 impl TokenUsage {
     fn record_file(&mut self, file: &syn::File) {
         collect_token_usage(&file.to_token_stream(), self);
+        self.record_dependency_method_calls(file);
+        self.record_dependency_assoc_calls_through_imports(file);
         for item in &file.items {
             if let Item::Use(item_use) = item {
                 self.record_use(item_use);
@@ -5936,6 +6571,61 @@ impl TokenUsage {
             Vec::new(),
             &mut self.dependency_public_names,
         );
+    }
+
+    fn record_dependency_method_calls(&mut self, file: &syn::File) {
+        let mut visitor = DependencyMethodCallVisitor::default();
+        visitor.visit_file(file);
+        for (root, type_path, method) in visitor.calls {
+            let mut required_path = type_path;
+            required_path.push(method);
+            if let Some(required_path) = dependency_required_path_string(&required_path) {
+                self.dependency_public_names
+                    .entry(root)
+                    .or_default()
+                    .insert(required_path);
+            }
+        }
+    }
+
+    fn record_dependency_assoc_calls_through_imports(&mut self, file: &syn::File) {
+        let imports = dependency_type_imports(file);
+        if imports.is_empty() {
+            return;
+        }
+
+        let mut visitor = SupportAssocUsageVisitor::default();
+        visitor.visit_file(file);
+        for assoc_path in visitor.assoc_paths {
+            self.record_imported_assoc_path(&imports, &assoc_path);
+        }
+
+        for assoc_path in token_path_candidates(&file.to_token_stream()) {
+            if support_required_assoc_segments(&assoc_path).is_some() {
+                self.record_imported_assoc_path(&imports, &assoc_path);
+            }
+        }
+    }
+
+    fn record_imported_assoc_path(
+        &mut self,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+        assoc_path: &[String],
+    ) {
+        let Some((visible_name, assoc_rest)) = assoc_path.split_first() else {
+            return;
+        };
+        let Some((root, imported_type_path)) = imports.get(visible_name) else {
+            return;
+        };
+        let mut required_path = imported_type_path.clone();
+        required_path.extend(assoc_rest.iter().cloned());
+        if let Some(required_path) = dependency_required_path_string(&required_path) {
+            self.dependency_public_names
+                .entry(root.clone())
+                .or_default()
+                .insert(required_path);
+        }
     }
 
     fn mentions_ident(&self, ident: &str) -> bool {
@@ -6035,6 +6725,157 @@ impl TokenUsage {
         }
         Some(names)
     }
+}
+
+#[derive(Default)]
+struct DependencyMethodCallVisitor {
+    calls: Vec<(String, Vec<String>, String)>,
+}
+
+impl Visit<'_> for DependencyMethodCallVisitor {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        if support_assoc_item_name_is_precise(&node.method.to_string()) {
+            if let Some((root, type_path)) = dependency_receiver_type_path(&node.receiver) {
+                self.calls.push((root, type_path, node.method.to_string()));
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn dependency_receiver_type_path(expr: &Expr) -> Option<(String, Vec<String>)> {
+    match expr {
+        Expr::Call(call) => match call.func.as_ref() {
+            Expr::Path(path) => dependency_type_path_from_associated_path(&path.path),
+            _ => None,
+        },
+        Expr::MethodCall(method_call) => dependency_receiver_type_path(&method_call.receiver),
+        Expr::Struct(expr_struct) => dependency_type_path_from_path(&expr_struct.path),
+        Expr::Path(expr_path) => dependency_type_path_from_path(&expr_path.path),
+        Expr::Reference(reference) => dependency_receiver_type_path(&reference.expr),
+        Expr::Paren(paren) => dependency_receiver_type_path(&paren.expr),
+        Expr::Group(group) => dependency_receiver_type_path(&group.expr),
+        Expr::Try(expr_try) => dependency_receiver_type_path(&expr_try.expr),
+        Expr::Await(expr_await) => dependency_receiver_type_path(&expr_await.base),
+        _ => None,
+    }
+}
+
+fn dependency_type_path_from_associated_path(path: &syn::Path) -> Option<(String, Vec<String>)> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let (assoc_name, type_path) = segments.split_last()?;
+    if !support_assoc_item_name_is_precise(assoc_name) {
+        return None;
+    }
+    dependency_type_path_from_segments(type_path)
+}
+
+fn dependency_type_path_from_path(path: &syn::Path) -> Option<(String, Vec<String>)> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    dependency_type_path_from_segments(&segments)
+}
+
+fn dependency_type_path_from_segments(segments: &[String]) -> Option<(String, Vec<String>)> {
+    if segments.len() < 2 {
+        return None;
+    }
+    let root = segments.first()?;
+    if matches!(root.as_str(), "crate" | "self" | "super" | "Self") {
+        return None;
+    }
+    let type_index = segments
+        .iter()
+        .rposition(|segment| support_type_like_ident(segment))?;
+    if type_index == 0 {
+        return None;
+    }
+    Some((root.clone(), segments[1..=type_index].to_vec()))
+}
+
+fn dependency_type_imports(file: &syn::File) -> BTreeMap<String, (String, Vec<String>)> {
+    let mut imports = BTreeMap::new();
+    for item in &file.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_dependency_type_imports(&item_use.tree, Vec::new(), &mut imports);
+    }
+    imports
+}
+
+fn collect_dependency_type_imports(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    imports: &mut BTreeMap<String, (String, Vec<String>)>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_dependency_type_imports(&path.tree, prefix, imports);
+        }
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            record_dependency_type_import(&prefix, &name.ident.to_string(), &visible_name, imports);
+        }
+        UseTree::Rename(rename) => {
+            record_dependency_type_import(
+                &prefix,
+                &rename.ident.to_string(),
+                &rename.rename.to_string(),
+                imports,
+            );
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_dependency_type_imports(item, prefix.clone(), imports);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn record_dependency_type_import(
+    prefix: &[String],
+    imported_name: &str,
+    visible_name: &str,
+    imports: &mut BTreeMap<String, (String, Vec<String>)>,
+) {
+    if !support_type_like_ident(visible_name) && !support_type_like_ident(imported_name) {
+        return;
+    }
+    let Some(root) = prefix.first() else {
+        return;
+    };
+    if matches!(root.as_str(), "crate" | "self" | "super") {
+        return;
+    }
+    let mut imported_type_path = prefix[1..].to_vec();
+    if imported_name != "self" {
+        imported_type_path.push(imported_name.to_string());
+    }
+    if imported_type_path.is_empty()
+        || !imported_type_path
+            .iter()
+            .any(|segment| support_type_like_ident(segment))
+    {
+        return;
+    }
+    imports.insert(visible_name.to_string(), (root.clone(), imported_type_path));
 }
 
 fn package_source_usage(
@@ -6388,13 +7229,17 @@ fn dependency_required_path_string(path: &[String]) -> Option<String> {
     }
     let retained_len = path
         .iter()
-        .position(|segment| {
-            segment
-                .chars()
-                .next()
-                .is_some_and(|ch| ch == '_' || ch.is_ascii_uppercase())
-        })
-        .map_or(path.len(), |index| index + 1);
+        .position(|segment| support_type_like_ident(segment))
+        .map_or(path.len(), |index| {
+            let mut retained_len = index + 1;
+            if path
+                .get(retained_len)
+                .is_some_and(|segment| support_assoc_item_name_is_precise(segment))
+            {
+                retained_len += 1;
+            }
+            retained_len
+        });
     Some(path[..retained_len].join("::"))
 }
 
