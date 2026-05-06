@@ -10734,6 +10734,7 @@ impl Visit<'_> for MethodCallVisitor<'_> {
 
 struct AssociatedFunctionCallVisitor<'a> {
     function: &'a str,
+    generic_type_params: BTreeSet<String>,
     found: bool,
 }
 
@@ -10741,12 +10742,19 @@ impl<'a> AssociatedFunctionCallVisitor<'a> {
     fn new(function: &'a str) -> Self {
         Self {
             function,
+            generic_type_params: BTreeSet::new(),
             found: false,
         }
     }
 }
 
 impl Visit<'_> for AssociatedFunctionCallVisitor<'_> {
+    fn visit_generics(&mut self, node: &syn::Generics) {
+        self.generic_type_params
+            .extend(node.type_params().map(|param| param.ident.to_string()));
+        visit::visit_generics(self, node);
+    }
+
     fn visit_expr_call(&mut self, node: &syn::ExprCall) {
         if let syn::Expr::Path(path) = node.func.as_ref() {
             if path.path.segments.len() > 1
@@ -10755,6 +10763,10 @@ impl Visit<'_> for AssociatedFunctionCallVisitor<'_> {
                     .segments
                     .last()
                     .is_some_and(|segment| segment.ident == self.function)
+                && !associated_function_call_receiver_is_generic_param(
+                    &path.path,
+                    &self.generic_type_params,
+                )
             {
                 self.found = true;
                 return;
@@ -10762,6 +10774,18 @@ impl Visit<'_> for AssociatedFunctionCallVisitor<'_> {
         }
         visit::visit_expr_call(self, node);
     }
+}
+
+fn associated_function_call_receiver_is_generic_param(
+    path: &syn::Path,
+    generic_type_params: &BTreeSet<String>,
+) -> bool {
+    if path.segments.len() != 2 {
+        return false;
+    }
+    path.segments
+        .first()
+        .is_some_and(|segment| generic_type_params.contains(&segment.ident.to_string()))
 }
 
 struct AssociatedFunctionCallOnTypeVisitor<'a> {

@@ -5265,6 +5265,78 @@ fn prunes_unused_serde_derive_imports_after_dead_items_are_removed() {
 }
 
 #[test]
+fn prunes_unused_serde_deserialize_import_when_owned_bound_is_enough() {
+    let workspace = temp_path("serde-owned-bound-import-workspace");
+    let output = temp_path("serde-owned-bound-import-output");
+    let target_dir = temp_path("serde-owned-bound-import-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "serde_owned_bound_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+serde = {{ version = "1.0", features = ["derive"] }}
+serde_json = "1"
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, de::DeserializeOwned};
+use serde_json::Value;
+
+fn deserialize_json_value<T>(value: &Value) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    T::deserialize(value)
+}
+
+#[opensourced]
+pub fn selected(value: &Value) -> Result<String, serde_json::Error> {
+    deserialize_json_value(value)
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let source = read(output.join("serde_owned_bound_import_like/src/lib.rs"));
+    assert!(source.contains("DeserializeOwned"), "{source}");
+    assert!(!source.contains("use serde::{Deserialize"), "{source}");
+    assert!(!source.contains("Deserialize,"), "{source}");
+    assert!(!source.contains("#[opensourced]"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde owned bound import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        source,
+    );
+}
+
+#[test]
 fn prunes_module_scoped_imports_used_only_by_dead_items() {
     let workspace = temp_path("module-scoped-unused-import-workspace");
     let output = temp_path("module-scoped-unused-import-output");
