@@ -20,6 +20,7 @@ Cargo could load the Rust workspace. Probe runs used temp copies with one
 | `ipc-random5-mixed-surfaces` | `Method`, `RequestHandler`, `IpcClientConfig`, `PendingRequests`, `read_frame` | production accepted | 116 | Pinned five-root corpus case in `scripts/corpus_cases/litter_codex_ipc_random5.json`. First run produced two unused imports in `client/handle.rs`; generic render-plan import pruning fixed them. Support library module-closure copying then removed test/tool-only support Rust files. The 2026-05-05 rerun after renamed-surface/default-trait hardening produced zero preflight errors, zero feedback errors, zero warnings, and `production_ready=accepted` under `--deny-warnings`. |
 | `ipc-random5-dyn-boundary-regression` | `Method`, `RequestHandler`, `IpcClientConfig`, `PendingRequests`, `read_frame` | production accepted | 119 | 2026-05-06 rerun after transparent callback-boundary hardening and pinned-corpus source guard. Baseline passed, preflight passed, feedback `cargo check -p codex-ipc` produced zero errors/warnings, no production hazards remained, and `production_ready=accepted`. |
 | `ipc-random5-dyn-proof-regression` | `Method`, `RequestHandler`, `IpcClientConfig`, `PendingRequests`, `read_frame` | production accepted | 119 | 2026-05-06 rerun after auto-trait and tightened concrete returned trait-object proof. Baseline passed, preflight passed, feedback `cargo check -p codex-ipc` produced zero errors/warnings, no production hazards remained, and `production_ready=accepted`. |
+| `ipc-rootless-random20-import-pruning` | 20 package-scoped `codex-ipc` roots, seed `2026050620` | production accepted | 5-119 per slice | Rootless batch mining against `/tmp/litter-agentic-probe/shared/rust-bridge/Cargo.toml` used one RA HIR load, `--feedback-loop 2`, `--deny-warnings`, and a shared batch target directory. The first 20-root run exposed five warning-only failures: dead thiserror derive imports in conversation-state roots, a dead private-field `tokio::sync::RwLock` grouped import in reconnect roots, and an empty public glob reexport in the bridge root. Generic renderer fixes made the final rerun accept all 20/20 with zero warnings and zero errors; a separate manual `RUSTFLAGS='-D warnings' cargo check` pass also succeeded for every generated workspace. |
 
 Two attempted `codex-mobile-client` probes did not reach slicer validation
 because the source workspace baseline failed before slicing in third-party
@@ -58,6 +59,13 @@ passed deliberately.
   pruning and support-package module-closure copying. The latest run emitted 116
   generated files and removed generic test/tool-only support files such as
   `src/*_tests.rs`, `src/*/tests.rs`, and support binary `main.rs`.
+- Package-scoped rootless mining is now a useful fast feedback path. A 20-root
+  `codex-ipc` batch reused one RA report and found renderer over-retention that
+  the five-root corpus did not cover. The fixes stayed generic: derive-macro
+  imports are retained only when rendered attributes need them, probable
+  external trait imports no longer win on raw uppercase type mentions from
+  pruned surfaces, and public glob reexports are checked against the rendered
+  public surface instead of the original module.
 - Support-package production hazard parity did not add blockers to the pinned
   five-root codex-ipc run: copied support packages had no retained support
   build-script/OUT_DIR/compile-env/file-include hazard debt, and the run stayed

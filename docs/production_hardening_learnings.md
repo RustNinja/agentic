@@ -905,3 +905,18 @@ name, and macro dependency import retention is leaf-scoped rather than
 package-wide. The rerun accepted all 10/10 selected `codex-ipc` roots with zero
 errors and zero warnings in 252 seconds, using one RA load and one shared batch
 target directory.
+
+The follow-up rootless random-20 `codex-ipc` probe reused the same seedable
+batch path and found the next layer of over-retention. The first run accepted
+15/20 roots; the five failures were all warning-only under `--deny-warnings`.
+The recurring shapes were derive-macro imports retained because another live
+path mentioned `Error`, grouped external type imports retained because a pruned
+private field mentioned the type, and public glob reexports retained because the
+original source module had public names even though the rendered module exposed
+none for that root. The generic fix was to make thiserror derive imports
+rendered-attribute-scoped, stop treating every probable external uppercase
+import as a trait when only raw type mentions exist, and compute public glob
+exposure from rendered public items. The rerun accepted all 20/20 roots with
+zero preflight errors, zero feedback/check errors, and zero warnings; a separate
+manual `RUSTFLAGS='-D warnings' cargo check` loop also passed each generated
+workspace.

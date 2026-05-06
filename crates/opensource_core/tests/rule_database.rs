@@ -194,6 +194,55 @@ fn prunes_module_scoped_imports_used_only_by_dead_items() {
 }
 
 #[test]
+fn prunes_thiserror_import_when_only_serde_json_error_paths_remain() {
+    let workspace = temp_path("rule-thiserror-import-liveness-workspace");
+    let output = temp_path("rule-thiserror-import-liveness-output");
+    let target_dir = temp_path("rule-thiserror-import-liveness-target");
+    write_thiserror_import_liveness_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("thiserror import liveness rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("thiserror_import_liveness_rule/src/lib.rs"));
+    assert!(lib.contains("DeserializeOwned"), "{lib}");
+    assert!(lib.contains("serde_json::Error"), "{lib}");
+    assert!(
+        lib.contains("#[derive(Debug, Clone, Deserialize)]"),
+        "{lib}"
+    );
+    assert!(!lib.contains("thiserror::Error"), "{lib}");
+    assert!(!lib.contains("DeadWireError"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn prunes_grouped_external_imports_after_private_field_pruning() {
+    let workspace = temp_path("rule-private-field-import-liveness-workspace");
+    let output = temp_path("rule-private-field-import-liveness-output");
+    let target_dir = temp_path("rule-private-field-import-liveness-target");
+    write_private_field_import_liveness_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("private field import liveness rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("private_field_import_liveness_rule/src/lib.rs"));
+    assert!(lib.contains("use std::sync::Arc"), "{lib}");
+    assert!(lib.contains("use tokio::sync::watch"), "{lib}");
+    assert!(!lib.contains("RwLock"), "{lib}");
+    assert!(!lib.contains("Handler"), "{lib}");
+    assert!(lib.contains("pub fn selected"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_trait_default_methods_and_impl_associated_consts() {
     let workspace = temp_path("rule-default-trait-workspace");
     let output = temp_path("rule-default-trait-output");
@@ -3844,6 +3893,81 @@ pub fn selected() -> wire::LiveWire {
     wire::LiveWire {
         id: client::live_client(),
     }
+}
+"#,
+    );
+}
+
+fn write_thiserror_import_liveness_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "thiserror_import_liveness_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+thiserror = "1"
+"#,
+        r#"use opensourced::opensourced;
+use serde::{de::DeserializeOwned, Deserialize};
+use serde_json::Value;
+use thiserror::Error;
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct LiveWire {
+    pub id: u32,
+}
+
+#[derive(Debug, Error)]
+#[error("dead wire error: {0}")]
+pub struct DeadWireError(serde_json::Error);
+
+fn deserialize_json_value<T>(value: &Value) -> Result<T, serde_json::Error>
+where
+    T: DeserializeOwned,
+{
+    T::deserialize(value)
+}
+
+#[opensourced]
+pub fn selected(value: &Value) -> Result<LiveWire, serde_json::Error> {
+    deserialize_json_value(value)
+}
+"#,
+    );
+}
+
+fn write_private_field_import_liveness_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "private_field_import_liveness_rule",
+        r#"tokio = { version = "1", features = ["sync"] }
+"#,
+        r#"use opensourced::opensourced;
+use std::sync::Arc;
+use tokio::sync::{RwLock, watch};
+
+pub trait Handler: Send + Sync {}
+
+pub struct ReconnectingClient {
+    client: Arc<u32>,
+    handler: Arc<RwLock<Option<Arc<dyn Handler>>>>,
+    connection_tx: watch::Sender<bool>,
+}
+
+impl ReconnectingClient {
+    pub fn shutdown(&self) -> bool {
+        let _ = Arc::strong_count(&self.client);
+        self.connection_tx.send_replace(false)
+    }
+
+    pub async fn set_handler(&self, handler: Arc<dyn Handler>) {
+        let mut guard = self.handler.write().await;
+        *guard = Some(handler);
+    }
+}
+
+#[opensourced]
+pub fn selected(client: &ReconnectingClient) -> bool {
+    client.shutdown()
 }
 "#,
     );

@@ -256,6 +256,9 @@ Recent Litter-driven rules came from these source patterns:
 | `import.facade_glob_selected_symbol.001` | `codex-ipc/src/lib.rs:20`, `codex-ipc/src/lib.rs:37` |
 | `import.external_reexport.ra_unresolved_benign.001` | `codex-ipc/src/protocol/params.rs:1`, `codex-ipc/src/protocol/params.rs:6` |
 | `macro.helper_attr.data_string_not_blocker.001` | `codex-ipc/src/protocol/envelope.rs:27`, `codex-ipc/src/error.rs:6` |
+| `import.thiserror_derive_leaf_scope.001` | `codex-ipc/src/conversation_state.rs:4`, `codex-ipc/src/conversation_state.rs:6`, `codex-ipc/src/conversation_state.rs:84` |
+| `import.grouped_external_private_field_pruned.001` | `codex-ipc/src/client/reconnect.rs:9`, `codex-ipc/src/client/reconnect.rs:35`, `codex-ipc/src/client/reconnect.rs:168`, `codex-ipc/src/client/reconnect.rs:179` |
+| `reexport.public_glob.rendered_surface_only.001` | `codex-ipc/src/lib.rs:22`, `codex-ipc/src/lib.rs:32` |
 
 ## Litter Patterns To Convert Next
 

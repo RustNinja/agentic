@@ -10600,9 +10600,10 @@ fn use_target_should_drop(
     is_public_use: bool,
 ) -> bool {
     if known_macro_dependency_target_should_remain(project, reduced, package, target)
-        && !target
-            .last()
-            .is_some_and(|leaf| is_derive_only_external_trait_import(leaf))
+        && !target.last().is_some_and(|leaf| {
+            is_derive_only_external_trait_import(leaf)
+                || is_thiserror_error_derive_import(target, leaf)
+        })
     {
         return false;
     }
@@ -10903,18 +10904,30 @@ fn use_prefix_should_drop(
             if !project_has_module_or_inline(project, &target_package, &target_path) {
                 return false;
             }
-            if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {
-                return true;
-            }
             if is_public_use {
-                return !public_glob_prefix_exposes_referenced_name(
+                let exposes_referenced_name = public_glob_prefix_exposes_referenced_name(
                     project,
                     reduced,
+                    render_plan,
                     package,
                     module_path,
                     &target_package,
                     &target_path,
                 );
+                if !module_should_render(
+                    project,
+                    reduced,
+                    render_plan,
+                    &target_package,
+                    &target_path,
+                ) && !exposes_referenced_name
+                {
+                    return true;
+                }
+                return !exposes_referenced_name;
+            }
+            if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {
+                return true;
             }
             !is_public_use
                 && prefix.first().is_none_or(|first| first != "super")
@@ -10943,6 +10956,17 @@ fn external_use_target_should_drop(
     let Some(leaf) = external_use_leaf(target) else {
         return false;
     };
+
+    if is_thiserror_error_derive_import(target, leaf) {
+        return !rendered_attrs_mention_unqualified_ident(
+            project,
+            reduced,
+            render_plan,
+            _package,
+            module_path,
+            leaf,
+        );
+    }
 
     if is_derive_only_external_trait_import(leaf) {
         return !external_trait_import_should_remain(
@@ -11483,6 +11507,7 @@ fn collect_pat_bindings(pat: &syn::Pat, bindings: &mut BTreeSet<String>) {
 fn public_glob_prefix_exposes_referenced_name(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     source_module_path: &[String],
     target_package: &str,
@@ -11491,26 +11516,181 @@ fn public_glob_prefix_exposes_referenced_name(
     let Some(items) = module_items_for_path(project, target_package, target_module_path) else {
         return false;
     };
-    module_public_visible_names(items).iter().any(|name| {
-        reachable_package_mentions_ident(project, reduced, package, name)
-            || (source_module_path.is_empty()
-                && public_reexport_name_is_referenced_by_reduced_package(
-                    project,
-                    reduced,
-                    target_package,
-                    name,
-                ))
+    module_rendered_public_visible_names(
+        project,
+        reduced,
+        render_plan,
+        target_package,
+        target_module_path,
+        items,
+    )
+    .iter()
+    .any(|name| {
+        public_glob_exposed_name_is_used(
+            project,
+            reduced,
+            package,
+            source_module_path,
+            target_package,
+            target_module_path,
+            name,
+        )
     })
 }
 
-fn module_public_visible_names(items: &[Item]) -> BTreeSet<String> {
+fn public_glob_exposed_name_is_used(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    source_module_path: &[String],
+    target_package: &str,
+    target_module_path: &[String],
+    name: &str,
+) -> bool {
+    if !source_module_path.is_empty()
+        && reachable_package_mentions_module_path_ident(
+            project,
+            reduced,
+            package,
+            source_module_path,
+            name,
+        )
+    {
+        return true;
+    }
+
+    if source_module_path.is_empty()
+        && reachable_package_mentions_unqualified_ident(project, reduced, package, name)
+    {
+        return true;
+    }
+
+    public_glob_target_name_is_selected_root(reduced, target_package, target_module_path, name)
+        || (source_module_path.is_empty()
+            && public_reexport_name_is_referenced_by_reduced_package(
+                project,
+                reduced,
+                target_package,
+                name,
+            ))
+}
+
+fn public_glob_target_name_is_selected_root(
+    reduced: &ReducedProject,
+    target_package: &str,
+    target_module_path: &[String],
+    name: &str,
+) -> bool {
+    reduced.roots.iter().any(|root| match root {
+        RootId::Callable(CallableId::Free {
+            package,
+            module_path,
+            name: callable_name,
+        }) => {
+            package == target_package && module_path == target_module_path && callable_name == name
+        }
+        RootId::Item(item) => {
+            item.package == target_package
+                && item.module_path == target_module_path
+                && item.name == name
+        }
+        _ => false,
+    })
+}
+
+fn reachable_package_mentions_unqualified_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    ident: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package == package && item.name != ident)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)
+                })
+            })
+}
+
+fn reachable_package_mentions_module_path_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_module_path_ident(
+                    &record.item.to_token_stream(),
+                    module_path,
+                    ident,
+                )
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_module_path_ident(
+                    &record.item.to_token_stream(),
+                    module_path,
+                    ident,
+                )
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package == package)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_module_path_ident(
+                        &record.item.to_token_stream(),
+                        module_path,
+                        ident,
+                    )
+                })
+            })
+}
+
+fn module_rendered_public_visible_names(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     for item in items {
         match item {
             Item::Use(item_use) if use_is_reexport(&item_use.vis) => {
                 collect_use_tree_visible_names(&item_use.tree, Vec::new(), &mut names);
             }
-            _ if item_is_public(item) => {
+            _ if item_is_public(item)
+                && public_visible_item_should_render(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    item,
+                ) =>
+            {
                 if let Some(name) = support_item_name(item) {
                     names.insert(name);
                 }
@@ -11519,6 +11699,33 @@ fn module_public_visible_names(items: &[Item]) -> BTreeSet<String> {
         }
     }
     names
+}
+
+fn public_visible_item_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    item: &Item,
+) -> bool {
+    match item {
+        Item::Fn(function) => {
+            let id = CallableId::Free {
+                package: package.to_string(),
+                module_path: module_path.to_vec(),
+                name: function.sig.ident.to_string(),
+            };
+            render_plan.callable_should_render(&id)
+        }
+        Item::Mod(item_mod) => {
+            let mut child_path = module_path.to_vec();
+            child_path.push(item_mod.ident.to_string());
+            module_should_render(project, reduced, render_plan, package, &child_path)
+        }
+        _ => item_id(package, module_path, item)
+            .is_some_and(|id| render_plan.item_should_render(&id)),
+    }
 }
 
 fn collect_use_tree_visible_names(
@@ -11778,8 +11985,14 @@ fn external_trait_import_should_remain(
         });
     }
     if !is_public_use {
-        if render_plan.module_mentions_ident(package, module_path, leaf)
-            || reachable_module_mentions_ident(project, reduced, package, module_path, leaf)
+        let is_known_trait = is_known_external_trait_import(leaf)
+            || target
+                .first()
+                .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
+                && is_known_std_trait_import(leaf);
+        if is_known_trait
+            && (render_plan.module_mentions_ident(package, module_path, leaf)
+                || reachable_module_mentions_ident(project, reduced, package, module_path, leaf))
         {
             return true;
         }
@@ -12104,6 +12317,13 @@ fn known_trait_associated_function_idents(
 
 fn is_derive_only_external_trait_import(leaf: &str) -> bool {
     matches!(leaf, "Deserialize" | "Serialize")
+}
+
+fn is_thiserror_error_derive_import(target: &[String], leaf: &str) -> bool {
+    leaf == "Error"
+        && target
+            .first()
+            .is_some_and(|first| dependency_code_name(first) == "thiserror")
 }
 
 fn use_ident_is_pruned_local_dependency(
