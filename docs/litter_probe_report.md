@@ -223,6 +223,15 @@ not slicer failures.
   function-like macro invocation hazards disappeared, macro surfaces dropped to
   zero, macro-blocked unknown surfaces dropped to zero, and
   `usage.blocked_by_unknown` remained zero.
+- The semantic proof pass was report-only and did not change the generated
+  Litter slice. The same five-root batch stayed at 119 files with zero preflight
+  errors, zero feedback errors, zero warnings, and `production_ready=accepted`.
+  The new `usage.semantic_proof` certificate reported
+  `complete_for_retained_packages`: 1 retained package, 1,621 package-pruned
+  callables and 789 package-pruned items, plus 129 retained-package prunable
+  callables and 72 retained-package prunable items, all proven by RA mapping and
+  reference search with zero unproven, unmapped, failed-query, or retained-owner
+  reference cases.
 
 ## Next Rule Targets
 

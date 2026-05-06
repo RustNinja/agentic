@@ -158,6 +158,7 @@ pub struct MacroSurface {
 pub struct UsageClassificationReport {
     pub status: String,
     pub summary: UsageClassificationSummary,
+    pub semantic_proof: SemanticUsageProofReport,
     pub used: UsageClassifiedItems,
     pub unused_candidate: UsageClassifiedItems,
     pub blocked_by_unknown: UsageClassifiedItems,
@@ -188,6 +189,35 @@ pub struct UsageClassificationSummary {
 }
 
 #[derive(Debug, Clone)]
+pub struct SemanticUsageProofReport {
+    pub status: String,
+    pub summary: SemanticUsageProofSummary,
+    pub unproven: UsageClassifiedItems,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SemanticUsageProofSummary {
+    pub analyzer_available: bool,
+    pub retained_packages: usize,
+    pub prunable_callables: usize,
+    pub prunable_items: usize,
+    pub package_pruned_callables: usize,
+    pub package_pruned_items: usize,
+    pub proof_required_callables: usize,
+    pub proof_required_items: usize,
+    pub proven_callables: usize,
+    pub proven_items: usize,
+    pub unproven_callables: usize,
+    pub unproven_items: usize,
+    pub unmapped_callables: usize,
+    pub unmapped_items: usize,
+    pub failed_reference_query_callables: usize,
+    pub failed_reference_query_items: usize,
+    pub retained_reference_callables: usize,
+    pub retained_reference_items: usize,
+}
+
+#[derive(Debug, Clone)]
 pub struct UsageClassifiedItems {
     pub callables: Vec<CallableId>,
     pub items: Vec<ItemId>,
@@ -212,6 +242,7 @@ impl UsageDecision {
 
 #[derive(Debug, Clone, Default)]
 pub struct UsageDecisionIndex {
+    retained_packages: BTreeSet<String>,
     used_callables: BTreeSet<CallableId>,
     used_items: BTreeSet<ItemId>,
     blocked_by_unknown_callables: BTreeSet<CallableId>,
@@ -230,6 +261,7 @@ impl UsageDecisionIndex {
     ) -> Self {
         let used_callables = root_reduced.reachable.clone();
         let used_items = root_reduced.reachable_items.clone();
+        let retained_packages = render_reduced.packages.clone();
         let blocked_by_unknown_callables = render_reduced
             .reachable
             .difference(&used_callables)
@@ -264,6 +296,7 @@ impl UsageDecisionIndex {
             usage_decision_map(&used_items, &blocked_by_unknown_items, &prunable_items);
 
         Self {
+            retained_packages,
             used_callables,
             used_items,
             blocked_by_unknown_callables,
@@ -572,7 +605,8 @@ pub fn generate_with_analyzer_feedback(
     let macro_surfaces = macro_surface_report(&project, &render_reduced);
     let production =
         production_readiness_report(&analyzer, &project, &render_reduced, &options.output_root);
-    let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
+    let usage =
+        usage_classification_report(&project, &reduced, &analyzer, &usage_decisions, &production);
 
     Ok(GenerateReport {
         analyzer,
@@ -1391,6 +1425,7 @@ fn item_record_is_test(item: &Item) -> bool {
 fn usage_classification_report(
     project: &model::Project,
     reduced: &model::ReducedProject,
+    analyzer: &AnalyzerReport,
     decisions: &UsageDecisionIndex,
     production: &ProductionReadinessReport,
 ) -> UsageClassificationReport {
@@ -1466,6 +1501,7 @@ fn usage_classification_report(
         prunable_items: &prunable_items,
     };
     let evidence = usage_classification_evidence(project, reduced, &evidence_input);
+    let semantic_proof = semantic_usage_proof_report(analyzer, decisions);
 
     UsageClassificationReport {
         status,
@@ -1487,6 +1523,7 @@ fn usage_classification_report(
             macro_blocked_unknown_surfaces,
             dependency_risk_unknown_surfaces,
         },
+        semantic_proof,
         used: UsageClassifiedItems {
             callables: used_callables,
             items: used_items,
@@ -1544,6 +1581,115 @@ fn semantic_unresolved_hazard_category(hazard: &ProductionHazardReport) -> &'sta
         return "macro_blocked";
     }
     "benign"
+}
+
+fn semantic_usage_proof_report(
+    analyzer: &AnalyzerReport,
+    decisions: &UsageDecisionIndex,
+) -> SemanticUsageProofReport {
+    let mut summary = SemanticUsageProofSummary {
+        analyzer_available: analyzer.semantic_usage.is_some(),
+        retained_packages: decisions.retained_packages.len(),
+        prunable_callables: decisions.prunable_callables.len(),
+        prunable_items: decisions.prunable_items.len(),
+        ..SemanticUsageProofSummary::default()
+    };
+    let retained_callables = decisions
+        .used_callables
+        .union(&decisions.blocked_by_unknown_callables)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let retained_items = decisions
+        .used_items
+        .union(&decisions.blocked_by_unknown_items)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    let mut unproven_callables = Vec::new();
+    let mut unproven_items = Vec::new();
+    for callable in &decisions.prunable_callables {
+        if !decisions.retained_packages.contains(callable.package()) {
+            summary.package_pruned_callables += 1;
+            continue;
+        }
+        summary.proof_required_callables += 1;
+        if let Some(usage) = &analyzer.semantic_usage {
+            let mut unproven = false;
+            if !usage.is_callable_mapped(callable) {
+                summary.unmapped_callables += 1;
+                unproven = true;
+            }
+            if usage.callable_reference_query_failed(callable) {
+                summary.failed_reference_query_callables += 1;
+                unproven = true;
+            }
+            if usage.callable_has_retained_reference(callable, &retained_callables, &retained_items)
+            {
+                summary.retained_reference_callables += 1;
+                unproven = true;
+            }
+            if unproven {
+                unproven_callables.push(callable.clone());
+            } else {
+                summary.proven_callables += 1;
+            }
+        } else {
+            unproven_callables.push(callable.clone());
+        }
+    }
+    for item in &decisions.prunable_items {
+        if !decisions.retained_packages.contains(&item.package) {
+            summary.package_pruned_items += 1;
+            continue;
+        }
+        summary.proof_required_items += 1;
+        if let Some(usage) = &analyzer.semantic_usage {
+            let mut unproven = false;
+            if !usage.is_item_mapped(item) {
+                summary.unmapped_items += 1;
+                unproven = true;
+            }
+            if usage.item_reference_query_failed(item) {
+                summary.failed_reference_query_items += 1;
+                unproven = true;
+            }
+            if usage.item_has_retained_reference(item, &retained_callables, &retained_items) {
+                summary.retained_reference_items += 1;
+                unproven = true;
+            }
+            if unproven {
+                unproven_items.push(item.clone());
+            } else {
+                summary.proven_items += 1;
+            }
+        } else {
+            unproven_items.push(item.clone());
+        }
+    }
+
+    unproven_callables.sort();
+    unproven_items.sort();
+    summary.unproven_callables = unproven_callables.len();
+    summary.unproven_items = unproven_items.len();
+    let status = if analyzer.semantic_usage.is_none()
+        && (summary.proof_required_callables + summary.proof_required_items > 0)
+    {
+        "semantic_usage_unavailable"
+    } else if summary.unproven_callables + summary.unproven_items == 0 {
+        "complete_for_retained_packages"
+    } else {
+        "partial_for_retained_packages"
+    }
+    .to_string();
+
+    SemanticUsageProofReport {
+        status,
+        summary,
+        unproven: UsageClassifiedItems {
+            callables: unproven_callables,
+            items: unproven_items,
+        },
+    }
 }
 
 struct UsageEvidenceInput<'a> {
@@ -5934,6 +6080,7 @@ impl GenerateTimingReportJson {
 struct UsageClassificationReportJson {
     status: String,
     summary: UsageClassificationSummaryJson,
+    semantic_proof: SemanticUsageProofReportJson,
     decision_map: UsageDecisionMapJson,
     used: UsageClassifiedItemsJson,
     unused_candidate: UsageClassifiedItemsJson,
@@ -5949,6 +6096,7 @@ impl UsageClassificationReportJson {
         Self {
             status: report.status.clone(),
             summary: UsageClassificationSummaryJson::from_report(&report.summary),
+            semantic_proof: SemanticUsageProofReportJson::from_report(&report.semantic_proof),
             decision_map: UsageDecisionMapJson::from_report(report),
             used: UsageClassifiedItemsJson::from_report(&report.used),
             unused_candidate: UsageClassifiedItemsJson::from_report(&report.unused_candidate),
@@ -5961,6 +6109,70 @@ impl UsageClassificationReportJson {
                 .map(UsageUnknownSurfaceJson::from_report)
                 .collect(),
             evidence: UsageClassificationEvidenceJson::from_report(&report.evidence),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SemanticUsageProofReportJson {
+    status: String,
+    summary: SemanticUsageProofSummaryJson,
+    unproven: UsageClassifiedItemsJson,
+}
+
+impl SemanticUsageProofReportJson {
+    fn from_report(report: &SemanticUsageProofReport) -> Self {
+        Self {
+            status: report.status.clone(),
+            summary: SemanticUsageProofSummaryJson::from_report(&report.summary),
+            unproven: UsageClassifiedItemsJson::from_report(&report.unproven),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct SemanticUsageProofSummaryJson {
+    analyzer_available: bool,
+    retained_packages: usize,
+    prunable_callables: usize,
+    prunable_items: usize,
+    package_pruned_callables: usize,
+    package_pruned_items: usize,
+    proof_required_callables: usize,
+    proof_required_items: usize,
+    proven_callables: usize,
+    proven_items: usize,
+    unproven_callables: usize,
+    unproven_items: usize,
+    unmapped_callables: usize,
+    unmapped_items: usize,
+    failed_reference_query_callables: usize,
+    failed_reference_query_items: usize,
+    retained_reference_callables: usize,
+    retained_reference_items: usize,
+}
+
+impl SemanticUsageProofSummaryJson {
+    fn from_report(summary: &SemanticUsageProofSummary) -> Self {
+        Self {
+            analyzer_available: summary.analyzer_available,
+            retained_packages: summary.retained_packages,
+            prunable_callables: summary.prunable_callables,
+            prunable_items: summary.prunable_items,
+            package_pruned_callables: summary.package_pruned_callables,
+            package_pruned_items: summary.package_pruned_items,
+            proof_required_callables: summary.proof_required_callables,
+            proof_required_items: summary.proof_required_items,
+            proven_callables: summary.proven_callables,
+            proven_items: summary.proven_items,
+            unproven_callables: summary.unproven_callables,
+            unproven_items: summary.unproven_items,
+            unmapped_callables: summary.unmapped_callables,
+            unmapped_items: summary.unmapped_items,
+            failed_reference_query_callables: summary.failed_reference_query_callables,
+            failed_reference_query_items: summary.failed_reference_query_items,
+            retained_reference_callables: summary.retained_reference_callables,
+            retained_reference_items: summary.retained_reference_items,
         }
     }
 }
@@ -7010,7 +7222,8 @@ fn private_leaf() -> i32 {
                 .expect("usage-guarded render reduction should work");
         render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
             .expect("render should succeed");
-        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &blocker);
+        let usage =
+            usage_classification_report(&project, &reduced, &analyzer, &usage_decisions, &blocker);
 
         let used_callables = usage
             .used
@@ -7314,7 +7527,13 @@ pub fn mapped_dead_code() -> i32 {
         );
         render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
             .expect("render should succeed");
-        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+        );
 
         assert!(
             usage.blocked_by_unknown.callables.contains(&unmapped_dead),
@@ -7324,6 +7543,16 @@ pub fn mapped_dead_code() -> i32 {
             usage.prunable.callables.contains(&mapped_dead),
             "graph-unused callables with RA mapping evidence should remain prunable",
         );
+        assert_eq!(
+            usage.semantic_proof.status, "complete_for_retained_packages",
+            "all pruned code inside retained packages should have semantic proof: {:?}",
+            usage.semantic_proof.unproven.callables,
+        );
+        assert!(
+            usage.semantic_proof.summary.proven_callables >= 1,
+            "mapped clean candidates should be counted as semantically proven"
+        );
+        assert!(usage.semantic_proof.unproven.callables.is_empty());
         assert!(
             !usage.unused.callables.contains(&unmapped_dead),
             "RA-unmapped unknown candidates must not be reported as removable unused code",
@@ -7428,7 +7657,13 @@ pub fn clean_dead_code() -> i32 {
         );
         render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
             .expect("render should succeed");
-        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+        );
         assert!(usage.blocked_by_unknown.callables.contains(&unknown_helper));
         assert!(usage.unused.callables.contains(&clean_dead));
         assert!(!usage.unused.callables.contains(&unknown_helper));
@@ -7647,7 +7882,13 @@ pub fn clean_dead_code() -> i32 {
                 .expect("usage-guarded render reduction should work");
         render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
             .expect("render should succeed");
-        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+        );
 
         assert!(
             usage
@@ -7768,7 +8009,13 @@ pub fn clean_dead_code() -> i32 {
                 .expect("usage-guarded render reduction should work");
         render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
             .expect("render should succeed");
-        let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+        );
 
         assert!(
             usage.used.callables.contains(&referenced),
@@ -7938,6 +8185,10 @@ theme = []
                 .unwrap()
                 .iter()
                 .any(|file| file == "/tmp/unowned-item.rs")
+        );
+        assert_eq!(
+            value["usage"]["semantic_proof"]["status"],
+            report.usage.semantic_proof.status
         );
         assert_eq!(value["production"]["status"], "requires_feedback");
         assert!(value["production"]["hazards"]
