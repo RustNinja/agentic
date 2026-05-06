@@ -920,3 +920,16 @@ exposure from rendered public items. The rerun accepted all 20/20 roots with
 zero preflight errors, zero feedback/check errors, and zero warnings; a separate
 manual `RUSTFLAGS='-D warnings' cargo check` loop also passed each generated
 workspace.
+
+The first `codex-mobile-client` random-five probe showed a different failure
+mode: all five roots compiled cleanly, but tiny roots still wrote about 1,000
+files because RA-unmapped unused candidates were treated as global
+`blocked_by_unknown` roots. That made every unmapped UniFFI/serde surface pull
+its dependency closure into unrelated slices. The policy is now narrower:
+retained RA reference edges and failed reference queries still block pruning,
+but an unmapped candidate with no retained reference is removed and recorded in
+the semantic proof as unproven instead of rendered. Compiler feedback remains
+the acceptance gate. On the same random-five seed, the shell-preflight helper
+dropped from 989 files written to 5, and the full batch accepted 5/5 roots with
+zero errors and zero warnings; generated workspaces ranged from 5 to 18 written
+files instead of roughly 989 to 997.

@@ -1641,8 +1641,7 @@ fn semantic_usage_blocks_callable_pruning(
     usage: &SemanticUsageReport,
     retained: &ReducedProject,
 ) -> bool {
-    !usage.is_callable_mapped(callable)
-        || usage.callable_reference_query_failed(callable)
+    usage.callable_reference_query_failed(callable)
         || usage.callable_has_retained_reference(
             callable,
             &retained.reachable,
@@ -1655,8 +1654,7 @@ fn semantic_usage_blocks_item_pruning(
     usage: &SemanticUsageReport,
     retained: &ReducedProject,
 ) -> bool {
-    !usage.is_item_mapped(item)
-        || usage.item_reference_query_failed(item)
+    usage.item_reference_query_failed(item)
         || usage.item_has_retained_reference(item, &retained.reachable, &retained.reachable_items)
 }
 
@@ -8139,7 +8137,7 @@ pub fn unrelated_dead() -> u32 {
     }
 
     #[test]
-    fn semantic_usage_mapping_blocks_unmapped_unused_candidates_from_pruning() {
+    fn semantic_usage_mapping_reports_unmapped_unused_candidates_without_retaining() {
         let root = temp_output("semantic-usage-mapping-source");
         let output = temp_output("semantic-usage-mapping-output");
         let opensourced_path = workspace_root().join("crates/opensourced");
@@ -8213,8 +8211,8 @@ pub fn mapped_dead_code() -> i32 {
         );
         assert_eq!(
             usage_decisions.callable_decision(&unmapped_dead),
-            Some(UsageDecision::BlockedByUnknown),
-            "RA-unmapped candidates should be classified in the decision map as unknown-blocked",
+            Some(UsageDecision::Prunable),
+            "RA-unmapped candidates without retained references should not force unknown retention",
         );
         assert_eq!(
             usage_decisions.callable_decision(&mapped_dead),
@@ -8231,34 +8229,38 @@ pub fn mapped_dead_code() -> i32 {
             &production,
         );
 
-        assert!(
-            usage.blocked_by_unknown.callables.contains(&unmapped_dead),
-            "graph-unused callables without RA mapping evidence must stay blocked_by_unknown",
-        );
+        assert!(!usage.blocked_by_unknown.callables.contains(&unmapped_dead));
         assert!(
             usage.prunable.callables.contains(&mapped_dead),
             "graph-unused callables with RA mapping evidence should remain prunable",
         );
         assert_eq!(
-            usage.semantic_proof.status, "complete_for_retained_packages",
-            "all pruned code inside retained packages should have semantic proof: {:?}",
+            usage.semantic_proof.status, "partial_for_retained_packages",
+            "unmapped pruned code should keep semantic proof partial: {:?}",
             usage.semantic_proof.unproven.callables,
         );
         assert!(
             usage.semantic_proof.summary.proven_callables >= 1,
             "mapped clean candidates should be counted as semantically proven"
         );
-        assert!(usage.semantic_proof.unproven.callables.is_empty());
         assert!(
-            !usage.unused.callables.contains(&unmapped_dead),
-            "RA-unmapped unknown candidates must not be reported as removable unused code",
+            usage
+                .semantic_proof
+                .unproven
+                .callables
+                .contains(&unmapped_dead),
+            "unmapped clean candidates should be reported as unproven semantic proof"
+        );
+        assert!(
+            usage.unused.callables.contains(&unmapped_dead),
+            "RA-unmapped candidates without retained references are removable after compiler feedback",
         );
         assert!(
             usage.unused.callables.contains(&mapped_dead),
             "RA-mapped clean candidates should be reported in removable unused code",
         );
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
-        assert!(generated.contains("pub fn unmapped_dead_code"));
+        assert!(!generated.contains("pub fn unmapped_dead_code"));
         assert!(!generated.contains("pub fn mapped_dead_code"));
     }
 
@@ -8343,8 +8345,8 @@ pub fn clean_dead_code() -> i32 {
                 .expect("usage-guarded render reduction should work");
         assert_eq!(
             usage_decisions.callable_decision(&unknown_helper),
-            Some(UsageDecision::BlockedByUnknown),
-            "RA-unmapped public reexport target must be retained as unknown",
+            Some(UsageDecision::Prunable),
+            "RA-unmapped public reexport target without retained references should be removable",
         );
         assert_eq!(
             usage_decisions.callable_decision(&clean_dead),
@@ -8360,14 +8362,14 @@ pub fn clean_dead_code() -> i32 {
             &usage_decisions,
             &production,
         );
-        assert!(usage.blocked_by_unknown.callables.contains(&unknown_helper));
+        assert!(!usage.blocked_by_unknown.callables.contains(&unknown_helper));
         assert!(usage.unused.callables.contains(&clean_dead));
-        assert!(!usage.unused.callables.contains(&unknown_helper));
+        assert!(usage.unused.callables.contains(&unknown_helper));
 
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(
-            generated.contains("unknown_helper as UnknownHelper"),
-            "unknown-blocked reexport aliases should remain:\n{generated}",
+            !generated.contains("UnknownHelper"),
+            "unreferenced reexport aliases should be removed even when RA mapping is incomplete:\n{generated}",
         );
         assert!(
             !generated.contains("CleanDeadCode"),
@@ -8378,8 +8380,8 @@ pub fn clean_dead_code() -> i32 {
             "proven-unused target function should be stripped:\n{generated}",
         );
         assert!(
-            generated.contains("pub fn unknown_helper"),
-            "unknown-blocked target function should remain:\n{generated}",
+            !generated.contains("pub fn unknown_helper"),
+            "unreferenced target function should be stripped:\n{generated}",
         );
     }
 
@@ -8444,10 +8446,12 @@ pub struct CleanSurface {
         let entry = project_callable_named(&project, "entry");
         let blocked_type = project_item_named(&project, "BlockedType", ItemKind::Struct);
         let clean_type = project_item_named(&project, "CleanType", ItemKind::Struct);
+        let unknown_surface = project_item_named(&project, "UnknownSurface", ItemKind::Struct);
         let clean_surface = project_item_named(&project, "CleanSurface", ItemKind::Struct);
         let mapped_item_ids = BTreeSet::from([
             blocked_type.clone(),
             clean_type.clone(),
+            unknown_surface.clone(),
             clean_surface.clone(),
         ]);
         let semantic_usage = SemanticUsageReport {
@@ -8458,6 +8462,14 @@ pub struct CleanSurface {
             unmapped_items: project.items.len().saturating_sub(mapped_item_ids.len()),
             mapped_callable_ids: BTreeSet::from([entry]),
             mapped_item_ids,
+            referenced_items: 1,
+            referenced_item_ids: BTreeSet::from([unknown_surface.clone()]),
+            item_reference_owners: BTreeMap::from([(
+                unknown_surface,
+                BTreeSet::from([SemanticOwnerId::Callable(project_callable_named(
+                    &project, "entry",
+                ))]),
+            )]),
             ..SemanticUsageReport::default()
         };
         let analyzer = AnalyzerReport {
