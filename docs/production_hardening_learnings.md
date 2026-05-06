@@ -864,3 +864,16 @@ The UniFFI smoke file pinned `5ccb9a7`, but the local source checkout was
 baseline failed. The corpus runner now checks a roots file's top-level
 `commit` against the source checkout and fails fast with a clear mismatch unless
 `--allow-source-commit-mismatch` is set for deliberate stale-corpus probing.
+
+Dynamic-dispatch review pressure should shrink only when the code carries its
+own proof. Auto-trait-only objects such as `dyn Send + Sync` have no callable
+dispatch surface, so they no longer produce `trait_object_surfaces` hazards.
+Returned trait-object surfaces are also cleared when the retained function or
+method returns an expression that visibly constructs a local concrete type and
+that type has a local impl for every non-auto trait in the returned `dyn`
+object. The proof is deliberately narrow: non-return-position constructions,
+dead constructions inside returned blocks, opaque factory-call arguments,
+forwarded `Box<dyn Trait>` values, stored `Arc<dyn Trait>` registries, `dyn Fn`
+callbacks, future aliases, and local function-pointer fields still remain review
+hazards. This keeps unknown retention scoped without pretending callback
+registries are statically proven.

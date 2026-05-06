@@ -87,7 +87,8 @@ file.
 | `semantic.associated_external_call.no_method_cap.001` | covered | Unresolved associated calls such as `String::new()` do not retain or cap local same-name methods unless the receiver prefix resolves to a local type |
 | `semantic.prunable_retained_package_proof.001` | covered | The usage report separates whole-package pruning from item/function pruning inside retained packages, and marks retained-package prunable code as proven only when RA mapping and reference-search checks succeed without retained-owner references |
 | `semantic.complete_proof_clears_generic_warnings.001` | covered | Generic semantic-inventory and semantic-edge production warnings are suppressed only when the retained-package semantic pruning proof is complete; specific unresolved/query hazards still remain fail-closed |
-| `dyn.returned_trait_object_boundary.001` | covered | Returned `Box<dyn Trait>` API surfaces report hard dynamic-dispatch hazards while retaining the trait object type surface |
+| `dyn.returned_trait_object_boundary.001` | covered | Returned `Box<dyn Trait>` API surfaces are cleared only when a return-position expression visibly constructs a retained local concrete type that implements the trait; forwarded/unconstructed returned trait objects remain dynamic-dispatch hazards |
+| `dyn.auto_trait_object_no_dispatch.001` | covered | Auto-trait-only objects such as `dyn Send + Sync` do not create dynamic-dispatch hazards because they expose no callable dispatch surface while still retaining the concrete source type |
 | `dyn.wrapped_borrowed_callback_boundary.001` | covered | Transparent selected API wrappers such as `Option<&dyn Trait>` and `Result<fn(...), E>` are reported as direct callback boundary warnings without adding broad owned/stored trait-object noise |
 | `ffi.extern_called_symbol.001` | covered | Retained calls to foreign `extern "C"` functions keep only the called foreign declarations and prune dead sibling declarations |
 | `ffi.extern_static_symbol.001` | covered | Retained reads of foreign `extern "C"` statics keep only the referenced static declaration and the imports used by that foreign item |
@@ -140,7 +141,7 @@ file.
 | `trait.conversion.bidirectional_from_pair.001` | covered | Boundary roundtrips retain both live `From<A> for B` and `From<B> for A` impls while pruning unrelated conversion impls |
 | `dyn.callback.option_arc_trait.001` | covered | Stored `Option<Arc<dyn Trait + Send + Sync>>` callback slots are hard dynamic-dispatch hazards |
 | `dyn.callback.nested_store_trait.001` | covered | Nested callback stores such as `Arc<RwLock<Option<Arc<dyn Trait + Send + Sync>>>>` are hard dynamic-dispatch hazards and keep only the live callback trait |
-| `dyn.auto_trait.cast_keepalive.001` | covered | Explicit casts to `Arc<dyn Send + Sync>` retain the concrete source type while reporting the type-erased surface as a hazard |
+| `dyn.auto_trait.cast_keepalive.001` | covered | Explicit casts to `Arc<dyn Send + Sync>` retain the concrete source type without reporting a dynamic-dispatch hazard because auto-trait-only objects expose no callable dispatch surface |
 | `dyn.bare_alias.once_lock_arc.001` | covered | Bare `dyn Fn` type aliases hidden behind `Arc<Alias>` and `OnceLock` still report dynamic-dispatch hazards |
 | `dyn.boxed_io_alias.facade.001` | covered | Public module facades reexporting boxed `dyn Read`/`dyn Write` aliases keep the live alias and import, report the trait-object surface, and prune dead sibling aliases/imports |
 | `import.facade_const_alias.001` | covered | Local facade const aliases keep only referenced constants and prune dead alias siblings |

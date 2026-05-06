@@ -2657,6 +2657,7 @@ fn generated_support_package_syntactic_hazard_counts(
             continue;
         };
         let mut visitor = SyntacticHazardVisitor {
+            project: None,
             counts: SyntacticHazardCounts::default(),
             include_context: path.parent().map(|source_dir| IncludeContext {
                 package_root: package.root.clone(),
@@ -2676,6 +2677,7 @@ fn generated_support_package_syntactic_hazard_counts(
                 &BTreeSet::new(),
                 &BTreeSet::new(),
             ),
+            proven_trait_object_surfaces: BTreeSet::new(),
         };
         visitor.visit_file(&syntax);
         counts.add(visitor.counts.support_package_blocking_subset());
@@ -4163,6 +4165,7 @@ fn retained_module_boundary_hazard_counts(
             });
         let file = source.map(|source| source.path.clone());
         let mut visitor = SyntacticHazardVisitor {
+            project: Some(project),
             counts: SyntacticHazardCounts::default(),
             include_context: None,
             macro_context: MacroInvocationContext::for_project_source(project, &package, source),
@@ -4172,6 +4175,7 @@ fn retained_module_boundary_hazard_counts(
                 file,
                 owner: None,
             },
+            proven_trait_object_surfaces: BTreeSet::new(),
         };
         for attribute in &item_mod.attrs {
             visitor.visit_attribute(attribute);
@@ -4194,12 +4198,12 @@ fn insert_module_boundary_paths(
     }
 }
 
-fn syntactic_hazard_visitor_for_location(
-    project: &Project,
+fn syntactic_hazard_visitor_for_location<'project>(
+    project: &'project Project,
     package: &str,
     module_path: &[String],
     owner: Option<String>,
-) -> SyntacticHazardVisitor {
+) -> SyntacticHazardVisitor<'project> {
     let source = source_for_module(project, package, module_path);
     let file = source.map(|source| source.path.clone());
     let include_context = project.workspace.packages.get(package).and_then(|package| {
@@ -4212,6 +4216,7 @@ fn syntactic_hazard_visitor_for_location(
         })
     });
     SyntacticHazardVisitor {
+        project: Some(project),
         counts: SyntacticHazardCounts::default(),
         include_context,
         macro_context: MacroInvocationContext::for_project_source(project, package, source),
@@ -4221,15 +4226,16 @@ fn syntactic_hazard_visitor_for_location(
             file,
             owner,
         },
+        proven_trait_object_surfaces: BTreeSet::new(),
     }
 }
 
-fn syntactic_hazard_visitor_for_inline_location(
-    project: &Project,
+fn syntactic_hazard_visitor_for_inline_location<'project>(
+    project: &'project Project,
     package: &str,
     source_module_path: &[String],
     rendered_module_path: &[String],
-) -> SyntacticHazardVisitor {
+) -> SyntacticHazardVisitor<'project> {
     let source = source_for_module(project, package, source_module_path);
     let file = source.map(|source| source.path.clone());
     let include_context = project.workspace.packages.get(package).and_then(|package| {
@@ -4242,6 +4248,7 @@ fn syntactic_hazard_visitor_for_inline_location(
         })
     });
     SyntacticHazardVisitor {
+        project: Some(project),
         counts: SyntacticHazardCounts::default(),
         include_context,
         macro_context: MacroInvocationContext::for_project_source(project, package, source),
@@ -4251,6 +4258,7 @@ fn syntactic_hazard_visitor_for_inline_location(
             file,
             owner: None,
         },
+        proven_trait_object_surfaces: BTreeSet::new(),
     }
 }
 
@@ -4272,11 +4280,13 @@ fn source_for_module<'a>(
         .find(|source| source.package == package && source.module_path == module_path)
 }
 
-struct SyntacticHazardVisitor {
+struct SyntacticHazardVisitor<'project> {
+    project: Option<&'project Project>,
     counts: SyntacticHazardCounts,
     include_context: Option<IncludeContext>,
     macro_context: MacroInvocationContext,
     location: HazardLocation,
+    proven_trait_object_surfaces: BTreeSet<String>,
 }
 
 #[derive(Clone, Default)]
@@ -4383,7 +4393,19 @@ impl HazardLocation {
     }
 }
 
-impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
+impl<'ast> Visit<'ast> for SyntacticHazardVisitor<'_> {
+    fn visit_item_fn(&mut self, item_fn: &'ast syn::ItemFn) {
+        self.with_function_dynamic_surface_proofs(&item_fn.sig.output, &item_fn.block, |visitor| {
+            syn::visit::visit_item_fn(visitor, item_fn);
+        });
+    }
+
+    fn visit_impl_item_fn(&mut self, item_fn: &'ast syn::ImplItemFn) {
+        self.with_function_dynamic_surface_proofs(&item_fn.sig.output, &item_fn.block, |visitor| {
+            syn::visit::visit_impl_item_fn(visitor, item_fn);
+        });
+    }
+
     fn visit_item_macro(&mut self, item_macro: &'ast syn::ItemMacro) {
         for attribute in &item_macro.attrs {
             self.visit_attribute(attribute);
@@ -4510,6 +4532,14 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
     }
 
     fn visit_type_trait_object(&mut self, trait_object: &'ast syn::TypeTraitObject) {
+        if trait_object_is_auto_trait_only(trait_object)
+            || self
+                .proven_trait_object_surfaces
+                .contains(&trait_object_surface_key(trait_object))
+        {
+            syn::visit::visit_type_trait_object(self, trait_object);
+            return;
+        }
         self.counts.trait_object_surfaces += 1;
         self.counts
             .trait_object_details
@@ -4518,7 +4548,62 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
     }
 }
 
-impl SyntacticHazardVisitor {
+impl SyntacticHazardVisitor<'_> {
+    fn with_function_dynamic_surface_proofs(
+        &mut self,
+        output: &syn::ReturnType,
+        block: &syn::Block,
+        visit: impl FnOnce(&mut Self),
+    ) {
+        let previous = self.proven_trait_object_surfaces.clone();
+        self.proven_trait_object_surfaces
+            .extend(self.proven_return_trait_object_surfaces(output, block));
+        visit(self);
+        self.proven_trait_object_surfaces = previous;
+    }
+
+    fn proven_return_trait_object_surfaces(
+        &self,
+        output: &syn::ReturnType,
+        block: &syn::Block,
+    ) -> BTreeSet<String> {
+        let Some(project) = self.project else {
+            return BTreeSet::new();
+        };
+        let syn::ReturnType::Type(_, output_ty) = output else {
+            return BTreeSet::new();
+        };
+        let surfaces = collect_trait_object_surfaces(output_ty);
+        if surfaces.is_empty() {
+            return BTreeSet::new();
+        }
+
+        let constructed_types =
+            returned_constructed_local_type_names(project, &self.location.package, block);
+        if constructed_types.is_empty() {
+            return BTreeSet::new();
+        }
+
+        surfaces
+            .into_iter()
+            .filter(|surface| {
+                let traits = dispatchable_trait_object_names(surface);
+                !traits.is_empty()
+                    && constructed_types.iter().any(|type_name| {
+                        traits.iter().all(|trait_name| {
+                            local_type_implements_trait(
+                                project,
+                                &self.location.package,
+                                type_name,
+                                trait_name,
+                            )
+                        })
+                    })
+            })
+            .map(|surface| trait_object_surface_key(surface))
+            .collect()
+    }
+
     fn cfg_attr_detail(&self, attribute: &Attribute) -> ProductionHazardDetail {
         ProductionHazardDetail {
             subject: self.location.subject(),
@@ -4677,7 +4762,7 @@ impl SyntacticHazardVisitor {
     }
 }
 
-impl SyntacticHazardVisitor {
+impl SyntacticHazardVisitor<'_> {
     fn visit_compile_env_macro(&mut self, mac: &Macro) {
         if macro_first_string_literal(&mac.tokens)
             .as_deref()
@@ -4854,6 +4939,285 @@ impl<'ast> Visit<'ast> for SourceIncludeReferenceVisitor {
         }
         syn::visit::visit_path(self, path);
     }
+}
+
+fn collect_trait_object_surfaces(ty: &syn::Type) -> Vec<&syn::TypeTraitObject> {
+    let mut visitor = TraitObjectSurfaceCollector {
+        surfaces: Vec::new(),
+    };
+    visitor.visit_type(ty);
+    visitor.surfaces
+}
+
+struct TraitObjectSurfaceCollector<'ast> {
+    surfaces: Vec<&'ast syn::TypeTraitObject>,
+}
+
+impl<'ast> Visit<'ast> for TraitObjectSurfaceCollector<'ast> {
+    fn visit_type_trait_object(&mut self, trait_object: &'ast syn::TypeTraitObject) {
+        self.surfaces.push(trait_object);
+        syn::visit::visit_type_trait_object(self, trait_object);
+    }
+}
+
+fn trait_object_is_auto_trait_only(trait_object: &syn::TypeTraitObject) -> bool {
+    dispatchable_trait_object_names(trait_object).is_empty()
+}
+
+fn dispatchable_trait_object_names(trait_object: &syn::TypeTraitObject) -> BTreeSet<String> {
+    trait_object
+        .bounds
+        .iter()
+        .filter_map(|bound| {
+            let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                return None;
+            };
+            let name = trait_bound.path.segments.last()?.ident.to_string();
+            (!auto_trait_object_bound_name(&name)).then_some(name)
+        })
+        .collect()
+}
+
+fn auto_trait_object_bound_name(name: &str) -> bool {
+    matches!(
+        name,
+        "Send" | "Sync" | "Unpin" | "UnwindSafe" | "RefUnwindSafe" | "Sized"
+    )
+}
+
+fn trait_object_surface_key(trait_object: &syn::TypeTraitObject) -> String {
+    format_token_stream(&trait_object.to_token_stream())
+}
+
+fn returned_constructed_local_type_names(
+    project: &Project,
+    package: &str,
+    block: &syn::Block,
+) -> BTreeSet<String> {
+    let mut local_type_counts = BTreeMap::<String, usize>::new();
+    for item in project.items.keys().filter(|item| {
+        item.package == package
+            && matches!(
+                item.kind,
+                model::ItemKind::Struct | model::ItemKind::Enum | model::ItemKind::Union
+            )
+    }) {
+        *local_type_counts.entry(item.name.clone()).or_default() += 1;
+    }
+    let local_types = local_type_counts
+        .into_iter()
+        .filter_map(|(name, count)| (count == 1).then_some(name))
+        .collect::<BTreeSet<_>>();
+    if local_types.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let mut return_visitor = ReturnConstructedLocalTypeVisitor {
+        constructor: ConstructedLocalTypeVisitor {
+            local_types: &local_types,
+            constructed: BTreeSet::new(),
+        },
+    };
+    return_visitor.visit_block(block);
+
+    if let Some(tail_expr) = block.stmts.iter().rev().find_map(|stmt| match stmt {
+        syn::Stmt::Expr(expr, None) => Some(expr),
+        syn::Stmt::Local(_)
+        | syn::Stmt::Item(_)
+        | syn::Stmt::Expr(_, Some(_))
+        | syn::Stmt::Macro(_) => None,
+    }) {
+        return_visitor.constructor.visit_expr(tail_expr);
+    }
+
+    return_visitor.constructor.constructed
+}
+
+struct ReturnConstructedLocalTypeVisitor<'types> {
+    constructor: ConstructedLocalTypeVisitor<'types>,
+}
+
+impl<'ast> Visit<'ast> for ReturnConstructedLocalTypeVisitor<'_> {
+    fn visit_expr_return(&mut self, expr_return: &'ast syn::ExprReturn) {
+        if let Some(expr) = &expr_return.expr {
+            self.constructor.visit_expr(expr);
+        }
+    }
+
+    fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+
+    fn visit_item_fn(&mut self, _item: &'ast syn::ItemFn) {}
+
+    fn visit_impl_item_fn(&mut self, _item: &'ast syn::ImplItemFn) {}
+}
+
+struct ConstructedLocalTypeVisitor<'types> {
+    local_types: &'types BTreeSet<String>,
+    constructed: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ConstructedLocalTypeVisitor<'_> {
+    fn visit_expr_block(&mut self, expr: &'ast syn::ExprBlock) {
+        self.visit_return_value_block(&expr.block);
+    }
+
+    fn visit_expr_unsafe(&mut self, expr: &'ast syn::ExprUnsafe) {
+        self.visit_return_value_block(&expr.block);
+    }
+
+    fn visit_expr_if(&mut self, expr: &'ast syn::ExprIf) {
+        self.visit_return_value_block(&expr.then_branch);
+        if let Some((_, else_branch)) = &expr.else_branch {
+            self.visit_expr(else_branch);
+        }
+    }
+
+    fn visit_expr_match(&mut self, expr: &'ast syn::ExprMatch) {
+        for arm in &expr.arms {
+            self.visit_expr(&arm.body);
+        }
+    }
+
+    fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+
+    fn visit_expr_async(&mut self, _async_expr: &'ast syn::ExprAsync) {}
+
+    fn visit_expr_struct(&mut self, expr: &'ast syn::ExprStruct) {
+        self.record_path_leaf(&expr.path);
+    }
+
+    fn visit_expr_call(&mut self, expr: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = expr.func.as_ref() {
+            if self.record_constructor_path(&path.path) {
+                return;
+            }
+            if transparent_return_wrapper_path(&path.path) {
+                for arg in &expr.args {
+                    self.visit_expr(arg);
+                }
+            }
+        }
+    }
+
+    fn visit_expr_path(&mut self, expr: &'ast syn::ExprPath) {
+        if expr.qself.is_none() {
+            self.record_path_leaf(&expr.path);
+        }
+    }
+}
+
+impl ConstructedLocalTypeVisitor<'_> {
+    fn visit_return_value_block(&mut self, block: &syn::Block) {
+        let mut return_visitor = ReturnConstructedLocalTypeVisitor {
+            constructor: ConstructedLocalTypeVisitor {
+                local_types: self.local_types,
+                constructed: BTreeSet::new(),
+            },
+        };
+        return_visitor.visit_block(block);
+        self.constructed
+            .extend(return_visitor.constructor.constructed);
+        if let Some(tail_expr) = block.stmts.iter().rev().find_map(|stmt| match stmt {
+            syn::Stmt::Expr(expr, None) => Some(expr),
+            syn::Stmt::Local(_)
+            | syn::Stmt::Item(_)
+            | syn::Stmt::Expr(_, Some(_))
+            | syn::Stmt::Macro(_) => None,
+        }) {
+            self.visit_expr(tail_expr);
+        }
+    }
+
+    fn record_constructor_path(&mut self, path: &syn::Path) -> bool {
+        if path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == "new")
+            && path.segments.len() >= 2
+        {
+            if let Some(segment) = path.segments.iter().rev().nth(1) {
+                return self.record_ident(&segment.ident.to_string());
+            }
+            return false;
+        }
+        self.record_path_leaf(path)
+    }
+
+    fn record_path_leaf(&mut self, path: &syn::Path) -> bool {
+        if let Some(segment) = path.segments.last() {
+            return self.record_ident(&segment.ident.to_string());
+        }
+        false
+    }
+
+    fn record_ident(&mut self, ident: &str) -> bool {
+        if self.local_types.contains(ident) {
+            self.constructed.insert(ident.to_string());
+            true
+        } else {
+            false
+        }
+    }
+}
+
+fn transparent_return_wrapper_path(path: &syn::Path) -> bool {
+    if let Some(last) = path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+    {
+        if matches!(last.as_str(), "Some" | "Ok" | "Err") {
+            return true;
+        }
+    }
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    match segments.as_slice() {
+        [wrapper, method]
+            if matches!(wrapper.as_str(), "Box" | "Arc" | "Rc" | "Pin")
+                && matches!(method.as_str(), "new" | "pin" | "new_unchecked") =>
+        {
+            true
+        }
+        segments
+            if segments.len() >= 2
+                && matches!(
+                    segments[segments.len() - 2].as_str(),
+                    "Box" | "Arc" | "Rc" | "Pin"
+                )
+                && matches!(
+                    segments[segments.len() - 1].as_str(),
+                    "new" | "pin" | "new_unchecked"
+                ) =>
+        {
+            true
+        }
+        _ => false,
+    }
+}
+
+fn local_type_implements_trait(
+    project: &Project,
+    package: &str,
+    type_name: &str,
+    trait_name: &str,
+) -> bool {
+    project.methods.keys().any(|callable| {
+        matches!(
+            callable,
+            CallableId::Method {
+                package: method_package,
+                type_path,
+                trait_path: Some(trait_path),
+                ..
+            } if method_package == package
+                && type_path.last().is_some_and(|name| name == type_name)
+                && trait_path.last().is_some_and(|name| name == trait_name)
+        )
+    })
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -9789,7 +10153,7 @@ impl Other {
     }
 
     #[test]
-    fn reports_function_pointer_and_trait_object_production_hazards() {
+    fn reports_function_pointer_callback_boundaries_and_proven_returned_dyn_surfaces() {
         let root = temp_output("dynamic-dispatch-hazard-source");
         let opensourced_path = workspace_root().join("crates/opensourced");
         write(
@@ -9861,21 +10225,11 @@ pub fn Box() -> usize {
                     .is_some_and(|file| file.ends_with("app/src/lib.rs"))
                 && detail.start_line == Some(3)
         }));
-        let trait_object = report
+        assert!(!report
             .production
             .hazards
             .iter()
-            .find(|hazard| hazard.code == "trait_object_surfaces" && hazard.severity == "warning")
-            .expect("trait object hazard should be reported");
-        assert!(trait_object.details.iter().any(|detail| {
-            detail.subject == "app: dyn Worker"
-                && detail.package.as_deref() == Some("app")
-                && detail.blocked_idents == vec!["Worker"]
-                && detail
-                    .file
-                    .as_ref()
-                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
-        }));
+            .any(|hazard| hazard.code == "trait_object_surfaces"));
         let callback_boundary = report
             .production
             .hazards
@@ -9885,6 +10239,15 @@ pub fn Box() -> usize {
             })
             .expect("direct callback boundary warning should be reported");
         assert_eq!(callback_boundary.details.len(), 2);
+        assert!(callback_boundary.details.iter().any(|detail| {
+            detail.subject == "app: & dyn Worker"
+                && detail.package.as_deref() == Some("app")
+                && detail.blocked_idents == vec!["Worker"]
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+        }));
         assert!(callback_boundary.details.iter().any(|detail| {
             detail.subject == "app: & dyn Worker"
                 && detail.package.as_deref() == Some("app")

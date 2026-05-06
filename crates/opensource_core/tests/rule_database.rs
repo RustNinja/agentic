@@ -508,7 +508,7 @@ fn retains_foreign_extern_functions_called_by_selected_roots() {
 }
 
 #[test]
-fn reports_returned_trait_object_surfaces_as_dynamic_hazards() {
+fn proves_returned_trait_object_surfaces_with_concrete_impls() {
     let workspace = temp_path("rule-returned-dyn-workspace");
     let output = temp_path("rule-returned-dyn-output");
     let target_dir = temp_path("rule-returned-dyn-target");
@@ -520,6 +520,31 @@ fn reports_returned_trait_object_surfaces_as_dynamic_hazards() {
     })
     .expect("returned dyn rule should reduce");
 
+    assert_no_error_hazards(&report.production.hazards);
+    assert!(!report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "trait_object_surfaces"));
+    let lib = read(output.join("returned_dyn_rule/src/lib.rs"));
+    assert!(lib.contains("Box<dyn Reader>"), "{lib}");
+    assert!(lib.contains("pub trait Reader"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn reports_forwarded_trait_object_returns_without_concrete_proof() {
+    let workspace = temp_path("rule-forwarded-dyn-workspace");
+    let output = temp_path("rule-forwarded-dyn-output");
+    let target_dir = temp_path("rule-forwarded-dyn-target");
+    write_forwarded_trait_object_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("forwarded dyn rule should reduce");
+
     assert_eq!(report.production.status, "requires_feedback");
     assert!(report.production.hazards.iter().any(|hazard| {
         hazard.code == "trait_object_surfaces"
@@ -528,9 +553,8 @@ fn reports_returned_trait_object_surfaces_as_dynamic_hazards() {
                 .iter()
                 .any(|detail| detail.subject.contains("dyn Reader"))
     }));
-    let lib = read(output.join("returned_dyn_rule/src/lib.rs"));
+    let lib = read(output.join("forwarded_dyn_rule/src/lib.rs"));
     assert!(lib.contains("Box<dyn Reader>"), "{lib}");
-    assert!(lib.contains("pub trait Reader"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -1856,7 +1880,7 @@ fn reports_nested_callback_store_trait_objects_as_dynamic_hazards() {
 }
 
 #[test]
-fn reports_trait_object_casts_while_retaining_concrete_sources() {
+fn ignores_auto_trait_object_casts_while_retaining_concrete_sources() {
     let workspace = temp_path("rule-trait-object-cast-workspace");
     let output = temp_path("rule-trait-object-cast-output");
     let target_dir = temp_path("rule-trait-object-cast-target");
@@ -1868,14 +1892,12 @@ fn reports_trait_object_casts_while_retaining_concrete_sources() {
     })
     .expect("trait object cast rule should reduce");
 
-    assert_eq!(report.production.status, "requires_feedback");
-    assert!(report.production.hazards.iter().any(|hazard| {
-        hazard.code == "trait_object_surfaces"
-            && hazard
-                .details
-                .iter()
-                .any(|detail| detail.subject.contains("dyn Send + Sync"))
-    }));
+    assert_no_error_hazards(&report.production.hazards);
+    assert!(!report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "trait_object_surfaces"));
     let lib = read(output.join("trait_object_cast_rule/src/lib.rs"));
     assert!(lib.contains("pub struct Session"), "{lib}");
     assert!(lib.contains("Session::new()"), "{lib}");
@@ -4209,6 +4231,36 @@ impl Reader for LiveReader {
 #[opensourced]
 pub fn selected() -> Box<dyn Reader> {
     Box::new(LiveReader)
+}
+"#,
+    );
+}
+
+fn write_forwarded_trait_object_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "forwarded_dyn_rule",
+        r#"
+use opensourced::opensourced;
+
+pub trait Reader {
+    fn read(&self) -> u32;
+}
+
+pub struct DeadReader;
+
+impl Reader for DeadReader {
+    fn read(&self) -> u32 {
+        0
+    }
+}
+
+#[opensourced]
+pub fn selected(reader: Box<dyn Reader>) -> Box<dyn Reader> {
+    {
+        let _unused = DeadReader;
+        reader
+    }
 }
 "#,
     );
