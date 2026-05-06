@@ -44,6 +44,7 @@ file.
 | `import.renamed_surface_alias.001` | covered | Renamed local type and trait imports used only by retained struct/impl surfaces keep their resolved target items and prune dead sibling aliases |
 | `import.dependency_barrel.renamed_type.001` | covered | Renamed dependency type reexports used through a local barrel keep the concrete dependency target item while pruning dead sibling dependency aliases and helper reexports |
 | `import.dependency_barrel.multi_hop_function.001` | covered | Multi-hop local and dependency barrel reexports resolve live function aliases through support packages while pruning dead support helper functions, dead dependency aliases, and dead leaf items |
+| `import.external_reexport.ra_unresolved_benign.001` | covered | Bounded rust-analyzer unresolved path misses are benign when the unresolved symbol is covered by a retained external `use` or `pub use` leaf, while local `crate`/`self`/`super` imports never receive that downgrade |
 | `import.module_scoped.dead_item_only.001` | covered | Module-local imports used only by pruned dead items are removed even when the same symbol is live in another module |
 | `import.external_group_shadowed_local.001` | covered | Private external grouped import leaves are retained only for actual path/macro uses, so local bindings with the same name do not keep dead sibling imports |
 | `import.renamed_alias_shadowed_local.001` | covered | Private renamed import aliases are retained only for actual alias path/macro uses or implicit trait scope effects, so local bindings do not keep aliases to items used only elsewhere |
@@ -242,6 +243,7 @@ Recent Litter-driven rules came from these source patterns:
 | `include.str.once_lock_initializer_asset.001` | `third_party/codex/codex-rs/hooks/src/engine/schema_loader.rs:21`, `third_party/codex/codex-rs/hooks/src/engine/schema_loader.rs:64` |
 | `dyn.boundary.facade_method_input.001` | `third_party/codex/codex-rs/codex-client/src/transport.rs:18`, `third_party/codex/codex-rs/codex-client/src/sse.rs:12` |
 | `import.facade_glob_selected_symbol.001` | `codex-ipc/src/lib.rs:20`, `codex-ipc/src/lib.rs:37` |
+| `import.external_reexport.ra_unresolved_benign.001` | `codex-ipc/src/protocol/params.rs:1`, `codex-ipc/src/protocol/params.rs:6` |
 
 ## Litter Patterns To Convert Next
 

@@ -1473,7 +1473,7 @@ mod rust_analyzer {
             .map(|name| name.syntax().text().to_string());
         let segments = path_segments(path);
         let (category, reason) =
-            classify_unresolved_path(context.semantic_index, syntax, &segments);
+            classify_unresolved_path(context.semantic_index, syntax, source_text, &segments);
         unresolved_diagnostic(
             SemanticUnresolvedKind::Path,
             category,
@@ -1549,12 +1549,22 @@ mod rust_analyzer {
     fn classify_unresolved_path(
         index: Option<&ProjectSemanticIndex>,
         syntax: &ra_ap_syntax::SyntaxNode,
+        source_text: &str,
         segments: &[String],
     ) -> (SemanticUnresolvedCategory, &'static str) {
         if syntax_has_macro_or_attr_ancestor(syntax) {
             return (
                 SemanticUnresolvedCategory::MacroBlocked,
                 "unresolved_path_inside_macro_or_attribute_context",
+            );
+        }
+        if segments
+            .last()
+            .is_some_and(|symbol| source_has_external_imported_symbol(source_text, symbol))
+        {
+            return (
+                SemanticUnresolvedCategory::Benign,
+                "unresolved_path_has_retained_external_import",
             );
         }
         if index.is_some_and(|index| index.path_has_project_local_anchor(segments)) {
@@ -1567,6 +1577,54 @@ mod rust_analyzer {
             SemanticUnresolvedCategory::Benign,
             "unresolved_path_has_no_project_local_identifier",
         )
+    }
+
+    fn source_has_external_imported_symbol(source_text: &str, symbol: &str) -> bool {
+        let Ok(file) = syn::parse_file(source_text) else {
+            return false;
+        };
+        file.items.iter().any(|item| {
+            let syn::Item::Use(item_use) = item else {
+                return false;
+            };
+            use_tree_imports_external_symbol(&item_use.tree, symbol, UseRootKind::Unknown)
+        })
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum UseRootKind {
+        Unknown,
+        External,
+        Local,
+    }
+
+    fn use_tree_imports_external_symbol(
+        tree: &syn::UseTree,
+        symbol: &str,
+        root: UseRootKind,
+    ) -> bool {
+        match tree {
+            syn::UseTree::Path(path) => {
+                let ident = path.ident.to_string();
+                let root = match root {
+                    UseRootKind::Unknown if is_relative_path_anchor(&ident) => UseRootKind::Local,
+                    UseRootKind::Unknown => UseRootKind::External,
+                    existing => existing,
+                };
+                use_tree_imports_external_symbol(&path.tree, symbol, root)
+            }
+            syn::UseTree::Name(name) => {
+                root == UseRootKind::External && name.ident.to_string() == symbol
+            }
+            syn::UseTree::Rename(rename) => {
+                root == UseRootKind::External && rename.rename.to_string() == symbol
+            }
+            syn::UseTree::Glob(_) => false,
+            syn::UseTree::Group(group) => group
+                .items
+                .iter()
+                .any(|tree| use_tree_imports_external_symbol(tree, symbol, root)),
+        }
     }
 
     fn path_segments(path: &ast::Path) -> Vec<String> {
@@ -2426,6 +2484,43 @@ mod rust_analyzer {
                 )
             })
             .unwrap_or(false)
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::source_has_external_imported_symbol;
+
+        #[test]
+        fn external_use_imported_symbols_are_benign_unresolved_candidates() {
+            let source = r#"
+pub use external_protocol::{TurnStartParams, UserInput};
+pub use codex_protocol::openai_models::ReasoningEffort;
+pub use external_protocol::Model as RenamedModel;
+use crate::local::LocalType;
+use self::local::SelfLocalType;
+use super::parent::ParentLocalType;
+"#;
+
+            assert!(source_has_external_imported_symbol(
+                source,
+                "TurnStartParams"
+            ));
+            assert!(source_has_external_imported_symbol(
+                source,
+                "ReasoningEffort"
+            ));
+            assert!(source_has_external_imported_symbol(source, "RenamedModel"));
+            assert!(!source_has_external_imported_symbol(source, "LocalType"));
+            assert!(!source_has_external_imported_symbol(
+                source,
+                "SelfLocalType"
+            ));
+            assert!(!source_has_external_imported_symbol(
+                source,
+                "ParentLocalType"
+            ));
+            assert!(!source_has_external_imported_symbol(source, "Missing"));
+        }
     }
 }
 

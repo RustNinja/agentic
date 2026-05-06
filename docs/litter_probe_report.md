@@ -157,6 +157,19 @@ not slicer failures.
   longer reported benign `Option::is_none` blockers from serde helper attrs;
   `usage.blocked_by_unknown` stayed at zero while 1,750 callables and 861 items
   remained prunable.
+- A follow-up rerun of the same fresh-checkout corpus after RA unresolved-path
+  import classification also generated 119 files and remained
+  `production_ready=accepted` with zero preflight errors, zero feedback errors,
+  and zero warnings. Bounded RA still cannot load every external dependency
+  definition in the default path, but unresolved local path names that are
+  covered by retained external `use` / `pub use` leaves are now classified as
+  benign instead of dependency risk. This removed the remaining
+  `semantic_unresolved_paths` hazards for external protocol reexports such as
+  `TurnStartParams` and `ReasoningEffort`; `semantic_unresolved_method_calls`
+  also stayed absent from the Litter hazard list. Usage proof stayed narrow:
+  `usage.blocked_by_unknown` remained zero, 1,750 callables and 861 items were
+  prunable, and the production report only retained macro and bounded-syntactic
+  review hazards.
 
 ## Next Rule Targets
 
