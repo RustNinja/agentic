@@ -7,11 +7,12 @@ use std::{
 
 use proc_macro2::{TokenStream, TokenTree};
 use quote::ToTokens;
+use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
 use syn::{
-    parse_quote, Expr, Field, ForeignItem, GenericArgument, ImplItem, Item, ItemMod, Lit, Meta,
-    PathArguments, TraitItem, Type, UseTree, Variant,
+    parse_quote, Expr, Field, Fields, ForeignItem, GenericArgument, ImplItem, Item, ItemMod, Lit,
+    Meta, Pat, PathArguments, TraitItem, Type, UseTree, Variant,
 };
 use toml::{value::Table, Value};
 
@@ -2130,6 +2131,18 @@ struct SupportMacroExpansion {
     paths: Vec<Vec<String>>,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd)]
+struct SupportMethodCandidate {
+    source_file: PathBuf,
+    self_name: String,
+}
+
+#[derive(Clone, Default)]
+struct SupportEnumVariantPayloads {
+    unnamed: Vec<Option<SupportMethodCandidate>>,
+    named: BTreeMap<String, SupportMethodCandidate>,
+}
+
 struct SupportResolveContext<'a> {
     modules: &'a BTreeMap<PathBuf, SupportModuleSource>,
     root_file: &'a Path,
@@ -2180,6 +2193,8 @@ fn build_restricted_support_sources(
         root_file: &root_file,
         dependency_roots,
     };
+    let method_index = support_method_index(&modules);
+    let variant_payload_index = support_enum_variant_payload_index(&modules);
     for required_name in required_names {
         if !seed_support_required_name(&ctx, required_name, &mut live) {
             debug_support_prune(
@@ -2251,6 +2266,28 @@ fn build_restricted_support_sources(
                     return Ok(None);
                 };
                 changed |= inserted;
+                let Some(inserted) =
+                    mark_support_item_attribute_dependencies(&ctx, &source_file, item, &mut live)
+                else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: item attribute dependency unsupported in {}::{name}",
+                            source_file.display()
+                        ),
+                    );
+                    return Ok(None);
+                };
+                changed |= inserted;
+                changed |=
+                    mark_support_method_fallback_dependencies(&ctx, &method_index, item, &mut live);
+                changed |= mark_support_enum_variant_method_dependencies(
+                    &ctx,
+                    &method_index,
+                    &variant_payload_index,
+                    item,
+                    &mut live,
+                );
             }
 
             for item in &module.syntax.items {
@@ -2299,6 +2336,40 @@ fn build_restricted_support_sources(
                     return Ok(None);
                 };
                 changed |= inserted;
+                let Some(inserted) = mark_support_impl_attribute_dependencies(
+                    &ctx,
+                    &source_file,
+                    item_impl,
+                    &mut live,
+                ) else {
+                    debug_support_prune(
+                        package_root,
+                        &format!(
+                            "restricted fail: impl attribute dependency unsupported in {}",
+                            source_file.display()
+                        ),
+                    );
+                    return Ok(None);
+                };
+                changed |= inserted;
+                if let Some(rendered_impl) =
+                    transform_support_impl(item_impl, &named_items, &live_set)
+                {
+                    let rendered_item = Item::Impl(rendered_impl);
+                    changed |= mark_support_method_fallback_dependencies(
+                        &ctx,
+                        &method_index,
+                        &rendered_item,
+                        &mut live,
+                    );
+                    changed |= mark_support_enum_variant_method_dependencies(
+                        &ctx,
+                        &method_index,
+                        &variant_payload_index,
+                        &rendered_item,
+                        &mut live,
+                    );
+                }
             }
 
             for item in &module.syntax.items {
@@ -3369,10 +3440,16 @@ fn transform_restricted_support_file(
         .unwrap_or_else(|| support_live_item_usage(syntax, live_set));
     let mut live_import_names = support_live_import_names(&live_usage);
     let non_enum_usage = support_live_non_enum_item_usage(syntax, live_set);
+    let enum_variant_type_usage = support_live_enum_variant_type_usage(syntax, live_set);
     for variant_name in support_live_enum_variant_names(syntax, live_set) {
         if !non_enum_usage.bare_idents.contains(&variant_name)
             && !non_enum_usage.path_roots.contains(&variant_name)
             && !non_enum_usage
+                .local_path_leaf_idents
+                .contains(&variant_name)
+            && !enum_variant_type_usage.bare_idents.contains(&variant_name)
+            && !enum_variant_type_usage.path_roots.contains(&variant_name)
+            && !enum_variant_type_usage
                 .local_path_leaf_idents
                 .contains(&variant_name)
         {
@@ -3491,6 +3568,36 @@ fn support_live_non_enum_item_usage(syntax: &syn::File, live_set: &SupportLiveSe
     usage
 }
 
+fn support_live_enum_variant_type_usage(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+    for item in &syntax.items {
+        let Item::Enum(item_enum) = item else {
+            continue;
+        };
+        if !live_set.item_names.contains(&item_enum.ident.to_string()) {
+            continue;
+        }
+        for variant in &item_enum.variants {
+            for field in &variant.fields {
+                collect_token_usage(&field.ty.to_token_stream(), &mut usage);
+                for attr in &field.attrs {
+                    collect_token_usage(&attr.to_token_stream(), &mut usage);
+                }
+            }
+            for attr in &variant.attrs {
+                collect_token_usage(&attr.to_token_stream(), &mut usage);
+            }
+            if let Some((_eq, discriminant)) = &variant.discriminant {
+                collect_token_usage(&discriminant.to_token_stream(), &mut usage);
+            }
+        }
+    }
+    usage
+}
+
 fn support_live_derive_idents(syntax: &syn::File, live_set: &SupportLiveSet) -> BTreeSet<String> {
     let mut derives = BTreeSet::new();
     let named_items = support_named_item_names(&syntax.items);
@@ -3517,6 +3624,120 @@ fn support_item_should_collect_live_usage(
         || matches!(item, Item::Macro(item_macro) if item_macro.ident.is_none())
 }
 
+fn support_method_index(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+) -> BTreeMap<String, Vec<SupportMethodCandidate>> {
+    let mut index = BTreeMap::<String, Vec<SupportMethodCandidate>>::new();
+    for (source_file, module) in modules {
+        let named_items = support_named_item_names(&module.syntax.items);
+        for item in &module.syntax.items {
+            let Item::Impl(item_impl) = item else {
+                continue;
+            };
+            if item_impl.trait_.is_some() {
+                continue;
+            }
+            let Some(self_name) = support_impl_self_named_item(item_impl) else {
+                continue;
+            };
+            if !named_items.contains_key(&self_name) {
+                continue;
+            }
+            for impl_item in &item_impl.items {
+                let ImplItem::Fn(item_fn) = impl_item else {
+                    continue;
+                };
+                index
+                    .entry(item_fn.sig.ident.to_string())
+                    .or_default()
+                    .push(SupportMethodCandidate {
+                        source_file: source_file.clone(),
+                        self_name: self_name.clone(),
+                    });
+            }
+        }
+    }
+    index
+}
+
+fn support_item_source_index(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+) -> BTreeMap<String, Vec<PathBuf>> {
+    let mut index = BTreeMap::<String, Vec<PathBuf>>::new();
+    for (source_file, module) in modules {
+        for name in support_named_item_names(&module.syntax.items).keys() {
+            index
+                .entry(name.clone())
+                .or_default()
+                .push(source_file.clone());
+        }
+    }
+    index
+}
+
+fn support_enum_variant_payload_index(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+) -> BTreeMap<(String, String), SupportEnumVariantPayloads> {
+    let item_sources = support_item_source_index(modules);
+    let mut index = BTreeMap::<(String, String), SupportEnumVariantPayloads>::new();
+    for module in modules.values() {
+        for item in &module.syntax.items {
+            let Item::Enum(item_enum) = item else {
+                continue;
+            };
+            let enum_name = item_enum.ident.to_string();
+            for variant in &item_enum.variants {
+                let mut payloads = SupportEnumVariantPayloads::default();
+                match &variant.fields {
+                    Fields::Unnamed(fields) => {
+                        payloads.unnamed = fields
+                            .unnamed
+                            .iter()
+                            .map(|field| support_field_candidate(field, &item_sources))
+                            .collect();
+                    }
+                    Fields::Named(fields) => {
+                        for field in &fields.named {
+                            let Some(ident) = &field.ident else {
+                                continue;
+                            };
+                            if let Some(candidate) = support_field_candidate(field, &item_sources) {
+                                payloads.named.insert(ident.to_string(), candidate);
+                            }
+                        }
+                    }
+                    Fields::Unit => {}
+                }
+                if !payloads.unnamed.is_empty() || !payloads.named.is_empty() {
+                    index.insert((enum_name.clone(), variant.ident.to_string()), payloads);
+                }
+            }
+        }
+    }
+    index
+}
+
+fn support_field_candidate(
+    field: &Field,
+    item_sources: &BTreeMap<String, Vec<PathBuf>>,
+) -> Option<SupportMethodCandidate> {
+    let Type::Path(type_path) = &field.ty else {
+        return None;
+    };
+    if type_path.qself.is_some() {
+        return None;
+    }
+    let type_name = type_path.path.segments.last()?.ident.to_string();
+    let source_files = item_sources.get(&type_name)?;
+    if source_files.len() != 1 {
+        return None;
+    }
+    Some(SupportMethodCandidate {
+        source_file: source_files[0].clone(),
+        self_name: type_name,
+    })
+}
+
 fn support_impl_dependency_tokens(
     item_impl: &syn::ItemImpl,
     named_items: &BTreeMap<String, Item>,
@@ -3540,13 +3761,10 @@ fn transform_support_impl(
     let Some(self_name) = support_impl_self_named_item(item_impl) else {
         return Some(item_impl.clone());
     };
-    let Some(assoc_items) = live_set
+    let assoc_items = live_set
         .assoc_item_names
         .get(&self_name)
-        .filter(|assoc_items| !assoc_items.is_empty())
-    else {
-        return Some(item_impl.clone());
-    };
+        .filter(|assoc_items| !assoc_items.is_empty());
 
     let mut pruned = item_impl.clone();
     pruned.items = item_impl
@@ -3558,9 +3776,14 @@ fn transform_support_impl(
     (!pruned.items.is_empty()).then_some(pruned)
 }
 
-fn support_impl_item_should_render(item: &ImplItem, assoc_items: &BTreeSet<String>) -> bool {
+fn support_impl_item_should_render(
+    item: &ImplItem,
+    assoc_items: Option<&BTreeSet<String>>,
+) -> bool {
     match item {
-        ImplItem::Fn(item_fn) => assoc_items.contains(&item_fn.sig.ident.to_string()),
+        ImplItem::Fn(item_fn) => assoc_items
+            .map(|assoc_items| assoc_items.contains(&item_fn.sig.ident.to_string()))
+            .unwrap_or_else(|| !matches!(item_fn.vis, syn::Visibility::Inherited)),
         // Associated consts, types, and macros can affect method signatures or macro-expanded
         // impl bodies. Keep them unless a future semantic pass proves an item-level decision.
         _ => true,
@@ -3589,6 +3812,139 @@ fn mark_support_item_assoc_usage_dependencies(
     mark_support_assoc_paths(ctx, source_file, visitor.assoc_paths, live)
 }
 
+fn mark_support_item_attribute_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    item: &Item,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut visitor = SupportAttributePathVisitor::default();
+    visitor.visit_item(item);
+    mark_support_attr_paths(ctx, source_file, visitor.paths, live)
+}
+
+fn mark_support_method_fallback_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    method_index: &BTreeMap<String, Vec<SupportMethodCandidate>>,
+    item: &Item,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> bool {
+    const SUPPORT_METHOD_FALLBACK_CAP: usize = 3;
+
+    let mut visitor = SupportMethodNameVisitor::default();
+    visitor.visit_item(item);
+    let mut changed = false;
+    for method in visitor.names {
+        let Some(candidates) = method_index.get(&method) else {
+            continue;
+        };
+        if candidates.len() > SUPPORT_METHOD_FALLBACK_CAP {
+            continue;
+        }
+        for candidate in candidates {
+            changed |= mark_support_live_item_name(
+                ctx,
+                &candidate.source_file,
+                &candidate.self_name,
+                live,
+            );
+            changed |= mark_support_live_assoc_item(
+                live,
+                &candidate.source_file,
+                &candidate.self_name,
+                &method,
+            );
+        }
+    }
+    changed
+}
+
+fn mark_support_enum_variant_method_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    method_index: &BTreeMap<String, Vec<SupportMethodCandidate>>,
+    variant_payload_index: &BTreeMap<(String, String), SupportEnumVariantPayloads>,
+    item: &Item,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> bool {
+    let mut visitor = SupportEnumVariantMethodVisitor {
+        method_index,
+        variant_payload_index,
+        current_impl_self: None,
+        calls: BTreeSet::new(),
+    };
+    visitor.visit_item(item);
+
+    let mut changed = false;
+    for (candidate, method) in visitor.calls {
+        changed |=
+            mark_support_live_item_name(ctx, &candidate.source_file, &candidate.self_name, live);
+        changed |= mark_support_live_assoc_item(
+            live,
+            &candidate.source_file,
+            &candidate.self_name,
+            &method,
+        );
+    }
+    changed
+}
+
+fn mark_support_impl_attribute_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    item_impl: &syn::ItemImpl,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut visitor = SupportAttributePathVisitor::default();
+    visitor.visit_item_impl(item_impl);
+    mark_support_attr_paths(ctx, source_file, visitor.paths, live)
+}
+
+fn mark_support_live_item_name(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    item_name: &str,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> bool {
+    let mut changed = live
+        .entry(source_file.to_path_buf())
+        .or_default()
+        .item_names
+        .insert(item_name.to_string());
+    let mut current_file = source_file.to_path_buf();
+    while let Some(parent_file) = support_parent_module_file(ctx.modules, &current_file).cloned() {
+        let Some(module_name) = support_module_name_for_child(ctx, &parent_file, &current_file)
+        else {
+            break;
+        };
+        changed |= live
+            .entry(parent_file.clone())
+            .or_default()
+            .item_names
+            .insert(module_name);
+        current_file = parent_file;
+    }
+    changed
+}
+
+fn support_module_name_for_child(
+    ctx: &SupportResolveContext<'_>,
+    parent_file: &Path,
+    child_file: &Path,
+) -> Option<String> {
+    let parent = ctx.modules.get(parent_file)?;
+    parent.syntax.items.iter().find_map(|item| {
+        let Item::Mod(item_mod) = item else {
+            return None;
+        };
+        if item_mod.content.is_some() || attrs_are_test(&item_mod.attrs) {
+            return None;
+        }
+        let (candidate, _) =
+            support_external_module_source(Path::new("/"), &parent.module_dir, item_mod)?;
+        (candidate == child_file).then(|| item_mod.ident.to_string())
+    })
+}
+
 fn mark_support_impl_self_assoc_dependencies(
     ctx: &SupportResolveContext<'_>,
     source_file: &Path,
@@ -3600,13 +3956,10 @@ fn mark_support_impl_self_assoc_dependencies(
     let Some(self_name) = support_impl_self_named_item(item_impl) else {
         return Some(false);
     };
-    if live_set
+    let has_assoc_items = live_set
         .assoc_item_names
         .get(&self_name)
-        .is_none_or(BTreeSet::is_empty)
-    {
-        return Some(false);
-    }
+        .is_some_and(|assoc_items| !assoc_items.is_empty());
     let Some(rendered_impl) = transform_support_impl(item_impl, named_items, live_set) else {
         return Some(false);
     };
@@ -3616,6 +3969,14 @@ fn mark_support_impl_self_assoc_dependencies(
         let ImplItem::Fn(item_fn) = impl_item else {
             continue;
         };
+        if !has_assoc_items && !matches!(item_fn.vis, syn::Visibility::Inherited) {
+            changed |= mark_support_live_assoc_item(
+                live,
+                source_file,
+                &self_name,
+                &item_fn.sig.ident.to_string(),
+            );
+        }
         let mut visitor = SelfAssocUsageVisitor::default();
         visitor.visit_impl_item_fn(item_fn);
         for assoc_name in visitor.assoc_items {
@@ -3624,6 +3985,33 @@ fn mark_support_impl_self_assoc_dependencies(
         assoc_usage.visit_impl_item_fn(item_fn);
     }
     changed |= mark_support_assoc_paths(ctx, source_file, assoc_usage.assoc_paths, live)?;
+    Some(changed)
+}
+
+fn mark_support_attr_paths(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    paths: BTreeSet<Vec<String>>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut changed = false;
+    for path in paths {
+        changed |= match path.as_slice() {
+            [] => false,
+            [name] => {
+                let mut visited = BTreeSet::new();
+                support_reexport_mark_to_option(mark_support_use_target(
+                    ctx,
+                    source_file,
+                    &[],
+                    name,
+                    live,
+                    &mut visited,
+                ))?
+            }
+            _ => mark_support_path_target(ctx, source_file, &path, live)?,
+        };
+    }
     Some(changed)
 }
 
@@ -3678,6 +4066,350 @@ fn method_call_receiver_is_self(receiver: &Expr) -> bool {
         Expr::Paren(paren) => method_call_receiver_is_self(&paren.expr),
         Expr::Group(group) => method_call_receiver_is_self(&group.expr),
         _ => false,
+    }
+}
+
+#[derive(Default)]
+struct SupportAttributePathVisitor {
+    paths: BTreeSet<Vec<String>>,
+}
+
+impl Visit<'_> for SupportAttributePathVisitor {
+    fn visit_attribute(&mut self, attribute: &syn::Attribute) {
+        collect_support_attribute_helper_paths(&attribute.meta, &mut self.paths);
+        visit::visit_attribute(self, attribute);
+    }
+}
+
+fn collect_support_attribute_helper_paths(meta: &Meta, paths: &mut BTreeSet<Vec<String>>) {
+    match meta {
+        Meta::Path(_) => {}
+        Meta::NameValue(name_value) => {
+            if support_helper_path_meta_key(&support_meta_path_key(&name_value.path)) {
+                if let syn::Expr::Lit(expr_lit) = &name_value.value {
+                    if let syn::Lit::Str(literal) = &expr_lit.lit {
+                        collect_support_path_like_string(&literal.value(), paths);
+                    }
+                }
+            }
+        }
+        Meta::List(list) => {
+            if support_helper_path_meta_key(&support_meta_path_key(&list.path)) {
+                if let Ok(literal) = syn::parse2::<syn::LitStr>(list.tokens.clone()) {
+                    collect_support_path_like_string(&literal.value(), paths);
+                    return;
+                }
+            }
+            let Ok(arguments) =
+                Punctuated::<Meta, syn::Token![,]>::parse_terminated.parse2(list.tokens.clone())
+            else {
+                return;
+            };
+            for nested in arguments {
+                collect_support_attribute_helper_paths(&nested, paths);
+            }
+        }
+    }
+}
+
+fn support_helper_path_meta_key(key: &str) -> bool {
+    matches!(
+        key,
+        "default"
+            | "deserialize_with"
+            | "serialize_with"
+            | "skip_serializing_if"
+            | "with"
+            | "serde_as"
+    )
+}
+
+fn support_meta_path_key(path: &syn::Path) -> String {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>()
+        .join("::")
+}
+
+fn collect_support_path_like_string(value: &str, paths: &mut BTreeSet<Vec<String>>) {
+    let segments = value
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .filter(|segment| {
+            segment
+                .chars()
+                .next()
+                .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+        })
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    if !segments.is_empty() {
+        paths.insert(segments);
+    }
+}
+
+#[derive(Default)]
+struct SupportMethodNameVisitor {
+    names: BTreeSet<String>,
+}
+
+impl Visit<'_> for SupportMethodNameVisitor {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        self.names.insert(node.method.to_string());
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+struct SupportEnumVariantMethodVisitor<'a> {
+    method_index: &'a BTreeMap<String, Vec<SupportMethodCandidate>>,
+    variant_payload_index: &'a BTreeMap<(String, String), SupportEnumVariantPayloads>,
+    current_impl_self: Option<String>,
+    calls: BTreeSet<(SupportMethodCandidate, String)>,
+}
+
+impl<'ast> Visit<'ast> for SupportEnumVariantMethodVisitor<'_> {
+    fn visit_item_impl(&mut self, item_impl: &'ast syn::ItemImpl) {
+        let previous = self.current_impl_self.clone();
+        if let Some(self_name) = support_impl_self_named_item(item_impl) {
+            self.current_impl_self = Some(self_name);
+        }
+        visit::visit_item_impl(self, item_impl);
+        self.current_impl_self = previous;
+    }
+
+    fn visit_expr_match(&mut self, node: &'ast syn::ExprMatch) {
+        for arm in &node.arms {
+            let bindings = support_pat_variant_payload_bindings(
+                &arm.pat,
+                self.current_impl_self.as_deref(),
+                self.variant_payload_index,
+            );
+            if !bindings.is_empty() {
+                let mut collector = SupportBoundMethodCallVisitor {
+                    bindings: &bindings,
+                    method_index: self.method_index,
+                    calls: &mut self.calls,
+                };
+                collector.visit_expr(&arm.body);
+                if let Some((_if, guard)) = &arm.guard {
+                    collector.visit_expr(guard);
+                }
+            }
+        }
+        visit::visit_expr_match(self, node);
+    }
+}
+
+struct SupportBoundMethodCallVisitor<'a> {
+    bindings: &'a BTreeMap<String, SupportMethodCandidate>,
+    method_index: &'a BTreeMap<String, Vec<SupportMethodCandidate>>,
+    calls: &'a mut BTreeSet<(SupportMethodCandidate, String)>,
+}
+
+impl Visit<'_> for SupportBoundMethodCallVisitor<'_> {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        if let Some(binding) = support_receiver_binding_name(&node.receiver) {
+            if let Some(candidate) = self.bindings.get(&binding) {
+                let method = node.method.to_string();
+                if self
+                    .method_index
+                    .get(&method)
+                    .is_some_and(|candidates| candidates.iter().any(|indexed| indexed == candidate))
+                {
+                    self.calls.insert((candidate.clone(), method));
+                }
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &syn::Macro) {
+        collect_bound_method_calls_from_tokens(
+            node.tokens.clone(),
+            self.bindings,
+            self.method_index,
+            self.calls,
+        );
+        visit::visit_macro(self, node);
+    }
+}
+
+fn collect_bound_method_calls_from_tokens(
+    tokens: TokenStream,
+    bindings: &BTreeMap<String, SupportMethodCandidate>,
+    method_index: &BTreeMap<String, Vec<SupportMethodCandidate>>,
+    calls: &mut BTreeSet<(SupportMethodCandidate, String)>,
+) {
+    let mut previous_ident = None::<String>;
+    let mut receiver_binding = None::<String>;
+    for token in tokens {
+        match token {
+            TokenTree::Ident(ident) => {
+                let ident = ident.to_string();
+                if let Some(binding) = receiver_binding.take() {
+                    if let Some(candidate) = bindings.get(&binding) {
+                        if method_index.get(&ident).is_some_and(|candidates| {
+                            candidates.iter().any(|indexed| indexed == candidate)
+                        }) {
+                            calls.insert((candidate.clone(), ident.clone()));
+                        }
+                    }
+                }
+                previous_ident = Some(ident);
+            }
+            TokenTree::Punct(punct) if punct.as_char() == '.' => {
+                receiver_binding = previous_ident
+                    .take()
+                    .filter(|ident| bindings.contains_key(ident));
+            }
+            TokenTree::Group(group) => {
+                collect_bound_method_calls_from_tokens(
+                    group.stream(),
+                    bindings,
+                    method_index,
+                    calls,
+                );
+                previous_ident = None;
+                receiver_binding = None;
+            }
+            _ => {
+                previous_ident = None;
+                receiver_binding = None;
+            }
+        }
+    }
+}
+
+fn support_pat_variant_payload_bindings(
+    pat: &Pat,
+    current_impl_self: Option<&str>,
+    variant_payload_index: &BTreeMap<(String, String), SupportEnumVariantPayloads>,
+) -> BTreeMap<String, SupportMethodCandidate> {
+    let mut bindings = BTreeMap::new();
+    collect_support_pat_variant_payload_bindings(
+        pat,
+        current_impl_self,
+        variant_payload_index,
+        &mut bindings,
+    );
+    bindings
+}
+
+fn collect_support_pat_variant_payload_bindings(
+    pat: &Pat,
+    current_impl_self: Option<&str>,
+    variant_payload_index: &BTreeMap<(String, String), SupportEnumVariantPayloads>,
+    bindings: &mut BTreeMap<String, SupportMethodCandidate>,
+) {
+    match pat {
+        Pat::TupleStruct(tuple_struct) => {
+            if let Some(payloads) = support_variant_payloads_for_path(
+                &tuple_struct.path,
+                current_impl_self,
+                variant_payload_index,
+            ) {
+                for (index, elem) in tuple_struct.elems.iter().enumerate() {
+                    let Some(candidate) = payloads.unnamed.get(index).and_then(Option::as_ref)
+                    else {
+                        continue;
+                    };
+                    collect_support_payload_binding(elem, candidate, bindings);
+                }
+            }
+        }
+        Pat::Struct(pat_struct) => {
+            if let Some(payloads) = support_variant_payloads_for_path(
+                &pat_struct.path,
+                current_impl_self,
+                variant_payload_index,
+            ) {
+                for field in &pat_struct.fields {
+                    let member = match &field.member {
+                        syn::Member::Named(ident) => ident.to_string(),
+                        syn::Member::Unnamed(index) => index.index.to_string(),
+                    };
+                    let Some(candidate) = payloads.named.get(&member) else {
+                        continue;
+                    };
+                    collect_support_payload_binding(&field.pat, candidate, bindings);
+                }
+            }
+        }
+        Pat::Or(pat_or) => {
+            for case in &pat_or.cases {
+                collect_support_pat_variant_payload_bindings(
+                    case,
+                    current_impl_self,
+                    variant_payload_index,
+                    bindings,
+                );
+            }
+        }
+        Pat::Reference(reference) => collect_support_pat_variant_payload_bindings(
+            &reference.pat,
+            current_impl_self,
+            variant_payload_index,
+            bindings,
+        ),
+        Pat::Paren(paren) => collect_support_pat_variant_payload_bindings(
+            &paren.pat,
+            current_impl_self,
+            variant_payload_index,
+            bindings,
+        ),
+        _ => {}
+    }
+}
+
+fn collect_support_payload_binding(
+    pat: &Pat,
+    candidate: &SupportMethodCandidate,
+    bindings: &mut BTreeMap<String, SupportMethodCandidate>,
+) {
+    match pat {
+        Pat::Ident(ident) => {
+            if ident.by_ref.is_none() && ident.subpat.is_none() {
+                bindings.insert(ident.ident.to_string(), candidate.clone());
+            }
+        }
+        Pat::Reference(reference) => {
+            collect_support_payload_binding(&reference.pat, candidate, bindings);
+        }
+        Pat::Paren(paren) => collect_support_payload_binding(&paren.pat, candidate, bindings),
+        _ => {}
+    }
+}
+
+fn support_variant_payloads_for_path<'a>(
+    path: &syn::Path,
+    current_impl_self: Option<&str>,
+    variant_payload_index: &'a BTreeMap<(String, String), SupportEnumVariantPayloads>,
+) -> Option<&'a SupportEnumVariantPayloads> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let variant_name = segments.last()?;
+    let enum_name = segments.iter().rev().nth(1).and_then(|name| {
+        if name == "Self" {
+            current_impl_self.map(str::to_string)
+        } else {
+            Some(name.clone())
+        }
+    })?;
+    variant_payload_index.get(&(enum_name, variant_name.clone()))
+}
+
+fn support_receiver_binding_name(receiver: &Expr) -> Option<String> {
+    match receiver {
+        Expr::Path(path) if path.qself.is_none() && path.path.segments.len() == 1 => {
+            Some(path.path.segments[0].ident.to_string())
+        }
+        Expr::Reference(reference) => support_receiver_binding_name(&reference.expr),
+        Expr::Paren(paren) => support_receiver_binding_name(&paren.expr),
+        _ => None,
     }
 }
 
@@ -7262,6 +7994,13 @@ fn known_macro_dependency_usage(usage: &TokenUsage, alias: &str, code_name: &str
                 || usage.mentions_ident("serde")
         }
         "thiserror" => usage.mentions_ident("Error") && usage.mentions_ident("error"),
+        "strum" => usage.mentions_ident("EnumIter"),
+        "strum_macros" => {
+            usage.mentions_ident("EnumIter")
+                || usage.mentions_ident("Display")
+                || usage.mentions_ident("EnumString")
+                || usage.mentions_ident("AsRefStr")
+        }
         "bitflags" => usage.mentions_ident("bitflags"),
         "error_support" => error_support_macro_idents()
             .iter()
@@ -7296,6 +8035,13 @@ fn known_macro_dependency_package_mentions(
         "thiserror" => {
             reachable_package_mentions_ident(project, reduced, package, "Error")
                 && reachable_package_mentions_ident(project, reduced, package, "error")
+        }
+        "strum" => reachable_package_mentions_ident(project, reduced, package, "EnumIter"),
+        "strum_macros" => {
+            reachable_package_mentions_ident(project, reduced, package, "EnumIter")
+                || reachable_package_mentions_ident(project, reduced, package, "Display")
+                || reachable_package_mentions_ident(project, reduced, package, "EnumString")
+                || reachable_package_mentions_ident(project, reduced, package, "AsRefStr")
         }
         "bitflags" => reachable_package_mentions_ident(project, reduced, package, "bitflags"),
         "error_support" => error_support_macro_idents()

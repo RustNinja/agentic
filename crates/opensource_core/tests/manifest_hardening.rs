@@ -4458,6 +4458,427 @@ impl PathModel {
 }
 
 #[test]
+fn retains_support_strum_runtime_dependency_for_enum_iter_derive() {
+    let workspace = temp_path("support-strum-runtime-workspace");
+    let output = temp_path("support-strum-runtime-output");
+    let target_dir = temp_path("support-strum-runtime-target");
+    let provider = temp_path("support-strum-runtime-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> provider::Mode {
+    provider::selected()
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+strum = "0.27"
+strum_macros = "0.27"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"use strum_macros::EnumIter;
+
+#[derive(Debug, Clone, Copy, EnumIter)]
+pub enum Mode {
+    Fast,
+    Slow,
+}
+
+pub fn selected() -> Mode {
+    Mode::Fast
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_manifest = read(output.join("support/provider/Cargo.toml"));
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(provider_manifest.contains("strum"), "{provider_manifest}");
+    assert!(
+        provider_manifest.contains("strum_macros"),
+        "{provider_manifest}"
+    );
+    assert!(provider_lib.contains("EnumIter"), "{provider_lib}");
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated strum runtime support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/Cargo.toml:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_manifest,
+        provider_lib,
+    );
+}
+
+#[test]
+fn retains_support_serde_attr_helpers_and_variant_payload_imports() {
+    let workspace = temp_path("support-serde-attr-variant-workspace");
+    let output = temp_path("support-serde-attr-variant-output");
+    let target_dir = temp_path("support-serde-attr-variant-target");
+    let provider = temp_path("support-serde-attr-variant-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> (provider::Event, provider::Model) {
+    provider::selected()
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"mod dynamic_tools;
+
+use crate::dynamic_tools::DynamicToolCallRequest;
+use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub enum Event {
+    DynamicToolCallRequest(DynamicToolCallRequest),
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct Model {
+    #[serde(default, skip_serializing_if = "should_serialize_reasoning_content")]
+    pub content: Option<String>,
+    #[serde(default, deserialize_with = "deserialize_lossy_opt_i64")]
+    pub count: Option<i64>,
+}
+
+fn should_serialize_reasoning_content(content: &Option<String>) -> bool {
+    content.is_some()
+}
+
+fn deserialize_lossy_opt_i64<'de, D>(deserializer: D) -> Result<Option<i64>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let value = Option::<Value>::deserialize(deserializer)?;
+    Ok(value.and_then(|value| value.as_i64()))
+}
+
+pub fn selected() -> (Event, Model) {
+    (
+        Event::DynamicToolCallRequest(DynamicToolCallRequest {
+            call_id: "call".to_string(),
+            arguments: Value::Null,
+        }),
+        Model {
+            content: Some("ok".to_string()),
+            count: Some(1),
+        },
+    )
+}
+"#,
+    );
+    write(
+        provider.join("src/dynamic_tools.rs"),
+        r#"use serde::{Deserialize, Serialize};
+use serde_json::Value;
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct DynamicToolCallRequest {
+    pub call_id: String,
+    pub arguments: Value,
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(
+        provider_lib.contains("use crate::dynamic_tools::DynamicToolCallRequest"),
+        "{provider_lib}"
+    );
+    assert!(
+        provider_lib.contains("should_serialize_reasoning_content"),
+        "{provider_lib}"
+    );
+    assert!(
+        provider_lib.contains("deserialize_lossy_opt_i64"),
+        "{provider_lib}"
+    );
+    assert!(output
+        .join("support/provider/src/dynamic_tools.rs")
+        .exists());
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated serde attr variant support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+    );
+}
+
+#[test]
+fn retains_support_enum_variant_payload_methods_without_widening_same_named_methods() {
+    let workspace = temp_path("support-variant-payload-methods-workspace");
+    let output = temp_path("support-variant-payload-methods-output");
+    let target_dir = temp_path("support-variant-payload-methods-target");
+    let provider = temp_path("support-variant-payload-methods-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> String {
+    provider::selected()
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"pub enum TurnItem {
+    User(UserItem),
+    Agent(AgentItem),
+    Search(SearchItem),
+    Compact(CompactItem),
+    Marker(MarkerItem),
+}
+
+pub struct UserItem;
+pub struct AgentItem;
+pub struct SearchItem;
+pub struct CompactItem;
+pub struct MarkerItem;
+pub struct LooseItem;
+
+impl UserItem {
+    pub fn as_event(&self) -> String {
+        "user".to_string()
+    }
+
+    pub fn helper(&self) -> String {
+        "helper".to_string()
+    }
+}
+
+impl AgentItem {
+    pub fn as_event(&self) -> String {
+        "agent".to_string()
+    }
+}
+
+impl SearchItem {
+    pub fn as_event(&self) -> String {
+        "search".to_string()
+    }
+}
+
+impl CompactItem {
+    pub fn as_event(&self) -> String {
+        "compact".to_string()
+    }
+}
+
+impl MarkerItem {
+    fn unused_private(&self) -> String {
+        "marker".to_string()
+    }
+}
+
+impl LooseItem {
+    pub fn as_event(&self) -> String {
+        "loose".to_string()
+    }
+}
+
+impl TurnItem {
+    pub fn as_events(&self) -> Vec<String> {
+        match self {
+            TurnItem::User(item) => vec![item.as_event()],
+            TurnItem::Agent(item) => vec![item.as_event()],
+            TurnItem::Search(item) => vec![item.as_event()],
+            TurnItem::Compact(item) => vec![item.as_event()],
+            TurnItem::Marker(_) => Vec::new(),
+        }
+    }
+}
+
+pub fn selected() -> String {
+    let user = UserItem;
+    let helper = user.helper();
+    format!("{helper}:{}", TurnItem::User(user).as_events().join(","))
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(provider_lib.contains("impl UserItem"), "{provider_lib}");
+    assert!(
+        provider_lib.contains("pub fn as_event(&self)"),
+        "{provider_lib}"
+    );
+    assert!(
+        provider_lib.contains("pub fn helper(&self)"),
+        "{provider_lib}"
+    );
+    assert!(
+        !provider_lib.contains("LooseItem"),
+        "unrelated same-named method receiver should stay pruned\n{provider_lib}"
+    );
+    assert!(
+        !provider_lib.contains("unused_private"),
+        "unused private inherent methods on live payload types should stay pruned\n{provider_lib}"
+    );
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated variant payload method support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+    );
+}
+
+#[test]
 fn prunes_support_items_named_only_as_macro_variant_tokens() {
     let workspace = temp_path("support-macro-variant-workspace");
     let output = temp_path("support-macro-variant-output");
