@@ -166,6 +166,7 @@ pub struct ReductionEvidence {
     pub unresolved_method_fallbacks: usize,
     pub unresolved_method_candidate_matches: usize,
     pub capped_unresolved_method_fallbacks: usize,
+    pub capped_unresolved_method_details: Vec<CappedMethodFallbackEvidence>,
     pub semantic_edges_applied: usize,
 }
 
@@ -174,8 +175,22 @@ impl ReductionEvidence {
         self.unresolved_method_fallbacks += other.unresolved_method_fallbacks;
         self.unresolved_method_candidate_matches += other.unresolved_method_candidate_matches;
         self.capped_unresolved_method_fallbacks += other.capped_unresolved_method_fallbacks;
+        self.capped_unresolved_method_details
+            .extend(other.capped_unresolved_method_details.iter().cloned());
         self.semantic_edges_applied += other.semantic_edges_applied;
     }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct CappedMethodFallbackEvidence {
+    pub method_name: String,
+    pub candidate_count: usize,
+    pub receiver_candidate_count: usize,
+    pub package: Option<String>,
+    pub module_path: Option<Vec<String>>,
+    pub owner: Option<String>,
+    pub file: Option<PathBuf>,
+    pub start_line: Option<usize>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]

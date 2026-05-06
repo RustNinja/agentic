@@ -3415,13 +3415,14 @@ fn add_reduction_evidence_production_hazards(
         ));
     }
     if evidence.capped_unresolved_method_fallbacks > 0 {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "syntactic_method_fallback_cap",
             "warning",
             format!(
                 "{} unresolved method fallback(s) exceeded the name-only candidate cap; compiler feedback is required to detect any omitted method dependencies",
                 evidence.capped_unresolved_method_fallbacks
             ),
+            capped_method_fallback_details(evidence),
         ));
     }
     if evidence.semantic_edges_applied > 0 {
@@ -3434,6 +3435,35 @@ fn add_reduction_evidence_production_hazards(
             ),
         ));
     }
+}
+
+fn capped_method_fallback_details(
+    evidence: &model::ReductionEvidence,
+) -> Vec<ProductionHazardDetail> {
+    evidence
+        .capped_unresolved_method_details
+        .iter()
+        .map(|detail| ProductionHazardDetail {
+            subject: format!(
+                "{}method={}; local_candidate_methods={}; receiver_candidates={}",
+                detail
+                    .owner
+                    .as_ref()
+                    .map(|owner| format!("{owner}: "))
+                    .unwrap_or_default(),
+                detail.method_name,
+                detail.candidate_count,
+                detail.receiver_candidate_count
+            ),
+            package: detail.package.clone(),
+            module_path: detail.module_path.as_ref().map(|path| path.join("::")),
+            file: detail.file.clone(),
+            start_line: detail.start_line,
+            cfg: None,
+            blocked_idents: vec![detail.method_name.clone()],
+            suggested_cargo_args: Vec::new(),
+        })
+        .collect()
 }
 
 #[derive(Default)]
@@ -8604,6 +8634,60 @@ pub fn entry() -> u32 {
     }
 
     #[test]
+    fn external_associated_calls_do_not_trip_method_fallback_cap() {
+        let root = temp_output("external-associated-call-no-cap-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> String {
+    String::new()
+}
+
+pub struct Worker;
+pub struct Other;
+
+impl Worker {
+    pub fn new() -> Self {
+        Self
+    }
+}
+
+impl Other {
+    pub fn new() -> Self {
+        Self
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("external-associated-call-no-cap-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(report
+            .production
+            .hazards
+            .iter()
+            .all(|hazard| hazard.code != "syntactic_method_fallback_cap"));
+    }
+
+    #[test]
     fn caps_ambiguous_syntactic_method_fallbacks() {
         let root = temp_output("method-fallback-cap-source");
         let output = temp_output("method-fallback-cap-output");
@@ -8657,11 +8741,22 @@ impl Other {
         })
         .expect("reduction should succeed");
 
-        assert!(report
+        let cap_hazard = report
             .production
             .hazards
             .iter()
-            .any(|hazard| hazard.code == "syntactic_method_fallback_cap"));
+            .find(|hazard| hazard.code == "syntactic_method_fallback_cap")
+            .expect("capped fallback hazard should be reported");
+        assert!(cap_hazard.details.iter().any(|detail| {
+            detail.subject
+                == "app::entry: method=run; local_candidate_methods=2; receiver_candidates=0"
+                && detail.package.as_deref() == Some("app")
+                && detail
+                    .file
+                    .as_ref()
+                    .is_some_and(|file| file.ends_with("app/src/lib.rs"))
+                && detail.blocked_idents == vec!["run".to_string()]
+        }));
         let rendered = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(
             !rendered.contains("impl Other"),

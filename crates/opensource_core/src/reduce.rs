@@ -15,8 +15,8 @@ use syn::{
 use toml::Value;
 
 use crate::model::{
-    CallableId, ItemId, ItemKind, Project, ReducedProject, ReductionEvidence, RootId,
-    SemanticDependencies, SemanticReductionHints,
+    CallableId, CappedMethodFallbackEvidence, ItemId, ItemKind, Project, ReducedProject,
+    ReductionEvidence, RootId, SemanticDependencies, SemanticReductionHints,
 };
 
 const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 1;
@@ -3136,7 +3136,15 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
             visitor.add_impl_trait_return_dependencies(&record.item.sig.output, &record.item.block);
             visitor.add_fn_inputs(&record.item.sig.inputs);
             visitor.visit_block(&record.item.block);
-            visitor.dependencies
+            let mut dependencies = visitor.dependencies;
+            annotate_capped_method_fallback_evidence(
+                &mut dependencies.evidence,
+                &record.package,
+                &record.module_path,
+                callable.to_string(),
+                &record.span,
+            );
+            dependencies
         }
         CallableId::Method {
             package,
@@ -3179,7 +3187,15 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
             visitor.add_impl_trait_return_dependencies(&record.item.sig.output, &record.item.block);
             visitor.add_fn_inputs(&record.item.sig.inputs);
             visitor.visit_block(&record.item.block);
-            visitor.dependencies
+            let mut dependencies = visitor.dependencies;
+            annotate_capped_method_fallback_evidence(
+                &mut dependencies.evidence,
+                package,
+                &record.module_path,
+                callable.to_string(),
+                &record.span,
+            );
+            dependencies
         }
     }
 }
@@ -3220,6 +3236,13 @@ fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
     if item_has_opensourced_attr(&record.item) {
         dependencies.extend(item_root_macro_impl_dependencies(project, item));
     }
+    annotate_capped_method_fallback_evidence(
+        &mut dependencies.evidence,
+        &record.package,
+        &record.module_path,
+        item.to_string(),
+        &record.span,
+    );
     dependencies.items.remove(item);
     dependencies
 }
@@ -3546,6 +3569,25 @@ fn dependency_set_from_semantic_dependencies(dependencies: &SemanticDependencies
             semantic_edges_applied: dependencies.len(),
             ..ReductionEvidence::default()
         },
+    }
+}
+
+fn annotate_capped_method_fallback_evidence(
+    evidence: &mut ReductionEvidence,
+    package: &str,
+    module_path: &[String],
+    owner: String,
+    span: &crate::model::SourceSpan,
+) {
+    for detail in &mut evidence.capped_unresolved_method_details {
+        if detail.owner.is_some() {
+            continue;
+        }
+        detail.package = Some(package.to_string());
+        detail.module_path = Some(module_path.to_vec());
+        detail.owner = Some(owner.clone());
+        detail.file = Some(span.file.clone());
+        detail.start_line.get_or_insert(span.start_line);
     }
 }
 
@@ -5043,14 +5085,15 @@ impl<'a> DependencyVisitor<'a> {
         self.dependencies.callables.insert(callable.clone());
     }
 
-    fn add_unresolved_method_fallback(&mut self, method_name: &str) {
-        self.add_unresolved_method_candidates(method_name, &[]);
+    fn add_unresolved_method_fallback(&mut self, method_name: &str, start_line: Option<usize>) {
+        self.add_unresolved_method_candidates(method_name, &[], start_line);
     }
 
     fn add_unresolved_method_candidates(
         &mut self,
         method_name: &str,
         receiver_candidates: &[TypeRef],
+        start_line: Option<usize>,
     ) {
         let receiver_candidates = receiver_candidates
             .iter()
@@ -5089,6 +5132,19 @@ impl<'a> DependencyVisitor<'a> {
             self.dependencies
                 .evidence
                 .capped_unresolved_method_fallbacks += 1;
+            self.dependencies
+                .evidence
+                .capped_unresolved_method_details
+                .push(CappedMethodFallbackEvidence {
+                    method_name: method_name.to_string(),
+                    candidate_count: matches.len(),
+                    receiver_candidate_count: receiver_candidates.len(),
+                    package: None,
+                    module_path: None,
+                    owner: None,
+                    file: None,
+                    start_line,
+                });
             return;
         }
 
@@ -5958,9 +6014,18 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_call_closure_arg_dependencies(call, &resolved_callables);
             self.add_generic_conversion_call_arg_dependencies(call, &resolved_callables);
             self.add_external_call_arg_trait_impls(call);
-            if resolved_callables.is_empty() && path.path.segments.len() >= 2 {
+            if resolved_callables.is_empty()
+                && path.path.segments.len() >= 2
+                && self
+                    .resolver
+                    .resolve_associated_call_type(&path.path)
+                    .is_some()
+            {
                 if let Some(method) = path.path.segments.last() {
-                    self.add_unresolved_method_fallback(&method.ident.to_string());
+                    self.add_unresolved_method_fallback(
+                        &method.ident.to_string(),
+                        Some(method.ident.span().start().line),
+                    );
                 }
             }
             if path.qself.is_none() {
@@ -6223,7 +6288,11 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_closure_arg_dependencies(call, &resolved_methods);
             }
             if !has_resolved_method && !has_trait_bound_method && !has_default_trait_method {
-                self.add_unresolved_method_candidates(&method, &receiver_candidates);
+                self.add_unresolved_method_candidates(
+                    &method,
+                    &receiver_candidates,
+                    Some(call.method.span().start().line),
+                );
                 self.add_trait_impls_for_type_named(&receiver, "Deref");
                 self.add_trait_impls_for_type_named(&receiver, "DerefMut");
                 self.add_extension_trait_dependencies_for_method(&receiver, &method);
@@ -6274,7 +6343,11 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         } else {
             let method = call.method.to_string();
             if !self.add_trait_bound_method_dependencies(&call.receiver, &method) {
-                self.add_unresolved_method_candidates(&method, &receiver_candidates);
+                self.add_unresolved_method_candidates(
+                    &method,
+                    &receiver_candidates,
+                    Some(call.method.span().start().line),
+                );
             }
             self.add_external_method_arg_trait_impls(call);
         }
@@ -7748,6 +7821,19 @@ impl Resolver<'_> {
 
     fn resolve_type_path(&self, path: &Path) -> Option<TypeRef> {
         let raw_segments = path_segments(path);
+        if let Some(type_ref) = self.resolve_type_segments(&raw_segments) {
+            return Some(type_ref);
+        }
+        let segments = self.apply_alias(raw_segments);
+        self.resolve_type_segments(&segments)
+    }
+
+    fn resolve_associated_call_type(&self, path: &Path) -> Option<TypeRef> {
+        let mut raw_segments = path_segments(path);
+        if raw_segments.len() < 2 {
+            return None;
+        }
+        raw_segments.pop();
         if let Some(type_ref) = self.resolve_type_segments(&raw_segments) {
             return Some(type_ref);
         }

@@ -186,6 +186,15 @@ not slicer failures.
   disappeared, only the capped-fallback marker remained, unknown surfaces dropped
   from 7 to 6, and dependency-risk unknown surfaces dropped from 2 to 1 without
   increasing `usage.blocked_by_unknown`.
+- The capped-fallback follow-up made the fallback marker precise enough to find
+  the remaining real source shape: `String::new()` inside
+  `codex-ipc::transport::frame::read_frame` was being treated as an unresolved
+  local `new` method and hit the same-name cap because two local `new` methods
+  existed elsewhere. The reducer now only applies associated-call method-name
+  fallback when the receiver prefix resolves to a local type. The same Litter
+  corpus stayed at 119 generated files and `production_ready=accepted`;
+  `syntactic_method_fallback_cap` disappeared, dependency-risk unknown surfaces
+  dropped to zero, and `usage.blocked_by_unknown` remained zero.
 
 ## Next Rule Targets
 
