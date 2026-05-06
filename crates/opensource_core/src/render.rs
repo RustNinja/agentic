@@ -5449,7 +5449,11 @@ fn known_macro_dependency_target_should_remain(
             reachable_package_mentions_ident(project, reduced, package, leaf)
         }
         "serde" | "serde_derive" => false,
-        "thiserror" if leaf == "Error" => true,
+        "thiserror" if leaf == "Error" => {
+            reachable_package_mentions_ident(project, reduced, package, "Error")
+                && reachable_package_mentions_ident(project, reduced, package, "error")
+        }
+        "thiserror" => false,
         "error_support" if error_support_macro_idents().contains(&leaf.as_str()) => {
             reachable_package_mentions_ident(project, reduced, package, leaf)
         }
@@ -10899,20 +10903,18 @@ fn use_prefix_should_drop(
             if !project_has_module_or_inline(project, &target_package, &target_path) {
                 return false;
             }
-            if is_public_use
-                && public_glob_prefix_exposes_referenced_name(
+            if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {
+                return true;
+            }
+            if is_public_use {
+                return !public_glob_prefix_exposes_referenced_name(
                     project,
                     reduced,
                     package,
                     module_path,
                     &target_package,
                     &target_path,
-                )
-            {
-                return false;
-            }
-            if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {
-                return true;
+                );
             }
             !is_public_use
                 && prefix.first().is_none_or(|first| first != "super")
@@ -10952,19 +10954,6 @@ fn external_use_target_should_drop(
             target,
             is_public_use,
         );
-    }
-
-    if !is_derive_only_external_trait_import(leaf)
-        && target.first().is_some_and(|first| {
-            known_macro_dependency_package_mentions(
-                project,
-                reduced,
-                _package,
-                &dependency_code_name(first),
-            )
-        })
-    {
-        return false;
     }
 
     if external_trait_import_should_remain(

@@ -30,6 +30,27 @@ fn prunes_dead_names_from_grouped_public_reexports() {
 }
 
 #[test]
+fn prunes_public_glob_reexport_when_source_module_is_removed() {
+    let workspace = temp_path("rule-dead-public-glob-workspace");
+    let output = temp_path("rule-dead-public-glob-output");
+    let target_dir = temp_path("rule-dead-public-glob-target");
+    write_dead_public_glob_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("dead public glob rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("dead_public_glob_rule/src/lib.rs"));
+    assert!(lib.contains("pub mod upstream"), "{lib}");
+    assert!(!lib.contains("pub mod dead_api"), "{lib}");
+    assert!(!lib.contains("pub use dead_api::*"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn prunes_removed_public_reexport_alias_even_when_alias_name_is_used_locally() {
     let workspace = temp_path("rule-public-alias-workspace");
     let output = temp_path("rule-public-alias-output");
@@ -164,6 +185,8 @@ fn prunes_module_scoped_imports_used_only_by_dead_items() {
     assert_no_error_hazards(&report.production.hazards);
     let lib = read(output.join("module_import_liveness_rule/src/lib.rs"));
     assert_eq!(lib.matches("use serde::Serialize").count(), 1, "{lib}");
+    assert!(!lib.contains("DeserializeOwned"), "{lib}");
+    assert!(!lib.contains("thiserror::Error"), "{lib}");
     assert!(lib.contains("#[derive(Serialize)]"), "{lib}");
     assert!(lib.contains("pub fn live_client"), "{lib}");
     assert!(!lib.contains("dead_client"), "{lib}");
@@ -3466,6 +3489,36 @@ pub fn selected() -> LiveType {
     );
 }
 
+fn write_dead_public_glob_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "dead_public_glob_rule",
+        r#"use opensourced::opensourced;
+
+pub mod upstream {
+    pub struct Shared;
+}
+
+pub mod dead_api;
+pub use dead_api::*;
+
+#[opensourced]
+pub struct Selected {
+    pub field: upstream::Shared,
+}
+"#,
+    );
+    write(
+        root.join("dead_public_glob_rule/src/dead_api.rs"),
+        r#"pub use crate::upstream::Shared;
+
+pub fn noise() -> u32 {
+    2
+}
+"#,
+    );
+}
+
 fn write_removed_public_alias_rule_fixture(root: &Path) {
     write_workspace(
         root,
@@ -3756,17 +3809,23 @@ fn write_module_scoped_import_liveness_rule_fixture(root: &Path) {
         root,
         "module_import_liveness_rule",
         r#"serde = { version = "1", features = ["derive"] }
+thiserror = "1"
 "#,
         r#"use opensourced::opensourced;
 
 mod client {
-    use serde::Serialize;
+    use serde::{de::DeserializeOwned, Serialize};
+    use thiserror::Error;
 
     pub fn live_client() -> u32 {
         7
     }
 
-    pub fn dead_client<T: Serialize>(value: &T) -> usize {
+    #[derive(Debug, Error)]
+    #[error("dead")]
+    pub struct DeadError;
+
+    pub fn dead_client<T: Serialize + DeserializeOwned>(value: &T) -> usize {
         core::mem::size_of_val(value)
     }
 }

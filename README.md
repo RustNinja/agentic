@@ -121,13 +121,18 @@ For failure mining, use `--batch-roots` or `--random-roots` so the CLI loads the
 workspace and rust-analyzer database once, then emits one generated workspace
 per selected root under the output directory. Each row is written to
 `batch-report.jsonl`; when validation runs and no package scope was supplied,
-the generated `cargo check` is scoped to the root package.
+the generated `cargo check` is scoped to the root package. Batch feedback uses a
+shared target directory under the batch output by default, or the explicit
+`--feedback-target-dir`, so dependency builds are reused across roots.
 
 ```sh
 cargo run -p opensource_cli --bin slicers -- \
   --production \
   --random-roots 10 \
+  --random-root-package my_crate \
   --random-seed 42 \
+  --feedback-loop 2 \
+  --deny-warnings \
   /path/to/source/Cargo.toml /tmp/slicers-mine
 ```
 

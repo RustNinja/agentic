@@ -883,7 +883,25 @@ Root mining should not require source edits. The CLI now accepts explicit
 `RootId` graph roots as `#[opensourced]`, but without writing markers or adding
 temporary macro dependencies to the source checkout. Batch mode reuses one
 parsed project and one analyzer report for many selected roots, then writes one
-output workspace per root plus a JSONL status row. This is the faster failure
-mining path: keep the original repo warm and immutable, run many independent
-slices, classify failures from generated preflight/check reports, and promote
-real failures into generic fixtures or fail-closed hazards.
+output workspace per root plus a JSONL status row. Real Litter mining showed
+two more CLI requirements: random roots need package scoping so a probe does not
+silently pick a huge unrelated workspace surface, and batch feedback must share
+one target directory so external dependency builds are reused instead of
+recompiled per root. This is the faster failure mining path: keep the original
+repo warm and immutable, run many independent slices, classify failures from
+generated preflight/check reports, and promote real failures into generic
+fixtures or fail-closed hazards.
+
+The first package-scoped Litter `codex-ipc` random-10 probe exposed generic
+renderer cleanup issues rather than Litter-specific cases. With a single
+feedback check the batch accepted only 4/10 roots; with two checks, compiler
+diagnostics widened missing method impls and moved the client roots to compile.
+The remaining failures were warning-only under `--deny-warnings`: a public glob
+reexport survived after its source module was removed, and macro dependency
+imports such as `serde::de::DeserializeOwned` and `thiserror::Error` survived
+after their owning dead items were removed. The renderer now drops public glob
+reexports unless the source module is rendered and exposes a referenced public
+name, and macro dependency import retention is leaf-scoped rather than
+package-wide. The rerun accepted all 10/10 selected `codex-ipc` roots with zero
+errors and zero warnings in 252 seconds, using one RA load and one shared batch
+target directory.

@@ -339,6 +339,7 @@ struct CliOptions {
     production_preset: bool,
     root_selectors: Vec<String>,
     random_roots: Option<usize>,
+    random_root_packages: Vec<String>,
     random_seed: u64,
     batch_roots: bool,
     batch_report: Option<PathBuf>,
@@ -501,6 +502,7 @@ where
     let mut production_preset = false;
     let mut root_selectors = Vec::new();
     let mut random_roots = None;
+    let mut random_root_packages = Vec::new();
     let mut random_seed = 0;
     let mut batch_roots = false;
     let mut batch_report = None;
@@ -615,6 +617,16 @@ where
         } else if arg == OsStr::new("--random-roots") {
             random_roots = Some(parse_usize_arg("--random-roots", args.next())?);
             batch_roots = true;
+        } else if arg == OsStr::new("--random-root-package") {
+            let value = args
+                .next()
+                .ok_or("--random-root-package requires a following package name")?;
+            random_root_packages.push(
+                value
+                    .to_str()
+                    .ok_or("--random-root-package value must be valid UTF-8")?
+                    .to_string(),
+            );
         } else if arg == OsStr::new("--random-seed") {
             random_seed = parse_u64_arg("--random-seed", args.next())?;
         } else if arg == OsStr::new("--batch-roots") {
@@ -668,6 +680,7 @@ where
         production_preset,
         root_selectors,
         random_roots,
+        random_root_packages,
         random_seed,
         batch_roots,
         batch_report,
@@ -788,7 +801,7 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
     let mut roots = session.resolve_root_selectors(&options.root_selectors)?;
     if let Some(count) = options.random_roots {
         roots.extend(select_random_roots(
-            session.selectable_roots(),
+            random_root_candidates(session.selectable_roots(), &options.random_root_packages),
             count,
             options.random_seed,
         ));
@@ -807,8 +820,18 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
         roots.len(),
         report_path.display()
     );
+    for root in &roots {
+        println!("  batch root: {root}");
+    }
     for (index, root) in roots.iter().enumerate() {
         let output_root = options.output_root.join(batch_output_dir_name(index, root));
+        println!(
+            "batch {}/{} start: {} -> {}",
+            index + 1,
+            roots.len(),
+            root,
+            output_root.display()
+        );
         let started = std::time::Instant::now();
         let row = match run_batch_root(options, &session, root, &output_root, baseline.as_ref()) {
             Ok(mut row) => {
@@ -841,6 +864,17 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
         append_batch_report_row(&report_path, &row)?;
     }
     Ok(())
+}
+
+fn random_root_candidates(roots: Vec<RootId>, packages: &[String]) -> Vec<RootId> {
+    if packages.is_empty() {
+        return roots;
+    }
+    let packages = packages.iter().map(String::as_str).collect::<BTreeSet<_>>();
+    roots
+        .into_iter()
+        .filter(|root| packages.contains(root.package()))
+        .collect()
 }
 
 fn run_batch_root(
@@ -898,7 +932,7 @@ fn run_batch_root(
 
         let check = check_workspace(CheckOptions {
             manifest_path: output_root.join("Cargo.toml"),
-            target_dir: Some(output_root.join("target-feedback")),
+            target_dir: Some(batch_feedback_target_dir(options)),
             timeout: options.feedback_timeout,
             cargo_args: batch_cargo_args(options, root),
         })?;
@@ -967,6 +1001,13 @@ fn batch_row_from_reports(
 
 fn batch_runs_check(options: &CliOptions) -> bool {
     options.run_check || options.feedback_iterations > 0 || options.feedback_repair_iterations > 0
+}
+
+fn batch_feedback_target_dir(options: &CliOptions) -> PathBuf {
+    options
+        .feedback_target_dir
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("target-feedback"))
 }
 
 fn batch_cargo_args(options: &CliOptions, root: &RootId) -> Vec<String> {
@@ -3856,7 +3897,7 @@ fn usage() -> String {
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
         "[--baseline-target-dir <path>] [--slice-report <path>] [--validation-report <path>] ",
         "[--preflight-report <path>] [--root <selector>] [--roots-file <path>] ",
-        "[--random-roots <n>] [--random-seed <n>] [--batch-roots] [--batch-report <path>] ",
+        "[--random-roots <n>] [--random-root-package <package>] [--random-seed <n>] [--batch-roots] [--batch-report <path>] ",
         "<workspace-root-or-Cargo.toml> <output-root>\n",
         "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn; ",
         "ra-feedback exposes the bounded RA outgoing-call closure explicitly; ",
@@ -4876,6 +4917,8 @@ resolver = "2"
             "--root",
             "app::selected",
             "--batch-roots",
+            "--random-root-package",
+            "codex-ipc",
             "--random-seed",
             "7",
             "workspace",
@@ -4884,6 +4927,7 @@ resolver = "2"
 
         assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
         assert_eq!(options.root_selectors, ["app::selected"]);
+        assert_eq!(options.random_root_packages, ["codex-ipc"]);
         assert!(options.batch_roots);
         assert_eq!(options.random_seed, 7);
     }
