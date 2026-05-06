@@ -63,6 +63,7 @@ pub struct GenerateReport {
     pub targets: Vec<GeneratedTargetReport>,
     pub reachable: Vec<CallableId>,
     pub reachable_items: Vec<ItemId>,
+    pub macro_surfaces: MacroSurfaceReport,
     pub usage: UsageClassificationReport,
     pub source_map: SourceMapReport,
     pub files_written: usize,
@@ -118,7 +119,39 @@ pub struct ProductionHazardDetail {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cfg: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub blocked_idents: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub suggested_cargo_args: Vec<String>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MacroSurfaceReport {
+    pub summary: MacroSurfaceSummary,
+    pub surfaces: Vec<MacroSurface>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct MacroSurfaceSummary {
+    pub total: usize,
+    pub derive_macros: usize,
+    pub attribute_macros: usize,
+    pub helper_attributes: usize,
+    pub macro_invocations: usize,
+    pub macro_blocked: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct MacroSurface {
+    pub kind: String,
+    pub category: String,
+    pub path: String,
+    pub subject: String,
+    pub package: String,
+    pub module_path: Option<String>,
+    pub owner: Option<String>,
+    pub file: Option<PathBuf>,
+    pub start_line: Option<usize>,
+    pub blocked_idents: Vec<String>,
 }
 
 #[derive(Debug, Clone)]
@@ -536,6 +569,7 @@ pub fn generate_with_analyzer_feedback(
     reachable_items.sort();
     let targets = target_report(&project, &packages);
     let source_map = source_map_report(&project, &render_reduced);
+    let macro_surfaces = macro_surface_report(&project, &render_reduced);
     let production =
         production_readiness_report(&analyzer, &project, &render_reduced, &options.output_root);
     let usage = usage_classification_report(&project, &reduced, &usage_decisions, &production);
@@ -550,6 +584,7 @@ pub fn generate_with_analyzer_feedback(
         targets,
         reachable,
         reachable_items,
+        macro_surfaces,
         usage,
         source_map,
         files_written,
@@ -1033,6 +1068,46 @@ fn source_map_report(project: &model::Project, reduced: &model::ReducedProject) 
     SourceMapReport { callables, items }
 }
 
+fn macro_surface_report(project: &Project, reduced: &ReducedProject) -> MacroSurfaceReport {
+    let mut surfaces = syntactic_hazard_counts(project, reduced).macro_surfaces;
+    surfaces.sort_by(|left, right| {
+        (
+            &left.package,
+            &left.module_path,
+            &left.owner,
+            &left.start_line,
+            &left.kind,
+            &left.path,
+        )
+            .cmp(&(
+                &right.package,
+                &right.module_path,
+                &right.owner,
+                &right.start_line,
+                &right.kind,
+                &right.path,
+            ))
+    });
+    let mut summary = MacroSurfaceSummary {
+        total: surfaces.len(),
+        macro_blocked: surfaces
+            .iter()
+            .filter(|surface| surface.category == "macro_blocked")
+            .count(),
+        ..MacroSurfaceSummary::default()
+    };
+    for surface in &surfaces {
+        match surface.kind.as_str() {
+            "derive_macro" => summary.derive_macros += 1,
+            "attribute_macro" => summary.attribute_macros += 1,
+            "helper_attribute" => summary.helper_attributes += 1,
+            "macro_invocation" => summary.macro_invocations += 1,
+            _ => {}
+        }
+    }
+    MacroSurfaceReport { summary, surfaces }
+}
+
 #[derive(Default)]
 struct DeletionBlockerScope {
     global: bool,
@@ -1051,6 +1126,13 @@ impl DeletionBlockerScope {
                 continue;
             }
             for detail in &hazard.details {
+                if !detail.blocked_idents.is_empty() {
+                    scope.idents.extend(detail.blocked_idents.iter().cloned());
+                    continue;
+                }
+                if hazard_uses_precise_detail_blockers(&hazard.code) {
+                    continue;
+                }
                 collect_text_idents(&detail.subject, &mut scope.idents);
                 if let Some(cfg) = &detail.cfg {
                     collect_text_idents(cfg, &mut scope.idents);
@@ -1169,6 +1251,13 @@ fn hazard_blocks_unused_pruning(code: &str) -> bool {
             | "function_pointer_surfaces"
             | "trait_object_surfaces"
             | "dynamic_callback_boundaries"
+    )
+}
+
+fn hazard_uses_precise_detail_blockers(code: &str) -> bool {
+    matches!(
+        code,
+        "custom_attribute_macros" | "custom_derive_macros" | "custom_macro_invocations"
     )
 }
 
@@ -1742,6 +1831,7 @@ fn add_semantic_usage_mapping_hazard(
                 file: Some(record.span.file.clone()),
                 start_line: Some(record.span.start_line),
                 cfg: None,
+                blocked_idents: Vec::new(),
                 suggested_cargo_args: Vec::new(),
             });
         } else if let Some(record) = project.methods.get(callable) {
@@ -1752,6 +1842,7 @@ fn add_semantic_usage_mapping_hazard(
                 file: Some(record.span.file.clone()),
                 start_line: Some(record.span.start_line),
                 cfg: None,
+                blocked_idents: Vec::new(),
                 suggested_cargo_args: Vec::new(),
             });
         }
@@ -1768,6 +1859,7 @@ fn add_semantic_usage_mapping_hazard(
                 file: Some(record.span.file.clone()),
                 start_line: Some(record.span.start_line),
                 cfg: None,
+                blocked_idents: Vec::new(),
                 suggested_cargo_args: Vec::new(),
             });
         }
@@ -1806,6 +1898,7 @@ fn add_semantic_usage_reference_hazard(
                 file: Some(record.span.file.clone()),
                 start_line: Some(record.span.start_line),
                 cfg: None,
+                blocked_idents: Vec::new(),
                 suggested_cargo_args: Vec::new(),
             });
         } else if let Some(record) = project.methods.get(callable) {
@@ -1816,6 +1909,7 @@ fn add_semantic_usage_reference_hazard(
                 file: Some(record.span.file.clone()),
                 start_line: Some(record.span.start_line),
                 cfg: None,
+                blocked_idents: Vec::new(),
                 suggested_cargo_args: Vec::new(),
             });
         }
@@ -1829,6 +1923,7 @@ fn add_semantic_usage_reference_hazard(
                 file: Some(record.span.file.clone()),
                 start_line: Some(record.span.start_line),
                 cfg: None,
+                blocked_idents: Vec::new(),
                 suggested_cargo_args: Vec::new(),
             });
         }
@@ -2009,7 +2104,7 @@ fn non_benign_unresolved_count(
     }
     diagnostics
         .iter()
-        .filter(|diagnostic| diagnostic.category != SemanticUnresolvedCategory::Benign)
+        .filter(|diagnostic| diagnostic.category == SemanticUnresolvedCategory::DependencyRisk)
         .count()
 }
 
@@ -2018,7 +2113,7 @@ fn semantic_unresolved_details(
 ) -> Vec<ProductionHazardDetail> {
     diagnostics
         .into_iter()
-        .filter(|diagnostic| diagnostic.category != SemanticUnresolvedCategory::Benign)
+        .filter(|diagnostic| diagnostic.category == SemanticUnresolvedCategory::DependencyRisk)
         .map(|diagnostic| ProductionHazardDetail {
             subject: format!(
                 "category={}; kind={}; reason={}; owner={}; symbol={}; snippet={}",
@@ -2038,6 +2133,7 @@ fn semantic_unresolved_details(
             file: Some(diagnostic.file.clone()),
             start_line: Some(diagnostic.start_line),
             cfg: None,
+            blocked_idents: diagnostic.symbol.iter().cloned().collect(),
             suggested_cargo_args: Vec::new(),
         })
         .collect()
@@ -2342,6 +2438,7 @@ fn generated_support_build_script_detail(
         file: Some(path),
         start_line: Some(1),
         cfg: None,
+        blocked_idents: Vec::new(),
         suggested_cargo_args: Vec::new(),
     })
 }
@@ -2389,6 +2486,7 @@ fn generated_support_package_syntactic_hazard_counts(
                 package: package.name.clone(),
                 module_path: Vec::new(),
                 file: Some(path),
+                owner: None,
             },
         };
         visitor.visit_file(&syntax);
@@ -2536,6 +2634,7 @@ fn retained_build_script_detail(
         file: Some(path),
         start_line: Some(1),
         cfg: None,
+        blocked_idents: Vec::new(),
         suggested_cargo_args: Vec::new(),
     })
 }
@@ -2676,6 +2775,7 @@ fn manifest_path_dependency_detail(
         file: Some(manifest_path.to_path_buf()),
         start_line: line_key.and_then(|key| manifest_key_line(manifest_path, key)),
         cfg: None,
+        blocked_idents: Vec::new(),
         suggested_cargo_args: Vec::new(),
     }
 }
@@ -3040,6 +3140,7 @@ fn cfg_gate_detail(
         file: span.as_ref().map(|span| span.file.clone()),
         start_line: span.as_ref().map(|span| span.start_line),
         cfg: Some(attribute.to_token_stream().to_string()),
+        blocked_idents: Vec::new(),
         suggested_cargo_args: cfg_gate_suggested_cargo_args(attribute),
     }
 }
@@ -3349,6 +3450,7 @@ struct SyntacticHazardCounts {
     custom_derive_details: Vec<ProductionHazardDetail>,
     custom_macro_invocations: usize,
     custom_macro_invocation_details: Vec<ProductionHazardDetail>,
+    macro_surfaces: Vec<MacroSurface>,
     compile_env_macros: usize,
     compile_env_details: Vec<ProductionHazardDetail>,
     function_pointer_surfaces: usize,
@@ -3390,6 +3492,7 @@ impl SyntacticHazardCounts {
         self.custom_macro_invocations += other.custom_macro_invocations;
         self.custom_macro_invocation_details
             .extend(other.custom_macro_invocation_details);
+        self.macro_surfaces.extend(other.macro_surfaces);
         self.compile_env_macros += other.compile_env_macros;
         self.compile_env_details.extend(other.compile_env_details);
         self.function_pointer_surfaces += other.function_pointer_surfaces;
@@ -3439,6 +3542,7 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
                 project,
                 &record.package,
                 &record.module_path,
+                Some(record.item.sig.ident.to_string()),
             );
             visitor.visit_item_fn(&record.item);
             counts.add(visitor.counts);
@@ -3447,6 +3551,7 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
                 project,
                 callable.package(),
                 &record.module_path,
+                Some(callable_name(callable)),
             );
             visitor.visit_impl_item_fn(&record.item);
             counts.add(visitor.counts);
@@ -3460,6 +3565,7 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
                 project,
                 &record.package,
                 &record.module_path,
+                Some(item.name.clone()),
             );
             visitor.visit_item(&scan_item);
             counts.add(visitor.counts);
@@ -3844,6 +3950,7 @@ fn retained_module_boundary_hazard_counts(
                 package,
                 module_path,
                 file,
+                owner: None,
             },
         };
         for attribute in &item_mod.attrs {
@@ -3871,6 +3978,7 @@ fn syntactic_hazard_visitor_for_location(
     project: &Project,
     package: &str,
     module_path: &[String],
+    owner: Option<String>,
 ) -> SyntacticHazardVisitor {
     let file = source_for_module(project, package, module_path).map(|source| source.path.clone());
     let include_context = project.workspace.packages.get(package).and_then(|package| {
@@ -3888,6 +3996,7 @@ fn syntactic_hazard_visitor_for_location(
             package: package.to_string(),
             module_path: module_path.to_vec(),
             file,
+            owner,
         },
     }
 }
@@ -3915,7 +4024,15 @@ fn syntactic_hazard_visitor_for_inline_location(
             package: package.to_string(),
             module_path: rendered_module_path.to_vec(),
             file,
+            owner: None,
         },
+    }
+}
+
+fn callable_name(callable: &CallableId) -> String {
+    match callable {
+        CallableId::Free { name, .. } => name.clone(),
+        CallableId::Method { method, .. } => method.clone(),
     }
 }
 
@@ -3945,6 +4062,7 @@ struct HazardLocation {
     package: String,
     module_path: Vec<String>,
     file: Option<PathBuf>,
+    owner: Option<String>,
 }
 
 impl HazardLocation {
@@ -3954,6 +4072,14 @@ impl HazardLocation {
         } else {
             format!("{}::{}", self.package, self.module_path.join("::"))
         }
+    }
+
+    fn owner_subject(&self) -> String {
+        let module = self.subject();
+        self.owner
+            .as_ref()
+            .map(|owner| format!("{module}::{owner}"))
+            .unwrap_or(module)
     }
 }
 
@@ -3993,25 +4119,42 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
         let custom_derives = custom_derive_macro_paths(attribute);
         self.counts.custom_derive_macros += custom_derives.len();
         for derive_path in custom_derives {
+            self.record_macro_surface("derive_macro", &derive_path, attribute, Vec::new());
             self.counts
                 .custom_derive_details
                 .push(self.macro_surface_detail(attribute, format!("derive {derive_path}")));
         }
         if attribute_requires_macro_expansion(attribute) {
+            let path = format_path(attribute.path());
+            let blocked_idents =
+                macro_surface_blocked_idents(attribute.path(), &attribute.meta.to_token_stream());
+            self.record_macro_surface(
+                attribute_surface_kind(attribute),
+                &path,
+                attribute,
+                blocked_idents.clone(),
+            );
             self.counts.custom_attribute_macros += 1;
             self.counts
                 .custom_attribute_details
-                .push(self.attribute_macro_detail(attribute));
+                .push(self.attribute_macro_detail(attribute, blocked_idents));
         }
         let nested_macro_paths = cfg_attr_nested_macro_paths(attribute);
         self.counts.custom_attribute_macros += nested_macro_paths.custom_attributes.len();
         self.counts.custom_derive_macros += nested_macro_paths.custom_derives.len();
         for attribute_path in nested_macro_paths.custom_attributes {
+            self.record_macro_surface(
+                "attribute_macro",
+                &attribute_path,
+                attribute,
+                macro_surface_blocked_idents(attribute.path(), &attribute.meta.to_token_stream()),
+            );
             self.counts.custom_attribute_details.push(
                 self.macro_surface_detail(attribute, format!("nested attr {attribute_path}")),
             );
         }
         for derive_path in nested_macro_paths.custom_derives {
+            self.record_macro_surface("derive_macro", &derive_path, attribute, Vec::new());
             self.counts
                 .custom_derive_details
                 .push(self.macro_surface_detail(attribute, format!("nested derive {derive_path}")));
@@ -4047,10 +4190,13 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
             }
         }
         if macro_invocation_requires_expansion_boundary(mac) {
+            let path = format_path(&mac.path);
+            let blocked_idents = macro_surface_blocked_idents(&mac.path, &mac.tokens);
+            self.record_macro_surface("macro_invocation", &path, mac, blocked_idents.clone());
             self.counts.custom_macro_invocations += 1;
             self.counts
                 .custom_macro_invocation_details
-                .push(self.macro_invocation_detail(mac));
+                .push(self.macro_invocation_detail(mac, blocked_idents));
         }
 
         syn::visit::visit_macro(self, mac);
@@ -4083,6 +4229,7 @@ impl SyntacticHazardVisitor {
             file: self.location.file.clone(),
             start_line: Some(attribute.span().start().line),
             cfg: Some(attribute.to_token_stream().to_string()),
+            blocked_idents: Vec::new(),
             suggested_cargo_args: cfg_gate_suggested_cargo_args(attribute),
         }
     }
@@ -4093,18 +4240,31 @@ impl SyntacticHazardVisitor {
         detail
     }
 
-    fn attribute_macro_detail(&self, attribute: &Attribute) -> ProductionHazardDetail {
-        self.macro_surface_detail(
+    fn attribute_macro_detail(
+        &self,
+        attribute: &Attribute,
+        blocked_idents: Vec<String>,
+    ) -> ProductionHazardDetail {
+        self.macro_surface_detail_with_blockers(
             attribute,
             format!(
                 "#[{}]",
                 format_token_stream(&attribute.meta.to_token_stream())
             ),
+            blocked_idents,
         )
     }
 
-    fn macro_invocation_detail(&self, mac: &Macro) -> ProductionHazardDetail {
-        self.macro_surface_detail(mac, format!("{}!", format_path(&mac.path)))
+    fn macro_invocation_detail(
+        &self,
+        mac: &Macro,
+        blocked_idents: Vec<String>,
+    ) -> ProductionHazardDetail {
+        self.macro_surface_detail_with_blockers(
+            mac,
+            format!("{}!", format_path(&mac.path)),
+            blocked_idents,
+        )
     }
 
     fn macro_surface_detail<T: Spanned>(
@@ -4112,9 +4272,41 @@ impl SyntacticHazardVisitor {
         node: &T,
         surface: impl AsRef<str>,
     ) -> ProductionHazardDetail {
+        self.macro_surface_detail_with_blockers(node, surface, Vec::new())
+    }
+
+    fn macro_surface_detail_with_blockers<T: Spanned>(
+        &self,
+        node: &T,
+        surface: impl AsRef<str>,
+        blocked_idents: Vec<String>,
+    ) -> ProductionHazardDetail {
         let mut detail = self.span_detail(node);
-        detail.subject = format!("{}: {}", detail.subject, surface.as_ref());
+        detail.subject = format!("{}: {}", self.location.owner_subject(), surface.as_ref());
+        detail.blocked_idents = blocked_idents;
         detail
+    }
+
+    fn record_macro_surface<T: Spanned>(
+        &mut self,
+        kind: &str,
+        path: &str,
+        node: &T,
+        blocked_idents: Vec<String>,
+    ) {
+        self.counts.macro_surfaces.push(MacroSurface {
+            kind: kind.to_string(),
+            category: "macro_blocked".to_string(),
+            path: path.to_string(),
+            subject: self.location.owner_subject(),
+            package: self.location.package.clone(),
+            module_path: (!self.location.module_path.is_empty())
+                .then(|| self.location.module_path.join("::")),
+            owner: self.location.owner.clone(),
+            file: self.location.file.clone(),
+            start_line: Some(node.span().start().line),
+            blocked_idents,
+        });
     }
 
     fn span_detail<T: Spanned>(&self, node: &T) -> ProductionHazardDetail {
@@ -4126,6 +4318,7 @@ impl SyntacticHazardVisitor {
             file: self.location.file.clone(),
             start_line: Some(node.span().start().line),
             cfg: None,
+            blocked_idents: Vec::new(),
             suggested_cargo_args: Vec::new(),
         }
     }
@@ -4485,6 +4678,138 @@ fn format_token_stream(tokens: &TokenStream) -> String {
     tokens.to_string().replace(" :: ", "::")
 }
 
+fn attribute_surface_kind(attribute: &Attribute) -> &'static str {
+    let Some(first) = attribute.path().segments.first() else {
+        return "attribute_macro";
+    };
+    if helper_attribute_name(&first.ident.to_string()) {
+        "helper_attribute"
+    } else {
+        "attribute_macro"
+    }
+}
+
+fn helper_attribute_name(name: &str) -> bool {
+    matches!(
+        name,
+        "serde"
+            | "serde_with"
+            | "error"
+            | "from"
+            | "source"
+            | "backtrace"
+            | "strum"
+            | "schemars"
+            | "clap"
+            | "arg"
+            | "command"
+            | "builder"
+    )
+}
+
+fn macro_surface_blocked_idents(path: &syn::Path, tokens: &TokenStream) -> Vec<String> {
+    let mut idents = token_stream_idents(tokens);
+    collect_string_literal_path_idents(tokens, &mut idents);
+    for segment in &path.segments {
+        idents.remove(&segment.ident.to_string());
+    }
+    idents.retain(|ident| !macro_surface_meta_word(ident));
+    idents.into_iter().collect()
+}
+
+fn token_stream_idents(tokens: &TokenStream) -> BTreeSet<String> {
+    let mut idents = BTreeSet::new();
+    collect_token_stream_idents(tokens, &mut idents);
+    idents
+}
+
+fn collect_token_stream_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
+    for token in tokens.clone() {
+        match token {
+            proc_macro2::TokenTree::Ident(ident) => {
+                let ident = ident.to_string();
+                if !rust_keyword_or_common_macro_word(&ident) && !macro_surface_meta_word(&ident) {
+                    idents.insert(ident);
+                }
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                collect_token_stream_idents(&group.stream(), idents)
+            }
+            proc_macro2::TokenTree::Punct(_) | proc_macro2::TokenTree::Literal(_) => {}
+        }
+    }
+}
+
+fn collect_string_literal_path_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
+    for token in tokens.clone() {
+        match token {
+            proc_macro2::TokenTree::Literal(literal) => {
+                if let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) {
+                    collect_path_like_string_idents(&literal.value(), idents);
+                }
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                collect_string_literal_path_idents(&group.stream(), idents)
+            }
+            proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
+        }
+    }
+}
+
+fn collect_path_like_string_idents(value: &str, idents: &mut BTreeSet<String>) {
+    if value.is_empty()
+        || value
+            .chars()
+            .any(|ch| !(ch == ':' || ch == '_' || ch.is_ascii_alphanumeric()))
+    {
+        return;
+    }
+    for segment in value.split("::") {
+        if segment
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_alphabetic())
+            && !rust_keyword_or_common_macro_word(segment)
+            && !macro_surface_meta_word(segment)
+        {
+            idents.insert(segment.to_string());
+        }
+    }
+}
+
+fn macro_surface_meta_word(ident: &str) -> bool {
+    matches!(
+        ident,
+        "as" | "bound"
+            | "crate"
+            | "default"
+            | "deny_unknown_fields"
+            | "deserialize_with"
+            | "flatten"
+            | "from"
+            | "getter"
+            | "into"
+            | "camelCase"
+            | "kebab-case"
+            | "lowercase"
+            | "PascalCase"
+            | "rename"
+            | "rename_all"
+            | "SCREAMING_SNAKE_CASE"
+            | "snake_case"
+            | "serialize_with"
+            | "skip"
+            | "skip_deserializing"
+            | "skip_serializing"
+            | "skip_serializing_if"
+            | "tag"
+            | "transparent"
+            | "try_from"
+            | "untagged"
+            | "with"
+    )
+}
+
 fn derive_path_is_builtin(path: &syn::Path) -> bool {
     if path.leading_colon.is_some() || path.segments.len() != 1 {
         return false;
@@ -4617,6 +4942,7 @@ struct GenerateReportJson {
     targets: Vec<GeneratedTargetReportJson>,
     reachable: Vec<String>,
     reachable_items: Vec<String>,
+    macro_surfaces: MacroSurfaceReportJson,
     usage: UsageClassificationReportJson,
     source_map: SourceMapReportJson,
     files_written: usize,
@@ -4647,9 +4973,83 @@ impl GenerateReportJson {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
+            macro_surfaces: MacroSurfaceReportJson::from_report(&report.macro_surfaces),
             usage: UsageClassificationReportJson::from_report(&report.usage),
             source_map: SourceMapReportJson::from_report(&report.source_map),
             files_written: report.files_written,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct MacroSurfaceReportJson {
+    summary: MacroSurfaceSummaryJson,
+    surfaces: Vec<MacroSurfaceJson>,
+}
+
+impl MacroSurfaceReportJson {
+    fn from_report(report: &MacroSurfaceReport) -> Self {
+        Self {
+            summary: MacroSurfaceSummaryJson::from_report(&report.summary),
+            surfaces: report
+                .surfaces
+                .iter()
+                .map(MacroSurfaceJson::from_report)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct MacroSurfaceSummaryJson {
+    total: usize,
+    derive_macros: usize,
+    attribute_macros: usize,
+    helper_attributes: usize,
+    macro_invocations: usize,
+    macro_blocked: usize,
+}
+
+impl MacroSurfaceSummaryJson {
+    fn from_report(summary: &MacroSurfaceSummary) -> Self {
+        Self {
+            total: summary.total,
+            derive_macros: summary.derive_macros,
+            attribute_macros: summary.attribute_macros,
+            helper_attributes: summary.helper_attributes,
+            macro_invocations: summary.macro_invocations,
+            macro_blocked: summary.macro_blocked,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct MacroSurfaceJson {
+    kind: String,
+    category: String,
+    path: String,
+    subject: String,
+    package: String,
+    module_path: Option<String>,
+    owner: Option<String>,
+    file: Option<PathBuf>,
+    start_line: Option<usize>,
+    blocked_idents: Vec<String>,
+}
+
+impl MacroSurfaceJson {
+    fn from_report(surface: &MacroSurface) -> Self {
+        Self {
+            kind: surface.kind.clone(),
+            category: surface.category.clone(),
+            path: surface.path.clone(),
+            subject: surface.subject.clone(),
+            package: surface.package.clone(),
+            module_path: surface.module_path.clone(),
+            owner: surface.owner.clone(),
+            file: surface.file.clone(),
+            start_line: surface.start_line,
+            blocked_idents: surface.blocked_idents.clone(),
         }
     }
 }
@@ -5771,6 +6171,7 @@ fn private_leaf() -> i32 {
                 file: None,
                 start_line: None,
                 cfg: None,
+                blocked_idents: vec!["maybe_macro_helper".to_string()],
                 suggested_cargo_args: Vec::new(),
             }],
         )]);
@@ -5846,6 +6247,109 @@ fn private_leaf() -> i32 {
             !output.join("app/src/safe.rs").exists(),
             "prunable module outside the unknown surface scope should not be rendered",
         );
+    }
+
+    #[test]
+    fn macro_surface_blockers_do_not_retain_macro_names_as_unknowns() {
+        let root = temp_output("macro-surface-blocker-source");
+        let output = temp_output("macro-surface-blocker-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> WireDto {
+    WireDto { value: 1 }
+}
+
+#[derive(serde::Serialize)]
+pub struct WireDto {
+    #[serde(with = "wire_helper")]
+    pub value: u32,
+}
+
+pub mod wire_helper {
+    pub fn serialize<S>(value: &u32, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        serializer.serialize_u32(*value)
+    }
+}
+
+pub fn Serialize() -> u32 {
+    9
+}
+
+pub fn with() -> u32 {
+    9
+}
+
+pub fn unrelated_dead() -> u32 {
+    10
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("generation should succeed");
+
+        let helper_surface = report
+            .macro_surfaces
+            .surfaces
+            .iter()
+            .find(|surface| surface.kind == "helper_attribute" && surface.path == "serde")
+            .expect("serde helper attribute should be indexed as a macro surface");
+        assert_eq!(
+            helper_surface.blocked_idents,
+            vec!["wire_helper".to_string()]
+        );
+
+        let prunable_callables = report
+            .usage
+            .prunable
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        let blocked_callables = report
+            .usage
+            .blocked_by_unknown
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            !blocked_callables.contains("app::Serialize"),
+            "derive macro name `Serialize` must not be retained as blocked_by_unknown: {blocked_callables:?}",
+        );
+        assert!(
+            !blocked_callables.contains("app::with"),
+            "helper meta key `with` must not be retained as blocked_by_unknown: {blocked_callables:?}",
+        );
+        assert!(
+            prunable_callables.contains("app::unrelated_dead"),
+            "unrelated dead code must remain prunable: {prunable_callables:?}",
+        );
+
+        let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(generated.contains("pub mod wire_helper"));
+        assert!(!generated.contains("pub fn unrelated_dead"));
     }
 
     #[test]
@@ -6782,6 +7286,19 @@ theme = []
     }
 
     #[test]
+    fn macro_blocked_unresolved_diagnostics_do_not_create_generic_semantic_hazards() {
+        let diagnostic = semantic_unresolved_diagnostic(
+            SemanticUnresolvedKind::Path,
+            SemanticUnresolvedCategory::MacroBlocked,
+            "attribute helper path",
+        );
+        let diagnostics = vec![&diagnostic];
+
+        assert_eq!(non_benign_unresolved_count(1, &diagnostics), 0);
+        assert!(semantic_unresolved_details(diagnostics).is_empty());
+    }
+
+    #[test]
     fn dependency_risk_unresolved_diagnostics_remain_scoped_hazards() {
         let diagnostic = semantic_unresolved_diagnostic(
             SemanticUnresolvedKind::Path,
@@ -6817,6 +7334,7 @@ theme = []
                 file: Some(PathBuf::from("/tmp/src/lib.rs")),
                 start_line: Some(1),
                 cfg: None,
+                blocked_idents: Vec::new(),
                 suggested_cargo_args: Vec::new(),
             }],
         );
@@ -7633,12 +8151,17 @@ pub fn entry() -> Vec<i32> {
             })
             .expect("custom macro invocation hazard should be reported");
         assert!(hazard.details.iter().any(|detail| {
-            detail.subject == "app: project_macro!"
+            detail.subject == "app::entry: project_macro!"
                 && detail
                     .file
                     .as_ref()
                     .is_some_and(|file| file.ends_with("app/src/lib.rs"))
                 && detail.start_line == Some(5)
+        }));
+        assert!(report.macro_surfaces.surfaces.iter().any(|surface| {
+            surface.kind == "macro_invocation"
+                && surface.path == "project_macro"
+                && surface.owner.as_deref() == Some("entry")
         }));
         assert_eq!(report.production.status, "requires_feedback");
     }
@@ -8492,7 +9015,7 @@ pub struct Payload {
             .find(|hazard| hazard.code == "custom_attribute_macros" && hazard.severity == "warning")
             .expect("custom attribute hazard should be reported");
         assert!(attribute_hazard.details.iter().any(|detail| {
-            detail.subject == "app: #[custom_attr::decorate]"
+            detail.subject == "app::Payload: #[custom_attr::decorate]"
                 && detail
                     .file
                     .as_ref()
@@ -8505,11 +9028,19 @@ pub struct Payload {
             .iter()
             .find(|hazard| hazard.code == "custom_derive_macros" && hazard.severity == "warning")
             .expect("custom derive hazard should be reported");
-        assert!(derive_hazard
-            .details
-            .iter()
-            .any(|detail| detail.subject == "app: derive serde::Serialize"
-                && detail.start_line == Some(9)));
+        assert!(derive_hazard.details.iter().any(|detail| detail.subject
+            == "app::Payload: derive serde::Serialize"
+            && detail.start_line == Some(9)));
+        assert!(report.macro_surfaces.surfaces.iter().any(|surface| {
+            surface.kind == "attribute_macro"
+                && surface.path == "custom_attr::decorate"
+                && surface.owner.as_deref() == Some("Payload")
+        }));
+        assert!(report.macro_surfaces.surfaces.iter().any(|surface| {
+            surface.kind == "derive_macro"
+                && surface.path == "serde::Serialize"
+                && surface.owner.as_deref() == Some("Payload")
+        }));
         assert_eq!(report.production.status, "requires_feedback");
     }
 

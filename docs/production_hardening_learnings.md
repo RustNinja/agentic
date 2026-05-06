@@ -825,3 +825,26 @@ evaluate only the unresolved path's actual `A::B` segments, not every
 identifier inside rendered generic arguments; otherwise benign external paths
 such as `Result<String, LocalError>` and `String::new` inherited local tokens
 from nested syntax and looked risky.
+
+Macro surfaces are now first-class report data instead of only production
+hazard prose. Retained derive macros, attribute/helper attributes, and
+function-like macro invocations are serialized under `macro_surfaces` with
+kind, macro path, owning callable/item, source span, category, and explicit
+`blocked_idents`. The usage-retention path now trusts those explicit blockers
+for custom macro hazards instead of scraping free-form subjects, so macro names
+and helper meta keys such as `Serialize`, `serde`, `error`, `from`, or `with`
+do not retain unrelated graph-unreachable code. Macro hazards still remain
+review surfaces, but only a real helper/path identifier such as
+`#[serde(with = "wire_helper")]` can block an otherwise-unused matching local
+candidate. Macro-blocked RA unresolved nodes are still recorded in
+`analyzer.semantic.unresolved_diagnostics`, but they no longer create duplicate
+generic `semantic_unresolved_*` hazards; project-local dependency-risk
+unresolved nodes still do.
+
+On the refreshed Litter `codex-ipc` random-five probe, feedback cargo check
+passed with zero errors and warnings and the harness reported
+`production_ready=accepted`. The report indexed 74 macro surfaces
+(29 derives, 1 attribute macro, 40 helper attributes, and 4 macro invocations),
+reduced `semantic_unresolved_paths` details to the 2 real local anchors, and
+classified all 1,750 unused callables plus 861 unused items as prunable with
+zero `blocked_by_unknown` entries.
