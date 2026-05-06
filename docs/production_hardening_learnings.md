@@ -791,3 +791,11 @@ format-string captures such as `format!("{PROFILE_INIT}")`, and retained custom
 attributes such as `#[handle_error(LocalError)]`. Those surfaces are now added
 as explicit import-use evidence instead of falling back to raw retained
 function/body tokens.
+
+Parent imports consumed through child modules now use the same structured
+import-use check. A child module with `use super::*` no longer keeps the
+parent's `helper` import only because the child has a local binding named
+`helper`; the parent leaf is retained only when the child actually uses the
+imported name through a retained path, macro token, signature, retained
+attribute, or other explicit surface. Existing `use super::*` cases that need
+parent imports for child signatures and trait-method resolution remain covered.

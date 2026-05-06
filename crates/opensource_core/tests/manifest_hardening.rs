@@ -4082,6 +4082,54 @@ fn retains_parent_imports_used_by_child_super_glob_and_prunes_unused_child_glob(
 }
 
 #[test]
+fn prunes_parent_imports_shadowed_by_child_super_glob_local_binding() {
+    let workspace = temp_path("super-glob-shadowed-parent-workspace");
+    let output = temp_path("super-glob-shadowed-parent-output");
+    let target_dir = temp_path("super-glob-shadowed-parent-target");
+    write_super_glob_shadowed_parent_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let parent = read(output.join("super_glob_shadowed_parent_like/src/parent/mod.rs"));
+    let child = read(output.join("super_glob_shadowed_parent_like/src/parent/child.rs"));
+    let other = read(output.join("super_glob_shadowed_parent_like/src/other.rs"));
+    assert!(parent.contains("FeatureValue"));
+    assert!(
+        !parent.contains("shared::{FeatureValue, helper}")
+            && !parent.contains("shared::{helper, FeatureValue}"),
+        "child local binding named like a parent import must not retain the parent import leaf\n{parent}",
+    );
+    assert!(child.contains("use super::*"));
+    assert!(child.contains("let helper = 1"));
+    assert!(
+        other.contains("helper()"),
+        "the helper target should remain where it is actually used\n{other}",
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated super glob shadowed parent slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nparent/mod.rs:\n{}\nparent/child.rs:\n{}\nother.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        parent,
+        child,
+        other,
+    );
+}
+
+#[test]
 fn prunes_unused_private_struct_fields_and_their_imports() {
     let workspace = temp_path("private-field-workspace");
     let output = temp_path("private-field-output");
@@ -7432,6 +7480,76 @@ pub fn selected(
     seed: Option<&PendingApprovalSeed>,
 ) -> Option<String> {
     seed.map(|seed| format!("{}:{}", approval.id, seed.raw_params))
+}
+"#,
+    );
+}
+
+fn write_super_glob_shadowed_parent_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "super_glob_shadowed_parent_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"pub mod other;
+pub mod parent;
+pub mod shared;
+"#,
+    );
+    write(
+        root.join("src/shared.rs"),
+        r#"pub struct FeatureValue {
+    pub value: i32,
+}
+
+pub fn helper() -> u32 {
+    41
+}
+"#,
+    );
+    write(
+        root.join("src/parent/mod.rs"),
+        r#"use crate::shared::{FeatureValue, helper};
+
+pub mod child;
+"#,
+    );
+    write(
+        root.join("src/parent/child.rs"),
+        r#"use opensourced::opensourced;
+use super::*;
+
+#[opensourced]
+pub fn selected_child() -> FeatureValue {
+    let helper = 1;
+    let _ = helper + 1;
+    FeatureValue { value: 1 }
+}
+"#,
+    );
+    write(
+        root.join("src/other.rs"),
+        r#"use opensourced::opensourced;
+use crate::shared::helper;
+
+#[opensourced]
+pub fn selected_other() -> u32 {
+    helper()
 }
 "#,
     );

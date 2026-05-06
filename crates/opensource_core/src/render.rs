@@ -9153,7 +9153,7 @@ fn reachable_module_import_scope_mentions_unqualified_ident(
         .values()
         .find(|source| source.package == package && source.module_path == module_path)
         .is_some_and(|source| {
-            inline_child_modules_import_scope_mentions_ident(
+            inline_child_modules_import_scope_uses_imported_ident(
                 project,
                 reduced,
                 render_plan,
@@ -9161,7 +9161,6 @@ fn reachable_module_import_scope_mentions_unqualified_ident(
                 module_path,
                 &source.syntax.items,
                 ident,
-                None,
             )
         })
     {
@@ -11084,7 +11083,7 @@ fn reachable_module_import_scope_uses_imported_ident(
             module_should_render(project, reduced, render_plan, package, &source.module_path)
         })
         .any(|source| {
-            child_module_import_scope_mentions_parent_ident(
+            child_module_import_scope_uses_parent_ident(
                 project,
                 reduced,
                 render_plan,
@@ -11092,9 +11091,77 @@ fn reachable_module_import_scope_uses_imported_ident(
                 source.module_path.as_slice(),
                 &source.syntax.items,
                 ident,
-                None,
             )
         })
+}
+
+fn inline_child_modules_import_scope_uses_imported_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+    ident: &str,
+) -> bool {
+    items.iter().any(|item| {
+        let Item::Mod(item_mod) = item else {
+            return false;
+        };
+        let Some((_, child_items)) = &item_mod.content else {
+            return false;
+        };
+
+        let mut child_path = module_path.to_vec();
+        child_path.push(item_mod.ident.to_string());
+        if !module_should_render(project, reduced, render_plan, package, &child_path) {
+            return false;
+        }
+
+        child_module_import_scope_uses_parent_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            &child_path,
+            child_items,
+            ident,
+        )
+    })
+}
+
+fn child_module_import_scope_uses_parent_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    child_module_path: &[String],
+    child_items: &[Item],
+    ident: &str,
+) -> bool {
+    let visible_names = super_import_visible_names_for_parent_ident(child_items, ident);
+    if visible_names.iter().any(|visible_name| {
+        reachable_module_import_scope_uses_imported_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            child_module_path,
+            visible_name,
+        )
+    }) {
+        return true;
+    }
+
+    items_have_super_glob_import(child_items)
+        && reachable_module_import_scope_uses_imported_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            child_module_path,
+            ident,
+        )
 }
 
 fn reachable_module_uses_imported_ident(
