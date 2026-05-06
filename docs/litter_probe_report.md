@@ -204,6 +204,15 @@ not slicer failures.
   `production_ready=accepted`; `custom_macro_invocations` dropped to zero, macro
   invocation surfaces dropped to zero, and `usage.blocked_by_unknown` remained
   zero.
+- The dependency-proven `async_trait` pass removed the one remaining retained
+  custom attribute macro warning from the same corpus. Path-qualified or imported
+  `async_trait` attributes are now treated as a known async trait transform only
+  when package dependency evidence proves the macro source; arbitrary attribute
+  macros remain fail-closed. The batch still generated 119 files, passed with
+  zero preflight errors, zero feedback errors, zero warnings, and
+  `production_ready=accepted`; `custom_attribute_macros` dropped to zero,
+  macro-blocked unknown surfaces dropped to one, and `usage.blocked_by_unknown`
+  remained zero.
 
 ## Next Rule Targets
 
