@@ -4257,6 +4257,7 @@ resolver = "2"
                 start_line: None,
                 cfg: Some("#[cfg(custom_platform)]".to_string()),
                 suggested_cargo_args: Vec::new(),
+                blocked_idents: Vec::new(),
             }],
         }]);
 
@@ -4953,6 +4954,7 @@ pub fn helper() -> usize {
                 start_line: None,
                 cfg: Some(format!("#[cfg(feature = \"{feature}\")]")),
                 suggested_cargo_args: vec!["--features".to_string(), feature.to_string()],
+                blocked_idents: Vec::new(),
             }],
         }
     }
@@ -4970,6 +4972,7 @@ pub fn helper() -> usize {
                 start_line: None,
                 cfg: Some(cfg.to_string()),
                 suggested_cargo_args: Vec::new(),
+                blocked_idents: Vec::new(),
             }],
         }
     }
@@ -4990,6 +4993,7 @@ pub fn helper() -> usize {
                 start_line: None,
                 cfg: Some(format!("#[cfg(feature = \"{feature}\")]")),
                 suggested_cargo_args: vec!["--features".to_string(), feature.to_string()],
+                blocked_idents: Vec::new(),
             }],
         }
     }

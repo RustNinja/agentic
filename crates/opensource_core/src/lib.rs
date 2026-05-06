@@ -1257,7 +1257,12 @@ fn hazard_blocks_unused_pruning(code: &str) -> bool {
 fn hazard_uses_precise_detail_blockers(code: &str) -> bool {
     matches!(
         code,
-        "custom_attribute_macros" | "custom_derive_macros" | "custom_macro_invocations"
+        "custom_attribute_macros"
+            | "custom_derive_macros"
+            | "custom_macro_invocations"
+            | "function_pointer_surfaces"
+            | "trait_object_surfaces"
+            | "dynamic_callback_boundaries"
     )
 }
 
@@ -4237,6 +4242,7 @@ impl SyntacticHazardVisitor {
     fn type_surface_detail<T: Spanned + ToTokens>(&self, node: &T) -> ProductionHazardDetail {
         let mut detail = self.span_detail(node);
         detail.subject = format!("{}: {}", detail.subject, node.to_token_stream());
+        detail.blocked_idents = type_surface_blocked_idents(&node.to_token_stream());
         detail
     }
 
@@ -4715,6 +4721,56 @@ fn macro_surface_blocked_idents(path: &syn::Path, tokens: &TokenStream) -> Vec<S
     }
     idents.retain(|ident| !macro_surface_meta_word(ident));
     idents.into_iter().collect()
+}
+
+fn type_surface_blocked_idents(tokens: &TokenStream) -> Vec<String> {
+    let mut idents = token_stream_idents(tokens);
+    idents.retain(|ident| !type_surface_wrapper_or_builtin_ident(ident));
+    idents.into_iter().collect()
+}
+
+fn type_surface_wrapper_or_builtin_ident(ident: &str) -> bool {
+    matches!(
+        ident,
+        "Arc"
+            | "Box"
+            | "Cell"
+            | "Cow"
+            | "Fn"
+            | "FnMut"
+            | "FnOnce"
+            | "HashMap"
+            | "HashSet"
+            | "Mutex"
+            | "Option"
+            | "Pin"
+            | "Rc"
+            | "RefCell"
+            | "Result"
+            | "RwLock"
+            | "Send"
+            | "Sync"
+            | "UnsafeCell"
+            | "Vec"
+            | "bool"
+            | "char"
+            | "f32"
+            | "f64"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "isize"
+            | "str"
+            | "String"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "usize"
+    )
 }
 
 fn token_stream_idents(tokens: &TokenStream) -> BTreeSet<String> {
@@ -8327,6 +8383,10 @@ pub fn entry(
     let _ = observer.run() + direct();
     (callback, Box::new(Real))
 }
+
+pub fn Box() -> usize {
+    99
+}
 "#,
         );
 
@@ -8347,6 +8407,7 @@ pub fn entry(
         assert!(function_pointer.details.iter().any(|detail| {
             detail.subject == "app: fn () -> usize"
                 && detail.package.as_deref() == Some("app")
+                && detail.blocked_idents.is_empty()
                 && detail
                     .file
                     .as_ref()
@@ -8362,6 +8423,7 @@ pub fn entry(
         assert!(trait_object.details.iter().any(|detail| {
             detail.subject == "app: dyn Worker"
                 && detail.package.as_deref() == Some("app")
+                && detail.blocked_idents == vec!["Worker"]
                 && detail
                     .file
                     .as_ref()
@@ -8379,6 +8441,7 @@ pub fn entry(
         assert!(callback_boundary.details.iter().any(|detail| {
             detail.subject == "app: & dyn Worker"
                 && detail.package.as_deref() == Some("app")
+                && detail.blocked_idents == vec!["Worker"]
                 && detail
                     .file
                     .as_ref()
@@ -8387,11 +8450,23 @@ pub fn entry(
         assert!(callback_boundary.details.iter().any(|detail| {
             detail.subject == "app: fn () -> usize"
                 && detail.package.as_deref() == Some("app")
+                && detail.blocked_idents.is_empty()
                 && detail
                     .file
                     .as_ref()
                     .is_some_and(|file| file.ends_with("app/src/lib.rs"))
         }));
+        let prunable_callables = report
+            .usage
+            .prunable
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            prunable_callables.contains("app::Box"),
+            "dynamic surface wrappers must not become unknown-retention blockers: {prunable_callables:?}",
+        );
         assert_eq!(report.production.status, "requires_feedback");
     }
 
