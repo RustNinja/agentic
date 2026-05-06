@@ -170,6 +170,15 @@ not slicer failures.
   `usage.blocked_by_unknown` remained zero, 1,750 callables and 861 items were
   prunable, and the production report only retained macro and bounded-syntactic
   review hazards.
+- The next fresh-checkout rerun tightened helper-attribute macro modeling
+  without changing the generated slice size or compile result. Serde/thiserror
+  helper attributes are now treated as scoped data-contract/path helpers instead
+  of possible source-rewriting attribute macros unless they name a real helper
+  path. `custom_attribute_macros` dropped from 41 retained details to one real
+  attribute macro surface, `#[async_trait::async_trait]`, while the same
+  `dnakov-litter-codex-ipc-random5` batch stayed at 119 generated files, zero
+  preflight errors, zero feedback errors, zero warnings, and
+  `production_ready=accepted`.
 
 ## Next Rule Targets
 

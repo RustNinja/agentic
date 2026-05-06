@@ -4135,8 +4135,7 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor {
         }
         if attribute_requires_macro_expansion(attribute) {
             let path = format_path(attribute.path());
-            let blocked_idents =
-                macro_surface_blocked_idents(attribute.path(), &attribute.meta.to_token_stream());
+            let blocked_idents = macro_attribute_blocked_idents(attribute);
             self.record_macro_surface(
                 attribute_surface_kind(attribute),
                 &path,
@@ -4886,11 +4885,68 @@ fn helper_attribute_name(name: &str) -> bool {
 fn macro_surface_blocked_idents(path: &syn::Path, tokens: &TokenStream) -> Vec<String> {
     let mut idents = token_stream_idents(tokens);
     collect_string_literal_path_idents(tokens, &mut idents);
+    filter_macro_surface_blocked_idents(path, idents)
+}
+
+fn macro_attribute_blocked_idents(attribute: &Attribute) -> Vec<String> {
+    let mut idents = token_stream_idents(&attribute.meta.to_token_stream());
+    collect_attribute_helper_path_idents(&attribute.meta, &mut idents);
+    filter_macro_surface_blocked_idents(attribute.path(), idents)
+}
+
+fn filter_macro_surface_blocked_idents(
+    path: &syn::Path,
+    mut idents: BTreeSet<String>,
+) -> Vec<String> {
     for segment in &path.segments {
         idents.remove(&segment.ident.to_string());
     }
     idents.retain(|ident| !macro_surface_meta_word(ident));
     idents.into_iter().collect()
+}
+
+fn collect_attribute_helper_path_idents(meta: &Meta, idents: &mut BTreeSet<String>) {
+    match meta {
+        Meta::Path(_) => {}
+        Meta::NameValue(name_value) => {
+            if helper_path_meta_key(&format_path(&name_value.path)) {
+                if let syn::Expr::Lit(expr_lit) = &name_value.value {
+                    if let syn::Lit::Str(literal) = &expr_lit.lit {
+                        collect_path_like_string_idents(&literal.value(), idents);
+                    }
+                }
+            }
+        }
+        Meta::List(list) => {
+            if helper_path_meta_key(&format_path(&list.path)) {
+                if let Ok(literal) = syn::parse2::<syn::LitStr>(list.tokens.clone()) {
+                    collect_path_like_string_idents(&literal.value(), idents);
+                    return;
+                }
+            }
+            let Ok(arguments) =
+                Punctuated::<Meta, syn::Token![,]>::parse_terminated.parse2(list.tokens.clone())
+            else {
+                return;
+            };
+            for nested in arguments {
+                collect_attribute_helper_path_idents(&nested, idents);
+            }
+        }
+    }
+}
+
+fn helper_path_meta_key(key: &str) -> bool {
+    matches!(
+        key,
+        "default"
+            | "deserialize_with"
+            | "serialize_with"
+            | "skip_serializing_if"
+            | "with"
+            | "serde_as"
+            | "value_parser"
+    )
 }
 
 fn type_surface_blocked_idents(tokens: &TokenStream) -> Vec<String> {
@@ -5071,6 +5127,9 @@ fn attribute_requires_macro_expansion(attribute: &Attribute) -> bool {
     let Some(first) = attribute.path().segments.first() else {
         return false;
     };
+    if helper_attribute_name(&first.ident.to_string()) {
+        return !macro_attribute_blocked_idents(attribute).is_empty();
+    }
     !attribute_path_is_builtin_or_inert(&first.ident.to_string())
 }
 
@@ -6504,7 +6563,7 @@ fn private_leaf() -> i32 {
 
 #[opensourced]
 pub fn entry() -> WireDto {
-    WireDto { value: 1, optional: None }
+    WireDto { value: 1, optional: None, kind: 2 }
 }
 
 #[derive(serde::Serialize)]
@@ -6513,6 +6572,8 @@ pub struct WireDto {
     pub value: u32,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub optional: Option<u32>,
+    #[serde(rename = "resultType")]
+    pub kind: u32,
 }
 
 pub mod wire_helper {
@@ -6537,6 +6598,10 @@ pub fn Option() -> u32 {
 }
 
 pub fn is_none() -> u32 {
+    9
+}
+
+pub fn resultType() -> u32 {
     9
 }
 
@@ -6602,9 +6667,24 @@ pub fn unrelated_dead() -> u32 {
             "std helper method `Option::is_none` must not retain local is_none code: {blocked_callables:?}",
         );
         assert!(
+            !blocked_callables.contains("app::resultType"),
+            "serde data strings such as rename/tag values must not retain same-named local code: {blocked_callables:?}",
+        );
+        assert!(
             prunable_callables.contains("app::unrelated_dead"),
             "unrelated dead code must remain prunable: {prunable_callables:?}",
         );
+        let attribute_hazard = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "custom_attribute_macros")
+            .expect("serde helper path should still report a scoped helper blocker");
+        assert!(attribute_hazard.details.iter().all(|detail| {
+            !detail.subject.contains("Option::is_none")
+                && !detail.subject.contains("resultType")
+                && !detail.subject.contains("rename")
+        }));
 
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(generated.contains("pub mod wire_helper"));

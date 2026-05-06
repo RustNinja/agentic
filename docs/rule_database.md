@@ -77,6 +77,7 @@ file.
 | `macro.serde_hook_string_paths.001` | covered | Serde `serialize_with` and `deserialize_with` string helper paths retain the helper functions and prune dead hooks |
 | `macro.serde_default_fn_path.001` | covered | Serde `default = "path"` field helper strings retain the default function even when live constructors do not call it |
 | `macro.serde_with_module_helpers.001` | covered | Serde `with = "module"` helper modules retain both `serialize` and `deserialize` functions plus their trait imports while pruning dead helper modules |
+| `macro.helper_attr.data_string_not_blocker.001` | covered | Serde/thiserror helper-attribute data strings such as rename/tag/error messages do not become macro blockers, while path-valued helper keys still retain the named helper |
 | `dyn.async_trait_object.001` | covered | `async_trait` trait-object API surfaces report hard dynamic-dispatch hazards while method-only macro-expanded trait contents remain pruned until semantic dispatch is proven |
 | `dyn.returned_trait_object_boundary.001` | covered | Returned `Box<dyn Trait>` API surfaces report hard dynamic-dispatch hazards while retaining the trait object type surface |
 | `ffi.extern_called_symbol.001` | covered | Retained calls to foreign `extern "C"` functions keep only the called foreign declarations and prune dead sibling declarations |
@@ -244,6 +245,7 @@ Recent Litter-driven rules came from these source patterns:
 | `dyn.boundary.facade_method_input.001` | `third_party/codex/codex-rs/codex-client/src/transport.rs:18`, `third_party/codex/codex-rs/codex-client/src/sse.rs:12` |
 | `import.facade_glob_selected_symbol.001` | `codex-ipc/src/lib.rs:20`, `codex-ipc/src/lib.rs:37` |
 | `import.external_reexport.ra_unresolved_benign.001` | `codex-ipc/src/protocol/params.rs:1`, `codex-ipc/src/protocol/params.rs:6` |
+| `macro.helper_attr.data_string_not_blocker.001` | `codex-ipc/src/protocol/envelope.rs:27`, `codex-ipc/src/error.rs:6` |
 
 ## Litter Patterns To Convert Next
 
