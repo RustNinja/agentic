@@ -3258,38 +3258,26 @@ fn support_impl_should_render(
     named_items: &BTreeMap<String, Item>,
     live_set: &SupportLiveSet,
 ) -> bool {
-    if let Some(self_name) = support_type_path_leaf(&item_impl.self_ty) {
-        if named_items.contains_key(&self_name) {
-            return live_set.item_names.contains(&self_name)
-                || live_set.public_exports.contains(&self_name);
-        }
-    }
-
-    if let Some((_, trait_path, _)) = &item_impl.trait_ {
-        if let Some(trait_name) = trait_path
-            .segments
-            .last()
-            .map(|segment| segment.ident.to_string())
-        {
-            if named_items.contains_key(&trait_name) {
-                return live_set.item_names.contains(&trait_name)
-                    || live_set.public_exports.contains(&trait_name);
-            }
-        }
-    }
-
-    true
+    support_impl_header_mentions_live_named_item(item_impl, named_items, live_set)
 }
 
-fn support_type_path_leaf(ty: &Type) -> Option<String> {
-    let Type::Path(type_path) = ty else {
-        return None;
-    };
-    type_path
-        .path
-        .segments
-        .last()
-        .map(|segment| segment.ident.to_string())
+fn support_impl_header_mentions_live_named_item(
+    item_impl: &syn::ItemImpl,
+    named_items: &BTreeMap<String, Item>,
+    live_set: &SupportLiveSet,
+) -> bool {
+    let mut tokens = TokenStream::new();
+    item_impl.generics.to_tokens(&mut tokens);
+    item_impl.self_ty.to_tokens(&mut tokens);
+
+    if let Some((_, trait_path, _)) = &item_impl.trait_ {
+        trait_path.to_tokens(&mut tokens);
+    }
+
+    named_items.keys().any(|name| {
+        (live_set.item_names.contains(name) || live_set.public_exports.contains(name))
+            && token_stream_mentions_ident(&tokens, name)
+    })
 }
 
 fn support_named_item_names(items: &[Item]) -> BTreeMap<String, Item> {

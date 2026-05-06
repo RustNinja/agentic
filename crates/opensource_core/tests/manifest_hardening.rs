@@ -3911,6 +3911,170 @@ pub fn dead_marker() -> &'static str {
 }
 
 #[test]
+fn prunes_support_impls_without_live_local_header_types() {
+    let workspace = temp_path("support-dead-impl-workspace");
+    let output = temp_path("support-dead-impl-output");
+    let target_dir = temp_path("support-dead-impl-target");
+    let external = temp_path("support-dead-impl-external");
+    let provider = external.join("provider");
+    let external_core = external.join("external-core");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    provider::LivePayload::new(value).render()
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+external-core = {{ path = "{}" }}
+"#,
+            manifest_path(&external_core)
+        ),
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"mod dead;
+mod live;
+
+pub use live::LivePayload;
+
+impl From<dead::DeadPayload> for external_core::ExternalPayload {
+    fn from(value: dead::DeadPayload) -> Self {
+        external_core::ExternalPayload(value.value)
+    }
+}
+"#,
+    );
+    write(
+        provider.join("src/live.rs"),
+        r#"pub struct LivePayload {
+    value: String,
+}
+
+impl LivePayload {
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+        }
+    }
+
+    pub fn render(self) -> String {
+        self.value
+    }
+}
+"#,
+    );
+    write(
+        provider.join("src/dead.rs"),
+        r#"pub struct DeadPayload {
+    pub value: String,
+}
+"#,
+    );
+    write(
+        external_core.join("Cargo.toml"),
+        r#"[package]
+name = "external-core"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        external_core.join("src/lib.rs"),
+        r#"pub struct ExternalPayload(pub String);
+
+pub fn dead_external() -> &'static str {
+    "dead"
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_manifest = read(output.join("support/provider/Cargo.toml"));
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    let provider_live = read(output.join("support/provider/src/live.rs"));
+    assert!(provider_lib.contains("mod live"), "{provider_lib}");
+    assert!(
+        provider_lib.contains("pub use live::LivePayload"),
+        "{provider_lib}"
+    );
+    assert!(!provider_lib.contains("mod dead"), "{provider_lib}");
+    assert!(
+        !provider_lib.contains("impl From<dead::DeadPayload>"),
+        "{provider_lib}"
+    );
+    assert!(!provider_lib.contains("external_core"), "{provider_lib}");
+    assert!(
+        !provider_manifest.contains("external-core"),
+        "{provider_manifest}"
+    );
+    assert!(
+        provider_live.contains("pub struct LivePayload"),
+        "{provider_live}"
+    );
+    assert!(!output.join("support/provider/src/dead.rs").exists());
+    assert!(!output.join("support/external-core").exists());
+
+    fs::rename(&external, external.with_extension("moved"))
+        .expect("original support packages should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated dead support impl slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/Cargo.toml:\n{}\nprovider/src/lib.rs:\n{}\nprovider/src/live.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_manifest,
+        provider_lib,
+        provider_live,
+    );
+}
+
+#[test]
 fn copies_only_reachable_support_library_modules_and_static_assets() {
     let workspace = temp_path("support-module-closure-workspace");
     let output = temp_path("support-module-closure-output");
