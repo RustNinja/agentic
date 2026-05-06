@@ -6923,6 +6923,131 @@ pub fn entry() -> u32 {
 
     #[test]
     #[cfg(feature = "ra-hir")]
+    fn ra_feedback_follows_newly_discovered_call_targets_transitively() {
+        let root = temp_output("ra-feedback-transitive-source");
+        let output = temp_output("ra-feedback-transitive-reduction");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"
+mod bridge;
+mod leaf;
+mod noise;
+
+use opensourced::opensourced;
+
+pub struct Entry;
+pub struct Bridge;
+pub struct Leaf;
+
+impl Entry {
+    pub fn run(&self, bridge: Bridge, leaf: Leaf) -> u32 {
+        bridge.dispatch(leaf)
+    }
+}
+
+#[opensourced]
+pub fn entry(entry: Entry, bridge: Bridge, leaf: Leaf) -> u32 {
+    entry.run(bridge, leaf)
+}
+"#,
+        );
+        write(
+            root.join("app/src/bridge.rs"),
+            r#"
+use crate::{Bridge, Leaf};
+
+impl Bridge {
+    pub fn dispatch(&self, leaf: Leaf) -> u32 {
+        leaf.finish()
+    }
+}
+"#,
+        );
+        write(
+            root.join("app/src/leaf.rs"),
+            r#"
+use crate::Leaf;
+
+impl Leaf {
+    pub fn finish(&self) -> u32 {
+        7
+    }
+}
+"#,
+        );
+        write(
+            root.join("app/src/noise.rs"),
+            r#"
+pub struct NoiseBridge;
+pub struct NoiseLeaf;
+
+impl NoiseBridge {
+    pub fn dispatch(&self) -> u32 {
+        1
+    }
+}
+
+impl NoiseLeaf {
+    pub fn finish(&self) -> u32 {
+        2
+    }
+}
+"#,
+        );
+
+        let report = generate_with_analyzer(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output.clone(),
+            },
+            AnalyzerMode::RustAnalyzerFeedback,
+        )
+        .expect("RA feedback generation should succeed");
+
+        assert!(report
+            .reachable
+            .iter()
+            .any(|callable| callable.to_string() == "app::Bridge::dispatch"));
+        assert!(report
+            .reachable
+            .iter()
+            .any(|callable| callable.to_string() == "app::Leaf::finish"));
+
+        let lib = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        let bridge = fs::read_to_string(output.join("app/src/bridge.rs")).unwrap();
+        let leaf = fs::read_to_string(output.join("app/src/leaf.rs")).unwrap();
+        assert!(lib.contains("mod bridge;"));
+        assert!(lib.contains("mod leaf;"));
+        assert!(bridge.contains("pub fn dispatch(&self, leaf: Leaf) -> u32"));
+        assert!(leaf.contains("pub fn finish(&self) -> u32"));
+        assert!(!lib.contains("mod noise;"));
+        assert!(!output.join("app/src/noise.rs").exists());
+
+        let target_dir = temp_output("ra-feedback-transitive-target");
+        let status = Command::new("cargo")
+            .arg("check")
+            .arg("--all-targets")
+            .current_dir(&output)
+            .env("CARGO_TARGET_DIR", target_dir)
+            .status()
+            .expect("cargo check should start");
+        assert!(status.success(), "generated workspace should compile");
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
     fn ra_feedback_repeatedly_prunes_selected_same_module_item_sets() {
         struct SliceCase<'a> {
             name: &'a str,

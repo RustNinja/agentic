@@ -39,7 +39,13 @@ does not query call hierarchy.
 outgoing call hierarchy closure without requesting proc-macro/build-script
 discovery. Both paths record project-local call hierarchy edges into the same
 additive reduction hint map, then let the existing `syn` renderer prune items
-outside the retained set.
+outside the retained set. The feedback pass is a queued retained-owner closure:
+selected and syntactically retained callables seed the queue, every RA-resolved
+project-local outgoing call target is added as a dependency, and newly
+discovered callable targets are queried before the closure stops. The semantic
+file inventory then refreshes its retained-owner/file priority from that RA
+closure before spending the bounded file budget, so feedback-discovered support
+files are analyzed ahead of unrelated workspace files.
 Generation reports now expose an explicit usage classification produced through
 a first-class `SlicePlan` and rendered through the same `UsageDecisionIndex`:
 `usage.used`, `usage.unused_candidate`, `usage.blocked_by_unknown`,
@@ -106,8 +112,11 @@ coverage, failed reference queries, and retained RA references that cannot be
 converted to graph edges become explicit unknown-retention signals instead of
 silently becoming deletion permission. Files containing selected
 `#[opensourced]` roots are analyzed first so
-bounded semantic budgets prioritize the active slice. The analyzer now records
-per-file semantic inventory; after reduction, production readiness scopes
+bounded semantic budgets prioritize the active slice. RA feedback-discovered
+call targets are folded back into retained-owner priority before the semantic
+file walk, so bounded analysis follows the same support closure that will be
+rendered. The analyzer now records per-file semantic inventory; after
+reduction, production readiness scopes
 semantic failure/budget/unresolved warnings to retained slice files when those
 file reports are available, then falls back to selected-root file counts and
 finally workspace-wide counts. Production validation therefore relies on

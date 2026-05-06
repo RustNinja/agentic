@@ -321,7 +321,7 @@ fn load_report_with_project(
 #[cfg(feature = "ra-hir")]
 mod rust_analyzer {
     use std::{
-        collections::{BTreeSet, HashMap},
+        collections::{BTreeSet, HashMap, VecDeque},
         ffi::OsStr,
         fs,
         panic::{self, AssertUnwindSafe},
@@ -711,8 +711,20 @@ mod rust_analyzer {
             remaining_method_calls: report.method_call_budget,
             remaining_paths: report.path_budget,
         };
-        let semantic_index = project.map(ProjectSemanticIndex::build);
+        let mut semantic_index = project.map(ProjectSemanticIndex::build);
         let mut hints = SemanticReductionHints::default();
+        let ra_feedback = if feedback_mode == RaFeedbackMode::Enabled {
+            project
+                .zip(semantic_index.as_ref())
+                .map(|(project, index)| {
+                    collect_ra_feedback_edges(database, vfs, project, index, &mut hints)
+                })
+        } else {
+            None
+        };
+        if let Some((project, index)) = project.zip(semantic_index.as_mut()) {
+            index.refresh_retention(project, &hints);
+        }
 
         let mut source_files = vfs
             .iter()
@@ -839,15 +851,6 @@ mod rust_analyzer {
             .map(|(project, index)| {
                 collect_semantic_usage_report(database, &semantics, vfs, project, index, &mut hints)
             });
-        let ra_feedback = if feedback_mode == RaFeedbackMode::Enabled {
-            project
-                .zip(semantic_index.as_ref())
-                .map(|(project, index)| {
-                    collect_ra_feedback_edges(database, vfs, project, index, &mut hints)
-                })
-        } else {
-            None
-        };
         SemanticCollection {
             report,
             hints,
@@ -1200,19 +1203,14 @@ mod rust_analyzer {
             ra_fixture: ra_ap_ide::RaFixtureConfig::default(),
         };
         let mut report = RaFeedbackReport::default();
-        let mut callables = project
-            .functions
-            .keys()
-            .chain(project.methods.keys())
-            .collect::<Vec<_>>();
-        callables.sort();
+        let mut pending = VecDeque::from(index.feedback_owner_callables());
+        let mut queried = BTreeSet::new();
 
-        for callable in callables {
-            let candidates = index
-                .callable_focus_offsets(callable)
-                .into_iter()
-                .filter(|(path, _)| index.is_feedback_owner_path(path))
-                .collect::<Vec<_>>();
+        while let Some(callable) = pending.pop_front() {
+            if !queried.insert(callable.clone()) {
+                continue;
+            }
+            let candidates = index.callable_focus_offsets(&callable);
             if candidates.is_empty() {
                 continue;
             }
@@ -1231,12 +1229,18 @@ mod rust_analyzer {
                     .unwrap_or(call.target.full_range)
                     .start();
                 match index.callable_at_vfs_offset(target_vfs_path, target_offset) {
-                    Some(dependency) if dependency != *callable => {
+                    Some(dependency) if dependency != callable => {
                         report.edges += 1;
                         hints.add_callable_edge(
                             SemanticOwnerId::Callable(callable.clone()),
-                            dependency,
+                            dependency.clone(),
                         );
+                        if !queried.contains(&dependency)
+                            && (project.functions.contains_key(&dependency)
+                                || project.methods.contains_key(&dependency))
+                        {
+                            pending.push_back(dependency);
+                        }
                     }
                     Some(_) => {}
                     None if index.contains_vfs_path(target_vfs_path) => {
@@ -1557,7 +1561,7 @@ mod rust_analyzer {
         fn build(project: &Project) -> Self {
             let mut files = HashMap::new();
             let mut root_files = BTreeSet::new();
-            let retention = syntactic_retention(project);
+            let retention = retained_scope(project, &SemanticReductionHints::default());
             for source in project.files.values() {
                 let path = normalize_fs_path(&source.path);
                 files.entry(path).or_insert_with(|| IndexedSourceFile {
@@ -1615,6 +1619,16 @@ mod rust_analyzer {
             }
         }
 
+        fn refresh_retention(
+            &mut self,
+            project: &Project,
+            semantic_hints: &SemanticReductionHints,
+        ) {
+            let retention = retained_scope(project, semantic_hints);
+            self.retained_files = retention.files;
+            self.retained_owners = retention.owners;
+        }
+
         fn contains_vfs_path(&self, vfs_path: &ra_ap_vfs::VfsPath) -> bool {
             self.indexed_file(vfs_path).is_some()
         }
@@ -1634,10 +1648,6 @@ mod rust_analyzer {
 
         fn is_root_file(&self, vfs_path: &ra_ap_vfs::VfsPath) -> bool {
             normalize_vfs_path(vfs_path).is_some_and(|path| self.root_files.contains(&path))
-        }
-
-        fn is_feedback_owner_path(&self, path: &Path) -> bool {
-            self.root_files.contains(path) || self.retained_files.contains(path)
         }
 
         fn should_collect_semantic_node(
@@ -1669,6 +1679,16 @@ mod rust_analyzer {
                         .find(|item| span_contains(&item.span, line, column))
                         .map(|item| SemanticOwnerId::Item(item.id.clone()))
                 })
+        }
+
+        fn feedback_owner_callables(&self) -> Vec<CallableId> {
+            self.retained_owners
+                .iter()
+                .filter_map(|owner| match owner {
+                    SemanticOwnerId::Callable(callable) => Some(callable.clone()),
+                    SemanticOwnerId::Item(_) => None,
+                })
+                .collect()
         }
 
         fn callable_at_vfs_offset(
@@ -1752,18 +1772,18 @@ mod rust_analyzer {
         }
     }
 
-    struct SyntacticRetention {
+    struct RetainedScope {
         files: BTreeSet<PathBuf>,
         owners: BTreeSet<SemanticOwnerId>,
     }
 
-    fn syntactic_retention(project: &Project) -> SyntacticRetention {
-        reduce::reduce_with_extra_roots(project, &[])
-            .map(|reduced| SyntacticRetention {
+    fn retained_scope(project: &Project, semantic_hints: &SemanticReductionHints) -> RetainedScope {
+        reduce::reduce_with_extra_roots_and_semantics(project, &[], semantic_hints)
+            .map(|reduced| RetainedScope {
                 files: retained_file_paths(project, &reduced),
                 owners: retained_owners(&reduced),
             })
-            .unwrap_or_else(|_| SyntacticRetention {
+            .unwrap_or_else(|_| RetainedScope {
                 files: BTreeSet::new(),
                 owners: BTreeSet::new(),
             })

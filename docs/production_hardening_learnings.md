@@ -738,6 +738,16 @@ collects method/path semantic inventory only inside those retained callable/item
 owners. The regression fixture puts more than the default method-call budget in
 a dead same-file function before the selected entry and proves the retained
 owner still gets queried with zero method-call budget exhaustion.
+The follow-up gap was RA feedback edges discovered after that initial syntactic
+retention pass. A support file can be retained only because outgoing call
+hierarchy finds it, which means the old semantic file walk could still spend
+its file budget on unrelated workspace files before analyzing that support
+owner. RA feedback is now a transitive retained-owner queue: newly discovered
+callable targets are queried for their own outgoing calls, and the resulting
+hint graph refreshes the retained-owner/file priority before bounded semantic
+inventory starts. The regression fixture uses ambiguous method names across
+modules (`dispatch` and `finish`) to prove the closure keeps the real
+two-hop support chain while pruning the unrelated ambiguous methods.
 On the same Litter `codex-ipc-public-mixed-surfaces` random5 probe, this removed
 the retained-slice budget-exhaustion hazards: method calls went from 1000
 queried plus 82 unqueried to 9 queried and 0 unqueried, paths went from 2000
