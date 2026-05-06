@@ -781,3 +781,13 @@ trait import needed for method resolution. The fixture
 `prunes_renamed_imports_shadowed_by_local_binding_when_target_is_retained_elsewhere`
 keeps the target item in the module that actually uses it while pruning the
 shadowed alias from the unrelated module.
+
+Direct private import leaves now follow the same structured rule. A retained
+helper function used in one module no longer keeps
+`use crate::shared::{FeatureValue, helper}` in another module just because that
+module has a local `let helper = ...`. The first broad run exposed the surfaces
+that must remain fail-closed: retained impl headers such as `impl Service`,
+format-string captures such as `format!("{PROFILE_INIT}")`, and retained custom
+attributes such as `#[handle_error(LocalError)]`. Those surfaces are now added
+as explicit import-use evidence instead of falling back to raw retained
+function/body tokens.

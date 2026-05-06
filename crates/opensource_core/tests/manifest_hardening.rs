@@ -1395,6 +1395,51 @@ fn prunes_renamed_imports_shadowed_by_local_binding_when_target_is_retained_else
 }
 
 #[test]
+fn prunes_direct_imports_shadowed_by_local_binding_when_target_is_retained_elsewhere() {
+    let workspace = temp_path("retained-target-shadowed-direct-workspace");
+    let output = temp_path("retained-target-shadowed-direct-output");
+    let target_dir = temp_path("retained-target-shadowed-direct-target");
+    write_retained_target_shadowed_direct_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let feature = read(output.join("retained_target_shadowed_direct_like/src/feature.rs"));
+    let other = read(output.join("retained_target_shadowed_direct_like/src/other.rs"));
+    assert!(feature.contains("pub fn selected_feature"));
+    assert!(feature.contains("let helper = 1"));
+    assert!(
+        !feature.contains("shared::{FeatureValue, helper}")
+            && !feature.contains("shared::{helper, FeatureValue}"),
+        "local binding named like a direct import leaf must not retain the import\n{feature}",
+    );
+    assert!(
+        other.contains("helper()"),
+        "the helper should still be retained where it is actually used\n{other}",
+    );
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated retained-target shadowed direct slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nfeature.rs:\n{}\nother.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        feature,
+        other,
+    );
+}
+
+#[test]
 fn retains_parent_imports_used_by_inline_child_super_glob() {
     let workspace = temp_path("inline-super-workspace");
     let output = temp_path("inline-super-output");
@@ -9428,6 +9473,73 @@ pub fn selected_other() -> OtherValue {
 
 pub struct OtherValue {
     pub value: i32,
+}
+"#,
+    );
+}
+
+fn write_retained_target_shadowed_direct_import_fixture(root: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["retained_target_shadowed_direct_like"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("retained_target_shadowed_direct_like/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "retained_target_shadowed_direct_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("retained_target_shadowed_direct_like/src/lib.rs"),
+        r#"pub mod feature;
+pub mod other;
+pub mod shared;
+"#,
+    );
+    write(
+        root.join("retained_target_shadowed_direct_like/src/feature.rs"),
+        r#"use opensourced::opensourced;
+use crate::shared::{FeatureValue, helper};
+
+#[opensourced]
+pub fn selected_feature() -> FeatureValue {
+    let helper = 1;
+    let _ = helper + 1;
+    FeatureValue { value: 1 }
+}
+"#,
+    );
+    write(
+        root.join("retained_target_shadowed_direct_like/src/other.rs"),
+        r#"use opensourced::opensourced;
+use crate::shared::helper;
+
+#[opensourced]
+pub fn selected_other() -> u32 {
+    helper()
+}
+"#,
+    );
+    write(
+        root.join("retained_target_shadowed_direct_like/src/shared.rs"),
+        r#"pub struct FeatureValue {
+    pub value: i32,
+}
+
+pub fn helper() -> u32 {
+    41
 }
 "#,
     );

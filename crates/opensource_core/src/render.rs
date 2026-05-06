@@ -7582,6 +7582,50 @@ fn retained_impl_attrs_mention_unqualified_ident(
     })
 }
 
+fn retained_impl_headers_mention_unqualified_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
+        return false;
+    };
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+
+    items.iter().any(|item| {
+        let Item::Impl(item_impl) = item else {
+            return false;
+        };
+        let header_should_render =
+            impl_has_reachable_method(project, reduced, package, module_path, item_impl, &aliases)
+                || (item_impl.trait_.is_some()
+                    && impl_should_render(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        item_impl,
+                        &aliases,
+                    ));
+        (header_should_render
+            || root_macro_impl_surface_should_render_for_module(
+                project,
+                reduced,
+                package,
+                module_path,
+                item_impl,
+                &aliases,
+            ))
+            && impl_header_mentions_unqualified_ident(item_impl, ident)
+    })
+}
+
 fn retained_impl_non_fn_items_mention_ident(
     project: &Project,
     reduced: &ReducedProject,
@@ -7908,6 +7952,14 @@ fn collect_impl_header_idents(item_impl: &syn::ItemImpl, idents: &mut BTreeSet<S
     if let Some((_, trait_path, _)) = &item_impl.trait_ {
         collect_token_idents(&trait_path.to_token_stream(), idents);
     }
+}
+
+fn impl_header_mentions_unqualified_ident(item_impl: &syn::ItemImpl, ident: &str) -> bool {
+    token_stream_mentions_unqualified_ident(&item_impl.generics.to_token_stream(), ident)
+        || token_stream_mentions_unqualified_ident(&item_impl.self_ty.to_token_stream(), ident)
+        || item_impl.trait_.as_ref().is_some_and(|(_, trait_path, _)| {
+            token_stream_mentions_unqualified_ident(&trait_path.to_token_stream(), ident)
+        })
 }
 
 fn impl_has_reachable_method(
@@ -10639,14 +10691,25 @@ fn use_target_should_drop(
     }
 
     let leaf_is_used_in_module = target.last().is_some_and(|leaf| {
-        reachable_module_import_scope_mentions_ident(
-            project,
-            reduced,
-            render_plan,
-            package,
-            module_path,
-            leaf,
-        )
+        if is_public_use {
+            reachable_module_import_scope_mentions_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                leaf,
+            )
+        } else {
+            reachable_module_import_scope_uses_imported_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                leaf,
+            )
+        }
     });
     if let Some(callable) = find_use_function(project, &target_package, &target_path) {
         if !is_public_use && !leaf_is_used_in_module {
@@ -10944,6 +11007,13 @@ fn reachable_module_import_scope_uses_imported_ident(
     }
 
     if retained_impl_attrs_mention_unqualified_ident(project, reduced, package, module_path, ident)
+        || retained_impl_headers_mention_unqualified_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
         || retained_impl_non_fn_items_mention_unqualified_ident(
             project,
             reduced,
@@ -10968,6 +11038,14 @@ fn reachable_module_import_scope_uses_imported_ident(
         || retained_foreign_items_mention_unqualified_ident(
             project,
             reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || rendered_attrs_mention_unqualified_ident(
+            project,
+            reduced,
+            render_plan,
             package,
             module_path,
             ident,
@@ -11291,7 +11369,7 @@ impl Visit<'_> for ImportUsageVisitor<'_> {
             .segments
             .first()
             .is_some_and(|segment| segment.ident == self.ident)
-            || token_stream_mentions_unqualified_ident(&item_macro.tokens, self.ident)
+            || token_stream_mentions_ident(&item_macro.tokens, self.ident)
         {
             self.found = true;
         }

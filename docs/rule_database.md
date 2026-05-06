@@ -47,6 +47,7 @@ file.
 | `import.module_scoped.dead_item_only.001` | covered | Module-local imports used only by pruned dead items are removed even when the same symbol is live in another module |
 | `import.external_group_shadowed_local.001` | covered | Private external grouped import leaves are retained only for actual path/macro uses, so local bindings with the same name do not keep dead sibling imports |
 | `import.renamed_alias_shadowed_local.001` | covered | Private renamed import aliases are retained only for actual alias path/macro uses or implicit trait scope effects, so local bindings do not keep aliases to items used only elsewhere |
+| `import.direct_leaf_shadowed_local.001` | covered | Private direct import leaves are retained only for actual retained path/macro/surface uses, so a local binding does not keep an imported function or item that is used only from another module |
 | `dyn.owned.registry.001` | covered | Stored `Box<dyn Trait>` and callback aliases are hard production hazards |
 | `dyn.pruned_private_field.001` | covered | Dynamic hazards on private struct fields that are pruned from the rendered slice do not block production readiness |
 | `struct.private_generic_field_usage.001` | covered | Private generic fields are pruned when other retained fields already keep the struct type parameter used |
