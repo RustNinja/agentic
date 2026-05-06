@@ -147,6 +147,16 @@ not slicer failures.
 - Mobile/UniFFI probes need a source baseline that compiles first. Until the
   source dependency version issue is fixed upstream or pinned in the temp probe,
   these probes are not useful slicer signals.
+- On 2026-05-06, the `dnakov-litter-codex-ipc-random5` production corpus was
+  rerun against a fresh Litter clone with the Codex submodule initialized. The
+  batch selected `Method`, `RequestHandler`, `IpcClientConfig`,
+  `PendingRequests`, and `read_frame`, generated 119 files, passed source
+  baseline, preflight, feedback repair, lockfile, target coverage, and
+  production-ready gates, and finished with zero feedback errors and zero
+  warnings. The post-filter macro report retained real macro blockers but no
+  longer reported benign `Option::is_none` blockers from serde helper attrs;
+  `usage.blocked_by_unknown` stayed at zero while 1,750 callables and 861 items
+  remained prunable.
 
 ## Next Rule Targets
 
