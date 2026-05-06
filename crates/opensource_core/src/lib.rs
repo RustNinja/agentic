@@ -4863,15 +4863,75 @@ enum DynamicCallbackBoundaryKind {
 }
 
 fn dynamic_callback_boundary_kind(ty: &syn::Type) -> Option<DynamicCallbackBoundaryKind> {
+    dynamic_callback_boundary_kind_inner(ty, 0)
+}
+
+fn dynamic_callback_boundary_kind_inner(
+    ty: &syn::Type,
+    depth: usize,
+) -> Option<DynamicCallbackBoundaryKind> {
+    if depth > 8 {
+        return None;
+    }
     match peel_grouped_type(ty) {
         syn::Type::BareFn(_) => Some(DynamicCallbackBoundaryKind::FunctionPointer),
-        syn::Type::Reference(reference) => matches!(
-            peel_grouped_type(&reference.elem),
-            syn::Type::TraitObject(_)
-        )
-        .then_some(DynamicCallbackBoundaryKind::TraitObject),
+        syn::Type::Reference(reference) => match peel_grouped_type(&reference.elem) {
+            syn::Type::TraitObject(_) => Some(DynamicCallbackBoundaryKind::TraitObject),
+            inner => dynamic_callback_boundary_kind_inner(inner, depth + 1),
+        },
+        syn::Type::Slice(slice) => dynamic_callback_boundary_kind_inner(&slice.elem, depth + 1),
+        syn::Type::Array(array) => dynamic_callback_boundary_kind_inner(&array.elem, depth + 1),
+        syn::Type::Tuple(tuple) => tuple
+            .elems
+            .iter()
+            .find_map(|elem| dynamic_callback_boundary_kind_inner(elem, depth + 1)),
+        syn::Type::Path(type_path)
+            if type_path_is_transparent_callback_boundary_wrapper(type_path) =>
+        {
+            type_path
+                .path
+                .segments
+                .last()
+                .and_then(|segment| match &segment.arguments {
+                    syn::PathArguments::AngleBracketed(arguments) => {
+                        arguments.args.iter().find_map(|argument| match argument {
+                            syn::GenericArgument::Type(argument_ty) => {
+                                dynamic_callback_boundary_kind_inner(argument_ty, depth + 1)
+                            }
+                            _ => None,
+                        })
+                    }
+                    syn::PathArguments::None | syn::PathArguments::Parenthesized(_) => None,
+                })
+        }
         _ => None,
     }
+}
+
+fn type_path_is_transparent_callback_boundary_wrapper(type_path: &syn::TypePath) -> bool {
+    if type_path.qself.is_some() {
+        return false;
+    }
+    let Some(last) = type_path.path.segments.last() else {
+        return false;
+    };
+    if !matches!(
+        last.ident.to_string().as_str(),
+        "Option" | "Result" | "Vec" | "Pin"
+    ) {
+        return false;
+    }
+    type_path
+        .path
+        .segments
+        .iter()
+        .take(type_path.path.segments.len().saturating_sub(1))
+        .all(|segment| {
+            matches!(
+                segment.ident.to_string().as_str(),
+                "std" | "core" | "alloc" | "option" | "result" | "vec" | "pin"
+            )
+        })
 }
 
 fn peel_grouped_type(mut ty: &syn::Type) -> &syn::Type {

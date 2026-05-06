@@ -848,3 +848,19 @@ passed with zero errors and warnings and the harness reported
 reduced `semantic_unresolved_paths` details to the 2 real local anchors, and
 classified all 1,750 unused callables plus 861 unused items as prunable with
 zero `blocked_by_unknown` entries.
+
+Transparent selected API wrappers around borrowed callbacks are dynamic
+boundaries, not owned dynamic-dispatch storage. The scanner now treats
+`Option<&dyn Trait>`, `Result<fn(...), E>`, and the same shapes under
+`std`/`core`/`alloc` wrapper paths as `dynamic_callback_boundaries` while still
+leaving `Box<dyn Trait>`, `Arc<dyn Trait>`, returned trait objects, stored
+registries, and local function-pointer surfaces as review-required dynamic
+hazards. This reduces false unknown pressure on UniFFI-style input signatures
+without making owned/stored dispatch look proven.
+
+Pinned real-repo corpora need a source identity guard before expensive builds.
+The UniFFI smoke file pinned `5ccb9a7`, but the local source checkout was
+`b5d9469`; without a guard, the harness spent minutes proving the stale source
+baseline failed. The corpus runner now checks a roots file's top-level
+`commit` against the source checkout and fails fast with a clear mismatch unless
+`--allow-source-commit-mismatch` is set for deliberate stale-corpus probing.

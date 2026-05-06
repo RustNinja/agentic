@@ -242,6 +242,14 @@ def parse_args() -> argparse.Namespace:
         ),
     )
     parser.add_argument(
+        "--allow-source-commit-mismatch",
+        action="store_true",
+        help=(
+            "run pinned roots even when the roots file commit does not match "
+            "the source checkout"
+        ),
+    )
+    parser.add_argument(
         "--stop-on-warning",
         action="store_true",
         help="classify generated warnings as corpus failures",
@@ -285,8 +293,11 @@ def main() -> int:
     cargo_source = resolve_cargo_source(source)
     if not opensourced_path.exists():
         raise SystemExit(f"missing opensourced crate at {opensourced_path}")
-    pinned_batches = load_pinned_batches(args.roots_file) if args.roots_file else []
+    pinned_corpus = load_pinned_corpus(args.roots_file) if args.roots_file else {}
+    pinned_batches = pinned_corpus.get("batches", [])
     args.pinned_batches = pinned_batches
+    args.pinned_corpus = pinned_corpus
+    validate_pinned_corpus_source(args, cargo_source)
 
     failures = 0
     successes = 0
@@ -331,7 +342,7 @@ def validate_args(args: argparse.Namespace) -> None:
         args.feedback_loop = max(args.feedback_loop, 2)
 
 
-def load_pinned_batches(path: Path) -> list[dict[str, Any]]:
+def load_pinned_corpus(path: Path) -> dict[str, Any]:
     data = json.loads(path.read_text())
     batches = data.get("batches") if isinstance(data, dict) else data
     if not isinstance(batches, list) or not batches:
@@ -357,7 +368,34 @@ def load_pinned_batches(path: Path) -> list[dict[str, Any]]:
             isinstance(arg, str) for arg in cargo_args
         ):
             raise SystemExit(f"{path} batch {index} cargo_check_args must be a string list")
-    return batches
+    if isinstance(data, dict):
+        if "commit" in data and not isinstance(data["commit"], str):
+            raise SystemExit(f"{path} top-level commit must be a string")
+        corpus = dict(data)
+        corpus["batches"] = batches
+        return corpus
+    return {"batches": batches}
+
+
+def validate_pinned_corpus_source(args: argparse.Namespace, cargo_source: CargoSource) -> None:
+    corpus = getattr(args, "pinned_corpus", {}) or {}
+    expected_commit = corpus.get("commit")
+    if not expected_commit or args.allow_source_commit_mismatch:
+        return
+    actual_commit = git_full_head(cargo_source.cargo_root)
+    if actual_commit is None:
+        raise SystemExit(
+            f"{args.roots_file} pins commit {expected_commit}, but {cargo_source.cargo_root} is not a git checkout; "
+            "pass --allow-source-commit-mismatch to run anyway"
+        )
+    if actual_commit == expected_commit or actual_commit.startswith(expected_commit):
+        return
+    expected_short = expected_commit[:12]
+    actual_short = actual_commit[:12]
+    raise SystemExit(
+        f"{args.roots_file} pins source commit {expected_short}, but {cargo_source.cargo_root} is at {actual_short}; "
+        "checkout the pinned source or pass --allow-source-commit-mismatch to run a stale-corpus probe"
+    )
 
 
 def resolve_cargo_source(source: Path) -> CargoSource:
@@ -1702,6 +1740,19 @@ def git_head(source: Path) -> str | None:
     git_context = source.parent if source.is_file() else source
     result = subprocess.run(
         ["git", "-C", str(git_context), "rev-parse", "--short", "HEAD"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode != 0:
+        return None
+    return result.stdout.strip()
+
+
+def git_full_head(source: Path) -> str | None:
+    git_context = source.parent if source.is_file() else source
+    result = subprocess.run(
+        ["git", "-C", str(git_context), "rev-parse", "HEAD"],
         check=False,
         capture_output=True,
         text=True,

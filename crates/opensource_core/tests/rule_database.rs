@@ -1922,6 +1922,50 @@ fn reports_direct_callback_boundaries_as_feedback_warnings() {
 }
 
 #[test]
+fn reports_wrapped_borrowed_callback_boundaries_without_trait_object_noise() {
+    let workspace = temp_path("rule-wrapped-callback-boundary-workspace");
+    let output = temp_path("rule-wrapped-callback-boundary-output");
+    let target_dir = temp_path("rule-wrapped-callback-boundary-target");
+    write_wrapped_callback_boundary_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("wrapped callback boundary rule should reduce");
+
+    assert_eq!(report.production.status, "requires_feedback");
+    assert_no_error_hazards(&report.production.hazards);
+    assert!(!report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "trait_object_surfaces"));
+    let boundary = report
+        .production
+        .hazards
+        .iter()
+        .find(|hazard| hazard.code == "dynamic_callback_boundaries")
+        .expect("wrapped direct callback boundaries should be reported");
+    assert!(boundary
+        .details
+        .iter()
+        .any(|detail| detail.subject.contains("Option < & dyn Callback >")));
+    assert!(boundary.details.iter().any(|detail| detail
+        .subject
+        .contains("Result < fn (u32) -> u32 , Error >")));
+
+    let lib = read(output.join("wrapped_callback_boundary_rule/src/lib.rs"));
+    assert!(lib.contains("handler: Option<&dyn Callback>"), "{lib}");
+    assert!(
+        lib.contains("callback: Result<fn(u32) -> u32, Error>"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadCallback"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn ignores_function_pointer_hazards_from_pruned_trait_surface_methods() {
     let workspace = temp_path("rule-pruned-trait-method-hazard-workspace");
     let output = temp_path("rule-pruned-trait-method-hazard-output");
@@ -5039,6 +5083,31 @@ pub trait DeadCallback {
 #[opensourced]
 pub fn selected(handler: &dyn Callback, callback: fn(u32) -> u32) -> u32 {
     handler.handle(callback(7))
+}
+"#,
+    );
+}
+
+fn write_wrapped_callback_boundary_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "wrapped_callback_boundary_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Callback {
+    fn handle(&self, value: u32) -> u32;
+}
+
+pub trait DeadCallback {
+    fn handle(&self) -> u32;
+}
+
+pub struct Error;
+
+#[opensourced]
+pub fn selected(handler: Option<&dyn Callback>, callback: Result<fn(u32) -> u32, Error>) -> u32 {
+    let value = callback.map(|callback| callback(7)).unwrap_or(0);
+    handler.map(|handler| handler.handle(value)).unwrap_or(value)
 }
 "#,
     );

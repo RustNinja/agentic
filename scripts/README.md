@@ -43,8 +43,11 @@ Use `--roots-file path/to/cases.json` for pinned real-repo batches instead of
 random roots. The JSON can contain `batches`, each with a `name`, optional
 `cargo_check_args`, and root selectors using `path` plus `name`, `kind`, `line`,
 `package`, or `target`. When `--roots-file` is provided without
-`--max-batches`, the runner executes all pinned batches. The checked-in Litter
-smoke set can be run against the pinned checkout like this:
+`--max-batches`, the runner executes all pinned batches. If the roots file has
+a top-level `commit`, the runner verifies the source checkout before baseline
+builds so stale corpora fail fast; pass `--allow-source-commit-mismatch` only
+when deliberately running a stale-corpus probe. The checked-in Litter smoke set
+can be run against the pinned checkout like this:
 
 ```sh
 scripts/corpus_feedback_loop.py \
