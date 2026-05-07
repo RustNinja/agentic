@@ -23,7 +23,11 @@ pub struct RepairReport {
     #[serde(default)]
     pub applied_suggestions: usize,
     pub added_dead_code_allows: usize,
+    #[serde(default)]
+    pub added_lint_allows: usize,
     pub deferred_dead_code_allows: usize,
+    #[serde(default)]
+    pub deferred_lint_allows: usize,
     pub skipped_diagnostics: usize,
     #[serde(default)]
     pub changed_files: Vec<RepairFileChange>,
@@ -39,6 +43,8 @@ pub struct RepairFileChange {
     #[serde(default)]
     pub applied_suggestions: usize,
     pub added_dead_code_allows: usize,
+    #[serde(default)]
+    pub added_lint_allows: usize,
 }
 
 impl RepairReport {
@@ -48,6 +54,7 @@ impl RepairReport {
             + self.normalized_paths
             + self.applied_suggestions
             + self.added_dead_code_allows
+            + self.added_lint_allows
     }
 }
 
@@ -59,6 +66,7 @@ pub fn repair_workspace(
     let mut syntax_candidates_by_file = BTreeMap::<PathBuf, Vec<PathSyntaxCandidate>>::new();
     let mut suggestion_candidates_by_file = BTreeMap::<PathBuf, Vec<SuggestionCandidate>>::new();
     let mut allow_candidates_by_file = BTreeMap::<PathBuf, Vec<AllowDeadCodeCandidate>>::new();
+    let mut lint_allow_candidates_by_file = BTreeMap::<PathBuf, Vec<AllowLintCandidate>>::new();
     let mut skipped_diagnostics = 0;
 
     for diagnostic in &options.diagnostics {
@@ -101,7 +109,10 @@ pub fn repair_workspace(
         }
 
         let code = diagnostic.code.as_deref();
-        if !matches!(code, Some("dead_code" | "unused_imports" | "unused_macros")) {
+        if !matches!(
+            code,
+            Some("dead_code" | "unused_imports" | "unused_macros" | "private_interfaces")
+        ) {
             skipped_diagnostics += 1;
             continue;
         }
@@ -183,6 +194,15 @@ pub fn repair_workspace(
                         repaired = true;
                     }
                 }
+                Some("private_interfaces") => {
+                    lint_allow_candidates_by_file.entry(path).or_default().push(
+                        AllowLintCandidate {
+                            line_start: span.line_start as usize,
+                            lint: "private_interfaces".to_string(),
+                        },
+                    );
+                    repaired = true;
+                }
                 _ => {}
             }
         }
@@ -219,7 +239,7 @@ pub fn repair_workspace(
         if applied_suggestions > 0 {
             report.applied_suggestions += applied_suggestions;
             suggestion_changed_files.insert(path.clone());
-            record_file_change(&mut report, &path, 0, 0, 0, applied_suggestions, 0);
+            record_file_change(&mut report, &path, 0, 0, 0, applied_suggestions, 0, 0);
             fs::write(path, source)?;
         }
     }
@@ -248,7 +268,7 @@ pub fn repair_workspace(
             }
         }
         if normalized_paths > 0 {
-            record_file_change(&mut report, &path, 0, 0, normalized_paths, 0, 0);
+            record_file_change(&mut report, &path, 0, 0, normalized_paths, 0, 0, 0);
         }
         fs::write(path, source)?;
     }
@@ -285,7 +305,7 @@ pub fn repair_workspace(
             }
         }
         if removed_imports > 0 {
-            record_file_change(&mut report, &path, 0, removed_imports, 0, 0, 0);
+            record_file_change(&mut report, &path, 0, removed_imports, 0, 0, 0, 0);
         }
         fs::write(path, source)?;
     }
@@ -307,13 +327,17 @@ pub fn repair_workspace(
             }
         }
         if removed_items > 0 {
-            record_file_change(&mut report, &path, removed_items, 0, 0, 0, 0);
+            record_file_change(&mut report, &path, removed_items, 0, 0, 0, 0, 0);
         }
         fs::write(path, source)?;
     }
 
     if has_structural_repairs {
         report.deferred_dead_code_allows = allow_candidates_by_file
+            .values()
+            .map(std::vec::Vec::len)
+            .sum();
+        report.deferred_lint_allows = lint_allow_candidates_by_file
             .values()
             .map(std::vec::Vec::len)
             .sum();
@@ -333,7 +357,31 @@ pub fn repair_workspace(
                 }
             }
             if added_allows > 0 {
-                record_file_change(&mut report, &path, 0, 0, 0, 0, added_allows);
+                record_file_change(&mut report, &path, 0, 0, 0, 0, added_allows, 0);
+            }
+            fs::write(path, source)?;
+        }
+        for (path, mut candidates) in lint_allow_candidates_by_file {
+            if !path.exists() {
+                continue;
+            }
+            candidates.sort_by(|left, right| {
+                right
+                    .line_start
+                    .cmp(&left.line_start)
+                    .then_with(|| right.lint.cmp(&left.lint))
+            });
+            candidates.dedup();
+            let mut source = fs::read_to_string(&path)?;
+            let mut added_allows = 0;
+            for candidate in candidates {
+                if add_lint_allow_before_line(&mut source, &candidate) {
+                    report.added_lint_allows += 1;
+                    added_allows += 1;
+                }
+            }
+            if added_allows > 0 {
+                record_file_change(&mut report, &path, 0, 0, 0, 0, 0, added_allows);
             }
             fs::write(path, source)?;
         }
@@ -350,6 +398,7 @@ fn record_file_change(
     normalized_paths: usize,
     applied_suggestions: usize,
     added_dead_code_allows: usize,
+    added_lint_allows: usize,
 ) {
     if let Some(change) = report
         .changed_files
@@ -361,6 +410,7 @@ fn record_file_change(
         change.normalized_paths += normalized_paths;
         change.applied_suggestions += applied_suggestions;
         change.added_dead_code_allows += added_dead_code_allows;
+        change.added_lint_allows += added_lint_allows;
         return;
     }
     report.changed_files.push(RepairFileChange {
@@ -370,6 +420,7 @@ fn record_file_change(
         normalized_paths,
         applied_suggestions,
         added_dead_code_allows,
+        added_lint_allows,
     });
 }
 
@@ -402,6 +453,12 @@ struct ImportSpanCandidate {
 #[derive(Clone, Debug, Eq, PartialEq)]
 struct AllowDeadCodeCandidate {
     line_start: usize,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct AllowLintCandidate {
+    line_start: usize,
+    lint: String,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]
@@ -1085,6 +1142,39 @@ fn add_dead_code_allow_for_enclosing_type(
     true
 }
 
+fn add_lint_allow_before_line(source: &mut String, candidate: &AllowLintCandidate) -> bool {
+    let mut lines = source.lines().map(str::to_string).collect::<Vec<_>>();
+    let Some(mut cursor) = candidate.line_start.checked_sub(1) else {
+        return false;
+    };
+    if lines.is_empty() {
+        return false;
+    }
+    if cursor >= lines.len() {
+        cursor = lines.len() - 1;
+    }
+
+    let mut insert_at = cursor;
+    while insert_at > 0 && line_is_outer_attr_or_doc(&lines[insert_at - 1]) {
+        insert_at -= 1;
+    }
+    let lint_attr = format!("allow({})", candidate.lint);
+    if lines[insert_at..=cursor]
+        .iter()
+        .any(|line| line.contains(&lint_attr))
+    {
+        return false;
+    }
+
+    let indent = lines
+        .get(insert_at)
+        .map(|line| line.chars().take_while(|ch| ch.is_whitespace()).collect())
+        .unwrap_or_else(String::new);
+    lines.insert(insert_at, format!("{indent}#[{lint_attr}]"));
+    *source = join_lines(lines);
+    true
+}
+
 fn line_starts_type_item(line: &str) -> bool {
     let trimmed = line.trim_start();
     let rest = strip_visibility_prefix(trimmed);
@@ -1705,6 +1795,39 @@ mod tests {
         assert!(source.contains("Fast"));
         assert!(source.contains("Slow"));
         assert!(source.contains("Mode::Fast"));
+    }
+
+    #[test]
+    fn allows_private_interface_lints_on_reported_item() {
+        let root = temp_output("repair-private-interface");
+        let file = root.join("src/lib.rs");
+        write(
+            &file,
+            "mod connect {\n    pub(super) struct ClientHandler;\n}\n\npub struct SshClient {\n    pub(crate) handle: connect::ClientHandler,\n}\n",
+        );
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![warning(
+                "private_interfaces",
+                "type `ClientHandler` is more private than the item `SshClient::handle`",
+                "src/lib.rs",
+                6,
+                5,
+                47,
+                "    pub(crate) handle: connect::ClientHandler,",
+            )],
+        })
+        .unwrap();
+
+        assert_eq!(report.added_lint_allows, 1);
+        assert_eq!(report.total_changes(), 1);
+        assert_eq!(report.changed_files.len(), 1);
+        assert_eq!(report.changed_files[0].added_lint_allows, 1);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(source.contains(
+            "pub struct SshClient {\n    #[allow(private_interfaces)]\n    pub(crate) handle"
+        ));
     }
 
     #[test]

@@ -947,3 +947,13 @@ propagate receiver type, receiver candidates, return type arguments, result
 types, and destructuring evidence. The same Litter module-root slice now keeps
 `HandoffManager::reset`, removes unrelated code, and passes feedback cargo
 check with zero errors and zero warnings.
+
+The `codex-mobile-client` SSH probes found a warning-only acceptance blocker:
+two independent roots compiled after slicing but failed `--deny-warnings`
+because a retained public field exposed a child-module-private handler type,
+triggering rustc's `private_interfaces` lint. This is not a missing dependency
+edge and widening would only add redundant code. The repair loop now handles
+`private_interfaces` generically by inserting a scoped lint allow at rustc's
+primary span, tracked separately from dead-code allows in the repair report.
+Both mined SSH roots now pass feedback cargo check with zero warnings while
+preserving the narrow slice.
