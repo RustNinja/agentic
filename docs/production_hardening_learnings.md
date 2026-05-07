@@ -933,3 +933,17 @@ the acceptance gate. On the same random-five seed, the shell-preflight helper
 dropped from 989 files written to 5, and the full batch accepted 5/5 roots with
 zero errors and zero warnings; generated workspaces ranged from 5 to 18 written
 files instead of roughly 989 to 997.
+
+The `codex-bridge::voice_handoff(Mod)` probe exposed why capped syntactic
+method fallback must not become a broad method-name blocker. After narrowing
+RA-unmapped retention, `manager.reset()` failed because the local `manager`
+binding came from `unsafe { arc_from_raw(handle) }` and the dependency visitor
+did not infer the tail expression type through `unsafe` blocks. Treating
+`syntactic_method_fallback_cap` as a blocker for every recorded method name
+would retain common names such as `new`, `insert`, `join`, and `push`, causing
+large over-retention and slow planning. The generic fix is to improve receiver
+type evidence instead: blocks and unsafe blocks with tail expressions now
+propagate receiver type, receiver candidates, return type arguments, result
+types, and destructuring evidence. The same Litter module-root slice now keeps
+`HandoffManager::reset`, removes unrelated code, and passes feedback cargo
+check with zero errors and zero warnings.

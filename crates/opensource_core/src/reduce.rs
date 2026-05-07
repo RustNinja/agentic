@@ -4155,6 +4155,12 @@ impl<'a> DependencyVisitor<'a> {
                 self.resolver.field_type(&receiver, &field.member)
             }
             Expr::Struct(expr) => self.resolver.resolve_type_path(&expr.path),
+            Expr::Block(expr) => {
+                final_block_expression(&expr.block).and_then(|expr| self.receiver_type(expr))
+            }
+            Expr::Unsafe(expr) => {
+                final_block_expression(&expr.block).and_then(|expr| self.receiver_type(expr))
+            }
             Expr::Reference(reference) => self.receiver_type(&reference.expr),
             Expr::Paren(paren) => self.receiver_type(&paren.expr),
             _ => None,
@@ -4224,6 +4230,16 @@ impl<'a> DependencyVisitor<'a> {
             Expr::Struct(expr) => {
                 if let Some(type_ref) = self.resolver.resolve_type_path(&expr.path) {
                     candidates.extend(self.resolver.type_ref_candidates(&type_ref));
+                }
+            }
+            Expr::Block(expr) => {
+                if let Some(tail) = final_block_expression(&expr.block) {
+                    candidates.extend(self.receiver_type_candidates(tail));
+                }
+            }
+            Expr::Unsafe(expr) => {
+                if let Some(tail) = final_block_expression(&expr.block) {
+                    candidates.extend(self.receiver_type_candidates(tail));
                 }
             }
             Expr::Reference(reference) => {
@@ -4317,6 +4333,16 @@ impl<'a> DependencyVisitor<'a> {
             }
             Expr::Try(expr) => {
                 self.collect_pattern_bindings_from_expr(pattern, &expr.expr, bindings)
+            }
+            Expr::Block(expr) => {
+                if let Some(tail) = final_block_expression(&expr.block) {
+                    self.collect_pattern_bindings_from_expr(pattern, tail, bindings);
+                }
+            }
+            Expr::Unsafe(expr) => {
+                if let Some(tail) = final_block_expression(&expr.block) {
+                    self.collect_pattern_bindings_from_expr(pattern, tail, bindings);
+                }
             }
             Expr::Reference(reference) => {
                 self.collect_pattern_bindings_from_expr(pattern, &reference.expr, bindings)
@@ -4504,6 +4530,12 @@ impl<'a> DependencyVisitor<'a> {
                 .type_from_value_path(&path.path)
                 .or_else(|| self.resolver.resolve_type_path(&path.path)),
             Expr::Struct(expr) => self.resolver.resolve_type_path(&expr.path),
+            Expr::Block(expr) => {
+                final_block_expression(&expr.block).and_then(|expr| self.infer_expr_type(expr))
+            }
+            Expr::Unsafe(expr) => {
+                final_block_expression(&expr.block).and_then(|expr| self.infer_expr_type(expr))
+            }
             Expr::Reference(reference) => self.infer_expr_type(&reference.expr),
             Expr::Paren(paren) => self.infer_expr_type(&paren.expr),
             _ => None,
@@ -5523,6 +5555,12 @@ impl<'a> DependencyVisitor<'a> {
                     .into_iter()
                     .collect()
             }
+            Expr::Block(expr) => final_block_expression(&expr.block)
+                .map(|expr| self.expression_type_arguments(expr))
+                .unwrap_or_default(),
+            Expr::Unsafe(expr) => final_block_expression(&expr.block)
+                .map(|expr| self.expression_type_arguments(expr))
+                .unwrap_or_default(),
             Expr::Reference(reference) => self.expression_type_arguments(&reference.expr),
             Expr::Paren(paren) => self.expression_type_arguments(&paren.expr),
             _ => Vec::new(),
@@ -5561,6 +5599,10 @@ impl<'a> DependencyVisitor<'a> {
                 .resolved_methods_for_call(call)
                 .iter()
                 .find_map(|callable| self.resolver.return_ok_type_from_callable(callable)),
+            Expr::Block(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_result_ok_type(expr)),
+            Expr::Unsafe(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_result_ok_type(expr)),
             Expr::Reference(reference) => self.expression_result_ok_type(&reference.expr),
             Expr::Paren(paren) => self.expression_result_ok_type(&paren.expr),
             _ => None,
@@ -5590,6 +5632,10 @@ impl<'a> DependencyVisitor<'a> {
                 .resolved_methods_for_call(call)
                 .iter()
                 .find_map(|callable| self.resolver.return_error_type_from_callable(callable)),
+            Expr::Block(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_result_error_type(expr)),
+            Expr::Unsafe(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_result_error_type(expr)),
             Expr::Reference(reference) => self.expression_result_error_type(&reference.expr),
             Expr::Paren(paren) => self.expression_result_error_type(&paren.expr),
             _ => None,

@@ -7987,6 +7987,86 @@ fn private_leaf() -> i32 {
     }
 
     #[test]
+    fn unsafe_block_helper_return_receiver_keeps_resolved_method() {
+        let root = temp_output("unsafe-helper-return-source");
+        let output = temp_output("unsafe-helper-return-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use std::ffi::c_void;
+use std::sync::Arc;
+
+pub struct Manager;
+
+impl Manager {
+    pub fn reset(&self) -> usize {
+        helper()
+    }
+
+    pub fn unrelated(&self) -> usize {
+        99
+    }
+}
+
+fn helper() -> usize {
+    1
+}
+
+unsafe fn arc_from_raw(handle: *mut c_void) -> Arc<Manager> {
+    unsafe { Arc::from_raw(handle as *const Manager) }
+}
+
+#[opensourced]
+pub fn entry(handle: *mut c_void) -> usize {
+    let manager = unsafe { arc_from_raw(handle) };
+    manager.reset()
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+        let reachable = report
+            .reachable
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            reachable.contains("app::Manager::reset"),
+            "method receiver inferred through unsafe helper return should keep reset: {reachable:?}",
+        );
+        assert!(
+            !reachable.contains("app::Manager::unrelated"),
+            "unrelated methods on the same receiver type must remain prunable: {reachable:?}",
+        );
+
+        let rendered = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(rendered.contains("pub fn reset"));
+        assert!(rendered.contains("fn helper"));
+        assert!(rendered.contains("fn arc_from_raw"));
+        assert!(rendered.contains("unsafe { arc_from_raw(handle) }"));
+        assert!(
+            !rendered.contains("pub fn unrelated"),
+            "receiver type inference must not retain unrelated methods: {rendered}",
+        );
+    }
+
+    #[test]
     fn macro_surface_blockers_do_not_retain_macro_names_as_unknowns() {
         let root = temp_output("macro-surface-blocker-source");
         let output = temp_output("macro-surface-blocker-output");
