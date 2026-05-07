@@ -18,7 +18,7 @@ use opensource_core::{
     write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
     CheckOptions, CheckReport, GenerateOptions, GenerateReport, GenerateSession,
     GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
-    RootId,
+    RepairReport, RootId,
 };
 
 fn main() {
@@ -955,12 +955,14 @@ fn run_batch_root(
         }
         if options.feedback_repair_iterations > 0 {
             let mut repaired_check = check.clone();
+            let mut saw_deferred_warning_allows = false;
             for _repair_attempt in 1..=options.feedback_repair_iterations {
                 let repair = repair_workspace(RepairOptions {
                     output_root: output_root.to_path_buf(),
                     diagnostics: repaired_check.diagnostics.clone(),
                 })?;
                 write_repair_report(&repair, &output_root.join("slice-repair.json"))?;
+                saw_deferred_warning_allows |= repair_has_deferred_warning_allows(&repair);
                 if repair.total_changes() == 0 {
                     break;
                 }
@@ -997,6 +999,58 @@ fn run_batch_root(
                         Some(&repaired_check),
                         None,
                     ));
+                }
+            }
+            if should_run_deferred_warning_repair(
+                &repaired_check,
+                baseline,
+                options.deny_warnings,
+                saw_deferred_warning_allows,
+            ) {
+                let repair = repair_workspace(RepairOptions {
+                    output_root: output_root.to_path_buf(),
+                    diagnostics: repaired_check.diagnostics.clone(),
+                })?;
+                write_repair_report(&repair, &output_root.join("slice-repair.json"))?;
+                if repair.total_changes() > 0 {
+                    let preflight = preflight_workspace(PreflightOptions {
+                        manifest_path: output_root.join("Cargo.toml"),
+                    })?;
+                    write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
+                    if !preflight.success {
+                        return Ok(batch_row_from_reports(
+                            root,
+                            output_root,
+                            "preflight_failed",
+                            last_report.as_ref(),
+                            Some(&preflight),
+                            Some(&repaired_check),
+                            Some(
+                                "batch warning repair produced a structurally invalid workspace"
+                                    .to_string(),
+                            ),
+                        ));
+                    }
+                    last_preflight = Some(preflight);
+                    repaired_check = check_workspace(CheckOptions {
+                        manifest_path: output_root.join("Cargo.toml"),
+                        target_dir: Some(batch_feedback_target_dir(options)),
+                        timeout: options.feedback_timeout,
+                        cargo_args: batch_cargo_args(options, root),
+                    })?;
+                    write_report(&repaired_check, &output_root.join("slice-feedback.json"))?;
+                    if feedback_repair_is_accepted(&repaired_check, baseline, options.deny_warnings)
+                    {
+                        return Ok(batch_row_from_reports(
+                            root,
+                            output_root,
+                            "accepted",
+                            last_report.as_ref(),
+                            last_preflight.as_ref(),
+                            Some(&repaired_check),
+                            None,
+                        ));
+                    }
                 }
             }
             if attempt == attempts || repaired_check.error_count() == 0 {
@@ -3547,6 +3601,23 @@ fn feedback_repair_is_accepted(
         && repairable_warning_count(&report.diagnostics) == 0
 }
 
+fn repair_has_deferred_warning_allows(report: &RepairReport) -> bool {
+    report.deferred_dead_code_allows > 0 || report.deferred_lint_allows > 0
+}
+
+fn should_run_deferred_warning_repair(
+    report: &CheckReport,
+    baseline: Option<&CheckReport>,
+    deny_warnings: bool,
+    saw_deferred_warning_allows: bool,
+) -> bool {
+    deny_warnings
+        && saw_deferred_warning_allows
+        && report.error_count() == 0
+        && report.warning_count() > 0
+        && semantic_hazard_warning_count(&report.diagnostics, baseline) == 0
+}
+
 fn baseline_limited_feedback_is_accepted(
     report: &CheckReport,
     baseline: Option<&CheckReport>,
@@ -3999,9 +4070,10 @@ mod tests {
         parse_args_from, production_readiness_blocks_validation,
         production_validation_matrix_entries, record_final_production_readiness,
         record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
-        run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count, slice_report_path,
-        try_widen_from_feedback, uncovered_validation_targets, validation_report_path,
-        FeedbackWideningState, ValidationGateReport, ValidationReport,
+        run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count,
+        should_run_deferred_warning_repair, slice_report_path, try_widen_from_feedback,
+        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
+        ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -4028,6 +4100,65 @@ mod tests {
 
         assert!(feedback_is_accepted(&report, None, false));
         assert!(!feedback_repair_is_accepted(&report, None, false));
+    }
+
+    #[test]
+    fn deferred_warning_repair_runs_only_for_denied_warning_only_reports() {
+        let warning_report = report(
+            true,
+            vec![warning_with_code(
+                "private_interfaces",
+                "type `Private` is more private than the item `Public::field`",
+            )],
+        );
+        let error_report = report(
+            false,
+            vec![
+                diagnostic("E0425", "cannot find value `missing` in this scope"),
+                warning_with_code(
+                    "private_interfaces",
+                    "type `Private` is more private than the item `Public::field`",
+                ),
+            ],
+        );
+        let semantic_warning_report = report(
+            true,
+            vec![warning_with_code(
+                "unreachable_patterns",
+                "unreachable pattern",
+            )],
+        );
+
+        assert!(should_run_deferred_warning_repair(
+            &warning_report,
+            None,
+            true,
+            true
+        ));
+        assert!(!should_run_deferred_warning_repair(
+            &warning_report,
+            None,
+            false,
+            true
+        ));
+        assert!(!should_run_deferred_warning_repair(
+            &warning_report,
+            None,
+            true,
+            false
+        ));
+        assert!(!should_run_deferred_warning_repair(
+            &error_report,
+            None,
+            true,
+            true
+        ));
+        assert!(!should_run_deferred_warning_repair(
+            &semantic_warning_report,
+            None,
+            true,
+            true
+        ));
     }
 
     #[test]

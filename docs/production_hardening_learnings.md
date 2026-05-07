@@ -1048,3 +1048,15 @@ actually uses the alias. Full public `pub use` items still preserve exported
 API paths, but crate-restricted aliases no longer survive merely because their
 target item is live somewhere else in the package. The regenerated Litter slice
 removed the stale reexport and `cargo check --quiet` completed without warnings.
+
+The next `SshClient::resolve_codex_binary` Litter mining root exposed a batch
+repair scheduling bug rather than a renderer dependency bug. The generated
+slice compiled, but the first repair pass had both structural warning fixes and
+a `private_interfaces` lint candidate. Repair intentionally deferred lint
+allows until after structural edits, so batch mode with
+`--feedback-repair-loop 1 --deny-warnings` reran Cargo, saw only the deferred
+warning, and reported `check_failed`. Batch repair now performs one final
+warning-only repair when a prior structural pass explicitly deferred lint or
+dead-code allows and the current Cargo report has no errors or semantic warning
+hazards. The same Litter root now adds a scoped `#[allow(private_interfaces)]`
+to the generated `SshClient` item and reaches zero-warning feedback acceptance.
