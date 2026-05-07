@@ -1038,6 +1038,28 @@ fn types_is_some_and_payloads_from_local_option_bindings() {
 }
 
 #[test]
+fn types_is_some_and_payloads_from_field_option_arc_bindings() {
+    let workspace = temp_path("rule-field-option-arc-workspace");
+    let output = temp_path("rule-field-option-arc-output");
+    let target_dir = temp_path("rule-field-option-arc-target");
+    write_field_option_arc_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("field Option<Arc<T>> payload rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("field_option_arc_rule/src/lib.rs"));
+    assert!(lib.contains("client: Option<Arc<Client>>"), "{lib}");
+    assert!(lib.contains("pub fn is_connected(&self) -> bool"), "{lib}");
+    assert!(!lib.contains("pub fn dead(&self) -> bool"), "{lib}");
+    assert!(!lib.contains("pub struct UnusedClient"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_dependencies_from_rendered_trait_impl_surfaces() {
     let workspace = temp_path("rule-trait-impl-surface-workspace");
     let output = temp_path("rule-trait-impl-surface-output");
@@ -7928,6 +7950,49 @@ impl Other {
 pub fn selected() -> bool {
     let maybe: Option<Payload> = Some(Payload);
     maybe.is_some_and(|payload| payload.live())
+}
+"#,
+    );
+}
+
+fn write_field_option_arc_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "field_option_arc_rule",
+        r#"
+use opensourced::opensourced;
+use std::sync::Arc;
+
+pub struct Client;
+
+impl Client {
+    pub fn is_connected(&self) -> bool {
+        true
+    }
+
+    pub fn dead(&self) -> bool {
+        false
+    }
+}
+
+pub struct UnusedClient;
+
+impl UnusedClient {
+    pub fn is_connected(&self) -> bool {
+        false
+    }
+}
+
+pub struct Holder {
+    client: Option<Arc<Client>>,
+    unused: Option<Arc<UnusedClient>>,
+}
+
+impl Holder {
+    #[opensourced]
+    pub fn has_client(&self) -> bool {
+        self.client.as_ref().is_some_and(|client| client.is_connected())
+    }
 }
 "#,
     );

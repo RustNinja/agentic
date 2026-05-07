@@ -5639,6 +5639,16 @@ impl<'a> DependencyVisitor<'a> {
                     .cloned()
                     .unwrap_or_default()
             }
+            Expr::Field(field) => {
+                let mut type_arguments = Vec::new();
+                for receiver in self.receiver_type_candidates(&field.base) {
+                    type_arguments
+                        .extend(self.resolver.field_type_arguments(&receiver, &field.member));
+                }
+                type_arguments.sort();
+                type_arguments.dedup();
+                type_arguments
+            }
             Expr::Call(call) => {
                 let Expr::Path(path) = call.func.as_ref() else {
                     return Vec::new();
@@ -5658,6 +5668,12 @@ impl<'a> DependencyVisitor<'a> {
                     .collect()
             }
             Expr::MethodCall(call) => {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "as_ref" | "as_mut" | "clone"
+                ) {
+                    return self.expression_type_arguments(&call.receiver);
+                }
                 let Some(receiver) = self.receiver_type(&call.receiver) else {
                     return Vec::new();
                 };
@@ -8109,6 +8125,40 @@ impl Resolver<'_> {
                 self_type: None,
             };
             type_refs.extend(resolver.receiver_type_candidates_from_type(ty));
+        }
+
+        type_refs.sort();
+        type_refs.dedup();
+        type_refs
+    }
+
+    fn field_type_arguments(&self, receiver: &TypeRef, member: &Member) -> Vec<TypeRef> {
+        let mut type_refs = Vec::new();
+        for candidate in self.type_ref_candidates(receiver) {
+            let Some(item) = self.find_item(
+                &candidate.package,
+                &candidate.type_path,
+                &[ItemKind::Struct],
+            ) else {
+                continue;
+            };
+            let Some(record) = self.project.items.get(&item) else {
+                continue;
+            };
+            let syn::Item::Struct(item_struct) = &record.item else {
+                continue;
+            };
+            let Some(ty) = field_member_type(&item_struct.fields, member) else {
+                continue;
+            };
+            let resolver = Resolver {
+                project: self.project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            type_refs.extend(resolver.type_argument_refs_in_type(ty));
         }
 
         type_refs.sort();
