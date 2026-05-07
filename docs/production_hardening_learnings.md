@@ -998,3 +998,18 @@ reexport remains only when retained child code actually refers to the exposed
 name. The focused fixture proves the sibling/parent shape builds and still
 prunes unrelated child modules; the mined Litter root now reaches feedback cargo
 check with zero final warnings.
+
+The next `codex-mobile-client::ffi::client::AppClient::list_plugins` mining
+root became a scale probe for the reducer and renderer. It selects a small
+method, but its surrounding UniFFI client type can expose many package-local
+imports, foreign item surfaces, support structs, and method candidates while RA
+is still bounded to retained owner files. Recomputing reachable callable token
+idents and scanning every method receiver for each dependency/import decision
+made the run look stalled even before compiler feedback. The model/reducer now
+carry receiver-method and reachable-callable-ident indexes, and the renderer
+builds a reachable-token-ident index once per render plan for reexports and
+foreign item surfaces. That keeps the mining loop responsive enough to expose
+the real next gap: the generated slice can still over-retain broad mobile
+surfaces and feedback can still require generic method/impl/support-schema
+widening, but those are now visible correctness questions instead of hidden
+inside repeated whole-project scans.

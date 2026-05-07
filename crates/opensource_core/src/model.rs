@@ -1,5 +1,5 @@
 use std::{
-    collections::{BTreeMap, BTreeSet, HashMap},
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
     fmt,
     path::PathBuf,
 };
@@ -18,6 +18,7 @@ pub struct Project {
     pub module_aliases: HashMap<(String, Vec<String>), HashMap<String, Vec<String>>>,
     pub source_files_by_module: HashMap<(String, Vec<String>), PathBuf>,
     pub methods_by_receiver: HashMap<(String, Vec<String>, String), Vec<CallableId>>,
+    pub receivers_with_methods: HashSet<(String, Vec<String>)>,
 }
 
 pub struct SourceFile {

@@ -77,6 +77,10 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
         methods.sort();
         methods.dedup();
     }
+    let receivers_with_methods = methods_by_receiver
+        .keys()
+        .map(|(package, type_path, _)| (package.clone(), type_path.clone()))
+        .collect();
 
     Ok(Project {
         workspace,
@@ -87,6 +91,7 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
         module_aliases: parser.module_aliases,
         source_files_by_module,
         methods_by_receiver,
+        receivers_with_methods,
     })
 }
 

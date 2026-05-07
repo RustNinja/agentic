@@ -528,6 +528,7 @@ fn retained_rendered_use_dependencies(
     let mut package_ident_cache = HashMap::new();
     let mut public_reexport_ident_cache = HashMap::new();
     let mut visible_name_usage_cache = HashMap::new();
+    let callable_idents_by_package = reachable_callable_idents_by_package(project, reachable);
     for source in project
         .files
         .values()
@@ -561,6 +562,7 @@ fn retained_rendered_use_dependencies(
             reachable_items,
             &source.package,
             &source.module_path,
+            &callable_idents_by_package,
             &mut module_ident_cache,
         );
         let mut package_idents = package_ident_cache
@@ -571,6 +573,7 @@ fn retained_rendered_use_dependencies(
                     reachable,
                     reachable_items,
                     &source.package,
+                    &callable_idents_by_package,
                 )
             })
             .clone();
@@ -1070,6 +1073,7 @@ fn reachable_source_idents(
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
     module_path: &[String],
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
     for callable in reachable
@@ -1092,7 +1096,14 @@ fn reachable_source_idents(
         .filter(|item| item.package == package && item.module_path == module_path)
     {
         if let Some(record) = project.items.get(item) {
-            collect_reachable_package_item_idents(project, reachable, item, record, &mut idents);
+            collect_reachable_package_item_idents(
+                project,
+                reachable,
+                item,
+                record,
+                &callable_idents_by_package,
+                &mut idents,
+            );
         }
     }
     idents
@@ -1103,6 +1114,7 @@ fn reachable_package_source_idents(
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
     for callable in reachable
@@ -1121,7 +1133,14 @@ fn reachable_package_source_idents(
         .filter(|item| item.package == package)
     {
         if let Some(record) = project.items.get(item) {
-            collect_reachable_package_item_idents(project, reachable, item, record, &mut idents);
+            collect_reachable_package_item_idents(
+                project,
+                reachable,
+                item,
+                record,
+                &callable_idents_by_package,
+                &mut idents,
+            );
         }
     }
     idents
@@ -1133,6 +1152,7 @@ fn reachable_import_scope_source_idents_cached(
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
     module_path: &[String],
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
     cache: &mut HashMap<(String, Vec<String>), BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let key = (package.to_string(), module_path.to_vec());
@@ -1140,8 +1160,14 @@ fn reachable_import_scope_source_idents_cached(
         return idents.clone();
     }
 
-    let mut idents =
-        reachable_source_idents(project, reachable, reachable_items, package, module_path);
+    let mut idents = reachable_source_idents(
+        project,
+        reachable,
+        reachable_items,
+        package,
+        module_path,
+        callable_idents_by_package,
+    );
     for source in project
         .files
         .values()
@@ -1157,6 +1183,7 @@ fn reachable_import_scope_source_idents_cached(
             reachable_items,
             package,
             &source.module_path,
+            callable_idents_by_package,
             cache,
         ));
     }
@@ -1933,6 +1960,9 @@ fn add_source_mentioned_dependency_packages(
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
 ) {
+    let callable_idents_by_package = reachable_callable_idents_by_package(project, reachable);
+    let mut idents_cache = HashMap::<String, BTreeSet<String>>::new();
+    let mut path_prefix_cache = HashMap::<String, BTreeSet<String>>::new();
     let mut changed = true;
     while changed {
         changed = false;
@@ -1943,14 +1973,26 @@ fn add_source_mentioned_dependency_packages(
             if package_is_proc_macro(package) {
                 continue;
             }
-            let idents =
-                reachable_package_idents(project, reachable, reachable_items, &package_name);
-            let path_prefixes = reachable_package_dependency_path_prefixes(
-                project,
-                reachable,
-                reachable_items,
-                &package_name,
-            );
+            let idents = idents_cache.entry(package_name.clone()).or_insert_with(|| {
+                reachable_package_idents_with_callable_index(
+                    project,
+                    reachable,
+                    reachable_items,
+                    &package_name,
+                    &callable_idents_by_package,
+                )
+            });
+            let path_prefixes = path_prefix_cache
+                .entry(package_name.clone())
+                .or_insert_with(|| {
+                    reachable_package_dependency_path_prefixes(
+                        project,
+                        reachable,
+                        reachable_items,
+                        &package_name,
+                        &callable_idents_by_package,
+                    )
+                });
             if idents.is_empty() && path_prefixes.is_empty() {
                 continue;
             }
@@ -2815,6 +2857,7 @@ fn reachable_package_dependency_path_prefixes(
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let mut prefixes = BTreeSet::new();
     for callable in reachable
@@ -2837,6 +2880,7 @@ fn reachable_package_dependency_path_prefixes(
                 project,
                 reachable,
                 record,
+                callable_idents_by_package,
                 &mut prefixes,
             );
         }
@@ -2848,6 +2892,7 @@ fn collect_reachable_package_item_dependency_path_prefixes(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
     record: &crate::model::ItemRecord,
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
     prefixes: &mut BTreeSet<String>,
 ) {
     let Item::Struct(item_struct) = &record.item else {
@@ -2862,7 +2907,13 @@ fn collect_reachable_package_item_dependency_path_prefixes(
     }
 
     for field in &item_struct.fields {
-        if struct_field_source_mentions_should_remain(project, reachable, &record.package, field) {
+        if struct_field_source_mentions_should_remain(
+            project,
+            reachable,
+            &record.package,
+            field,
+            callable_idents_by_package,
+        ) {
             collect_dependency_path_prefixes(&field.to_token_stream(), prefixes);
         }
     }
@@ -2882,27 +2933,86 @@ fn reachable_package_idents(
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
 ) -> BTreeSet<String> {
+    let callable_idents_by_package = reachable_callable_idents_by_package(project, reachable);
+    reachable_package_idents_with_callable_index(
+        project,
+        reachable,
+        reachable_items,
+        package,
+        &callable_idents_by_package,
+    )
+}
+
+fn reachable_package_idents_with_callable_index(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &BTreeSet<ItemId>,
+    package: &str,
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
-    for callable in reachable
-        .iter()
-        .filter(|callable| callable.package() == package)
-    {
-        if let Some(record) = project.functions.get(callable) {
-            collect_token_idents(&record.item.to_token_stream(), &mut idents);
-        }
-        if let Some(record) = project.methods.get(callable) {
-            collect_token_idents(&record.item.to_token_stream(), &mut idents);
-        }
+    if let Some(callable_idents) = callable_idents_by_package.get(package) {
+        idents.extend(callable_idents.iter().cloned());
     }
     for item in reachable_items
         .iter()
         .filter(|item| item.package() == package)
     {
         if let Some(record) = project.items.get(item) {
-            collect_reachable_package_item_idents(project, reachable, item, record, &mut idents);
+            collect_reachable_package_item_idents(
+                project,
+                reachable,
+                item,
+                record,
+                callable_idents_by_package,
+                &mut idents,
+            );
         }
     }
     idents
+}
+
+fn reachable_callable_idents_by_package(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut by_package = BTreeMap::<String, BTreeSet<String>>::new();
+    for callable in reachable {
+        let idents = by_package
+            .entry(callable.package().to_string())
+            .or_default();
+        collect_callable_id_idents(callable, idents);
+        if let Some(record) = project.functions.get(callable) {
+            collect_token_idents(&record.item.to_token_stream(), idents);
+        }
+        if let Some(record) = project.methods.get(callable) {
+            collect_token_idents(&record.item.to_token_stream(), idents);
+        }
+    }
+    by_package
+}
+
+fn collect_callable_id_idents(callable: &CallableId, idents: &mut BTreeSet<String>) {
+    match callable {
+        CallableId::Free {
+            module_path, name, ..
+        } => {
+            idents.extend(module_path.iter().cloned());
+            idents.insert(name.clone());
+        }
+        CallableId::Method {
+            type_path,
+            trait_path,
+            method,
+            ..
+        } => {
+            idents.extend(type_path.iter().cloned());
+            if let Some(trait_path) = trait_path {
+                idents.extend(trait_path.iter().cloned());
+            }
+            idents.insert(method.clone());
+        }
+    }
 }
 
 fn collect_reachable_package_item_idents(
@@ -2910,6 +3020,7 @@ fn collect_reachable_package_item_idents(
     reachable: &BTreeSet<CallableId>,
     item: &ItemId,
     record: &crate::model::ItemRecord,
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
     idents: &mut BTreeSet<String>,
 ) {
     let Item::Struct(item_struct) = &record.item else {
@@ -2926,7 +3037,13 @@ fn collect_reachable_package_item_idents(
     }
 
     for field in &item_struct.fields {
-        if struct_field_source_mentions_should_remain(project, reachable, &record.package, field) {
+        if struct_field_source_mentions_should_remain(
+            project,
+            reachable,
+            &record.package,
+            field,
+            callable_idents_by_package,
+        ) {
             collect_token_idents(&field.to_token_stream(), idents);
         }
     }
@@ -2937,8 +3054,15 @@ fn struct_field_source_mentions_should_remain(
     reachable: &BTreeSet<CallableId>,
     package: &str,
     field: &Field,
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
 ) -> bool {
-    struct_field_reachable_dependency_should_remain(project, reachable, package, field)
+    struct_field_reachable_dependency_should_remain_with_callable_index(
+        project,
+        reachable,
+        package,
+        field,
+        callable_idents_by_package,
+    )
 }
 
 fn struct_field_static_surface_dependency_should_remain(field: &Field) -> bool {
@@ -2947,11 +3071,12 @@ fn struct_field_static_surface_dependency_should_remain(field: &Field) -> bool {
         || field.ident.is_none()
 }
 
-fn struct_field_reachable_dependency_should_remain(
-    project: &Project,
-    reachable: &BTreeSet<CallableId>,
+fn struct_field_reachable_dependency_should_remain_with_callable_index(
+    _project: &Project,
+    _reachable: &BTreeSet<CallableId>,
     package: &str,
     field: &Field,
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
 ) -> bool {
     if matches!(field.vis, syn::Visibility::Public(_)) || field_attrs_require_field(field) {
         return true;
@@ -2959,27 +3084,9 @@ fn struct_field_reachable_dependency_should_remain(
     let Some(name) = field.ident.as_ref() else {
         return true;
     };
-    reachable_callables_mention_ident(project, reachable, package, &name.to_string())
-}
-
-fn reachable_callables_mention_ident(
-    project: &Project,
-    reachable: &BTreeSet<CallableId>,
-    package: &str,
-    ident: &str,
-) -> bool {
-    reachable
-        .iter()
-        .filter(|callable| callable.package() == package)
-        .any(|callable| {
-            callable_id_mentions_ident(callable, ident)
-                || project.functions.get(callable).is_some_and(|record| {
-                    token_stream_mentions_ident(&record.item.to_token_stream(), ident)
-                })
-                || project.methods.get(callable).is_some_and(|record| {
-                    token_stream_mentions_ident(&record.item.to_token_stream(), ident)
-                })
-        })
+    callable_idents_by_package
+        .get(package)
+        .is_some_and(|idents| idents.contains(&name.to_string()))
 }
 
 fn field_attrs_require_field(field: &Field) -> bool {
@@ -3305,6 +3412,7 @@ fn reachable_struct_field_dependencies(
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
+    let callable_idents_by_package = reachable_callable_idents_by_package(project, reachable);
     for item in reachable_items
         .iter()
         .filter(|item| candidate_packages.contains(item.package()) && item.kind == ItemKind::Struct)
@@ -3331,6 +3439,7 @@ fn reachable_struct_field_dependencies(
             reachable,
             &record.package,
             item_struct,
+            &callable_idents_by_package,
         );
         dependencies.extend(visitor.dependencies);
     }
@@ -3690,9 +3799,16 @@ impl<'a> DependencyVisitor<'a> {
         reachable: &BTreeSet<CallableId>,
         package: &str,
         item_struct: &syn::ItemStruct,
+        callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
     ) {
         for field in &item_struct.fields {
-            if struct_field_reachable_dependency_should_remain(project, reachable, package, field) {
+            if struct_field_reachable_dependency_should_remain_with_callable_index(
+                project,
+                reachable,
+                package,
+                field,
+                callable_idents_by_package,
+            ) {
                 self.visit_struct_field_surface_dependencies(item_struct, field);
             }
         }
@@ -7900,18 +8016,8 @@ impl Resolver<'_> {
             type_path: vec![leaf],
         };
         self.project
-            .methods
-            .keys()
-            .any(|id| {
-                matches!(
-                    id,
-                    CallableId::Method {
-                        package,
-                        type_path,
-                        ..
-                    } if package == &candidate.package && type_path == &candidate.type_path
-                )
-            })
+            .receivers_with_methods
+            .contains(&(candidate.package.clone(), candidate.type_path.clone()))
             .then_some(candidate)
     }
 
@@ -7926,18 +8032,8 @@ impl Resolver<'_> {
             type_path: item_path,
         };
         self.project
-            .methods
-            .keys()
-            .any(|id| {
-                matches!(
-                    id,
-                    CallableId::Method {
-                        package,
-                        type_path,
-                        ..
-                    } if package == &candidate.package && type_path == &candidate.type_path
-                )
-            })
+            .receivers_with_methods
+            .contains(&(candidate.package.clone(), candidate.type_path.clone()))
             .then_some(candidate)
     }
 
