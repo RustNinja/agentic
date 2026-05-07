@@ -130,6 +130,7 @@ file.
 | `manifest.support_reexported_module_alias.001` | covered | No-build copied support packages resolve required public paths through public module alias reexports, retaining the alias and target module closure while pruning dead sibling aliases/modules |
 | `manifest.support_grouped_self_module_alias.001` | covered | Grouped support reexports shaped like `pub use module::{self as alias}` resolve the alias as the module prefix instead of broad-copying dead sibling modules |
 | `manifest.support_private_self_module_alias.001` | covered | Private support imports shaped like `use module::{self as alias}` resolve nested `alias::Type` paths to the real module item closure while pruning dead private aliases/functions/modules |
+| `manifest.support_private_direct_module_alias.001` | covered | Private support imports shaped like `use module::leaf as alias` resolve nested `alias::Type` paths to the leaf module closure while pruning dead sibling aliases/functions/modules |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
