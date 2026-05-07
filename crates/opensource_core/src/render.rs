@@ -4119,7 +4119,7 @@ fn transform_restricted_support_file(
             Item::Mod(item_mod) if item_mod.content.is_some() => {
                 transform_support_inline_module(ctx, live_by_file, source_file, item_mod, live_set)
             }
-            Item::Use(item_use) if use_is_reexport(&item_use.vis) => {
+            Item::Use(item_use) if use_is_public_api_reexport(&item_use.vis) => {
                 let mut item_use = item_use.clone();
                 item_use.tree = prune_support_public_use_tree(
                     ctx,

@@ -4829,6 +4829,122 @@ pub enum LiveSegment {
 }
 
 #[test]
+fn prunes_unused_support_pub_crate_globs_when_direct_module_path_is_used() {
+    let workspace = temp_path("support-pub-crate-glob-workspace");
+    let output = temp_path("support-pub-crate-glob-output");
+    let target_dir = temp_path("support-pub-crate-glob-target");
+    let helper = temp_path("support-pub-crate-glob-helper");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use external_helper::selected_patch;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    selected_patch().path.len()
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"pub mod details;
+
+pub(crate) use details::*;
+
+pub fn selected_patch() -> details::LivePatch {
+    details::LivePatch {
+        path: vec![String::from("live")],
+    }
+}
+"#,
+    );
+    write(
+        helper.join("src/details.rs"),
+        r#"pub struct LivePatch {
+    pub path: Vec<String>,
+}
+
+pub struct DeadPatch {
+    pub path: Vec<String>,
+}
+
+pub fn dead_helper() -> DeadPatch {
+    DeadPatch {
+        path: vec![String::from("dead")],
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("support pub(crate) glob should reduce");
+
+    let helper_lib = read(output.join("support/external-helper/src/lib.rs"));
+    let details = read(output.join("support/external-helper/src/details.rs"));
+    assert!(helper_lib.contains("pub mod details"), "{helper_lib}");
+    assert!(helper_lib.contains("details::LivePatch"), "{helper_lib}");
+    assert!(
+        !helper_lib.contains("pub(crate) use details::*"),
+        "{helper_lib}"
+    );
+    assert!(details.contains("pub struct LivePatch"), "{details}");
+    assert!(!details.contains("DeadPatch"), "{details}");
+    assert!(!details.contains("dead_helper"), "{details}");
+
+    fs::rename(&helper, helper.with_extension("moved"))
+        .expect("original helper package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated support pub(crate) glob slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nhelper/src/lib.rs:\n{}\nhelper/src/details.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper_lib,
+        details,
+    );
+}
+
+#[test]
 fn prunes_support_package_items_with_parent_module_dependencies() {
     let workspace = temp_path("support-parent-module-workspace");
     let output = temp_path("support-parent-module-output");

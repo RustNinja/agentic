@@ -134,6 +134,7 @@ file.
 | `manifest.support_inline_facade_module.001` | covered | Inline support facade modules are modeled as virtual module nodes, so `pub mod facade { pub use crate::leaf::*; }` retains only live reexports/items without broad-copying dead sibling support modules |
 | `manifest.support_nested_inline_facade_module.001` | covered | Nested inline support facade modules resolve multi-hop paths such as `facade::nested::Type` and prune dead sibling inline facades plus dead support modules |
 | `manifest.support_inline_facade_external_child.001` | covered | Inline support facades that declare file-backed child modules and `pub use child::*` resolve through both virtual and file-backed nodes while repeated dead glob misses do not block later live reexports |
+| `manifest.support_pub_crate_glob_private_use.001` | covered | Restricted support reexports such as `pub(crate) use module::*` are pruned as private imports when retained code uses direct module paths, while the live target module/items stay rendered |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
