@@ -3861,7 +3861,7 @@ fn seed_support_name_in_file(
             .unwrap_or_else(|| required_name.to_string()),
     );
     if !visited.insert(key) {
-        return SupportReexportMark::Unsupported;
+        return SupportReexportMark::NotMatched;
     }
     let Some(module) = ctx.modules.get(source_file) else {
         return SupportReexportMark::Unsupported;
