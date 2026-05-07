@@ -2197,6 +2197,7 @@ struct SupportUseNeeds<'a> {
     live_idents: &'a BTreeSet<String>,
     live_exports: &'a BTreeSet<String>,
     live_assoc_items: &'a BTreeMap<String, BTreeSet<String>>,
+    live_paths: &'a BTreeSet<Vec<String>>,
 }
 
 struct SupportMacroExpansion {
@@ -2503,6 +2504,7 @@ fn build_restricted_support_sources(
                         live_idents: &live_usage.idents,
                         live_exports: &live_set.public_exports,
                         live_assoc_items: &live_assoc_import_items,
+                        live_paths: &live_usage.path_candidates,
                     },
                     &mut live,
                 ) else {
@@ -2558,6 +2560,7 @@ fn build_restricted_support_sources(
                         live_idents: &live_usage.idents,
                         live_exports: &live_set.public_exports,
                         live_assoc_items: &live_assoc_import_items,
+                        live_paths: &live_usage.path_candidates,
                     },
                     &mut live,
                 ) else {
@@ -3184,26 +3187,45 @@ fn mark_support_live_use_imports(
         }
         UseTree::Name(name) => {
             let imported_name = name.ident.to_string();
-            let is_live_name = needs.live_idents.contains(&imported_name)
-                || needs.live_exports.contains(&imported_name);
-            let live_assoc_items = needs.live_assoc_items.get(&imported_name);
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| imported_name.clone())
+            } else {
+                imported_name.clone()
+            };
+            let is_live_name = needs.live_idents.contains(&visible_name)
+                || needs.live_exports.contains(&visible_name);
+            let live_assoc_items = needs.live_assoc_items.get(&visible_name);
             if is_live_name || live_assoc_items.is_some() {
                 let mut inserted = false;
                 let mut visited = BTreeSet::new();
-                inserted |= support_reexport_mark_to_option(mark_support_use_target(
-                    ctx,
-                    source_file,
-                    &prefix,
-                    &imported_name,
-                    live,
-                    &mut visited,
-                ))?;
-                if let Some(assoc_items) = live_assoc_items {
-                    inserted |= mark_support_import_assoc_requirements(
+                if imported_name != "self" {
+                    inserted |= support_reexport_mark_to_option(mark_support_use_target(
                         ctx,
                         source_file,
                         &prefix,
                         &imported_name,
+                        live,
+                        &mut visited,
+                    ))?;
+                }
+                let target_prefix = support_import_target_prefix(&prefix, &imported_name);
+                inserted |= mark_support_visible_path_dependencies(
+                    ctx,
+                    source_file,
+                    &target_prefix,
+                    &visible_name,
+                    needs.live_paths,
+                    live,
+                )?;
+                if let Some(assoc_items) = live_assoc_items {
+                    inserted |= mark_support_import_assoc_requirements(
+                        ctx,
+                        source_file,
+                        &target_prefix,
+                        "",
                         assoc_items,
                         live,
                     )?;
@@ -3220,20 +3242,32 @@ fn mark_support_live_use_imports(
             if is_live_name || live_assoc_items.is_some() {
                 let mut inserted = false;
                 let mut visited = BTreeSet::new();
-                inserted |= support_reexport_mark_to_option(mark_support_use_target(
+                let imported_name = rename.ident.to_string();
+                let target_prefix = support_import_target_prefix(&prefix, &imported_name);
+                if imported_name != "self" {
+                    inserted |= support_reexport_mark_to_option(mark_support_use_target(
+                        ctx,
+                        source_file,
+                        &prefix,
+                        &imported_name,
+                        live,
+                        &mut visited,
+                    ))?;
+                }
+                inserted |= mark_support_visible_path_dependencies(
                     ctx,
                     source_file,
-                    &prefix,
-                    &rename.ident.to_string(),
+                    &target_prefix,
+                    &local_name,
+                    needs.live_paths,
                     live,
-                    &mut visited,
-                ))?;
+                )?;
                 if let Some(assoc_items) = live_assoc_items {
                     inserted |= mark_support_import_assoc_requirements(
                         ctx,
                         source_file,
-                        &prefix,
-                        &rename.ident.to_string(),
+                        &target_prefix,
+                        "",
                         assoc_items,
                         live,
                     )?;
@@ -3254,6 +3288,7 @@ fn mark_support_live_use_imports(
                         live_idents: needs.live_idents,
                         live_exports: needs.live_exports,
                         live_assoc_items: needs.live_assoc_items,
+                        live_paths: needs.live_paths,
                     },
                     live,
                 )?;
@@ -3262,6 +3297,37 @@ fn mark_support_live_use_imports(
         }
         UseTree::Glob(_) => mark_support_live_glob_imports(ctx, source_file, &prefix, needs, live),
     }
+}
+
+fn support_import_target_prefix(prefix: &[String], imported_name: &str) -> Vec<String> {
+    let mut target_prefix = prefix.to_vec();
+    if imported_name != "self" {
+        target_prefix.push(imported_name.to_string());
+    }
+    target_prefix
+}
+
+fn mark_support_visible_path_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    target_prefix: &[String],
+    visible_name: &str,
+    live_paths: &BTreeSet<Vec<String>>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut inserted = false;
+    for path in live_paths {
+        let Some((root, rest)) = path.split_first() else {
+            continue;
+        };
+        if root != visible_name || rest.is_empty() {
+            continue;
+        }
+        let mut target_path = target_prefix.to_vec();
+        target_path.extend(rest.iter().cloned());
+        inserted |= mark_support_path_target(ctx, source_file, &target_path, live)?;
+    }
+    Some(inserted)
 }
 
 fn support_combined_assoc_items(
@@ -3409,7 +3475,9 @@ fn mark_support_import_assoc_requirements(
             continue;
         }
         let mut segments = prefix.to_vec();
-        segments.push(imported_name.to_string());
+        if !imported_name.is_empty() {
+            segments.push(imported_name.to_string());
+        }
         segments.extend(assoc_segments);
         inserted |= mark_support_path_target(ctx, source_file, &segments, live)?;
     }
@@ -3447,12 +3515,15 @@ fn mark_support_path_target(
             &mut visited,
         ));
     }
+    let Some((target_name, prefix)) = target_segments.split_last() else {
+        return Some(false);
+    };
     let mut visited = BTreeSet::new();
     support_reexport_mark_to_option(mark_support_use_target(
         ctx,
         target_file,
-        &target_segments[..1],
-        &target_segments[1],
+        prefix,
+        target_name,
         live,
         &mut visited,
     ))
@@ -7815,6 +7886,7 @@ struct TokenUsage {
     idents: BTreeSet<String>,
     bare_idents: BTreeSet<String>,
     path_roots: BTreeSet<String>,
+    path_candidates: BTreeSet<Vec<String>>,
     local_path_leaf_idents: BTreeSet<String>,
     use_idents: BTreeSet<String>,
     dependency_root_aliases: BTreeMap<String, BTreeSet<Vec<String>>>,
@@ -7928,6 +8000,8 @@ impl TokenUsage {
         self.idents.extend(other.idents.iter().cloned());
         self.bare_idents.extend(other.bare_idents.iter().cloned());
         self.path_roots.extend(other.path_roots.iter().cloned());
+        self.path_candidates
+            .extend(other.path_candidates.iter().cloned());
         self.local_path_leaf_idents
             .extend(other.local_path_leaf_idents.iter().cloned());
         self.use_idents.extend(other.use_idents.iter().cloned());
@@ -8579,6 +8653,7 @@ fn collect_token_usage(tokens: &TokenStream, usage: &mut TokenUsage) {
     }
 
     for segments in token_path_candidates(tokens) {
+        usage.path_candidates.insert(segments.clone());
         if let [root, rest @ ..] = segments.as_slice() {
             if matches!(root.as_str(), "crate" | "self" | "super") {
                 if let Some(leaf) = local_required_leaf_from_path(rest) {
