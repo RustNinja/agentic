@@ -5704,6 +5704,128 @@ pub fn dead(path: &Path) -> bool {
 }
 
 #[test]
+fn prunes_support_package_with_local_enum_glob_imports() {
+    let workspace = temp_path("support-enum-glob-workspace");
+    let output = temp_path("support-enum-glob-output");
+    let target_dir = temp_path("support-enum-glob-target");
+    let provider = temp_path("support-enum-glob-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: i32) -> u8 {
+    provider::classify(value)
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"mod dead;
+mod errors;
+
+use errors::ParseError::*;
+
+pub fn classify(value: i32) -> u8 {
+    match parse(value) {
+        Ok(value) => value as u8,
+        Err(InvalidPatchError(_)) => 1,
+        Err(InvalidHunkError { .. }) => 2,
+    }
+}
+
+fn parse(value: i32) -> Result<i32, errors::ParseError> {
+    match value {
+        0 => Err(InvalidPatchError(String::from("zero"))),
+        value if value < 0 => Err(InvalidHunkError {
+            message: String::from("negative"),
+            line_number: 1,
+        }),
+        _ => Ok(value),
+    }
+}
+
+pub fn dead() -> dead::Dead {
+    dead::Dead
+}
+"#,
+    );
+    write(
+        provider.join("src/errors.rs"),
+        r#"pub enum ParseError {
+    InvalidPatchError(String),
+    InvalidHunkError { message: String, line_number: usize },
+}
+"#,
+    );
+    write(provider.join("src/dead.rs"), "pub struct Dead;\n");
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(
+        provider_lib.contains("use errors::ParseError::*"),
+        "{provider_lib}"
+    );
+    assert!(!provider_lib.contains("mod dead"), "{provider_lib}");
+    assert!(!provider_lib.contains("pub fn dead"), "{provider_lib}");
+    assert!(output.join("support/provider/src/errors.rs").exists());
+    assert!(!output.join("support/provider/src/dead.rs").exists());
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated enum glob support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+    );
+}
+
+#[test]
 fn copies_only_reachable_support_library_modules_and_static_assets() {
     let workspace = temp_path("support-module-closure-workspace");
     let output = temp_path("support-module-closure-output");

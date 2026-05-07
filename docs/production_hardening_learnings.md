@@ -970,3 +970,16 @@ surface name collisions and relies on callable/impl evidence plus field attrs,
 public surfaces, and generic field requirements. The three mined bridge roots
 now remove the unrelated transcript field and pass feedback cargo check with
 zero warnings.
+
+The follow-up bridge mining pass found a support-package pruning gap rather
+than a direct compile failure. `codex_bridge_init` still accepts cleanly, but it
+writes a large support tree because target-gated `codex_core` usage cannot be
+proven for the current host cfg matrix. Debug tracing also showed a generic
+support reducer failure on local enum glob imports such as
+`use parser::ParseError::*`; a live function that matches bare enum variants
+caused the support package reducer to give up and broad-copy the whole support
+crate. The reducer now recognizes glob imports from local enums, retains the
+owning enum when a variant name is live, preserves the glob import, and still
+prunes unrelated modules and functions. The focused fixture moves the original
+support crate away, proves the generated support package builds alone, and
+keeps dead support modules out of the output.

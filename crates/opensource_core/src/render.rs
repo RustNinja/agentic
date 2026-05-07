@@ -2159,7 +2159,18 @@ enum SupportReexportMark {
 }
 
 enum SupportLocalTarget {
-    Local(PathBuf),
+    Local,
+    External,
+    Unsupported,
+}
+
+enum SupportLocalGlobTarget {
+    Module(PathBuf),
+    Enum {
+        source_file: PathBuf,
+        enum_name: String,
+        variants: BTreeSet<String>,
+    },
     External,
     Unsupported,
 }
@@ -2938,7 +2949,7 @@ fn mark_support_required_reexport(
                 return SupportReexportMark::NotMatched;
             }
             match support_local_use_prefix_target(ctx, source_file, &prefix) {
-                SupportLocalTarget::Local(_) => mark_support_use_target_with_assoc(
+                SupportLocalTarget::Local => mark_support_use_target_with_assoc(
                     ctx,
                     source_file,
                     &prefix,
@@ -3111,8 +3122,8 @@ fn mark_support_live_glob_imports(
     needs: SupportUseNeeds<'_>,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
 ) -> Option<bool> {
-    match support_local_use_prefix_target(ctx, source_file, prefix) {
-        SupportLocalTarget::External => {
+    match support_local_glob_prefix_target(ctx, source_file, prefix) {
+        SupportLocalGlobTarget::External => {
             if needs.live_idents.is_empty()
                 && needs.live_exports.is_empty()
                 && needs.live_assoc_items.is_empty()
@@ -3122,8 +3133,29 @@ fn mark_support_live_glob_imports(
                 None
             }
         }
-        SupportLocalTarget::Unsupported => None,
-        SupportLocalTarget::Local(_) => {
+        SupportLocalGlobTarget::Unsupported => None,
+        SupportLocalGlobTarget::Enum {
+            source_file,
+            enum_name,
+            variants,
+        } => {
+            if needs.live_assoc_items.contains_key(&enum_name) {
+                return None;
+            }
+            let variant_is_live = variants.iter().any(|variant| {
+                needs.live_idents.contains(variant) || needs.live_exports.contains(variant)
+            });
+            if !variant_is_live {
+                return Some(false);
+            }
+            Some(
+                live.entry(source_file)
+                    .or_default()
+                    .item_names
+                    .insert(enum_name),
+            )
+        }
+        SupportLocalGlobTarget::Module(_) => {
             let mut inserted = false;
             for name in needs.live_idents.union(needs.live_exports) {
                 let mut visited = BTreeSet::new();
@@ -3448,7 +3480,93 @@ fn support_local_use_prefix_target(
         };
         target_file = child_file;
     }
-    SupportLocalTarget::Local(target_file)
+    SupportLocalTarget::Local
+}
+
+fn support_local_glob_prefix_target(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    prefix: &[String],
+) -> SupportLocalGlobTarget {
+    let mut source_file = source_file;
+    let mut prefix = prefix;
+    if let Some(first) = prefix.first() {
+        match first.as_str() {
+            "self" => {
+                prefix = &prefix[1..];
+            }
+            "crate" => {
+                source_file = ctx.root_file;
+                prefix = &prefix[1..];
+            }
+            "super" => {
+                let Some(parent) = support_parent_module_file(ctx.modules, source_file) else {
+                    return SupportLocalGlobTarget::Unsupported;
+                };
+                source_file = parent.as_path();
+                prefix = &prefix[1..];
+            }
+            _ => {}
+        }
+    }
+
+    let Some(first) = prefix.first() else {
+        return SupportLocalGlobTarget::Unsupported;
+    };
+    let mut target_file = source_file.to_path_buf();
+    for (index, segment) in prefix.iter().enumerate() {
+        if let Some(child_file) = support_child_module_file(ctx.modules, &target_file, segment) {
+            if index + 1 == prefix.len() {
+                return SupportLocalGlobTarget::Module(child_file);
+            }
+            target_file = child_file;
+            continue;
+        }
+
+        if index == 0
+            && segment == first
+            && support_enum_variants_in_file(ctx.modules, source_file, segment).is_none()
+        {
+            return SupportLocalGlobTarget::External;
+        }
+        if index + 1 == prefix.len() {
+            if let Some(variants) =
+                support_enum_variants_in_file(ctx.modules, &target_file, segment)
+            {
+                return SupportLocalGlobTarget::Enum {
+                    source_file: target_file,
+                    enum_name: segment.clone(),
+                    variants,
+                };
+            }
+        }
+        return SupportLocalGlobTarget::Unsupported;
+    }
+
+    SupportLocalGlobTarget::Unsupported
+}
+
+fn support_enum_variants_in_file(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+    source_file: &Path,
+    enum_name: &str,
+) -> Option<BTreeSet<String>> {
+    let module = modules.get(source_file)?;
+    module.syntax.items.iter().find_map(|item| {
+        let Item::Enum(item_enum) = item else {
+            return None;
+        };
+        if item_enum.ident != enum_name {
+            return None;
+        }
+        Some(
+            item_enum
+                .variants
+                .iter()
+                .map(|variant| variant.ident.to_string())
+                .collect(),
+        )
+    })
 }
 
 fn transform_restricted_support_file(
@@ -4728,17 +4846,26 @@ fn prune_support_public_use_tree(
                 .collect::<Punctuated<_, syn::Token![,]>>();
             (!group.items.is_empty()).then_some(UseTree::Group(group))
         }
-        UseTree::Glob(glob) => {
-            let SupportLocalTarget::Local(target_file) =
-                support_local_use_prefix_target(ctx, source_file, &prefix)
-            else {
-                return None;
-            };
-            let target_live_set = live_by_file.get(&target_file);
-            (support_live_set_exposes_names(target_live_set, live_names)
-                || support_live_set_has_retained_items(target_live_set))
-            .then(|| UseTree::Glob(glob.clone()))
-        }
+        UseTree::Glob(glob) => match support_local_glob_prefix_target(ctx, source_file, &prefix) {
+            SupportLocalGlobTarget::Module(target_file) => {
+                let target_live_set = live_by_file.get(&target_file);
+                (support_live_set_exposes_names(target_live_set, live_names)
+                    || support_live_set_has_retained_items(target_live_set))
+                .then(|| UseTree::Glob(glob.clone()))
+            }
+            SupportLocalGlobTarget::Enum {
+                source_file,
+                enum_name,
+                variants,
+            } => {
+                let enum_is_live = live_by_file
+                    .get(&source_file)
+                    .is_some_and(|live_set| live_set.item_names.contains(&enum_name));
+                (enum_is_live && variants.iter().any(|variant| live_names.contains(variant)))
+                    .then(|| UseTree::Glob(glob.clone()))
+            }
+            SupportLocalGlobTarget::External | SupportLocalGlobTarget::Unsupported => None,
+        },
     }
 }
 
@@ -4811,15 +4938,24 @@ fn prune_support_private_use_tree(
                 .collect::<Punctuated<_, syn::Token![,]>>();
             (!group.items.is_empty()).then_some(UseTree::Group(group))
         }
-        UseTree::Glob(glob) => {
-            let SupportLocalTarget::Local(target_file) =
-                support_local_use_prefix_target(ctx, source_file, &prefix)
-            else {
-                return None;
-            };
-            support_live_set_exposes_names(live_by_file.get(&target_file), live_names)
-                .then(|| UseTree::Glob(glob.clone()))
-        }
+        UseTree::Glob(glob) => match support_local_glob_prefix_target(ctx, source_file, &prefix) {
+            SupportLocalGlobTarget::Module(target_file) => {
+                support_live_set_exposes_names(live_by_file.get(&target_file), live_names)
+                    .then(|| UseTree::Glob(glob.clone()))
+            }
+            SupportLocalGlobTarget::Enum {
+                source_file,
+                enum_name,
+                variants,
+            } => {
+                let enum_is_live = live_by_file
+                    .get(&source_file)
+                    .is_some_and(|live_set| live_set.item_names.contains(&enum_name));
+                (enum_is_live && variants.iter().any(|variant| live_names.contains(variant)))
+                    .then(|| UseTree::Glob(glob.clone()))
+            }
+            SupportLocalGlobTarget::External | SupportLocalGlobTarget::Unsupported => None,
+        },
     }
 }
 
