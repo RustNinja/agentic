@@ -5071,9 +5071,8 @@ fn prune_support_public_use_tree(
         UseTree::Glob(glob) => match support_local_glob_prefix_target(ctx, source_file, &prefix) {
             SupportLocalGlobTarget::Module(target_file) => {
                 let target_live_set = live_by_file.get(&target_file);
-                (support_live_set_exposes_names(target_live_set, live_names)
-                    || support_live_set_has_retained_items(target_live_set))
-                .then(|| UseTree::Glob(glob.clone()))
+                support_live_set_exposes_names(target_live_set, live_names)
+                    .then(|| UseTree::Glob(glob.clone()))
             }
             SupportLocalGlobTarget::Enum {
                 source_file,
@@ -5214,12 +5213,6 @@ fn support_live_set_exposes_names(
             .public_exports
             .iter()
             .any(|name| names.contains(name))
-}
-
-fn support_live_set_has_retained_items(live_set: Option<&SupportLiveSet>) -> bool {
-    live_set.is_some_and(|live_set| {
-        !live_set.item_names.is_empty() || !live_set.public_exports.is_empty()
-    })
 }
 
 fn support_impl_should_render(
