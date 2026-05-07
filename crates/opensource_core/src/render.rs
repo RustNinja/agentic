@@ -2184,6 +2184,7 @@ struct SupportModuleSource {
     module_dir: PathBuf,
     parent_file: Option<PathBuf>,
     syntax: syn::File,
+    inline: bool,
 }
 
 #[derive(Clone, Default)]
@@ -2324,7 +2325,7 @@ fn build_restricted_support_sources(
                 let Some(inserted) = mark_support_token_dependencies(
                     &ctx,
                     &source_file,
-                    &item.to_token_stream(),
+                    &support_item_dependency_tokens(item),
                     &named_items,
                     &mut live,
                     &mut live_usage,
@@ -2616,6 +2617,9 @@ fn build_restricted_support_sources(
 
     let mut transformed_sources = BTreeMap::new();
     for (source_file, module) in &modules {
+        if module.inline {
+            continue;
+        }
         if *source_file != root_file && !live.contains_key(source_file) {
             continue;
         }
@@ -2634,6 +2638,18 @@ fn build_restricted_support_sources(
     }
 
     Ok(Some(transformed_sources))
+}
+
+fn support_item_dependency_tokens(item: &Item) -> TokenStream {
+    let Item::Mod(item_mod) = item else {
+        return item.to_token_stream();
+    };
+    if item_mod.content.is_none() {
+        return item.to_token_stream();
+    }
+    let mut item_mod = item_mod.clone();
+    item_mod.content = item_mod.content.map(|(brace, _items)| (brace, Vec::new()));
+    item_mod.to_token_stream()
 }
 
 fn mark_support_token_dependencies(
@@ -2753,6 +2769,7 @@ fn collect_support_module_sources_with_syntax(
             module_dir: module_dir.to_path_buf(),
             parent_file,
             syntax: syntax.clone(),
+            inline: false,
         },
     );
 
@@ -2760,7 +2777,27 @@ fn collect_support_module_sources_with_syntax(
         let Item::Mod(item_mod) = item else {
             continue;
         };
-        if item_mod.content.is_some() || attrs_are_test(&item_mod.attrs) {
+        if attrs_are_test(&item_mod.attrs) {
+            continue;
+        }
+        if let Some((_brace, items)) = &item_mod.content {
+            let inline_file = support_inline_module_file(&source_file, &item_mod.ident.to_string());
+            let inline_module_dir =
+                module_dir.join(module_source_name(&item_mod.ident.to_string()));
+            if !collect_support_inline_module_sources_with_syntax(
+                package_root,
+                &inline_file,
+                &inline_module_dir,
+                source_file.clone(),
+                syn::File {
+                    shebang: None,
+                    attrs: Vec::new(),
+                    items: items.clone(),
+                },
+                modules,
+            )? {
+                return Ok(false);
+            }
             continue;
         }
         let Some((child_file, child_dir)) =
@@ -2781,6 +2818,82 @@ fn collect_support_module_sources_with_syntax(
             &child_file,
             &child_dir,
             Some(source_file.clone()),
+            child_syntax,
+            modules,
+        )? {
+            return Ok(false);
+        }
+    }
+
+    Ok(true)
+}
+
+fn collect_support_inline_module_sources_with_syntax(
+    package_root: &Path,
+    source_file: &Path,
+    module_dir: &Path,
+    parent_file: PathBuf,
+    syntax: syn::File,
+    modules: &mut BTreeMap<PathBuf, SupportModuleSource>,
+) -> Result<bool, Box<dyn std::error::Error>> {
+    if modules.contains_key(source_file) {
+        return Ok(true);
+    }
+    modules.insert(
+        source_file.to_path_buf(),
+        SupportModuleSource {
+            module_dir: module_dir.to_path_buf(),
+            parent_file: Some(parent_file.clone()),
+            syntax: syntax.clone(),
+            inline: true,
+        },
+    );
+
+    for item in &syntax.items {
+        let Item::Mod(item_mod) = item else {
+            continue;
+        };
+        if attrs_are_test(&item_mod.attrs) {
+            continue;
+        }
+        if let Some((_brace, items)) = &item_mod.content {
+            let inline_file = support_inline_module_file(source_file, &item_mod.ident.to_string());
+            let inline_module_dir =
+                module_dir.join(module_source_name(&item_mod.ident.to_string()));
+            if !collect_support_inline_module_sources_with_syntax(
+                package_root,
+                &inline_file,
+                &inline_module_dir,
+                source_file.to_path_buf(),
+                syn::File {
+                    shebang: None,
+                    attrs: Vec::new(),
+                    items: items.clone(),
+                },
+                modules,
+            )? {
+                return Ok(false);
+            }
+            continue;
+        }
+        let Some((child_file, child_dir)) =
+            support_external_module_source(package_root, module_dir, item_mod)
+        else {
+            return Ok(false);
+        };
+        let text = match fs::read_to_string(&child_file) {
+            Ok(text) => text,
+            Err(_) => return Ok(false),
+        };
+        let child_syntax = match syn::parse_file(&text) {
+            Ok(syntax) => syntax,
+            Err(_) => return Ok(false),
+        };
+        if !collect_support_module_sources_with_syntax(
+            package_root,
+            &child_file,
+            &child_dir,
+            Some(source_file.to_path_buf()),
             child_syntax,
             modules,
         )? {
@@ -3810,15 +3923,22 @@ fn support_child_module_file(
         let Item::Mod(item_mod) = item else {
             return None;
         };
-        if item_mod.ident != module_name
-            || item_mod.content.is_some()
-            || attrs_are_test(&item_mod.attrs)
-        {
+        if item_mod.ident != module_name || attrs_are_test(&item_mod.attrs) {
             return None;
+        }
+        if item_mod.content.is_some() {
+            let inline_file = support_inline_module_file(source_file, module_name);
+            return modules.contains_key(&inline_file).then_some(inline_file);
         }
         support_external_module_source(Path::new("/"), &module.module_dir, item_mod)
             .map(|(child_file, _)| child_file)
     })
+}
+
+fn support_inline_module_file(source_file: &Path, module_name: &str) -> PathBuf {
+    let mut key = source_file.as_os_str().to_os_string();
+    key.push(format!("#inline:{module_name}"));
+    PathBuf::from(key)
 }
 
 fn support_parent_module_file<'a>(
@@ -3996,6 +4116,9 @@ fn transform_restricted_support_file(
         .items
         .iter()
         .filter_map(|item| match item {
+            Item::Mod(item_mod) if item_mod.content.is_some() => {
+                transform_support_inline_module(ctx, live_by_file, source_file, item_mod, live_set)
+            }
             Item::Use(item_use) if use_is_reexport(&item_use.vis) => {
                 let mut item_use = item_use.clone();
                 item_use.tree = prune_support_public_use_tree(
@@ -4035,6 +4158,35 @@ fn transform_restricted_support_file(
         })
         .collect();
     transformed
+}
+
+fn transform_support_inline_module(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+    source_file: &Path,
+    item_mod: &syn::ItemMod,
+    parent_live_set: &SupportLiveSet,
+) -> Option<Item> {
+    let name = item_mod.ident.to_string();
+    if !parent_live_set.item_names.contains(&name) {
+        return None;
+    }
+    let child_file = support_child_module_file(ctx.modules, source_file, &name)?;
+    let child_module = ctx.modules.get(&child_file)?;
+    let child_live_set = live_by_file.get(&child_file).cloned().unwrap_or_default();
+    let transformed = transform_restricted_support_file(
+        ctx,
+        live_by_file,
+        &child_file,
+        &child_module.syntax,
+        &child_live_set,
+        None,
+    );
+    let mut item_mod = item_mod.clone();
+    item_mod.content = item_mod
+        .content
+        .map(|(brace, _items)| (brace, transformed.items));
+    Some(Item::Mod(item_mod))
 }
 
 fn support_live_import_names(usage: &TokenUsage) -> BTreeSet<String> {
