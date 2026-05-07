@@ -9208,7 +9208,7 @@ fn transform_items(
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
             Item::Use(item_use) => {
                 let mut item_use = item_use.clone();
-                let is_public_use = use_is_reexport(&item_use.vis);
+                let is_public_use = use_is_public_api_reexport(&item_use.vis);
                 let tree = prune_use_tree(
                     project,
                     reduced,
@@ -13548,6 +13548,10 @@ fn attrs_are_test(attrs: &[syn::Attribute]) -> bool {
 
 fn use_is_reexport(vis: &syn::Visibility) -> bool {
     !matches!(vis, syn::Visibility::Inherited)
+}
+
+fn use_is_public_api_reexport(vis: &syn::Visibility) -> bool {
+    matches!(vis, syn::Visibility::Public(_))
 }
 
 fn use_mentions_opensourced(tree: &UseTree) -> bool {

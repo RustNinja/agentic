@@ -7051,6 +7051,91 @@ fn resolves_type_paths_through_visible_glob_reexports() {
 }
 
 #[test]
+fn prunes_unused_pub_crate_reexports_when_target_item_is_only_used_in_source_module() {
+    let workspace = temp_path("pub-crate-reexport-prune-workspace");
+    let output = temp_path("pub-crate-reexport-prune-output");
+    let target_dir = temp_path("pub-crate-reexport-prune-target");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub mod snapshot;
+pub(crate) use snapshot::QueuedFollowUpDraft;
+pub use snapshot::ThreadSnapshot;
+
+#[opensourced]
+pub fn selected() -> ThreadSnapshot {
+    ThreadSnapshot {
+        queued_follow_up_drafts: Vec::new(),
+    }
+}
+"#,
+    );
+    write(
+        workspace.join("app/src/snapshot.rs"),
+        r#"pub struct ThreadSnapshot {
+    pub(crate) queued_follow_up_drafts: Vec<QueuedFollowUpDraft>,
+}
+
+pub(crate) struct QueuedFollowUpDraft;
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let lib = read(output.join("app/src/lib.rs"));
+    let snapshot = read(output.join("app/src/snapshot.rs"));
+    assert!(lib.contains("pub use snapshot::ThreadSnapshot"), "{lib}");
+    assert!(
+        !lib.contains("QueuedFollowUpDraft"),
+        "restricted reexport should be pruned when only the source module uses the item\n{lib}"
+    );
+    assert!(snapshot.contains("QueuedFollowUpDraft"), "{snapshot}");
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated pub(crate) reexport slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nlib.rs:\n{}\nsnapshot.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+        snapshot,
+    );
+}
+
+#[test]
 fn retains_parent_public_glob_reexport_for_child_super_imports() {
     let workspace = temp_path("parent-glob-super-import-workspace");
     let output = temp_path("parent-glob-super-import-output");

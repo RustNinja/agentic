@@ -1039,3 +1039,12 @@ reexports, so `external_helper::LeafAlias::new()` and `leaf.label()` become
 `external_leaf::LeafLive::new` and `LeafLive::label` requirements. This keeps
 the leaf support crate buildable while still pruning the dead leaf package,
 dead facade exports, and unrelated public methods.
+
+The `ThreadSnapshot::from_info` Litter probe showed a related import-cleanup
+case in local packages: a `pub(crate) use snapshot::QueuedFollowUpDraft`
+remained even though the retained item was used only inside `snapshot.rs`.
+Restricted reexports are now pruned like internal imports unless retained code
+actually uses the alias. Full public `pub use` items still preserve exported
+API paths, but crate-restricted aliases no longer survive merely because their
+target item is live somewhere else in the package. The regenerated Litter slice
+removed the stale reexport and `cargo check --quiet` completed without warnings.

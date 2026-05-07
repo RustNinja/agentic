@@ -336,6 +336,9 @@ contracts.
 - Shadowed import leaves: local bindings named like removed imports must not
   keep dead `use` leaves alive, including grouped, renamed, direct, and
   parent/child `super::*` import shapes.
+- Restricted reexports: `pub(crate)` aliases should be treated as internal
+  imports for pruning, so a live target item in its source module does not keep
+  an otherwise unused crate-restricted reexport alive.
 
 Cfg/custom-cfg matrix expansion is not expanded blindly. Catalog rules track
 cfg gates as move-intact/fail-closed work, and executable rules should be added
