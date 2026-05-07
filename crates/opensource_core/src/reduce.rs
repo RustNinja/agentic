@@ -6711,34 +6711,13 @@ impl Resolver<'_> {
     fn resolve_methods(&self, receiver: &TypeRef, method: &str) -> Vec<CallableId> {
         let mut matches = Vec::new();
         for candidate in self.type_ref_candidates(receiver) {
-            let inherent = CallableId::Method {
-                package: candidate.package.clone(),
-                type_path: candidate.type_path.clone(),
-                trait_path: None,
-                trait_input_type_paths: Vec::new(),
-                method: method.to_string(),
-            };
-            if self.project.methods.contains_key(&inherent) {
-                matches.push(inherent);
+            if let Some(methods) = self.project.methods_by_receiver.get(&(
+                candidate.package.clone(),
+                candidate.type_path.clone(),
+                method.to_string(),
+            )) {
+                matches.extend(methods.iter().cloned());
             }
-
-            matches.extend(self.project.methods.keys().filter_map(|id| {
-                let CallableId::Method {
-                    package,
-                    type_path,
-                    trait_path: Some(_),
-                    method: candidate_method,
-                    ..
-                } = id
-                else {
-                    return None;
-                };
-
-                (package == &candidate.package
-                    && type_path == &candidate.type_path
-                    && candidate_method == method)
-                    .then(|| id.clone())
-            }));
         }
 
         matches.sort();
@@ -8346,11 +8325,7 @@ impl Resolver<'_> {
             return None;
         }
 
-        let source = self
-            .project
-            .files
-            .values()
-            .find(|source| source.package == package && source.module_path == module_path)?;
+        let source = self.source_for_module(package, module_path)?;
         for glob_path in visible_glob_use_paths(&source.syntax.items) {
             let aliases = self
                 .project
@@ -8401,11 +8376,7 @@ impl Resolver<'_> {
             return None;
         }
 
-        let source = self
-            .project
-            .files
-            .values()
-            .find(|source| source.package == package && source.module_path == module_path)?;
+        let source = self.source_for_module(package, module_path)?;
         for glob_path in visible_glob_use_paths(&source.syntax.items) {
             let aliases = self
                 .project
@@ -8487,6 +8458,18 @@ impl Resolver<'_> {
                 Some((self.package.to_string(), path))
             }
         }
+    }
+
+    fn source_for_module(
+        &self,
+        package: &str,
+        module_path: &[String],
+    ) -> Option<&crate::model::SourceFile> {
+        let path = self
+            .project
+            .source_files_by_module
+            .get(&(package.to_string(), module_path.to_vec()))?;
+        self.project.files.get(path)
     }
 
     fn resolve_dependency(&self, first: &str) -> Option<String> {

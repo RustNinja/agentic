@@ -14423,6 +14423,19 @@ fn public_glob_exposed_name_is_used(
         return true;
     }
 
+    if !source_module_path.is_empty()
+        && reachable_module_import_scope_mentions_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            source_module_path,
+            name,
+        )
+    {
+        return true;
+    }
+
     if source_module_path.is_empty()
         && reachable_package_mentions_unqualified_ident(project, reduced, package, name)
     {

@@ -983,3 +983,18 @@ owning enum when a variant name is live, preserves the glob import, and still
 prunes unrelated modules and functions. The focused fixture moves the original
 support crate away, proves the generated support package builds alone, and
 keeps dead support modules out of the output.
+
+The next mobile mining pass exposed a performance and reexport-retention pair.
+`codex-mobile-client::types::server_requests::ask_for_approval_into_upstream`
+initially burned minutes in dependency reduction because method resolution and
+glob reexport lookup repeatedly scanned the full parsed project. The project
+model now carries module-source and receiver-method indexes, dropping that root
+to a 66 ms reducer pass after the RA inventory completes. The same root then
+showed a correctness gap: a retained child module imported
+`super::AppAskForApproval`, while the enum lived in a sibling `models` module
+and was visible through the parent `pub use models::*`. Public glob reexport
+retention now consults the existing child import-scope analysis, so that parent
+reexport remains only when retained child code actually refers to the exposed
+name. The focused fixture proves the sibling/parent shape builds and still
+prunes unrelated child modules; the mined Litter root now reaches feedback cargo
+check with zero final warnings.

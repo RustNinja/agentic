@@ -47,6 +47,37 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
         }
     }
 
+    let source_files_by_module = parser
+        .files
+        .values()
+        .map(|source| {
+            (
+                (source.package.clone(), source.module_path.clone()),
+                source.path.clone(),
+            )
+        })
+        .collect();
+    let mut methods_by_receiver = HashMap::<(String, Vec<String>, String), Vec<CallableId>>::new();
+    for callable in parser.methods.keys() {
+        let CallableId::Method {
+            package,
+            type_path,
+            method,
+            ..
+        } = callable
+        else {
+            continue;
+        };
+        methods_by_receiver
+            .entry((package.clone(), type_path.clone(), method.clone()))
+            .or_default()
+            .push(callable.clone());
+    }
+    for methods in methods_by_receiver.values_mut() {
+        methods.sort();
+        methods.dedup();
+    }
+
     Ok(Project {
         workspace,
         files: parser.files,
@@ -54,6 +85,8 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
         methods: parser.methods,
         items: parser.items,
         module_aliases: parser.module_aliases,
+        source_files_by_module,
+        methods_by_receiver,
     })
 }
 

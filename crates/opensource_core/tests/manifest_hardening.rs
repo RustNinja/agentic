@@ -6836,6 +6836,48 @@ fn resolves_type_paths_through_visible_glob_reexports() {
 }
 
 #[test]
+fn retains_parent_public_glob_reexport_for_child_super_imports() {
+    let workspace = temp_path("parent-glob-super-import-workspace");
+    let output = temp_path("parent-glob-super-import-output");
+    let target_dir = temp_path("parent-glob-super-import-target");
+    write_parent_glob_super_import_fixture(&workspace);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let types_mod = read(output.join("parent_glob_super_import_like/src/types/mod.rs"));
+    let server_requests =
+        read(output.join("parent_glob_super_import_like/src/types/server_requests.rs"));
+    assert!(
+        types_mod.contains("pub use models::*;"),
+        "parent module must retain the public glob reexport that backs child use super::Name\n{}",
+        types_mod
+    );
+    assert!(server_requests.contains("use super::AppAskForApproval;"));
+    assert!(!types_mod.contains("dead"));
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated parent glob super-import slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\ntypes/mod.rs:\n{}\ntypes/server_requests.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        types_mod,
+        server_requests,
+    );
+}
+
+#[test]
 fn removes_test_and_runtime_benchmark_cfg_modules() {
     let workspace = temp_path("cfg-benchmark-workspace");
     let output = temp_path("cfg-benchmark-output");
@@ -10329,6 +10371,81 @@ pub enum AppAskForApproval {
 pub enum DeadPolicy {
     Noise,
 }
+"#,
+    );
+}
+
+fn write_parent_glob_super_import_fixture(root: &Path) {
+    if root.exists() {
+        fs::remove_dir_all(root).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "parent_glob_super_import_like"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+pub mod types;
+
+#[opensourced]
+pub fn selected() -> u8 {
+    types::server_requests::convert(types::models::AppAskForApproval::Never)
+}
+"#,
+    );
+    write(
+        root.join("src/types/mod.rs"),
+        r#"pub mod dead;
+pub mod models;
+pub mod server_requests;
+
+pub use dead::*;
+pub use models::*;
+pub use server_requests::*;
+"#,
+    );
+    write(
+        root.join("src/types/models.rs"),
+        r#"pub enum AppAskForApproval {
+    Never,
+}
+
+pub enum DeadPolicy {
+    Noise,
+}
+"#,
+    );
+    write(
+        root.join("src/types/server_requests.rs"),
+        r#"use super::AppAskForApproval;
+
+pub fn convert(value: AppAskForApproval) -> u8 {
+    match value {
+        AppAskForApproval::Never => 0,
+    }
+}
+
+pub fn unused_convert() -> u8 {
+    99
+}
+"#,
+    );
+    write(
+        root.join("src/types/dead.rs"),
+        r#"pub struct Dead;
 "#,
     );
 }
