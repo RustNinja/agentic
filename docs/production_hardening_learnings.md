@@ -1060,3 +1060,15 @@ warning-only repair when a prior structural pass explicitly deferred lint or
 dead-code allows and the current Cargo report has no errors or semantic warning
 hazards. The same Litter root now adds a scoped `#[allow(private_interfaces)]`
 to the generated `SshClient` item and reaches zero-warning feedback acceptance.
+
+The next `codex-mobile-client::alleycat::list_agents` root found a real
+conversion-edge gap. Retained code built `AgentInfo { wire:
+agent.wire.into(), ... }`; the field target type was `AgentWire`, while the
+source field came from a private wire DTO enum. The reducer now uses struct
+literal field types as expected conversion targets, so it retains
+`impl From<AgentWireWire> for AgentWire` without retaining dead sibling
+conversions to the same target. The same probe also produced an `unused_mut`
+warning after cfg pruning removed the Android-only reassignment branch. Repair
+now applies rustc `MachineApplicable` `unused_mut` suggestions, so strict
+batch feedback can remove the stale `mut` and accept the generated workspace
+with zero warnings.

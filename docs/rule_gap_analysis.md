@@ -1,6 +1,6 @@
 # Rule Gap Analysis
 
-Last updated: 2026-05-05
+Last updated: 2026-05-08
 
 This note records the next missing or underrepresented fixture/rule patterns
 found from the local Litter checkout at:
@@ -9,7 +9,7 @@ found from the local Litter checkout at:
 
 The current committed baseline after the first gap-closure pass is:
 
-- 132 focused cargo-checked rule database cases.
+- 140 focused cargo-checked rule database cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
 - The first documented gap batch is now executable in
   `crates/opensource_core/tests/rule_database.rs`.

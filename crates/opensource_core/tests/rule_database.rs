@@ -1934,6 +1934,26 @@ fn retains_bidirectional_from_impl_pair_for_boundary_roundtrips() {
 }
 
 #[test]
+fn retains_struct_literal_field_into_conversion_without_dead_siblings() {
+    let workspace = temp_path("rule-struct-field-into-workspace");
+    let output = temp_path("rule-struct-field-into-output");
+    let target_dir = temp_path("rule-struct-field-into-target");
+    write_struct_field_into_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("struct field into rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("struct_field_into_rule/src/lib.rs"));
+    assert!(lib.contains("impl From<WireMode> for PublicMode"), "{lib}");
+    assert!(!lib.contains("DeadWireMode"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
     let workspace = temp_path("rule-option-arc-callback-workspace");
     let output = temp_path("rule-option-arc-callback-output");
@@ -5279,6 +5299,72 @@ pub fn selected(id: u32) -> u32 {
     let wire: Wire = Internal::new(id).into();
     let internal: Internal = wire.into();
     internal.id
+}
+"#,
+    );
+}
+
+fn write_struct_field_into_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "struct_field_into_rule",
+        r#"use opensourced::opensourced;
+
+pub struct PublicAgent {
+    pub name: String,
+    pub mode: PublicMode,
+}
+
+pub enum PublicMode {
+    Websocket,
+    Jsonl,
+}
+
+struct WireAgent {
+    name: String,
+    mode: WireMode,
+}
+
+enum WireMode {
+    Websocket,
+    Jsonl,
+}
+
+enum DeadWireMode {
+    Http,
+}
+
+impl From<WireMode> for PublicMode {
+    fn from(value: WireMode) -> Self {
+        match value {
+            WireMode::Websocket => Self::Websocket,
+            WireMode::Jsonl => Self::Jsonl,
+        }
+    }
+}
+
+impl From<DeadWireMode> for PublicMode {
+    fn from(_: DeadWireMode) -> Self {
+        Self::Websocket
+    }
+}
+
+fn load_wire_agents() -> Vec<WireAgent> {
+    vec![WireAgent {
+        name: "codex".to_string(),
+        mode: WireMode::Jsonl,
+    }]
+}
+
+#[opensourced]
+pub fn selected() -> Vec<PublicAgent> {
+    load_wire_agents()
+        .into_iter()
+        .map(|agent| PublicAgent {
+            name: agent.name,
+            mode: agent.mode.into(),
+        })
+        .collect()
 }
 "#,
     );

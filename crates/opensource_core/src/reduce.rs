@@ -5670,7 +5670,7 @@ impl<'a> DependencyVisitor<'a> {
             Expr::MethodCall(call) => {
                 if matches!(
                     call.method.to_string().as_str(),
-                    "as_ref" | "as_mut" | "clone"
+                    "as_ref" | "as_mut" | "clone" | "into_iter" | "iter" | "iter_mut"
                 ) {
                     return self.expression_type_arguments(&call.receiver);
                 }
@@ -6534,6 +6534,26 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_expr_struct(&mut self, expr: &'ast ExprStruct) {
         self.add_item_path(&expr.path);
+        if let Some(struct_type) = self.resolver.resolve_type_path(&expr.path) {
+            for field in &expr.fields {
+                if let Some(target) = self.resolver.field_type(&struct_type, &field.member) {
+                    self.add_conversion_impls_to_expected_type(
+                        &field.expr,
+                        &target,
+                        "From",
+                        "from",
+                        "into",
+                    );
+                    self.add_conversion_impls_to_expected_type(
+                        &field.expr,
+                        &target,
+                        "TryFrom",
+                        "try_from",
+                        "try_into",
+                    );
+                }
+            }
+        }
         visit::visit_expr_struct(self, expr);
     }
 

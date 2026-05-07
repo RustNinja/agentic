@@ -111,13 +111,34 @@ pub fn repair_workspace(
         let code = diagnostic.code.as_deref();
         if !matches!(
             code,
-            Some("dead_code" | "unused_imports" | "unused_macros" | "private_interfaces")
+            Some(
+                "dead_code"
+                    | "unused_imports"
+                    | "unused_macros"
+                    | "unused_mut"
+                    | "private_interfaces"
+            )
         ) {
             skipped_diagnostics += 1;
             continue;
         }
 
         let mut repaired = false;
+        if code == Some("unused_mut") {
+            for suggestion in &diagnostic.suggestions {
+                let Some(path) = diagnostic_path(&options.output_root, &suggestion.file_name)
+                else {
+                    continue;
+                };
+                if let Some(candidate) = suggestion_candidate(suggestion) {
+                    suggestion_candidates_by_file
+                        .entry(path)
+                        .or_default()
+                        .push(candidate);
+                    repaired = true;
+                }
+            }
+        }
         if code == Some("unused_imports") {
             for suggestion in diagnostic
                 .suggestions
@@ -2032,6 +2053,49 @@ mod tests {
         let source = fs::read_to_string(file).unwrap();
         assert!(source.contains("let _: i32 = 1;"));
         assert!(!source.contains("\"1\""));
+    }
+
+    #[test]
+    fn applies_machine_applicable_unused_mut_warning_suggestions() {
+        let root = temp_output("repair-unused-mut-suggestion");
+        let file = root.join("src/lib.rs");
+        let source = "pub fn run() {\n    let mut value = 1;\n    let _ = value;\n}\n";
+        let start = source.find("mut ").unwrap() as u64;
+        let end = start + 4;
+        write(&file, source);
+
+        let report = repair_workspace(RepairOptions {
+            output_root: root.clone(),
+            diagnostics: vec![CheckDiagnostic {
+                level: "warning".to_string(),
+                message: "variable does not need to be mutable".to_string(),
+                code: Some("unused_mut".to_string()),
+                package_id: None,
+                target: None,
+                rendered: None,
+                spans: Vec::new(),
+                suggestions: vec![CheckSuggestion {
+                    level: "help".to_string(),
+                    message: "remove this `mut`".to_string(),
+                    file_name: "src/lib.rs".to_string(),
+                    line_start: 2,
+                    line_end: 2,
+                    column_start: 9,
+                    column_end: 13,
+                    byte_start: Some(start),
+                    byte_end: Some(end),
+                    suggested_replacement: String::new(),
+                    suggestion_applicability: Some("MachineApplicable".to_string()),
+                }],
+            }],
+        })
+        .unwrap();
+
+        assert_eq!(report.applied_suggestions, 1);
+        assert_eq!(report.skipped_diagnostics, 0);
+        let source = fs::read_to_string(file).unwrap();
+        assert!(source.contains("let value = 1;"));
+        assert!(!source.contains("let mut value = 1;"));
     }
 
     fn warning(
