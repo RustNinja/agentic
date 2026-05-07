@@ -135,6 +135,7 @@ file.
 | `manifest.support_nested_inline_facade_module.001` | covered | Nested inline support facade modules resolve multi-hop paths such as `facade::nested::Type` and prune dead sibling inline facades plus dead support modules |
 | `manifest.support_inline_facade_external_child.001` | covered | Inline support facades that declare file-backed child modules and `pub use child::*` resolve through both virtual and file-backed nodes while repeated dead glob misses do not block later live reexports |
 | `manifest.support_pub_crate_glob_private_use.001` | covered | Restricted support reexports such as `pub(crate) use module::*` are pruned as private imports when retained code uses direct module paths, while the live target module/items stay rendered |
+| `manifest.support_macro_reexport_alias_assoc.001` | covered | Copied support crates propagate methods called on macro metavariable receivers through reexported dependency type aliases, retaining only the required upstream associated methods |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
@@ -334,10 +335,9 @@ contracts.
   type, store it in a local, and call a method later. The support package must
   keep that associated method but still prune unrelated public methods on the
   same type.
-- Transitive support reexport aliases: if a copied support facade reexports a
-  leaf dependency type under a new name, associated method requirements must be
-  forwarded to the original leaf type, including method calls inside macro
-  arguments.
+- Transitive support reexport aliases: copied support facades now forward
+  associated method requirements through renamed dependency type aliases,
+  including methods called on macro metavariable receivers.
 - Support type-only surfaces: a retained dependency struct used only as data
   must not keep public inherent methods unless a live call, macro token, or
   unknown surface requires them.

@@ -6077,6 +6077,144 @@ impl PathModel {
 }
 
 #[test]
+fn propagates_support_assoc_methods_from_macro_body_receivers_through_reexported_aliases() {
+    let workspace = temp_path("support-macro-reexport-assoc-workspace");
+    let output = temp_path("support-macro-reexport-assoc-output");
+    let target_dir = temp_path("support-macro-reexport-assoc-target");
+    let external = temp_path("support-macro-reexport-assoc-external");
+    let provider = external.join("provider");
+    let path_model = external.join("path-model");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    provider::selected(value)
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+path-model = {{ path = "{}" }}
+"#,
+            manifest_path(&path_model)
+        ),
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"pub use path_model::PathModel as PublicPath;
+
+macro_rules! render_model_path {
+    ($model:expr) => {{
+        $model.as_path().display().to_string()
+    }};
+}
+
+pub fn selected(value: &str) -> String {
+    let model = PublicPath::new(value);
+    render_model_path!(model)
+}
+"#,
+    );
+    write(
+        path_model.join("Cargo.toml"),
+        r#"[package]
+name = "path-model"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        path_model.join("src/lib.rs"),
+        r#"use std::path::{Path, PathBuf};
+
+pub struct PathModel(PathBuf);
+
+impl PathModel {
+    pub fn new(value: &str) -> Self {
+        Self(PathBuf::from(value))
+    }
+
+    pub fn as_path(&self) -> &Path {
+        &self.0
+    }
+
+    pub fn dead_marker(&self) -> String {
+        self.0.display().to_string()
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    let path_model_lib = read(output.join("support/path-model/src/lib.rs"));
+    assert!(provider_lib.contains("render_model_path"), "{provider_lib}");
+    assert!(provider_lib.contains("PublicPath::new"), "{provider_lib}");
+    assert!(path_model_lib.contains("pub fn new"), "{path_model_lib}");
+    assert!(
+        path_model_lib.contains("pub fn as_path"),
+        "macro body receiver method on a reexported support alias should retain the dependency method\n{path_model_lib}"
+    );
+    assert!(!path_model_lib.contains("dead_marker"), "{path_model_lib}");
+
+    fs::rename(&external, external.with_extension("moved"))
+        .expect("original support packages should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated macro reexport assoc support slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}\npath-model/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+        path_model_lib,
+    );
+}
+
+#[test]
 fn retains_support_strum_runtime_dependency_for_enum_iter_derive() {
     let workspace = temp_path("support-strum-runtime-workspace");
     let output = temp_path("support-strum-runtime-output");

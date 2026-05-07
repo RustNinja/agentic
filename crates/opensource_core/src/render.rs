@@ -2341,9 +2341,13 @@ fn build_restricted_support_sources(
                     return Ok(None);
                 };
                 changed |= inserted;
-                let Some(inserted) =
-                    mark_support_item_assoc_usage_dependencies(&ctx, &source_file, item, &mut live)
-                else {
+                let Some(inserted) = mark_support_item_assoc_usage_dependencies(
+                    &ctx,
+                    &source_file,
+                    item,
+                    &named_items,
+                    &mut live,
+                ) else {
                     debug_support_prune(
                         package_root,
                         &format!(
@@ -4485,9 +4489,13 @@ fn mark_support_item_assoc_usage_dependencies(
     ctx: &SupportResolveContext<'_>,
     source_file: &Path,
     item: &Item,
+    named_items: &BTreeMap<String, Item>,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
 ) -> Option<bool> {
-    let mut visitor = SupportAssocUsageVisitor::default();
+    let mut visitor = SupportAssocUsageVisitor::new(
+        None,
+        support_macro_metavariable_method_requirements_from_named_items(named_items),
+    );
     visitor.visit_item(item);
     mark_support_assoc_paths(ctx, source_file, visitor.assoc_paths, live)
 }
@@ -4643,7 +4651,10 @@ fn mark_support_impl_self_assoc_dependencies(
         return Some(false);
     };
     let mut changed = false;
-    let mut assoc_usage = SupportAssocUsageVisitor::new(Some(self_name.clone()));
+    let mut assoc_usage = SupportAssocUsageVisitor::new(
+        Some(self_name.clone()),
+        support_macro_metavariable_method_requirements_from_named_items(named_items),
+    );
     for impl_item in &rendered_impl.items {
         let ImplItem::Fn(item_fn) = impl_item else {
             continue;
@@ -4857,6 +4868,85 @@ fn collect_token_method_call_names(tokens: &TokenStream, names: &mut BTreeSet<St
         {
             names.insert(method.to_string());
         }
+    }
+}
+
+#[derive(Clone, Default)]
+struct MacroMetavariableMethodRequirement {
+    metavariables: Vec<String>,
+    methods: BTreeMap<String, BTreeSet<String>>,
+}
+
+fn support_macro_metavariable_method_requirements_from_named_items(
+    named_items: &BTreeMap<String, Item>,
+) -> BTreeMap<String, MacroMetavariableMethodRequirement> {
+    let items = named_items.values().cloned().collect::<Vec<_>>();
+    support_macro_metavariable_method_requirements_from_items(&items)
+}
+
+fn support_macro_metavariable_method_requirements_from_items(
+    items: &[Item],
+) -> BTreeMap<String, MacroMetavariableMethodRequirement> {
+    let mut requirements = BTreeMap::new();
+    for item in items {
+        let Item::Macro(item_macro) = item else {
+            continue;
+        };
+        let Some(name) = item_macro.ident.as_ref().map(ToString::to_string) else {
+            continue;
+        };
+        let methods = macro_metavariable_method_names(&item_macro.mac.tokens);
+        if methods.is_empty() {
+            continue;
+        }
+        requirements.insert(
+            name,
+            MacroMetavariableMethodRequirement {
+                metavariables: macro_definition_metavariables(&item_macro.mac.tokens),
+                methods,
+            },
+        );
+    }
+    requirements
+}
+
+fn macro_invocation_single_ident(path: &syn::Path) -> Option<String> {
+    (path.segments.len() == 1).then(|| path.segments[0].ident.to_string())
+}
+
+fn macro_metavariable_method_names(tokens: &TokenStream) -> BTreeMap<String, BTreeSet<String>> {
+    let mut names = BTreeMap::new();
+    collect_macro_metavariable_method_names(tokens, &mut names);
+    names
+}
+
+fn collect_macro_metavariable_method_names(
+    tokens: &TokenStream,
+    names: &mut BTreeMap<String, BTreeSet<String>>,
+) {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            collect_macro_metavariable_method_names(&group.stream(), names);
+        }
+    }
+
+    for window in token_trees.windows(4) {
+        let [TokenTree::Punct(dollar), TokenTree::Ident(receiver), TokenTree::Punct(dot), TokenTree::Ident(method)] =
+            window
+        else {
+            continue;
+        };
+        if dollar.as_char() != '$'
+            || dot.as_char() != '.'
+            || !support_assoc_item_name_is_precise(&method.to_string())
+        {
+            continue;
+        }
+        names
+            .entry(receiver.to_string())
+            .or_default()
+            .insert(method.to_string());
     }
 }
 
@@ -5117,14 +5207,19 @@ struct SupportAssocUsageVisitor {
     self_type: Option<String>,
     variable_type_scopes: Vec<BTreeMap<String, Vec<String>>>,
     assoc_paths: BTreeSet<Vec<String>>,
+    macro_method_requirements: BTreeMap<String, MacroMetavariableMethodRequirement>,
 }
 
 impl SupportAssocUsageVisitor {
-    fn new(self_type: Option<String>) -> Self {
+    fn new(
+        self_type: Option<String>,
+        macro_method_requirements: BTreeMap<String, MacroMetavariableMethodRequirement>,
+    ) -> Self {
         Self {
             self_type,
             variable_type_scopes: Vec::new(),
             assoc_paths: BTreeSet::new(),
+            macro_method_requirements,
         }
     }
 
@@ -5159,6 +5254,43 @@ impl SupportAssocUsageVisitor {
             .iter()
             .rev()
             .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn macro_arg_type_path(&self, name: &str) -> Option<Vec<String>> {
+        if name == "self" {
+            return self
+                .self_type
+                .as_ref()
+                .map(|self_type| vec![self_type.clone()]);
+        }
+        self.variable_type(name)
+    }
+
+    fn record_macro_metavariable_method_dependencies(&mut self, mac: &syn::Macro) {
+        let Some(macro_name) = macro_invocation_single_ident(&mac.path) else {
+            return;
+        };
+        let Some(requirement) = self.macro_method_requirements.get(&macro_name) else {
+            return;
+        };
+        let invocation_args = macro_invocation_arg_idents(&mac.tokens);
+        let mut assoc_paths = Vec::new();
+        for (metavariable, arg) in requirement.metavariables.iter().zip(invocation_args) {
+            let Some(methods) = requirement.methods.get(metavariable) else {
+                continue;
+            };
+            let Some(type_path) = self.macro_arg_type_path(&arg) else {
+                continue;
+            };
+            for method in methods {
+                let mut assoc_path = type_path.clone();
+                assoc_path.push(method.clone());
+                if support_required_assoc_segments(&assoc_path).is_some() {
+                    assoc_paths.push(assoc_path);
+                }
+            }
+        }
+        self.assoc_paths.extend(assoc_paths);
     }
 }
 
@@ -5225,6 +5357,11 @@ impl Visit<'_> for SupportAssocUsageVisitor {
             }
         }
         visit::visit_expr_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &syn::Macro) {
+        self.record_macro_metavariable_method_dependencies(node);
+        visit::visit_macro(self, node);
     }
 }
 
@@ -8082,7 +8219,13 @@ impl TokenUsage {
     }
 
     fn record_dependency_methods_through_typed_values(&mut self, file: &syn::File) {
-        let mut visitor = DependencyTypedValueMethodVisitor::default();
+        let mut visitor = DependencyTypedValueMethodVisitor {
+            type_imports: dependency_type_imports(file),
+            macro_method_requirements: support_macro_metavariable_method_requirements_from_items(
+                &file.items,
+            ),
+            ..Default::default()
+        };
         visitor.visit_file(file);
         for (root, type_path, method) in visitor.calls {
             self.record_dependency_assoc_requirement(root, type_path, method);
@@ -8265,6 +8408,8 @@ impl Visit<'_> for DependencyMethodCallVisitor {
 struct DependencyTypedValueMethodVisitor {
     scopes: Vec<BTreeMap<String, (String, Vec<String>)>>,
     calls: Vec<(String, Vec<String>, String)>,
+    type_imports: BTreeMap<String, (String, Vec<String>)>,
+    macro_method_requirements: BTreeMap<String, MacroMetavariableMethodRequirement>,
 }
 
 impl DependencyTypedValueMethodVisitor {
@@ -8300,7 +8445,7 @@ impl DependencyTypedValueMethodVisitor {
             let Some(binding) = pat_single_ident(&typed.pat) else {
                 continue;
             };
-            let Some(dependency_type) = dependency_type_path_from_type(&typed.ty) else {
+            let Some(dependency_type) = self.dependency_type_path_from_type(&typed.ty) else {
                 continue;
             };
             self.insert_binding(binding, dependency_type);
@@ -8319,8 +8464,78 @@ impl DependencyTypedValueMethodVisitor {
             Expr::Group(group) => self.scoped_receiver_type_path(&group.expr),
             Expr::Try(expr_try) => self.scoped_receiver_type_path(&expr_try.expr),
             Expr::Await(expr_await) => self.scoped_receiver_type_path(&expr_await.base),
-            _ => dependency_receiver_type_path(expr),
+            _ => self.dependency_receiver_type_path(expr),
         }
+    }
+
+    fn dependency_receiver_type_path(&self, expr: &Expr) -> Option<(String, Vec<String>)> {
+        match expr {
+            Expr::Call(call) => match call.func.as_ref() {
+                Expr::Path(path) => self.dependency_type_path_from_associated_path(&path.path),
+                _ => None,
+            },
+            Expr::MethodCall(method_call) => {
+                self.dependency_receiver_type_path(&method_call.receiver)
+            }
+            Expr::Struct(expr_struct) => self.dependency_type_path_from_path(&expr_struct.path),
+            Expr::Path(expr_path) => self.dependency_type_path_from_path(&expr_path.path),
+            Expr::Reference(reference) => self.dependency_receiver_type_path(&reference.expr),
+            Expr::Paren(paren) => self.dependency_receiver_type_path(&paren.expr),
+            Expr::Group(group) => self.dependency_receiver_type_path(&group.expr),
+            Expr::Try(expr_try) => self.dependency_receiver_type_path(&expr_try.expr),
+            Expr::Await(expr_await) => self.dependency_receiver_type_path(&expr_await.base),
+            _ => None,
+        }
+    }
+
+    fn dependency_type_path_from_type(&self, ty: &Type) -> Option<(String, Vec<String>)> {
+        match ty {
+            Type::Path(type_path) => self.dependency_type_path_from_path(&type_path.path),
+            Type::Reference(reference) => self.dependency_type_path_from_type(&reference.elem),
+            Type::Paren(paren) => self.dependency_type_path_from_type(&paren.elem),
+            Type::Group(group) => self.dependency_type_path_from_type(&group.elem),
+            _ => None,
+        }
+    }
+
+    fn dependency_type_path_from_associated_path(
+        &self,
+        path: &syn::Path,
+    ) -> Option<(String, Vec<String>)> {
+        dependency_type_path_from_associated_path(path).or_else(|| {
+            let segments = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            let (assoc_name, type_segments) = segments.split_last()?;
+            if !support_assoc_item_name_is_precise(assoc_name) {
+                return None;
+            }
+            self.dependency_type_path_from_segments(type_segments)
+        })
+    }
+
+    fn dependency_type_path_from_path(&self, path: &syn::Path) -> Option<(String, Vec<String>)> {
+        dependency_type_path_from_path(path).or_else(|| {
+            let segments = path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            self.dependency_type_path_from_segments(&segments)
+        })
+    }
+
+    fn dependency_type_path_from_segments(
+        &self,
+        segments: &[String],
+    ) -> Option<(String, Vec<String>)> {
+        let (first, rest) = segments.split_first()?;
+        let (root, imported_type_path) = self.type_imports.get(first)?;
+        let mut type_path = imported_type_path.clone();
+        type_path.extend(rest.iter().cloned());
+        Some((root.clone(), type_path))
     }
 
     fn scoped_token_method_calls(
@@ -8361,6 +8576,32 @@ impl DependencyTypedValueMethodVisitor {
             }
         }
     }
+
+    fn scoped_macro_metavariable_method_calls(
+        &self,
+        mac: &syn::Macro,
+    ) -> Vec<(String, Vec<String>, String)> {
+        let Some(macro_name) = macro_invocation_single_ident(&mac.path) else {
+            return Vec::new();
+        };
+        let Some(requirement) = self.macro_method_requirements.get(&macro_name) else {
+            return Vec::new();
+        };
+        let invocation_args = macro_invocation_arg_idents(&mac.tokens);
+        let mut calls = Vec::new();
+        for (metavariable, arg) in requirement.metavariables.iter().zip(invocation_args) {
+            let Some(methods) = requirement.methods.get(metavariable) else {
+                continue;
+            };
+            let Some((root, type_path)) = self.lookup_binding(&arg) else {
+                continue;
+            };
+            for method in methods {
+                calls.push((root.clone(), type_path.clone(), method.clone()));
+            }
+        }
+        calls
+    }
 }
 
 impl Visit<'_> for DependencyTypedValueMethodVisitor {
@@ -8383,7 +8624,8 @@ impl Visit<'_> for DependencyTypedValueMethodVisitor {
             self.visit_expr(&init.expr);
         }
 
-        let explicit_type = pat_dependency_type_annotation(&node.pat);
+        let explicit_type = pat_dependency_type_annotation(&node.pat)
+            .or_else(|| pat_dependency_type_annotation_with_imports(&node.pat, &self.type_imports));
         let inferred_type = node
             .init
             .as_ref()
@@ -8406,6 +8648,8 @@ impl Visit<'_> for DependencyTypedValueMethodVisitor {
     }
 
     fn visit_macro(&mut self, node: &syn::Macro) {
+        self.calls
+            .extend(self.scoped_macro_metavariable_method_calls(node));
         self.calls
             .extend(self.scoped_token_method_calls(&node.tokens));
         visit::visit_macro(self, node);
@@ -8469,6 +8713,54 @@ fn pat_dependency_type_annotation(pat: &Pat) -> Option<(String, Vec<String>)> {
         Pat::Paren(paren) => pat_dependency_type_annotation(&paren.pat),
         _ => None,
     }
+}
+
+fn pat_dependency_type_annotation_with_imports(
+    pat: &Pat,
+    imports: &BTreeMap<String, (String, Vec<String>)>,
+) -> Option<(String, Vec<String>)> {
+    match pat {
+        Pat::Type(typed) => dependency_type_path_from_type_with_imports(&typed.ty, imports),
+        Pat::Reference(reference) => {
+            pat_dependency_type_annotation_with_imports(&reference.pat, imports)
+        }
+        Pat::Paren(paren) => pat_dependency_type_annotation_with_imports(&paren.pat, imports),
+        _ => None,
+    }
+}
+
+fn dependency_type_path_from_type_with_imports(
+    ty: &Type,
+    imports: &BTreeMap<String, (String, Vec<String>)>,
+) -> Option<(String, Vec<String>)> {
+    match ty {
+        Type::Path(type_path) => {
+            let segments = type_path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            dependency_type_path_from_segments_with_imports(&segments, imports)
+        }
+        Type::Reference(reference) => {
+            dependency_type_path_from_type_with_imports(&reference.elem, imports)
+        }
+        Type::Paren(paren) => dependency_type_path_from_type_with_imports(&paren.elem, imports),
+        Type::Group(group) => dependency_type_path_from_type_with_imports(&group.elem, imports),
+        _ => None,
+    }
+}
+
+fn dependency_type_path_from_segments_with_imports(
+    segments: &[String],
+    imports: &BTreeMap<String, (String, Vec<String>)>,
+) -> Option<(String, Vec<String>)> {
+    let (first, rest) = segments.split_first()?;
+    let (root, imported_type_path) = imports.get(first)?;
+    let mut type_path = imported_type_path.clone();
+    type_path.extend(rest.iter().cloned());
+    Some((root.clone(), type_path))
 }
 
 fn dependency_type_path_from_associated_path(path: &syn::Path) -> Option<(String, Vec<String>)> {
