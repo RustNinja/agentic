@@ -322,6 +322,20 @@ contracts.
   reexports, websocket/remote-control siblings, or monolithic protocol files
   where the next production gap is item-level support pruning after the current
   module/file-level copy.
+- Support dependency typed locals: a retained root can construct a dependency
+  type, store it in a local, and call a method later. The support package must
+  keep that associated method but still prune unrelated public methods on the
+  same type.
+- Transitive support reexport aliases: if a copied support facade reexports a
+  leaf dependency type under a new name, associated method requirements must be
+  forwarded to the original leaf type, including method calls inside macro
+  arguments.
+- Support type-only surfaces: a retained dependency struct used only as data
+  must not keep public inherent methods unless a live call, macro token, or
+  unknown surface requires them.
+- Shadowed import leaves: local bindings named like removed imports must not
+  keep dead `use` leaves alive, including grouped, renamed, direct, and
+  parent/child `super::*` import shapes.
 
 Cfg/custom-cfg matrix expansion is not expanded blindly. Catalog rules track
 cfg gates as move-intact/fail-closed work, and executable rules should be added

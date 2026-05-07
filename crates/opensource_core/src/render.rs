@@ -5,7 +5,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use proc_macro2::{TokenStream, TokenTree};
+use proc_macro2::{Delimiter, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
@@ -1894,6 +1894,7 @@ fn build_support_source_plan(
     for syntax in transformed_sources.values() {
         usage.record_file(syntax);
     }
+    record_required_external_reexport_usage(&syntax, &dependency_roots, required_names, &mut usage);
     for expansion in &macro_expansions {
         if support_macro_expansion_is_live(&usage, expansion) {
             usage.merge(&expansion.usage);
@@ -2905,6 +2906,138 @@ fn support_required_assoc_segments(segments: &[String]) -> Option<(Vec<String>, 
         type_name.clone(),
         assoc_name.clone(),
     ))
+}
+
+fn record_required_external_reexport_usage(
+    root_syntax: &syn::File,
+    dependency_roots: &BTreeSet<String>,
+    required_names: &BTreeSet<String>,
+    usage: &mut TokenUsage,
+) {
+    for required_name in required_names {
+        let (visible_path, assoc_name) = if let Some((prefix, type_name, assoc_name)) =
+            support_required_assoc_path(required_name)
+        {
+            let mut visible_path = prefix;
+            visible_path.push(type_name);
+            (visible_path, Some(assoc_name))
+        } else {
+            (
+                required_name
+                    .split("::")
+                    .filter(|segment| !segment.is_empty())
+                    .map(str::to_string)
+                    .collect::<Vec<_>>(),
+                None,
+            )
+        };
+        let Some(visible_name) = visible_path.last() else {
+            continue;
+        };
+        for item in &root_syntax.items {
+            let Item::Use(item_use) = item else {
+                continue;
+            };
+            if !use_is_reexport(&item_use.vis) {
+                continue;
+            }
+            record_required_external_reexport_use_tree(
+                &item_use.tree,
+                Vec::new(),
+                dependency_roots,
+                visible_name,
+                assoc_name.as_deref(),
+                usage,
+            );
+        }
+    }
+}
+
+fn record_required_external_reexport_use_tree(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    dependency_roots: &BTreeSet<String>,
+    visible_name: &str,
+    assoc_name: Option<&str>,
+    usage: &mut TokenUsage,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            record_required_external_reexport_use_tree(
+                &path.tree,
+                prefix,
+                dependency_roots,
+                visible_name,
+                assoc_name,
+                usage,
+            );
+        }
+        UseTree::Name(name) => {
+            if name.ident != visible_name {
+                return;
+            }
+            record_required_external_reexport_path(
+                &prefix,
+                &name.ident.to_string(),
+                dependency_roots,
+                assoc_name,
+                usage,
+            );
+        }
+        UseTree::Rename(rename) => {
+            if rename.rename != visible_name {
+                return;
+            }
+            record_required_external_reexport_path(
+                &prefix,
+                &rename.ident.to_string(),
+                dependency_roots,
+                assoc_name,
+                usage,
+            );
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                record_required_external_reexport_use_tree(
+                    item,
+                    prefix.clone(),
+                    dependency_roots,
+                    visible_name,
+                    assoc_name,
+                    usage,
+                );
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn record_required_external_reexport_path(
+    prefix: &[String],
+    imported_name: &str,
+    dependency_roots: &BTreeSet<String>,
+    assoc_name: Option<&str>,
+    usage: &mut TokenUsage,
+) {
+    let Some(root) = prefix.first() else {
+        return;
+    };
+    if !dependency_roots.contains(root) {
+        return;
+    }
+    let mut imported_path = prefix[1..].to_vec();
+    imported_path.push(imported_name.to_string());
+    if let Some(assoc_name) = assoc_name {
+        imported_path.push(assoc_name.to_string());
+    }
+    if let Some(required_path) = dependency_required_path_string(&imported_path) {
+        usage
+            .dependency_public_names
+            .entry(root.clone())
+            .or_default()
+            .insert(required_path);
+    }
 }
 
 fn support_type_like_ident(ident: &str) -> bool {
@@ -3996,8 +4129,7 @@ fn support_impl_item_should_render(
 ) -> bool {
     match item {
         ImplItem::Fn(item_fn) => assoc_items
-            .map(|assoc_items| assoc_items.contains(&item_fn.sig.ident.to_string()))
-            .unwrap_or_else(|| !matches!(item_fn.vis, syn::Visibility::Inherited)),
+            .is_some_and(|assoc_items| assoc_items.contains(&item_fn.sig.ident.to_string())),
         // Associated consts, types, and macros can affect method signatures or macro-expanded
         // impl bodies. Keep them unless a future semantic pass proves an item-level decision.
         _ => true,
@@ -4047,6 +4179,9 @@ fn mark_support_method_fallback_dependencies(
 
     let mut visitor = SupportMethodNameVisitor::default();
     visitor.visit_item(item);
+    visitor
+        .names
+        .extend(token_method_call_names(&item.to_token_stream()));
     let mut changed = false;
     for method in visitor.names {
         let Some(candidates) = method_index.get(&method) else {
@@ -4170,10 +4305,6 @@ fn mark_support_impl_self_assoc_dependencies(
     let Some(self_name) = support_impl_self_named_item(item_impl) else {
         return Some(false);
     };
-    let has_assoc_items = live_set
-        .assoc_item_names
-        .get(&self_name)
-        .is_some_and(|assoc_items| !assoc_items.is_empty());
     let Some(rendered_impl) = transform_support_impl(item_impl, named_items, live_set) else {
         return Some(false);
     };
@@ -4183,14 +4314,6 @@ fn mark_support_impl_self_assoc_dependencies(
         let ImplItem::Fn(item_fn) = impl_item else {
             continue;
         };
-        if !has_assoc_items && !matches!(item_fn.vis, syn::Visibility::Inherited) {
-            changed |= mark_support_live_assoc_item(
-                live,
-                source_file,
-                &self_name,
-                &item_fn.sig.ident.to_string(),
-            );
-        }
         let mut visitor = SelfAssocUsageVisitor::default();
         visitor.visit_impl_item_fn(item_fn);
         for assoc_name in visitor.assoc_items {
@@ -4372,6 +4495,34 @@ impl Visit<'_> for SupportMethodNameVisitor {
     fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
         self.names.insert(node.method.to_string());
         visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn token_method_call_names(tokens: &TokenStream) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_token_method_call_names(tokens, &mut names);
+    names
+}
+
+fn collect_token_method_call_names(tokens: &TokenStream, names: &mut BTreeSet<String>) {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            collect_token_method_call_names(&group.stream(), names);
+        }
+    }
+
+    for window in token_trees.windows(3) {
+        let [TokenTree::Punct(dot), TokenTree::Ident(method), TokenTree::Group(args)] = window
+        else {
+            continue;
+        };
+        if dot.as_char() == '.'
+            && args.delimiter() == Delimiter::Parenthesis
+            && support_assoc_item_name_is_precise(&method.to_string())
+        {
+            names.insert(method.to_string());
+        }
     }
 }
 
@@ -7560,6 +7711,7 @@ impl TokenUsage {
     fn record_file(&mut self, file: &syn::File) {
         collect_token_usage(&file.to_token_stream(), self);
         self.record_dependency_method_calls(file);
+        self.record_dependency_methods_through_typed_values(file);
         self.record_dependency_assoc_calls_through_imports(file);
         for item in &file.items {
             if let Item::Use(item_use) = item {
@@ -7587,14 +7739,30 @@ impl TokenUsage {
         let mut visitor = DependencyMethodCallVisitor::default();
         visitor.visit_file(file);
         for (root, type_path, method) in visitor.calls {
-            let mut required_path = type_path;
-            required_path.push(method);
-            if let Some(required_path) = dependency_required_path_string(&required_path) {
-                self.dependency_public_names
-                    .entry(root)
-                    .or_default()
-                    .insert(required_path);
-            }
+            self.record_dependency_assoc_requirement(root, type_path, method);
+        }
+    }
+
+    fn record_dependency_methods_through_typed_values(&mut self, file: &syn::File) {
+        let mut visitor = DependencyTypedValueMethodVisitor::default();
+        visitor.visit_file(file);
+        for (root, type_path, method) in visitor.calls {
+            self.record_dependency_assoc_requirement(root, type_path, method);
+        }
+    }
+
+    fn record_dependency_assoc_requirement(
+        &mut self,
+        root: String,
+        mut type_path: Vec<String>,
+        assoc_name: String,
+    ) {
+        type_path.push(assoc_name);
+        if let Some(required_path) = dependency_required_path_string(&type_path) {
+            self.dependency_public_names
+                .entry(root)
+                .or_default()
+                .insert(required_path);
         }
     }
 
@@ -7753,6 +7921,163 @@ impl Visit<'_> for DependencyMethodCallVisitor {
     }
 }
 
+#[derive(Default)]
+struct DependencyTypedValueMethodVisitor {
+    scopes: Vec<BTreeMap<String, (String, Vec<String>)>>,
+    calls: Vec<(String, Vec<String>, String)>,
+}
+
+impl DependencyTypedValueMethodVisitor {
+    fn push_scope(&mut self) {
+        self.scopes.push(BTreeMap::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn insert_binding(&mut self, name: String, dependency_type: (String, Vec<String>)) {
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.insert(name, dependency_type);
+        }
+    }
+
+    fn lookup_binding(&self, name: &str) -> Option<(String, Vec<String>)> {
+        self.scopes
+            .iter()
+            .rev()
+            .find_map(|scope| scope.get(name).cloned())
+    }
+
+    fn record_fn_inputs<'ast, I>(&mut self, inputs: I)
+    where
+        I: IntoIterator<Item = &'ast syn::FnArg>,
+    {
+        for input in inputs {
+            let syn::FnArg::Typed(typed) = input else {
+                continue;
+            };
+            let Some(binding) = pat_single_ident(&typed.pat) else {
+                continue;
+            };
+            let Some(dependency_type) = dependency_type_path_from_type(&typed.ty) else {
+                continue;
+            };
+            self.insert_binding(binding, dependency_type);
+        }
+    }
+
+    fn scoped_receiver_type_path(&self, expr: &Expr) -> Option<(String, Vec<String>)> {
+        match expr {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let ident = path.path.segments.first()?.ident.to_string();
+                self.lookup_binding(&ident)
+            }
+            Expr::MethodCall(method_call) => self.scoped_receiver_type_path(&method_call.receiver),
+            Expr::Reference(reference) => self.scoped_receiver_type_path(&reference.expr),
+            Expr::Paren(paren) => self.scoped_receiver_type_path(&paren.expr),
+            Expr::Group(group) => self.scoped_receiver_type_path(&group.expr),
+            Expr::Try(expr_try) => self.scoped_receiver_type_path(&expr_try.expr),
+            Expr::Await(expr_await) => self.scoped_receiver_type_path(&expr_await.base),
+            _ => dependency_receiver_type_path(expr),
+        }
+    }
+
+    fn scoped_token_method_calls(
+        &self,
+        tokens: &TokenStream,
+    ) -> Vec<(String, Vec<String>, String)> {
+        let mut calls = Vec::new();
+        self.collect_scoped_token_method_calls(tokens, &mut calls);
+        calls
+    }
+
+    fn collect_scoped_token_method_calls(
+        &self,
+        tokens: &TokenStream,
+        calls: &mut Vec<(String, Vec<String>, String)>,
+    ) {
+        let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+        for token in &token_trees {
+            if let TokenTree::Group(group) = token {
+                self.collect_scoped_token_method_calls(&group.stream(), calls);
+            }
+        }
+
+        for window in token_trees.windows(4) {
+            let [TokenTree::Ident(receiver), TokenTree::Punct(dot), TokenTree::Ident(method), TokenTree::Group(args)] =
+                window
+            else {
+                continue;
+            };
+            if dot.as_char() != '.'
+                || args.delimiter() != Delimiter::Parenthesis
+                || !support_assoc_item_name_is_precise(&method.to_string())
+            {
+                continue;
+            }
+            if let Some((root, type_path)) = self.lookup_binding(&receiver.to_string()) {
+                calls.push((root, type_path, method.to_string()));
+            }
+        }
+    }
+}
+
+impl Visit<'_> for DependencyTypedValueMethodVisitor {
+    fn visit_item_fn(&mut self, node: &syn::ItemFn) {
+        self.push_scope();
+        self.record_fn_inputs(&node.sig.inputs);
+        self.visit_block(&node.block);
+        self.pop_scope();
+    }
+
+    fn visit_impl_item_fn(&mut self, node: &syn::ImplItemFn) {
+        self.push_scope();
+        self.record_fn_inputs(&node.sig.inputs);
+        self.visit_block(&node.block);
+        self.pop_scope();
+    }
+
+    fn visit_local(&mut self, node: &syn::Local) {
+        if let Some(init) = &node.init {
+            self.visit_expr(&init.expr);
+        }
+
+        let explicit_type = pat_dependency_type_annotation(&node.pat);
+        let inferred_type = node
+            .init
+            .as_ref()
+            .and_then(|init| self.scoped_receiver_type_path(&init.expr));
+        if let (Some(binding), Some(dependency_type)) = (
+            pat_single_ident_or_typed_ident(&node.pat),
+            explicit_type.or(inferred_type),
+        ) {
+            self.insert_binding(binding, dependency_type);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        if support_assoc_item_name_is_precise(&node.method.to_string()) {
+            if let Some((root, type_path)) = self.scoped_receiver_type_path(&node.receiver) {
+                self.calls.push((root, type_path, node.method.to_string()));
+            }
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_macro(&mut self, node: &syn::Macro) {
+        self.calls
+            .extend(self.scoped_token_method_calls(&node.tokens));
+        visit::visit_macro(self, node);
+    }
+
+    fn visit_block(&mut self, node: &syn::Block) {
+        self.push_scope();
+        visit::visit_block(self, node);
+        self.pop_scope();
+    }
+}
+
 fn dependency_receiver_type_path(expr: &Expr) -> Option<(String, Vec<String>)> {
     match expr {
         Expr::Call(call) => match call.func.as_ref() {
@@ -7767,6 +8092,41 @@ fn dependency_receiver_type_path(expr: &Expr) -> Option<(String, Vec<String>)> {
         Expr::Group(group) => dependency_receiver_type_path(&group.expr),
         Expr::Try(expr_try) => dependency_receiver_type_path(&expr_try.expr),
         Expr::Await(expr_await) => dependency_receiver_type_path(&expr_await.base),
+        _ => None,
+    }
+}
+
+fn dependency_type_path_from_type(ty: &Type) -> Option<(String, Vec<String>)> {
+    match ty {
+        Type::Path(type_path) => dependency_type_path_from_path(&type_path.path),
+        Type::Reference(reference) => dependency_type_path_from_type(&reference.elem),
+        Type::Paren(paren) => dependency_type_path_from_type(&paren.elem),
+        Type::Group(group) => dependency_type_path_from_type(&group.elem),
+        _ => None,
+    }
+}
+
+fn pat_single_ident_or_typed_ident(pat: &Pat) -> Option<String> {
+    pat_single_ident(pat).or_else(|| match pat {
+        Pat::Type(typed) => pat_single_ident(&typed.pat),
+        _ => None,
+    })
+}
+
+fn pat_single_ident(pat: &Pat) -> Option<String> {
+    match pat {
+        Pat::Ident(ident) => Some(ident.ident.to_string()),
+        Pat::Reference(reference) => pat_single_ident(&reference.pat),
+        Pat::Paren(paren) => pat_single_ident(&paren.pat),
+        _ => None,
+    }
+}
+
+fn pat_dependency_type_annotation(pat: &Pat) -> Option<(String, Vec<String>)> {
+    match pat {
+        Pat::Type(typed) => dependency_type_path_from_type(&typed.ty),
+        Pat::Reference(reference) => pat_dependency_type_annotation(&reference.pat),
+        Pat::Paren(paren) => pat_dependency_type_annotation(&paren.pat),
         _ => None,
     }
 }
@@ -14228,7 +14588,43 @@ fn reachable_module_uses_imported_ident(
         return true;
     }
 
-    render_plan.module_mentions_ident(package, module_path, ident)
+    reachable_module_non_callable_mentions_imported_ident(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        ident,
+    )
+}
+
+fn reachable_module_non_callable_mentions_imported_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    render_plan
+        .reachable_items
+        .iter()
+        .filter(|item| item.package() == package && item.module_path == module_path)
+        .any(|item| {
+            project.items.get(item).is_some_and(|record| {
+                reachable_item_mentions_ident(project, reduced, package, item, record, ident)
+            })
+        })
+        || retained_impl_attrs_mention_ident(project, reduced, package, module_path, ident)
+        || retained_impl_non_fn_items_mention_ident(project, reduced, package, module_path, ident)
+        || retained_root_macro_impl_items_mention_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || retained_macro_invocations_mention_ident(project, reduced, package, module_path, ident)
 }
 
 fn function_uses_imported_ident(function: &syn::ItemFn, ident: &str) -> bool {

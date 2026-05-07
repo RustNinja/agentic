@@ -1013,3 +1013,29 @@ the real next gap: the generated slice can still over-retain broad mobile
 surfaces and feedback can still require generic method/impl/support-schema
 widening, but those are now visible correctness questions instead of hidden
 inside repeated whole-project scans.
+
+The next support-package pass tightened the "used / unknown / unused" boundary
+for copied path dependencies. A support type that was retained only as a data
+surface used to keep every public inherent method, which made monolithic
+protocol/helper crates carry dead sibling methods into the slice. Support impl
+rendering now keeps inherent methods only when an associated-method requirement
+is observed. To avoid unsafe pruning, token usage records method calls through
+dependency-typed locals and parameters, so shapes like
+`let value = provider::Payload::new(...); value.render()` retain both `new` and
+`render` while pruning unrelated public methods. Macro token bodies are also
+scanned for dotted method calls so live support methods mentioned inside
+`format!` or similar macros are not lost. The same pass fixed import pruning
+for local bindings that shadow removed imports: scoped callable usage now wins
+over coarse module token mentions, so a local `helper` or `fmt` binding does
+not keep `use ...::helper` or `use std::fmt` alive. The full manifest hardening
+suite now covers this with support typed-local, type-only public-method, enum
+payload macro-method, and shadowed-import fixtures.
+
+The rule database then caught the next transitive support edge: a helper support
+crate can reexport a leaf dependency type under a facade alias, and the root can
+call methods through that alias inside normal code or macro arguments. The
+support source plan now forwards required alias methods through public external
+reexports, so `external_helper::LeafAlias::new()` and `leaf.label()` become
+`external_leaf::LeafLive::new` and `LeafLive::label` requirements. This keeps
+the leaf support crate buildable while still pruning the dead leaf package,
+dead facade exports, and unrelated public methods.

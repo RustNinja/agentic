@@ -3857,6 +3857,221 @@ impl LivePayload {
 }
 
 #[test]
+fn retains_support_methods_called_through_typed_locals_and_prunes_dead_siblings() {
+    let workspace = temp_path("support-typed-local-method-workspace");
+    let output = temp_path("support-typed-local-method-output");
+    let target_dir = temp_path("support-typed-local-method-target");
+    let provider = temp_path("support-typed-local-method-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    let payload = provider::Payload::new(value);
+    payload.render()
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"pub struct Payload {
+    value: String,
+}
+
+impl Payload {
+    pub fn new(value: &str) -> Self {
+        Self {
+            value: value.to_string(),
+        }
+    }
+
+    pub fn render(self) -> String {
+        format!("live:{}", self.value)
+    }
+
+    pub fn dead_public(self) -> String {
+        format!("dead:{}", self.value)
+    }
+}
+
+pub fn unrelated() -> String {
+    "unused".to_string()
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(
+        provider_lib.contains("pub struct Payload"),
+        "{provider_lib}"
+    );
+    assert!(provider_lib.contains("pub fn new"), "{provider_lib}");
+    assert!(provider_lib.contains("pub fn render"), "{provider_lib}");
+    assert!(
+        !provider_lib.contains("dead_public"),
+        "unused public support methods must not survive typed-local method slicing\n{provider_lib}"
+    );
+    assert!(!provider_lib.contains("unrelated"), "{provider_lib}");
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated typed-local support method slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+    );
+}
+
+#[test]
+fn prunes_type_only_support_public_inherent_methods() {
+    let workspace = temp_path("support-type-only-method-workspace");
+    let output = temp_path("support-type-only-method-output");
+    let target_dir = temp_path("support-type-only-method-target");
+    let provider = temp_path("support-type-only-method-provider");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&provider)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> String {
+    provider::label(provider::Payload {
+        value: value.to_string(),
+    })
+}
+"#,
+    );
+    write(
+        provider.join("Cargo.toml"),
+        r#"[package]
+name = "provider"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        provider.join("src/lib.rs"),
+        r#"pub struct Payload {
+    pub value: String,
+}
+
+impl Payload {
+    pub fn dead_public(&self) -> String {
+        format!("dead:{}", self.value)
+    }
+}
+
+pub fn label(payload: Payload) -> String {
+    format!("live:{}", payload.value)
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let provider_lib = read(output.join("support/provider/src/lib.rs"));
+    assert!(
+        provider_lib.contains("pub struct Payload"),
+        "{provider_lib}"
+    );
+    assert!(provider_lib.contains("pub fn label"), "{provider_lib}");
+    assert!(
+        !provider_lib.contains("dead_public"),
+        "type-only support retention must not keep unused public inherent methods\n{provider_lib}"
+    );
+
+    fs::rename(&provider, provider.with_extension("moved"))
+        .expect("original provider package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated type-only support method slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nprovider/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        provider_lib,
+    );
+}
+
+#[test]
 fn retains_support_package_runtime_used_by_proc_macro_expansion() {
     let workspace = temp_path("support-proc-macro-runtime-workspace");
     let output = temp_path("support-proc-macro-runtime-output");
