@@ -243,6 +243,32 @@ fn prunes_grouped_external_imports_after_private_field_pruning() {
 }
 
 #[test]
+fn prunes_private_fields_mentioned_only_by_other_item_surfaces() {
+    let workspace = temp_path("rule-private-field-module-mention-workspace");
+    let output = temp_path("rule-private-field-module-mention-output");
+    let target_dir = temp_path("rule-private-field-module-mention-target");
+    write_private_field_module_mention_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("private field module mention rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("private_field_module_mention_rule/src/lib.rs"));
+    assert!(lib.contains("pub enum HandoffAction"), "{lib}");
+    assert!(
+        lib.contains("SendTurn { transcript: String }"),
+        "public enum surface should still keep its transcript field:\n{lib}",
+    );
+    assert!(!lib.contains("TranscriptBuffer"), "{lib}");
+    assert!(!lib.contains("transcript: TranscriptBuffer"), "{lib}");
+    assert!(lib.contains("action_queue: Vec<HandoffAction>"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_trait_default_methods_and_impl_associated_consts() {
     let workspace = temp_path("rule-default-trait-workspace");
     let output = temp_path("rule-default-trait-output");
@@ -3968,6 +3994,44 @@ impl ReconnectingClient {
 #[opensourced]
 pub fn selected(client: &ReconnectingClient) -> bool {
     client.shutdown()
+}
+"#,
+    );
+}
+
+fn write_private_field_module_mention_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "private_field_module_mention_rule",
+        r#"use opensourced::opensourced;
+
+pub enum HandoffAction {
+    SendTurn { transcript: String },
+    Drain,
+}
+
+pub struct TranscriptBuffer {
+    text: String,
+}
+
+pub struct HandoffManager {
+    inner: HandoffManagerInner,
+}
+
+struct HandoffManagerInner {
+    action_queue: Vec<HandoffAction>,
+    transcript: TranscriptBuffer,
+}
+
+impl HandoffManager {
+    pub fn drain_actions(&mut self) -> Vec<HandoffAction> {
+        std::mem::take(&mut self.inner.action_queue)
+    }
+}
+
+#[opensourced]
+pub fn selected(manager: &mut HandoffManager) -> Vec<HandoffAction> {
+    manager.drain_actions()
 }
 "#,
     );

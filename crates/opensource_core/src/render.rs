@@ -12679,7 +12679,6 @@ fn struct_field_should_remain(
     let name = name.to_string();
     if let Some(render_plan) = render_plan {
         render_plan.package_callable_mentions_ident(package, &name)
-            || render_plan.module_mentions_ident(package, module_path, &name)
             || retained_impl_items_mention_struct_field(
                 project,
                 reduced,
@@ -12777,7 +12776,6 @@ fn struct_field_should_remain_without_type_param_guard(
     let name = name.to_string();
     if let Some(render_plan) = render_plan {
         render_plan.package_callable_mentions_ident(package, &name)
-            || render_plan.module_mentions_ident(package, module_path, &name)
             || retained_impl_items_mention_struct_field(
                 project,
                 reduced,

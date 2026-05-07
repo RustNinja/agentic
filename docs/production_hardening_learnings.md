@@ -957,3 +957,16 @@ edge and widening would only add redundant code. The repair loop now handles
 primary span, tracked separately from dead-code allows in the repair report.
 Both mined SSH roots now pass feedback cargo check with zero warnings while
 preserving the narrow slice.
+
+The next bridge random-ten seed exposed an over-retention bug in private field
+pruning. Several `voice_handoff` function roots retained `HandoffManagerInner`
+and its live `action_queue` field, but also kept the unrelated private
+`transcript: TranscriptBuffer` field because another retained public enum
+surface had a field named `transcript`. The graph already marked
+`TranscriptBuffer` reachable, but the render plan did not render it because no
+retained callable or impl actually used that field. The better generic fix is
+not to widen: private field retention now ignores broad module-level item
+surface name collisions and relies on callable/impl evidence plus field attrs,
+public surfaces, and generic field requirements. The three mined bridge roots
+now remove the unrelated transcript field and pass feedback cargo check with
+zero warnings.
