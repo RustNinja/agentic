@@ -3642,7 +3642,9 @@ fn support_reexported_module_prefixes(tree: &UseTree, visible_name: &str) -> Vec
             UseTree::Rename(rename) => {
                 if rename.rename == visible_name {
                     let mut target = prefix;
-                    target.push(rename.ident.to_string());
+                    if rename.ident != "self" {
+                        target.push(rename.ident.to_string());
+                    }
                     out.push(target);
                 }
             }
