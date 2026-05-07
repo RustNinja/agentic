@@ -3888,6 +3888,135 @@ pub enum LiveSegment {
 }
 
 #[test]
+fn prunes_support_packages_reached_through_reexported_module_aliases() {
+    let workspace = temp_path("support-module-alias-workspace");
+    let output = temp_path("support-module-alias-output");
+    let target_dir = temp_path("support-module-alias-target");
+    let helper = temp_path("support-module-alias-helper");
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper)
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use external_helper::protocol_params::LivePatch;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(patch: LivePatch) -> usize {
+    patch.path.len()
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"pub mod protocol;
+
+pub use protocol::dead as dead_protocol;
+pub use protocol::params as protocol_params;
+"#,
+    );
+    write(
+        helper.join("src/protocol/mod.rs"),
+        r#"pub mod dead;
+pub mod params;
+"#,
+    );
+    write(
+        helper.join("src/protocol/params.rs"),
+        r#"pub struct LivePatch {
+    pub path: Vec<LiveSegment>,
+}
+
+pub enum LiveSegment {
+    Index(usize),
+    Key(String),
+}
+"#,
+    );
+    write(
+        helper.join("src/protocol/dead.rs"),
+        r#"pub struct DeadPatch {
+    pub value: String,
+}
+
+pub fn dead_helper() -> DeadPatch {
+    DeadPatch {
+        value: String::new(),
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reexported support module alias should reduce");
+
+    let helper_lib = read(output.join("support/external-helper/src/lib.rs"));
+    let protocol_mod = read(output.join("support/external-helper/src/protocol/mod.rs"));
+    let params = read(output.join("support/external-helper/src/protocol/params.rs"));
+    assert!(
+        helper_lib.contains("pub use protocol::params as protocol_params"),
+        "{helper_lib}"
+    );
+    assert!(!helper_lib.contains("dead_protocol"), "{helper_lib}");
+    assert!(protocol_mod.contains("pub mod params"), "{protocol_mod}");
+    assert!(!protocol_mod.contains("dead"), "{protocol_mod}");
+    assert!(params.contains("pub struct LivePatch"), "{params}");
+    assert!(!output
+        .join("support/external-helper/src/protocol/dead.rs")
+        .exists());
+
+    fs::rename(&helper, helper.with_extension("moved"))
+        .expect("original helper package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated support module alias slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nhelper/src/lib.rs:\n{}\nhelper/src/protocol/mod.rs:\n{}\nhelper/src/protocol/params.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper_lib,
+        protocol_mod,
+        params,
+    );
+}
+
+#[test]
 fn prunes_support_package_items_with_parent_module_dependencies() {
     let workspace = temp_path("support-parent-module-workspace");
     let output = temp_path("support-parent-module-output");

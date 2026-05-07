@@ -3505,6 +3505,19 @@ fn mark_support_use_target_with_assoc(
     };
 
     let Some(child_file) = support_child_module_file(ctx.modules, source_file, first) else {
+        match mark_support_reexported_module_prefix_with_assoc(
+            ctx,
+            source_file,
+            first,
+            &prefix[1..],
+            target_name,
+            assoc_name,
+            live,
+            visited,
+        ) {
+            SupportReexportMark::NotMatched => {}
+            matched => return matched,
+        }
         if ctx.dependency_roots.contains(first) {
             return SupportReexportMark::Matched(false);
         }
@@ -3549,6 +3562,102 @@ fn mark_support_use_target_with_assoc(
         }
         other => other,
     }
+}
+
+fn mark_support_reexported_module_prefix_with_assoc(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    visible_prefix: &str,
+    remaining_prefix: &[String],
+    target_name: &str,
+    assoc_name: Option<&str>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+    visited: &mut BTreeSet<(PathBuf, String)>,
+) -> SupportReexportMark {
+    let Some(module) = ctx.modules.get(source_file) else {
+        return SupportReexportMark::Unsupported;
+    };
+    let mut matched = false;
+    let mut inserted = false;
+    for item in &module.syntax.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        if !use_is_reexport(&item_use.vis) {
+            continue;
+        }
+        for mut target_prefix in support_reexported_module_prefixes(&item_use.tree, visible_prefix)
+        {
+            if !dependency_alias_target_is_module_like(visible_prefix, &target_prefix) {
+                continue;
+            }
+            target_prefix.extend(remaining_prefix.iter().cloned());
+            match mark_support_use_target_with_assoc(
+                ctx,
+                source_file,
+                &target_prefix,
+                target_name,
+                assoc_name,
+                live,
+                visited,
+            ) {
+                SupportReexportMark::Matched(item_inserted) => {
+                    matched = true;
+                    inserted |= item_inserted;
+                    inserted |= live
+                        .entry(source_file.to_path_buf())
+                        .or_default()
+                        .public_exports
+                        .insert(visible_prefix.to_string());
+                }
+                SupportReexportMark::Unsupported => return SupportReexportMark::Unsupported,
+                SupportReexportMark::NotMatched => {}
+            }
+        }
+    }
+    if matched {
+        SupportReexportMark::Matched(inserted)
+    } else {
+        SupportReexportMark::NotMatched
+    }
+}
+
+fn support_reexported_module_prefixes(tree: &UseTree, visible_name: &str) -> Vec<Vec<String>> {
+    fn collect(
+        tree: &UseTree,
+        mut prefix: Vec<String>,
+        visible_name: &str,
+        out: &mut Vec<Vec<String>>,
+    ) {
+        match tree {
+            UseTree::Path(path) => {
+                prefix.push(path.ident.to_string());
+                collect(&path.tree, prefix, visible_name, out);
+            }
+            UseTree::Name(name) => {
+                if name.ident == "self" && prefix.last().is_some_and(|name| name == visible_name) {
+                    out.push(prefix);
+                }
+            }
+            UseTree::Rename(rename) => {
+                if rename.rename == visible_name {
+                    let mut target = prefix;
+                    target.push(rename.ident.to_string());
+                    out.push(target);
+                }
+            }
+            UseTree::Group(group) => {
+                for item in &group.items {
+                    collect(item, prefix.clone(), visible_name, out);
+                }
+            }
+            UseTree::Glob(_) => {}
+        }
+    }
+
+    let mut prefixes = Vec::new();
+    collect(tree, Vec::new(), visible_name, &mut prefixes);
+    prefixes
 }
 
 fn seed_support_name_in_file(
@@ -5044,9 +5153,19 @@ fn prune_support_public_use_tree(
             )?);
             Some(UseTree::Path(path))
         }
-        UseTree::Name(name) => live_names
-            .contains(&name.ident.to_string())
-            .then(|| UseTree::Name(name.clone())),
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            live_names
+                .contains(&visible_name)
+                .then(|| UseTree::Name(name.clone()))
+        }
         UseTree::Rename(rename) => (live_names.contains(&rename.ident.to_string())
             || live_names.contains(&rename.rename.to_string()))
         .then(|| UseTree::Rename(rename.clone())),
