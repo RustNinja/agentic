@@ -7,9 +7,9 @@ found from the local Litter checkout at:
 
 `/Users/mykyta/Documents/New project 6/litter-analysis/shared/rust-bridge`
 
-The current committed baseline after the first gap-closure pass is:
+The current committed baseline after the fixture expansion pass is:
 
-- 190 focused cargo-checked fixture/rule cases.
+- 194 focused cargo-checked fixture/rule cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
 - The first documented gap batch is now executable in
   `crates/opensource_core/tests/rule_database.rs`.

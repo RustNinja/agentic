@@ -3629,6 +3629,317 @@ fn prunes_map_payload_support_chain_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_free_function_closure_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/free_function_closure_prune");
+    let output = temp_path("slice-case-free-function-closure-prune-output");
+    let target_dir = temp_path("slice-case-free-function-closure-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("free_function_closure_prune fixture should slice");
+
+    assert_eq!(report.packages, ["closure_api", "closure_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_free_closure_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("closure_api/Cargo.toml"));
+    let api_root = read(output.join("closure_api/src/lib.rs"));
+    let api_live = read(output.join("closure_api/src/live.rs"));
+    let model_root = read(output.join("closure_model/src/lib.rs"));
+    let model_live = read(output.join("closure_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../closure_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_free_closure_report"));
+    assert!(root_source.contains("closure_api::selected_free_closure_report"));
+    assert_absent(
+        "root/src/lib.rs",
+        &root_source,
+        &["dead_free_closure_report"],
+    );
+
+    assert!(api_manifest.contains("../closure_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(
+        api_root.contains("selected_free_closure_report"),
+        "{api_root}"
+    );
+    assert_absent(
+        "closure_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_free_closure_report"],
+    );
+    assert!(api_live.contains("closure_model::with_free_payload"));
+    assert!(api_live.contains("|payload| payload.render()"));
+    assert_absent(
+        "closure_api/src/live.rs",
+        &api_live,
+        &["dead_live_free_closure_report"],
+    );
+    assert!(!output.join("closure_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("with_free_payload"), "{model_root}");
+    assert!(model_root.contains("FreePayload"), "{model_root}");
+    assert_absent(
+        "closure_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadFreeClosure", "dead_free_closure"],
+    );
+    assert!(model_live.contains("pub fn render"), "{model_live}");
+    assert!(model_live.contains("render(FreePayload::new(raw))"));
+    assert_absent(
+        "closure_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_free_closure", "dead-free-closure"],
+    );
+    assert!(!output.join("closure_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_result_map_err_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/result_map_err_prune");
+    let output = temp_path("slice-case-result-map-err-prune-output");
+    let target_dir = temp_path("slice-case-result-map-err-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("result_map_err_prune fixture should slice");
+
+    assert_eq!(report.packages, ["result_api", "result_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_result_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("result_api/Cargo.toml"));
+    let api_root = read(output.join("result_api/src/lib.rs"));
+    let api_live = read(output.join("result_api/src/live.rs"));
+    let model_root = read(output.join("result_model/src/lib.rs"));
+    let model_live = read(output.join("result_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../result_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_result_report"));
+    assert!(root_source.contains("result_api::selected_result_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_result_report"]);
+
+    assert!(api_manifest.contains("../result_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_result_report"), "{api_root}");
+    assert_absent(
+        "result_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_result_report"],
+    );
+    assert!(api_live.contains("result_model::parse_result"));
+    assert!(api_live.contains(".map_err(|err| err.render())"));
+    assert_absent(
+        "result_api/src/live.rs",
+        &api_live,
+        &["dead_live_result_report"],
+    );
+    assert!(!output.join("result_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("parse_result"), "{model_root}");
+    assert!(model_root.contains("ResultValue"), "{model_root}");
+    assert!(model_root.contains("ResultError"), "{model_root}");
+    assert_absent(
+        "result_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadResult", "dead_result"],
+    );
+    assert!(model_live.contains("pub fn render"), "{model_live}");
+    assert_absent(
+        "result_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_result", "dead-result"],
+    );
+    assert!(!output.join("result_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_const_generic_array_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/const_generic_array_prune");
+    let output = temp_path("slice-case-const-generic-array-prune-output");
+    let target_dir = temp_path("slice-case-const-generic-array-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("const_generic_array_prune fixture should slice");
+
+    assert_eq!(report.packages, ["array_api", "array_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_array_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("array_api/Cargo.toml"));
+    let api_root = read(output.join("array_api/src/lib.rs"));
+    let api_live = read(output.join("array_api/src/live.rs"));
+    let model_root = read(output.join("array_model/src/lib.rs"));
+    let model_live = read(output.join("array_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../array_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_array_report"));
+    assert!(root_source.contains("array_api::selected_array_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_array_report"]);
+
+    assert!(api_manifest.contains("../array_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_array_report"), "{api_root}");
+    assert_absent(
+        "array_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_array_report"],
+    );
+    assert!(api_live.contains("array_model::selected_array"));
+    assert_absent(
+        "array_api/src/live.rs",
+        &api_live,
+        &["dead_live_array_report"],
+    );
+    assert!(!output.join("array_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("selected_array"), "{model_root}");
+    assert!(model_root.contains("ArrayPayload"), "{model_root}");
+    assert!(model_root.contains("LIVE_LEN"), "{model_root}");
+    assert_absent(
+        "array_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadArray", "dead_array", "DEAD_LEN"],
+    );
+    assert!(model_live.contains("ArrayPayload<LIVE_LEN>"));
+    assert!(model_live.contains("pub fn render"), "{model_live}");
+    assert_absent(
+        "array_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_array", "dead-array"],
+    );
+    assert!(!output.join("array_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_newtype_tuple_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/newtype_tuple_prune");
+    let output = temp_path("slice-case-newtype-tuple-prune-output");
+    let target_dir = temp_path("slice-case-newtype-tuple-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("newtype_tuple_prune fixture should slice");
+
+    assert_eq!(report.packages, ["newtype_api", "newtype_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_newtype_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("newtype_api/Cargo.toml"));
+    let api_root = read(output.join("newtype_api/src/lib.rs"));
+    let api_live = read(output.join("newtype_api/src/live.rs"));
+    let model_root = read(output.join("newtype_model/src/lib.rs"));
+    let model_live = read(output.join("newtype_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../newtype_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_newtype_report"));
+    assert!(root_source.contains("newtype_api::selected_newtype_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_newtype_report"]);
+
+    assert!(api_manifest.contains("../newtype_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_newtype_report"), "{api_root}");
+    assert_absent(
+        "newtype_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_newtype_report"],
+    );
+    assert!(api_live.contains("newtype_model::selected_newtype"));
+    assert_absent(
+        "newtype_api/src/live.rs",
+        &api_live,
+        &["dead_live_newtype_report"],
+    );
+    assert!(!output.join("newtype_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("selected_newtype"), "{model_root}");
+    assert!(model_root.contains("NewtypeRecord"), "{model_root}");
+    assert!(model_root.contains("NewtypeInner"), "{model_root}");
+    assert_absent(
+        "newtype_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadNewtype", "dead_newtype"],
+    );
+    assert!(model_live.contains("self.0.render()"), "{model_live}");
+    assert_absent(
+        "newtype_model/src/live.rs",
+        &model_live,
+        &[
+            "dead_method",
+            "dead_inner_method",
+            "dead_live_newtype",
+            "dead-newtype",
+        ],
+    );
+    assert!(!output.join("newtype_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")

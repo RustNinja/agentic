@@ -4381,6 +4381,7 @@ impl<'a> DependencyVisitor<'a> {
                 }) {
                     candidates.extend(self.resolver.type_ref_candidates(&type_ref));
                 }
+                candidates.extend(self.call_return_type_candidates(call));
             }
             Expr::MethodCall(call) => {
                 if matches!(call.method.to_string().as_str(), "as_ref" | "clone") {
@@ -4451,6 +4452,24 @@ impl<'a> DependencyVisitor<'a> {
         candidates.sort();
         candidates.dedup();
         candidates
+    }
+
+    fn call_return_type_candidates(&self, call: &ExprCall) -> Vec<TypeRef> {
+        let Expr::Path(path) = call.func.as_ref() else {
+            return Vec::new();
+        };
+        let callables = if path.qself.is_some() {
+            self.resolver.resolve_qself_call(path)
+        } else {
+            self.resolver.resolve_call_path(&path.path)
+        };
+        callables
+            .iter()
+            .filter_map(|callable| self.resolver.return_type_from_callable(callable))
+            .flat_map(|type_ref| self.resolver.type_ref_candidates(&type_ref))
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .collect()
     }
 
     fn index_output_type(&self, expression: &ExprIndex) -> Option<TypeRef> {
@@ -5881,11 +5900,19 @@ impl<'a> DependencyVisitor<'a> {
                     .iter()
                     .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
             }
-            Expr::MethodCall(call) => self.parse_method_target_type(call).or_else(|| {
-                self.resolved_methods_for_call(call)
-                    .iter()
-                    .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
-            }),
+            Expr::MethodCall(call) => {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "map_err" | "or_else" | "inspect_err" | "as_ref" | "as_mut"
+                ) {
+                    return self.expression_result_ok_type(&call.receiver);
+                }
+                self.parse_method_target_type(call).or_else(|| {
+                    self.resolved_methods_for_call(call)
+                        .iter()
+                        .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
+                })
+            }
             Expr::Block(expr) => final_block_expression(&expr.block)
                 .and_then(|expr| self.expression_result_ok_type(expr)),
             Expr::Unsafe(expr) => final_block_expression(&expr.block)
@@ -5915,21 +5942,28 @@ impl<'a> DependencyVisitor<'a> {
                     .iter()
                     .find_map(|callable| self.resolver.return_error_type_from_callable(callable))
             }
-            Expr::MethodCall(call) => self
-                .parse_method_target_type(call)
-                .and_then(|target| {
-                    self.resolver
-                        .from_str_error_types(&target)
-                        .into_iter()
-                        .next()
-                })
-                .or_else(|| {
-                    self.resolved_methods_for_call(call)
-                        .iter()
-                        .find_map(|callable| {
-                            self.resolver.return_error_type_from_callable(callable)
-                        })
-                }),
+            Expr::MethodCall(call) => {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "map" | "and_then" | "inspect" | "is_ok_and" | "as_ref" | "as_mut"
+                ) {
+                    return self.expression_result_error_type(&call.receiver);
+                }
+                self.parse_method_target_type(call)
+                    .and_then(|target| {
+                        self.resolver
+                            .from_str_error_types(&target)
+                            .into_iter()
+                            .next()
+                    })
+                    .or_else(|| {
+                        self.resolved_methods_for_call(call)
+                            .iter()
+                            .find_map(|callable| {
+                                self.resolver.return_error_type_from_callable(callable)
+                            })
+                    })
+            }
             Expr::Block(expr) => final_block_expression(&expr.block)
                 .and_then(|expr| self.expression_result_error_type(expr)),
             Expr::Unsafe(expr) => final_block_expression(&expr.block)

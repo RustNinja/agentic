@@ -1,0 +1,7 @@
+[package]
+name = "newtype_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+newtype_model = { path = "../newtype_model" }
