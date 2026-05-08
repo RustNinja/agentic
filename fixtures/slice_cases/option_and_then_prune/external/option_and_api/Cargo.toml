@@ -1,0 +1,7 @@
+[package]
+name = "option_and_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_and_model = { path = "../option_and_model" }

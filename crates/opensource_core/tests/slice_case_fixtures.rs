@@ -5501,6 +5501,142 @@ fn prunes_iterator_enum_flat_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_and_then_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_and_then_prune",
+        root_fn: "selected_option_and_then_report",
+        api_pkg: "option_and_api",
+        model_pkg: "option_and_model",
+        api_fn: "selected_option_and_then_report",
+        model_fn: "selected_option_and_then",
+        model_required: &[
+            "OptionAndPayload",
+            ".and_then(|payload| payload.expand())",
+            "pub fn expand",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionAndItem",
+            "dead_option_and_then",
+            "dead_method",
+            "dead_live_option_and_then",
+            "dead-option-and",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_is_some_and_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_is_some_and_prune",
+        root_fn: "selected_option_check_report",
+        api_pkg: "option_check_api",
+        model_pkg: "option_check_model",
+        api_fn: "selected_option_check_report",
+        model_fn: "selected_option_check",
+        model_required: &[
+            "OptionCheckPayload",
+            ".is_some_and(|payload| payload.accepts())",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionCheckItem",
+            "dead_option_check",
+            "dead_method",
+            "dead_live_option_check",
+            "dead-option-check",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_inspect_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_inspect_prune",
+        root_fn: "selected_option_inspect_report",
+        api_pkg: "option_inspect_api",
+        model_pkg: "option_inspect_model",
+        api_fn: "selected_option_inspect_report",
+        model_fn: "selected_option_inspect",
+        model_required: &[
+            "OptionInspectPayload",
+            ".inspect(|payload| audit.push(payload.audit()))",
+            ".map(|payload| payload.render_label())",
+            "pub fn audit",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionInspectItem",
+            "dead_option_inspect",
+            "dead_method",
+            "dead_live_option_inspect",
+            "dead-option-inspect",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_inspect_err_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_inspect_err_prune",
+        root_fn: "selected_result_inspect_report",
+        api_pkg: "result_inspect_api",
+        model_pkg: "result_inspect_model",
+        api_fn: "selected_result_inspect_report",
+        model_fn: "selected_result_inspect",
+        model_required: &[
+            "ResultInspectPayload",
+            "ResultInspectError",
+            ".inspect_err(|err| audit.push(err.audit()))",
+            ".map(|payload| payload.render_label())",
+            "pub fn audit",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultInspectItem",
+            "dead_result_inspect",
+            "dead_method",
+            "dead_live_result_inspect",
+            "dead-result-inspect",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_or_else_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_or_else_prune",
+        root_fn: "selected_result_or_report",
+        api_pkg: "result_or_api",
+        model_pkg: "result_or_model",
+        api_fn: "selected_result_or_report",
+        model_fn: "selected_result_or",
+        model_required: &[
+            "ResultOrPayload",
+            "ResultOrError",
+            ".or_else(|err| err.recover())",
+            ".map(|payload| payload.render_label())",
+            "pub fn recover",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultOrItem",
+            "dead_result_or",
+            "dead_method",
+            "dead_live_result_or",
+            "dead-result-or",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

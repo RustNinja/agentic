@@ -225,6 +225,11 @@ file.
 | `fixture.iterator_enum_if_let_for_each_prune.support_chain.001` | covered | A checked-in support fixture slices through enum struct-variant payloads inside `if let` side-effect closures while pruning dead enum support |
 | `fixture.iterator_enum_match_map_prune.support_chain.001` | covered | A checked-in support fixture slices through enum tuple-variant payloads inside iterator `map` match closures while pruning dead match support |
 | `fixture.iterator_enum_flat_map_prune.support_chain.001` | covered | A checked-in support fixture slices through enum struct-variant payloads inside iterator `flat_map` matches while pruning dead flat-map enum support |
+| `fixture.option_and_then_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::and_then` payload closures while pruning dead optional support |
+| `fixture.option_is_some_and_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::is_some_and` predicate payload closures while pruning dead predicate support |
+| `fixture.option_inspect_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::inspect` side-effect closures plus downstream map payloads while pruning dead inspect support |
+| `fixture.result_inspect_err_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::inspect_err` error-payload closures plus OK mapping while pruning dead result support |
+| `fixture.result_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::or_else` recovery closures plus recovered payload mapping while pruning dead fallback support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
