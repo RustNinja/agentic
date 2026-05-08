@@ -8548,8 +8548,8 @@ impl Resolver<'_> {
             return None;
         }
 
-        let source = self.source_for_module(package, module_path)?;
-        for glob_path in visible_glob_use_paths(&source.syntax.items) {
+        let items = self.items_for_module(package, module_path)?;
+        for glob_path in visible_glob_use_paths(items) {
             let aliases = self
                 .project
                 .module_aliases
@@ -8573,6 +8573,25 @@ impl Resolver<'_> {
             target_path.push(name.to_string());
             if let Some(item) = self.find_item_in_module(&target_package, &target_path, kinds) {
                 return Some(item);
+            }
+            if let Some(alias) =
+                self.resolve_alias_target(&target_package, &target_module_path, name)
+            {
+                let alias_path = alias.full_path();
+                if let Some(item) = self.find_item_in_module(&alias.package, &alias_path, kinds) {
+                    return Some(item);
+                }
+                if let Some((alias_name, alias_module_path)) = alias_path.split_last() {
+                    if let Some(item) = self.find_glob_reexport_item(
+                        &alias.package,
+                        alias_module_path,
+                        alias_name,
+                        kinds,
+                        visited,
+                    ) {
+                        return Some(item);
+                    }
+                }
             }
             if let Some(item) = self.find_glob_reexport_item(
                 &target_package,
@@ -8599,8 +8618,8 @@ impl Resolver<'_> {
             return None;
         }
 
-        let source = self.source_for_module(package, module_path)?;
-        for glob_path in visible_glob_use_paths(&source.syntax.items) {
+        let items = self.items_for_module(package, module_path)?;
+        for glob_path in visible_glob_use_paths(items) {
             let aliases = self
                 .project
                 .module_aliases
@@ -8627,6 +8646,29 @@ impl Resolver<'_> {
             };
             if self.project.functions.contains_key(&id) {
                 return Some(id);
+            }
+            if let Some(alias) =
+                self.resolve_alias_target(&target_package, &target_module_path, name)
+            {
+                let alias_path = alias.full_path();
+                if let Some((alias_name, alias_module_path)) = alias_path.split_last() {
+                    let id = CallableId::Free {
+                        package: alias.package.clone(),
+                        module_path: alias_module_path.to_vec(),
+                        name: alias_name.clone(),
+                    };
+                    if self.project.functions.contains_key(&id) {
+                        return Some(id);
+                    }
+                    if let Some(callable) = self.find_glob_reexport_function(
+                        &alias.package,
+                        alias_module_path,
+                        alias_name,
+                        visited,
+                    ) {
+                        return Some(callable);
+                    }
+                }
             }
             if let Some(callable) = self.find_glob_reexport_function(
                 &target_package,
@@ -8693,6 +8735,24 @@ impl Resolver<'_> {
             .source_files_by_module
             .get(&(package.to_string(), module_path.to_vec()))?;
         self.project.files.get(path)
+    }
+
+    fn items_for_module(&self, package: &str, module_path: &[String]) -> Option<&[Item]> {
+        if let Some(source) = self.source_for_module(package, module_path) {
+            return Some(&source.syntax.items);
+        }
+
+        for split in (0..module_path.len()).rev() {
+            let prefix = &module_path[..split];
+            let Some(source) = self.source_for_module(package, prefix) else {
+                continue;
+            };
+            if let Some(items) = inline_module_items(&source.syntax.items, &module_path[split..]) {
+                return Some(items);
+            }
+        }
+
+        None
     }
 
     fn resolve_dependency(&self, first: &str) -> Option<String> {

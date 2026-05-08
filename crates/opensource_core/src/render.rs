@@ -15561,6 +15561,19 @@ fn public_glob_exposed_name_is_used(
         return true;
     }
 
+    if !source_module_path.is_empty()
+        && public_reexport_path_name_is_referenced_by_reduced_package(
+            project,
+            reduced,
+            render_plan,
+            package,
+            source_module_path,
+            name,
+        )
+    {
+        return true;
+    }
+
     if source_module_path.is_empty()
         && reachable_package_mentions_unqualified_ident(project, reduced, package, name)
     {
@@ -15575,6 +15588,269 @@ fn public_glob_exposed_name_is_used(
                 target_package,
                 name,
             ))
+}
+
+fn public_reexport_path_name_is_referenced_by_reduced_package(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    visible_name: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() != package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_dependency_public_path_name(
+                    project,
+                    &record.package,
+                    package,
+                    module_path,
+                    visible_name,
+                    &record.item.to_token_stream(),
+                )
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_dependency_public_path_name(
+                    project,
+                    callable.package(),
+                    package,
+                    module_path,
+                    visible_name,
+                    &record.item.to_token_stream(),
+                )
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package != package)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_dependency_public_path_name(
+                        project,
+                        &record.package,
+                        package,
+                        module_path,
+                        visible_name,
+                        &record.item.to_token_stream(),
+                    )
+                })
+            })
+        || rendered_imports_mention_dependency_module_path_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            visible_name,
+        )
+}
+
+fn token_stream_mentions_dependency_public_path_name(
+    project: &Project,
+    caller_package: &str,
+    dependency_package: &str,
+    module_path: &[String],
+    visible_name: &str,
+    tokens: &TokenStream,
+) -> bool {
+    token_path_candidates(tokens).iter().any(|segments| {
+        let Some((root, rest)) = segments.split_first() else {
+            return false;
+        };
+        if !first_segment_targets_dependency(project, caller_package, dependency_package, root) {
+            return false;
+        }
+        let mut expected = module_path.to_vec();
+        expected.push(visible_name.to_string());
+        rest == expected.as_slice()
+    })
+}
+
+fn rendered_imports_mention_dependency_module_path_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    dependency_package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    project
+        .files
+        .values()
+        .filter(|source| source.package != dependency_package)
+        .filter(|source| {
+            module_should_render(
+                project,
+                reduced,
+                render_plan,
+                &source.package,
+                &source.module_path,
+            )
+        })
+        .any(|source| {
+            source.syntax.items.iter().any(|item| {
+                let Item::Use(item_use) = item else {
+                    return false;
+                };
+                use_tree_mentions_dependency_module_path_ident(
+                    project,
+                    reduced,
+                    render_plan,
+                    &source.package,
+                    &source.module_path,
+                    &item_use.tree,
+                    Vec::new(),
+                    dependency_package,
+                    module_path,
+                    ident,
+                )
+            })
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn use_tree_mentions_dependency_module_path_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    caller_package: &str,
+    caller_module_path: &[String],
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    dependency_package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            use_tree_mentions_dependency_module_path_ident(
+                project,
+                reduced,
+                render_plan,
+                caller_package,
+                caller_module_path,
+                &path.tree,
+                prefix,
+                dependency_package,
+                module_path,
+                ident,
+            )
+        }
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            if name.ident != "self" {
+                prefix.push(name.ident.to_string());
+            }
+            dependency_use_target_matches_module_path_ident(
+                project,
+                caller_package,
+                dependency_package,
+                &prefix,
+                module_path,
+                ident,
+            ) && reachable_module_import_scope_uses_imported_ident(
+                project,
+                reduced,
+                render_plan,
+                caller_package,
+                caller_module_path,
+                &visible_name,
+            )
+        }
+        UseTree::Rename(rename) => {
+            prefix.push(rename.ident.to_string());
+            dependency_use_target_matches_module_path_ident(
+                project,
+                caller_package,
+                dependency_package,
+                &prefix,
+                module_path,
+                ident,
+            ) && reachable_module_import_scope_uses_imported_ident(
+                project,
+                reduced,
+                render_plan,
+                caller_package,
+                caller_module_path,
+                &rename.rename.to_string(),
+            )
+        }
+        UseTree::Group(group) => group.items.iter().any(|nested| {
+            use_tree_mentions_dependency_module_path_ident(
+                project,
+                reduced,
+                render_plan,
+                caller_package,
+                caller_module_path,
+                nested,
+                prefix.clone(),
+                dependency_package,
+                module_path,
+                ident,
+            )
+        }),
+        UseTree::Glob(_) => {
+            dependency_use_prefix_matches_module_path(
+                project,
+                caller_package,
+                dependency_package,
+                &prefix,
+                module_path,
+            ) && reachable_module_import_scope_uses_imported_ident(
+                project,
+                reduced,
+                render_plan,
+                caller_package,
+                caller_module_path,
+                ident,
+            )
+        }
+    }
+}
+
+fn dependency_use_target_matches_module_path_ident(
+    project: &Project,
+    caller_package: &str,
+    dependency_package: &str,
+    target: &[String],
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some((root, rest)) = target.split_first() else {
+        return false;
+    };
+    if !first_segment_targets_dependency(project, caller_package, dependency_package, root) {
+        return false;
+    }
+    let mut expected = module_path.to_vec();
+    expected.push(ident.to_string());
+    rest == expected.as_slice()
+}
+
+fn dependency_use_prefix_matches_module_path(
+    project: &Project,
+    caller_package: &str,
+    dependency_package: &str,
+    target: &[String],
+    module_path: &[String],
+) -> bool {
+    let Some((root, rest)) = target.split_first() else {
+        return false;
+    };
+    first_segment_targets_dependency(project, caller_package, dependency_package, root)
+        && rest == module_path
 }
 
 fn rendered_imports_mention_module_path_ident(
@@ -16864,11 +17140,8 @@ fn find_glob_reexport_function(
     if !visited.insert((package.to_string(), module_path.to_vec(), name.to_string())) {
         return None;
     }
-    let source = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)?;
-    for glob_path in visible_glob_use_paths(&source.syntax.items) {
+    let items = module_items_for_path(project, package, module_path)?;
+    for glob_path in visible_glob_use_paths(items) {
         let Some((target_package, target_module_path)) =
             resolve_use_target_path(project, package, module_path, &glob_path)
         else {
@@ -16878,6 +17151,24 @@ fn find_glob_reexport_function(
         target_path.push(name.to_string());
         if let Some(callable) = find_use_function_direct(project, &target_package, &target_path) {
             return Some(callable);
+        }
+        if let Some((alias_package, alias_path)) =
+            resolve_reexported_use_path(project, &target_package, &target_path)
+        {
+            if let Some(callable) = find_use_function_direct(project, &alias_package, &alias_path) {
+                return Some(callable);
+            }
+            if let Some((alias_name, alias_module_path)) = alias_path.split_last() {
+                if let Some(callable) = find_glob_reexport_function(
+                    project,
+                    &alias_package,
+                    alias_module_path,
+                    alias_name,
+                    visited,
+                ) {
+                    return Some(callable);
+                }
+            }
         }
         if let Some(callable) = find_glob_reexport_function(
             project,
@@ -16902,11 +17193,8 @@ fn find_glob_reexport_item(
     if !visited.insert((package.to_string(), module_path.to_vec(), name.to_string())) {
         return None;
     }
-    let source = project
-        .files
-        .values()
-        .find(|source| source.package == package && source.module_path == module_path)?;
-    for glob_path in visible_glob_use_paths(&source.syntax.items) {
+    let items = module_items_for_path(project, package, module_path)?;
+    for glob_path in visible_glob_use_paths(items) {
         let Some((target_package, target_module_path)) =
             resolve_use_target_path(project, package, module_path, &glob_path)
         else {
@@ -16916,6 +17204,24 @@ fn find_glob_reexport_item(
         target_path.push(name.to_string());
         if let Some(item) = find_use_item_direct(project, &target_package, &target_path) {
             return Some(item);
+        }
+        if let Some((alias_package, alias_path)) =
+            resolve_reexported_use_path(project, &target_package, &target_path)
+        {
+            if let Some(item) = find_use_item_direct(project, &alias_package, &alias_path) {
+                return Some(item);
+            }
+            if let Some((alias_name, alias_module_path)) = alias_path.split_last() {
+                if let Some(item) = find_glob_reexport_item(
+                    project,
+                    &alias_package,
+                    alias_module_path,
+                    alias_name,
+                    visited,
+                ) {
+                    return Some(item);
+                }
+            }
         }
         if let Some(item) =
             find_glob_reexport_item(project, &target_package, &target_module_path, name, visited)

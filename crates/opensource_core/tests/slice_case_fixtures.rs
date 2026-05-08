@@ -806,6 +806,181 @@ fn prunes_iterator_result_support_chain_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_facade_glob_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/facade_glob_prune");
+    let output = temp_path("slice-case-facade-glob-prune-output");
+    let target_dir = temp_path("slice-case-facade-glob-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("facade_glob_prune fixture should slice");
+
+    assert_eq!(report.packages, ["facade_api", "facade_support", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_facade_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("facade_api/Cargo.toml"));
+    let api_root = read(output.join("facade_api/src/lib.rs"));
+    let api_live = read(output.join("facade_api/src/live.rs"));
+    let support_root = read(output.join("facade_support/src/lib.rs"));
+    let support_live = read(output.join("facade_support/src/live.rs"));
+
+    assert!(root_manifest.contains("../facade_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_facade_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("facade_api::selected_facade_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_facade_report"]);
+
+    assert!(api_manifest.contains("../facade_support"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_facade_report"), "{api_root}");
+    assert_absent(
+        "facade_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_facade_report"],
+    );
+    assert!(api_live.contains("build_live"), "{api_live}");
+    assert!(api_live.contains("LiveRecord"), "{api_live}");
+    assert_absent(
+        "facade_api/src/live.rs",
+        &api_live,
+        &["dead_live_facade_report", "DeadRecord", "dead_factory"],
+    );
+    assert!(!output.join("facade_api/src/dead.rs").exists());
+
+    assert!(support_root.contains("mod live"), "{support_root}");
+    assert!(support_root.contains("pub mod facade"), "{support_root}");
+    assert!(support_root.contains("pub mod nested"), "{support_root}");
+    assert!(support_root.contains("build_live"), "{support_root}");
+    assert!(support_root.contains("LiveRecord"), "{support_root}");
+    assert_absent(
+        "facade_support/src/lib.rs",
+        &support_root,
+        &["mod dead", "DeadRecord", "dead_factory"],
+    );
+    assert!(
+        support_live.contains("pub struct LiveRecord"),
+        "{support_live}"
+    );
+    assert!(support_live.contains("pub fn build_live"), "{support_live}");
+    assert_absent(
+        "facade_support/src/live.rs",
+        &support_live,
+        &[
+            "dead_live_factory",
+            "dead_method",
+            "dead-live-facade",
+            "DeadRecord",
+        ],
+    );
+    assert!(!output.join("facade_support/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_macro_generated_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/macro_generated_prune");
+    let output = temp_path("slice-case-macro-generated-prune-output");
+    let target_dir = temp_path("slice-case-macro-generated-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("macro_generated_prune fixture should slice");
+
+    assert_eq!(report.packages, ["macro_api", "macro_support", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_macro_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("macro_api/Cargo.toml"));
+    let api_root = read(output.join("macro_api/src/lib.rs"));
+    let api_live = read(output.join("macro_api/src/live.rs"));
+    let support_root = read(output.join("macro_support/src/lib.rs"));
+
+    assert!(root_manifest.contains("../macro_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_macro_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("macro_api::selected_macro_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_macro_report"]);
+
+    assert!(api_manifest.contains("../macro_support"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_macro_report"), "{api_root}");
+    assert_absent(
+        "macro_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_macro_report"],
+    );
+    assert!(
+        api_live.contains("macro_support::selected_generated"),
+        "{api_live}"
+    );
+    assert_absent(
+        "macro_api/src/live.rs",
+        &api_live,
+        &["dead_live_macro_report", "dead_generated"],
+    );
+    assert!(!output.join("macro_api/src/dead.rs").exists());
+
+    assert!(
+        support_root.contains("macro_rules! define_generated"),
+        "{support_root}"
+    );
+    assert!(support_root.contains("LiveGenerated"), "{support_root}");
+    assert!(
+        support_root.contains("build_live_generated"),
+        "{support_root}"
+    );
+    assert!(
+        support_root.contains("pub fn selected_generated"),
+        "{support_root}"
+    );
+    assert_absent(
+        "macro_support/src/lib.rs",
+        &support_root,
+        &["DeadGenerated", "build_dead_generated", "dead_generated"],
+    );
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")
