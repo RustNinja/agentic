@@ -1,0 +1,7 @@
+[package]
+name = "returned_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+returned_model = { path = "../returned_model" }

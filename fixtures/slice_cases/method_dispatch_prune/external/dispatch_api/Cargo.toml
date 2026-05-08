@@ -1,0 +1,7 @@
+[package]
+name = "dispatch_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+dispatch_model = { path = "../dispatch_model" }

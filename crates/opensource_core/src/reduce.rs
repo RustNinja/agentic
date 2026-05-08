@@ -3394,15 +3394,62 @@ fn item_is_root_callable_signature_surface(
         let RootId::Callable(callable) = root else {
             return false;
         };
-        if callable.package() != item.package {
-            return false;
-        }
-        project.functions.get(callable).is_some_and(|record| {
-            token_stream_mentions_ident(&record.item.sig.to_token_stream(), &item.name)
-        }) || project.methods.get(callable).is_some_and(|record| {
-            token_stream_mentions_ident(&record.item.sig.to_token_stream(), &item.name)
-        })
+        callable_signature_references_item(project, callable, item)
     })
+}
+
+fn callable_signature_references_item(
+    project: &Project,
+    callable: &CallableId,
+    item: &ItemId,
+) -> bool {
+    match callable {
+        CallableId::Free { .. } => {
+            let Some(record) = project.functions.get(callable) else {
+                return false;
+            };
+            let resolver = Resolver {
+                project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            let mut visitor = DependencyVisitor::new(resolver);
+            visitor.visit_generics(&record.item.sig.generics);
+            for input in &record.item.sig.inputs {
+                if let FnArg::Typed(input) = input {
+                    visitor.visit_type(&input.ty);
+                }
+            }
+            visitor.visit_return_type(&record.item.sig.output);
+            visitor.dependencies.items.contains(item)
+                || (callable.package() == item.package
+                    && token_stream_mentions_ident(&record.item.sig.to_token_stream(), &item.name))
+        }
+        CallableId::Method {
+            package, type_path, ..
+        } => {
+            let Some(record) = project.methods.get(callable) else {
+                return false;
+            };
+            let resolver = Resolver {
+                project,
+                package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: Some(TypeRef {
+                    package: package.clone(),
+                    type_path: type_path.clone(),
+                }),
+            };
+            let mut visitor = DependencyVisitor::new(resolver);
+            visitor.visit_signature(&record.item.sig);
+            visitor.dependencies.items.contains(item)
+                || (callable.package() == item.package
+                    && token_stream_mentions_ident(&record.item.sig.to_token_stream(), &item.name))
+        }
+    }
 }
 
 fn reachable_struct_field_dependencies(
@@ -3449,6 +3496,10 @@ fn reachable_struct_field_dependencies(
 fn item_root_macro_impl_dependencies(project: &Project, item: &ItemId) -> DependencySet {
     let mut dependencies = DependencySet::default();
     let item_path = path_from_item(item);
+    let item_is_marked_root = project
+        .items
+        .get(item)
+        .is_some_and(|record| item_has_opensourced_attr(&record.item));
 
     for module_path in project_module_paths(project, &item.package) {
         let Some(items) = module_items_for_path(project, &item.package, &module_path) else {
@@ -3493,8 +3544,31 @@ fn item_root_macro_impl_dependencies(project: &Project, item: &ItemId) -> Depend
             for attr in &item_impl.attrs {
                 visitor.visit_attribute(attr);
             }
+            let impl_has_surface_attr = item_impl
+                .attrs
+                .iter()
+                .any(attr_requires_impl_surface_retention);
             for impl_item in &item_impl.items {
-                if root_macro_impl_item_should_render(item_impl, impl_item) {
+                let should_scan = if item_is_marked_root {
+                    root_macro_impl_item_should_render(item_impl, impl_item)
+                } else {
+                    impl_has_surface_attr || impl_item_attrs_require_surface_retention(impl_item)
+                };
+                if should_scan {
+                    if impl_has_surface_attr || impl_item_attrs_require_surface_retention(impl_item)
+                    {
+                        if let ImplItem::Fn(method) = impl_item {
+                            let method_name = method.sig.ident.to_string();
+                            let Some(self_type) = visitor.resolver.self_type.clone() else {
+                                continue;
+                            };
+                            for callable in
+                                visitor.resolver.resolve_methods(&self_type, &method_name)
+                            {
+                                dependencies.callables.insert(callable);
+                            }
+                        }
+                    }
                     visitor.visit_impl_item(impl_item);
                 }
             }
@@ -5670,6 +5744,26 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn bind_pattern_type_arguments(&mut self, pattern: &Pat, type_arguments: &[TypeRef]) {
+        if type_arguments.is_empty() {
+            return;
+        }
+        let mut type_arguments = type_arguments.to_vec();
+        type_arguments.sort();
+        type_arguments.dedup();
+        match pattern {
+            Pat::Ident(ident) => {
+                self.variable_type_arguments
+                    .insert(ident.ident.to_string(), type_arguments);
+            }
+            Pat::Reference(reference) => {
+                self.bind_pattern_type_arguments(&reference.pat, &type_arguments)
+            }
+            Pat::Type(pat_type) => self.bind_pattern_type_arguments(&pat_type.pat, &type_arguments),
+            _ => {}
+        }
+    }
+
     fn bind_single_payload_pattern(&mut self, pattern: &Pat, type_ref: &TypeRef) {
         if let Pat::TupleStruct(tuple) = pattern {
             if tuple.elems.len() == 1
@@ -6113,6 +6207,7 @@ impl<'a> DependencyVisitor<'a> {
         let Some(payload_type) = self.single_payload_closure_method_type(call) else {
             return false;
         };
+        let payload_type_arguments = self.expression_type_arguments(&call.receiver);
         let Some(Expr::Closure(closure)) = call.args.first() else {
             return false;
         };
@@ -6127,6 +6222,7 @@ impl<'a> DependencyVisitor<'a> {
         let variable_result_ok_types = self.variable_result_ok_types.clone();
         let variable_result_error_types = self.variable_result_error_types.clone();
         self.bind_pattern_type(payload_pat, &payload_type);
+        self.bind_pattern_type_arguments(payload_pat, &payload_type_arguments);
         self.visit_expr(&closure.body);
         self.variables = variables;
         self.variable_candidates = variable_candidates;
@@ -6138,7 +6234,7 @@ impl<'a> DependencyVisitor<'a> {
 
     fn single_payload_closure_method_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
         let method = call.method.to_string();
-        let type_arguments = self.receiver_expression_type_arguments(&call.receiver);
+        let type_arguments = self.expression_type_arguments(&call.receiver);
         match method.as_str() {
             "map" | "and_then" | "filter" | "inspect" | "is_some_and" | "is_ok_and" => self
                 .expression_result_ok_type(&call.receiver)

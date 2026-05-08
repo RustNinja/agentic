@@ -174,6 +174,10 @@ file.
 | `fixture.index_operator_prune.support_chain.001` | covered | A checked-in support fixture slices through indexing expressions such as `store[0].render()`, retaining the concrete `Index` impl and output method closure while pruning dead index APIs |
 | `fixture.option_field_payload_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option` payloads reached from struct fields and `as_ref()`, retaining only the live payload render method while pruning dead option APIs |
 | `fixture.closure_return_prune.support_chain.001` | covered | A checked-in support fixture slices through closure-return receiver calls such as `build().render()`, retaining the returned type method closure while pruning dead closure-return APIs |
+| `fixture.try_from_transpose_prune.support_chain.001` | covered | A checked-in support fixture slices through fallible `TryFrom` conversion inside `Option<Vec<_>>::map(...).transpose()`, retaining converted payload methods and pruning dead conversion APIs |
+| `fixture.returned_object_prune.support_chain.001` | covered | A checked-in support fixture slices through a returned object exported from a support package, retaining macro-exported impl surface methods and pruning dead object impl methods |
+| `fixture.method_dispatch_prune.support_chain.001` | covered | A checked-in support fixture slices through string-typed method dispatch with a retained unknown fallback variant while pruning dead dispatch parameters and APIs |
+| `fixture.map_payload_prune.support_chain.001` | covered | A checked-in support fixture slices through map payload traversal via `.values().map(Type::method)`, retaining only the live entry render closure while pruning dead map APIs |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
