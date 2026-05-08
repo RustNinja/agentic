@@ -1,0 +1,7 @@
+[package]
+name = "question_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+question_model = { path = "../question_model" }

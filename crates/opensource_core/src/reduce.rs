@@ -4843,6 +4843,19 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn add_result_ok_binding_type(&mut self, pattern: &Pat, type_ref: &TypeRef) {
+        self.add_result_variant_binding_type(pattern, "Ok", type_ref);
+    }
+
+    fn add_result_error_binding_type(&mut self, pattern: &Pat, type_ref: &TypeRef) {
+        self.add_result_variant_binding_type(pattern, "Err", type_ref);
+    }
+
+    fn add_result_variant_binding_type(
+        &mut self,
+        pattern: &Pat,
+        variant: &str,
+        type_ref: &TypeRef,
+    ) {
         let Pat::TupleStruct(tuple) = pattern else {
             return;
         };
@@ -4850,7 +4863,7 @@ impl<'a> DependencyVisitor<'a> {
             .path
             .segments
             .last()
-            .is_none_or(|segment| segment.ident != "Ok")
+            .is_none_or(|segment| segment.ident != variant)
         {
             return;
         }
@@ -5066,6 +5079,14 @@ impl<'a> DependencyVisitor<'a> {
             }
             self.dependencies.items.insert(trait_item);
             self.dependencies.callables.insert(callable.clone());
+        }
+    }
+
+    fn add_deref_target_method_dependencies(&mut self, type_ref: &TypeRef, method_name: &str) {
+        for target in self.resolver.deref_target_types(type_ref) {
+            for callable in self.resolver.resolve_methods(&target, method_name) {
+                self.add_method_dependency(&callable);
+            }
         }
     }
 
@@ -5383,6 +5404,9 @@ impl<'a> DependencyVisitor<'a> {
                 };
                 self.add_call_path(&path);
                 self.add_item_path(&path);
+                for type_ref in self.local_value_type_candidates(&capture) {
+                    self.add_trait_impls_for_type_named(&type_ref, "Display");
+                }
             }
         }
 
@@ -6228,6 +6252,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_expr_match(&mut self, expr_match: &'ast ExprMatch) {
         self.visit_expr(&expr_match.expr);
         let ok_type = self.result_ok_type(&expr_match.expr);
+        let error_type = self.expression_result_error_type(&expr_match.expr);
         let match_type = self
             .receiver_type(&expr_match.expr)
             .or_else(|| self.infer_expr_type(&expr_match.expr));
@@ -6240,6 +6265,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             let variable_result_error_types = self.variable_result_error_types.clone();
             if let Some(ok_type) = &ok_type {
                 self.add_result_ok_binding_type(&arm.pat, ok_type);
+            }
+            if let Some(error_type) = &error_type {
+                self.add_result_error_binding_type(&arm.pat, error_type);
             }
             if let Some(match_type) = &match_type {
                 self.add_pattern_bindings_for_type(&arm.pat, match_type);
@@ -6474,10 +6502,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_trait_impls_for_type_named(&receiver, "Deref");
                 self.add_trait_impls_for_type_named(&receiver, "DerefMut");
                 self.add_extension_trait_dependencies_for_method(&receiver, &method);
+                self.add_deref_target_method_dependencies(&receiver, &method);
                 for candidate in &receiver_candidates {
                     self.add_trait_impls_for_type_named(candidate, "Deref");
                     self.add_trait_impls_for_type_named(candidate, "DerefMut");
                     self.add_extension_trait_dependencies_for_method(candidate, &method);
+                    self.add_deref_target_method_dependencies(candidate, &method);
                 }
                 self.add_external_method_arg_trait_impls(call);
             }
@@ -8191,6 +8221,55 @@ impl Resolver<'_> {
             candidates.push(candidate);
         }
         candidates
+    }
+
+    fn deref_target_types(&self, receiver: &TypeRef) -> Vec<TypeRef> {
+        let mut targets = Vec::new();
+        for candidate in self.type_ref_candidates(receiver) {
+            for (callable, record) in &self.project.methods {
+                let CallableId::Method {
+                    package,
+                    type_path,
+                    trait_path: Some(trait_path),
+                    method,
+                    ..
+                } = callable
+                else {
+                    continue;
+                };
+                if package != &candidate.package
+                    || type_path != &candidate.type_path
+                    || !matches!(method.as_str(), "deref" | "deref_mut")
+                    || !trait_path
+                        .last()
+                        .is_some_and(|name| matches!(name.as_str(), "Deref" | "DerefMut"))
+                {
+                    continue;
+                }
+
+                let resolver = Resolver {
+                    project: self.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(candidate.clone()),
+                };
+                for impl_item in &record.impl_items {
+                    let ImplItem::Type(item_type) = impl_item else {
+                        continue;
+                    };
+                    if item_type.ident != "Target" {
+                        continue;
+                    }
+                    if let Some(target) = resolver.resolve_receiver_type(&item_type.ty) {
+                        targets.push(target);
+                    }
+                }
+            }
+        }
+        targets.sort();
+        targets.dedup();
+        targets
     }
 
     fn crate_root_reexport_method_candidate(&self, type_ref: &TypeRef) -> Option<TypeRef> {

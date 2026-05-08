@@ -1,0 +1,7 @@
+[package]
+name = "deref_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+deref_model = { path = "../deref_model" }

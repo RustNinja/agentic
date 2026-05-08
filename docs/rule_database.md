@@ -166,6 +166,10 @@ file.
 | `fixture.enum_variant_constructor_prune.support_chain.001` | covered | A checked-in support fixture slices through enum variant constructors used as iterator function values while pruning dead enum APIs and sibling support modules |
 | `fixture.associated_projection_prune.support_chain.001` | covered | A checked-in support fixture slices through associated type projections and projected render bounds while pruning dead projection APIs |
 | `fixture.iterator_method_ref_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator method references such as `map(Type::method)`, retaining the used method closure while pruning dead iterator APIs |
+| `fixture.display_format_prune.support_chain.001` | covered | A checked-in support fixture slices through captured `format!` arguments, retaining the concrete `Display` impl required by retained formatting while pruning dead display APIs |
+| `fixture.deref_method_prune.support_chain.001` | covered | A checked-in support fixture slices through autoderef method calls, retaining the `Deref` target method closure while pruning dead wrapper and target methods |
+| `fixture.question_mark_conversion_prune.support_chain.001` | covered | A checked-in support fixture slices through `?` error conversion plus `Err(err)` match rendering, retaining the conversion impl and error render method while pruning dead question APIs |
+| `fixture.match_guard_prune.support_chain.001` | covered | A checked-in support fixture slices through match-guard receiver methods, retaining guard predicate/render methods while pruning dead guard APIs |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
