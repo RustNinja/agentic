@@ -9,7 +9,7 @@ found from the local Litter checkout at:
 
 The current committed baseline after the first gap-closure pass is:
 
-- 182 focused cargo-checked fixture/rule cases.
+- 186 focused cargo-checked fixture/rule cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
 - The first documented gap batch is now executable in
   `crates/opensource_core/tests/rule_database.rs`.

@@ -1,0 +1,7 @@
+[package]
+name = "parse_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+parse_model = { path = "../parse_model" }

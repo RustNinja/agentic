@@ -8,9 +8,9 @@ use quote::ToTokens;
 use syn::{
     parse::Parser,
     visit::{self, Visit},
-    Expr, ExprCall, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, ExprStruct, Field, FnArg,
-    GenericArgument, ImplItem, Item, ItemMacro, Local, Macro, Member, Meta, Pat, PatTupleStruct,
-    Path, PathArguments, ReturnType, Stmt, Type, TypePath, UseTree,
+    Expr, ExprCall, ExprIndex, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, ExprStruct, Field,
+    FnArg, GenericArgument, ImplItem, Item, ItemMacro, Local, Macro, Member, Meta, Pat,
+    PatTupleStruct, Path, PathArguments, ReturnType, Stmt, Type, TypePath, UseTree,
 };
 use toml::Value;
 
@@ -4266,6 +4266,7 @@ impl<'a> DependencyVisitor<'a> {
                 .into_iter()
                 .next()
                 .or_else(|| self.receiver_type(&expr.expr)),
+            Expr::Index(index) => self.index_output_type(index),
             Expr::Field(field) => {
                 let receiver = self.receiver_type(&field.base)?;
                 self.resolver.field_type(&receiver, &field.member)
@@ -4335,6 +4336,9 @@ impl<'a> DependencyVisitor<'a> {
                 candidates.extend(self.expression_type_arguments(&expr.expr));
                 candidates.extend(self.receiver_type_candidates(&expr.expr));
             }
+            Expr::Index(index) => {
+                candidates.extend(self.index_output_type_candidates(index));
+            }
             Expr::Field(field) => {
                 for receiver in self.receiver_type_candidates(&field.base) {
                     candidates.extend(
@@ -4373,6 +4377,25 @@ impl<'a> DependencyVisitor<'a> {
         candidates.sort();
         candidates.dedup();
         candidates
+    }
+
+    fn index_output_type(&self, expression: &ExprIndex) -> Option<TypeRef> {
+        self.index_output_type_candidates(expression)
+            .into_iter()
+            .next()
+    }
+
+    fn index_output_type_candidates(&self, expression: &ExprIndex) -> Vec<TypeRef> {
+        let mut outputs = Vec::new();
+        for receiver in self.receiver_type_candidates(&expression.expr) {
+            outputs.extend(self.resolver.index_output_types(&receiver));
+        }
+        if let Some(receiver) = self.receiver_type(&expression.expr) {
+            outputs.extend(self.resolver.index_output_types(&receiver));
+        }
+        outputs.sort();
+        outputs.dedup();
+        outputs
     }
 
     fn local_binding_type(&self, local: &Local) -> Option<(String, TypeRef, Vec<TypeRef>)> {
@@ -4629,6 +4652,7 @@ impl<'a> DependencyVisitor<'a> {
                 .into_iter()
                 .next()
                 .or_else(|| self.infer_expr_type(&expr.expr)),
+            Expr::Index(index) => self.index_output_type(index),
             Expr::Field(field) => {
                 let receiver = self.receiver_type(&field.base)?;
                 self.resolver.field_type(&receiver, &field.member)
@@ -5510,6 +5534,15 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_parse_turbofish_trait_dependencies(&mut self, call: &ExprMethodCall) {
+        if call.method != "parse" {
+            return;
+        }
+        for type_ref in self.method_turbofish_type_refs(call) {
+            self.add_trait_impls_for_type_named(&type_ref, "FromStr");
+        }
+    }
+
     fn add_collect_method_trait_dependencies(&mut self) {
         for type_ref in self.expected_collect_types.clone() {
             self.add_trait_impls_for_type_named(&type_ref, "FromIterator");
@@ -5692,6 +5725,9 @@ impl<'a> DependencyVisitor<'a> {
                     .collect()
             }
             Expr::MethodCall(call) => {
+                if call.method == "parse" {
+                    return self.method_turbofish_type_refs(call);
+                }
                 if matches!(
                     call.method.to_string().as_str(),
                     "as_ref" | "as_mut" | "clone" | "into_iter" | "iter" | "iter_mut"
@@ -5751,10 +5787,11 @@ impl<'a> DependencyVisitor<'a> {
                     .iter()
                     .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
             }
-            Expr::MethodCall(call) => self
-                .resolved_methods_for_call(call)
-                .iter()
-                .find_map(|callable| self.resolver.return_ok_type_from_callable(callable)),
+            Expr::MethodCall(call) => self.parse_method_target_type(call).or_else(|| {
+                self.resolved_methods_for_call(call)
+                    .iter()
+                    .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
+            }),
             Expr::Block(expr) => final_block_expression(&expr.block)
                 .and_then(|expr| self.expression_result_ok_type(expr)),
             Expr::Unsafe(expr) => final_block_expression(&expr.block)
@@ -5785,9 +5822,20 @@ impl<'a> DependencyVisitor<'a> {
                     .find_map(|callable| self.resolver.return_error_type_from_callable(callable))
             }
             Expr::MethodCall(call) => self
-                .resolved_methods_for_call(call)
-                .iter()
-                .find_map(|callable| self.resolver.return_error_type_from_callable(callable)),
+                .parse_method_target_type(call)
+                .and_then(|target| {
+                    self.resolver
+                        .from_str_error_types(&target)
+                        .into_iter()
+                        .next()
+                })
+                .or_else(|| {
+                    self.resolved_methods_for_call(call)
+                        .iter()
+                        .find_map(|callable| {
+                            self.resolver.return_error_type_from_callable(callable)
+                        })
+                }),
             Expr::Block(expr) => final_block_expression(&expr.block)
                 .and_then(|expr| self.expression_result_error_type(expr)),
             Expr::Unsafe(expr) => final_block_expression(&expr.block)
@@ -5814,6 +5862,31 @@ impl<'a> DependencyVisitor<'a> {
         resolved_methods.sort();
         resolved_methods.dedup();
         resolved_methods
+    }
+
+    fn parse_method_target_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
+        (call.method == "parse")
+            .then(|| self.method_turbofish_type_refs(call).into_iter().next())
+            .flatten()
+    }
+
+    fn method_turbofish_type_refs(&self, call: &ExprMethodCall) -> Vec<TypeRef> {
+        let Some(arguments) = &call.turbofish else {
+            return Vec::new();
+        };
+        let mut type_refs = arguments
+            .args
+            .iter()
+            .filter_map(|argument| {
+                let GenericArgument::Type(ty) = argument else {
+                    return None;
+                };
+                self.resolver.resolve_receiver_type(ty)
+            })
+            .collect::<Vec<_>>();
+        type_refs.sort();
+        type_refs.dedup();
+        type_refs
     }
 
     fn add_closure_arg_dependencies(
@@ -6251,7 +6324,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_expr_match(&mut self, expr_match: &'ast ExprMatch) {
         self.visit_expr(&expr_match.expr);
-        let ok_type = self.result_ok_type(&expr_match.expr);
+        let ok_type = self
+            .result_ok_type(&expr_match.expr)
+            .or_else(|| self.expression_result_ok_type(&expr_match.expr));
         let error_type = self.expression_result_error_type(&expr_match.expr);
         let match_type = self
             .receiver_type(&expr_match.expr)
@@ -6463,6 +6538,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         if self.visit_single_payload_closure_method_call(call) {
             return;
         }
+        self.add_parse_turbofish_trait_dependencies(call);
         self.add_method_turbofish_trait_dependencies(call);
         let receiver_candidates = self.receiver_type_candidates(&call.receiver);
         if let Some(receiver) = self.receiver_type(&call.receiver) {
@@ -6560,6 +6636,16 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_external_method_arg_trait_impls(call);
         }
         visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_index(&mut self, index: &'ast ExprIndex) {
+        if let Some(receiver) = self.receiver_type(&index.expr) {
+            self.add_trait_impls_for_type_named(&receiver, "Index");
+        }
+        for receiver in self.receiver_type_candidates(&index.expr) {
+            self.add_trait_impls_for_type_named(&receiver, "Index");
+        }
+        visit::visit_expr_index(self, index);
     }
 
     fn visit_expr_struct(&mut self, expr: &'ast ExprStruct) {
@@ -8259,6 +8345,64 @@ impl Resolver<'_> {
                         continue;
                     };
                     if item_type.ident != "Target" {
+                        continue;
+                    }
+                    if let Some(target) = resolver.resolve_receiver_type(&item_type.ty) {
+                        targets.push(target);
+                    }
+                }
+            }
+        }
+        targets.sort();
+        targets.dedup();
+        targets
+    }
+
+    fn index_output_types(&self, receiver: &TypeRef) -> Vec<TypeRef> {
+        self.trait_associated_type_targets(receiver, "Index", "Output")
+    }
+
+    fn from_str_error_types(&self, receiver: &TypeRef) -> Vec<TypeRef> {
+        self.trait_associated_type_targets(receiver, "FromStr", "Err")
+    }
+
+    fn trait_associated_type_targets(
+        &self,
+        receiver: &TypeRef,
+        trait_name: &str,
+        associated_type: &str,
+    ) -> Vec<TypeRef> {
+        let mut targets = Vec::new();
+        for candidate in self.type_ref_candidates(receiver) {
+            for (callable, record) in &self.project.methods {
+                let CallableId::Method {
+                    package,
+                    type_path,
+                    trait_path: Some(trait_path),
+                    ..
+                } = callable
+                else {
+                    continue;
+                };
+                if package != &candidate.package
+                    || type_path != &candidate.type_path
+                    || !trait_path.last().is_some_and(|name| name == trait_name)
+                {
+                    continue;
+                }
+
+                let resolver = Resolver {
+                    project: self.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(candidate.clone()),
+                };
+                for impl_item in &record.impl_items {
+                    let ImplItem::Type(item_type) = impl_item else {
+                        continue;
+                    };
+                    if item_type.ident != associated_type {
                         continue;
                     }
                     if let Some(target) = resolver.resolve_receiver_type(&item_type.ty) {

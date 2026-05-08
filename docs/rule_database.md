@@ -170,6 +170,10 @@ file.
 | `fixture.deref_method_prune.support_chain.001` | covered | A checked-in support fixture slices through autoderef method calls, retaining the `Deref` target method closure while pruning dead wrapper and target methods |
 | `fixture.question_mark_conversion_prune.support_chain.001` | covered | A checked-in support fixture slices through `?` error conversion plus `Err(err)` match rendering, retaining the conversion impl and error render method while pruning dead question APIs |
 | `fixture.match_guard_prune.support_chain.001` | covered | A checked-in support fixture slices through match-guard receiver methods, retaining guard predicate/render methods while pruning dead guard APIs |
+| `fixture.from_str_parse_prune.support_chain.001` | covered | A checked-in support fixture slices through `.parse::<T>()`, retaining the concrete `FromStr` impl, parsed value methods, and `Err(T::Err)` rendering while pruning dead parse APIs |
+| `fixture.index_operator_prune.support_chain.001` | covered | A checked-in support fixture slices through indexing expressions such as `store[0].render()`, retaining the concrete `Index` impl and output method closure while pruning dead index APIs |
+| `fixture.option_field_payload_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option` payloads reached from struct fields and `as_ref()`, retaining only the live payload render method while pruning dead option APIs |
+| `fixture.closure_return_prune.support_chain.001` | covered | A checked-in support fixture slices through closure-return receiver calls such as `build().render()`, retaining the returned type method closure while pruning dead closure-return APIs |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

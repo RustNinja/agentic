@@ -1,0 +1,7 @@
+[package]
+name = "closure_return_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+closure_return_model = { path = "../closure_return_model" }
