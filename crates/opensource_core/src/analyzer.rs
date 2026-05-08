@@ -2526,7 +2526,11 @@ use super::parent::ParentLocalType;
 
 #[cfg(test)]
 mod tests {
-    use std::path::{Path, PathBuf};
+    use std::{
+        fs,
+        path::{Path, PathBuf},
+        time::{SystemTime, UNIX_EPOCH},
+    };
 
     #[cfg(feature = "ra-hir")]
     use super::load_report_for_project;
@@ -2574,7 +2578,7 @@ mod tests {
     #[test]
     #[cfg(feature = "ra-hir")]
     fn ra_hir_loads_workspace_and_initializes_semantics() {
-        let workspace_root = workspace_root();
+        let workspace_root = ra_fixture_workspace("ra-hir-load");
         let workspace = crate::manifest::load_workspace(&workspace_root).unwrap();
         let project = crate::parse::parse_workspace(workspace).unwrap();
         let report =
@@ -2611,7 +2615,7 @@ mod tests {
             return;
         }
 
-        let workspace_root = workspace_root();
+        let workspace_root = ra_fixture_workspace("ra-hir-proc-macro-mode");
         let workspace = crate::manifest::load_workspace(&workspace_root).unwrap();
         let project = crate::parse::parse_workspace(workspace).unwrap();
         let report = load_report_for_project(
@@ -2655,6 +2659,68 @@ mod tests {
             .nth(2)
             .expect("core crate should live under crates/opensource_core")
             .to_path_buf()
+    }
+
+    #[cfg(feature = "ra-hir")]
+    fn ra_fixture_workspace(label: &str) -> PathBuf {
+        let root = temp_path(label);
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"
+use opensourced::opensourced;
+
+pub struct Worker;
+
+impl Worker {
+    pub fn value(&self) -> u32 {
+        7
+    }
+}
+
+pub fn helper(worker: Worker) -> u32 {
+    worker.value()
+}
+
+#[opensourced]
+pub fn entry(worker: Worker) -> u32 {
+    helper(worker)
+}
+"#,
+        );
+        root
+    }
+
+    #[cfg(feature = "ra-hir")]
+    fn temp_path(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        let path = std::env::temp_dir().join(format!("opensource-core-{label}-{nanos}"));
+        if path.exists() {
+            fs::remove_dir_all(&path).expect("old temp path should be removable");
+        }
+        path
+    }
+
+    #[cfg(feature = "ra-hir")]
+    fn write(path: PathBuf, contents: &str) {
+        if let Some(parent) = path.parent() {
+            fs::create_dir_all(parent).expect("fixture parent should be creatable");
+        }
+        fs::write(path, contents).expect("fixture file should be writable");
     }
 }
 
