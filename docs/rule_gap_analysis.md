@@ -9,7 +9,7 @@ found from the local Litter checkout at:
 
 The current committed baseline after the fixture expansion pass is:
 
-- 194 focused cargo-checked fixture/rule cases.
+- 198 focused cargo-checked fixture/rule cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
 - The first documented gap batch is now executable in
   `crates/opensource_core/tests/rule_database.rs`.
@@ -231,11 +231,11 @@ Keep the generated 1,200-row catalog for breadth. The next focused batch should
 target the remaining shapes that are not closed above:
 
 1. `manifest.cdylib_staticlib_target_patch_bundle.001`
-2. `pattern.external_protocol_variant_projection.001`
+2. `pattern.external_protocol_variant_projection.001` deeper cross-crate public protocol variant surfaces
 3. `request.json_patch_state_machine.001`
 4. `serde.adjacent_tag_content_contract.001`
-5. `static.lazy_regex_constructor.001`
-6. `static.global_mutex_registry.001`
+5. `static.lazy_regex_constructor.001` with external regex-like dependency behavior
+6. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
 7. `uniffi.shared_runtime_once_lock.001`
 8. `uniffi.async_runtime_exported_object.001`
 

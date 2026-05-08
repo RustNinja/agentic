@@ -4369,6 +4369,8 @@ impl<'a> DependencyVisitor<'a> {
                     }
                 } else if let Some(variable_candidates) = self.variable_candidates.get(&name) {
                     candidates.extend(variable_candidates.clone());
+                } else {
+                    candidates.extend(self.expression_type_arguments(expression));
                 }
             }
             Expr::Call(call) => {
@@ -5807,8 +5809,9 @@ impl<'a> DependencyVisitor<'a> {
                 self.variable_type_arguments
                     .get(&name)
                     .cloned()
-                    .unwrap_or_default()
+                    .unwrap_or_else(|| self.resolver.type_arguments_from_value_path(&path.path))
             }
+            Expr::Path(path) => self.resolver.type_arguments_from_value_path(&path.path),
             Expr::Field(field) => {
                 let mut type_arguments = Vec::new();
                 for receiver in self.receiver_type_candidates(&field.base) {
@@ -6189,7 +6192,8 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn visit_fold_method_call(&mut self, call: &ExprMethodCall) -> bool {
-        if call.method != "fold" || call.args.len() != 2 {
+        if !matches!(call.method.to_string().as_str(), "fold" | "try_fold") || call.args.len() != 2
+        {
             return false;
         }
 
@@ -6213,14 +6217,20 @@ impl<'a> DependencyVisitor<'a> {
         self.visit_expr(&call.receiver);
         self.visit_expr(initial);
 
+        let item_types = self.expression_type_arguments(&call.receiver);
         let variables = self.variables.clone();
         let variable_candidates = self.variable_candidates.clone();
         let variable_type_arguments = self.variable_type_arguments.clone();
         let variable_result_ok_types = self.variable_result_ok_types.clone();
         let variable_result_error_types = self.variable_result_error_types.clone();
         self.bind_pattern_type(accumulator_pat, &accumulator_type);
-        for input in closure.inputs.iter().skip(1) {
-            self.visit_pat(input);
+        for (input, item_type) in closure.inputs.iter().skip(1).zip(item_types.iter()) {
+            self.bind_pattern_type(input, item_type);
+        }
+        if closure.inputs.len() > item_types.len() + 1 {
+            for input in closure.inputs.iter().skip(item_types.len() + 1) {
+                self.visit_pat(input);
+            }
         }
         self.visit_expr(&closure.body);
         self.variables = variables;
@@ -7533,6 +7543,27 @@ impl Resolver<'_> {
             Item::Const(item_const) => resolver.resolve_receiver_type(&item_const.ty),
             Item::Static(item_static) => resolver.resolve_receiver_type(&item_static.ty),
             _ => None,
+        }
+    }
+
+    fn type_arguments_from_value_path(&self, path: &Path) -> Vec<TypeRef> {
+        let Some(item) = self.resolve_item_path(path) else {
+            return Vec::new();
+        };
+        let Some(record) = self.project.items.get(&item) else {
+            return Vec::new();
+        };
+        let resolver = Resolver {
+            project: self.project,
+            package: &record.package,
+            module_path: &record.module_path,
+            aliases: &record.aliases,
+            self_type: None,
+        };
+        match &record.item {
+            Item::Const(item_const) => resolver.type_argument_refs_in_type(&item_const.ty),
+            Item::Static(item_static) => resolver.type_argument_refs_in_type(&item_static.ty),
+            _ => Vec::new(),
         }
     }
 
