@@ -374,6 +374,232 @@ fn prunes_proc_macro_surface_support_chain_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_asset_conversion_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/asset_conversion_prune");
+    let output = temp_path("slice-case-asset-conversion-prune-output");
+    let target_dir = temp_path("slice-case-asset-conversion-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("asset_conversion_prune fixture should slice");
+
+    assert_eq!(report.packages, ["asset_api", "asset_codec", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_asset_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("asset_api/Cargo.toml"));
+    let api_root = read(output.join("asset_api/src/lib.rs"));
+    let api_live = read(output.join("asset_api/src/live.rs"));
+    let codec_root = read(output.join("asset_codec/src/lib.rs"));
+    let codec_live = read(output.join("asset_codec/src/live.rs"));
+
+    assert!(root_manifest.contains("../asset_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_asset_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("asset_api::selected_asset_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_asset_report"]);
+
+    assert!(api_manifest.contains("../asset_codec"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_asset_report"), "{api_root}");
+    assert_absent(
+        "asset_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_asset_report"],
+    );
+    assert!(api_live.contains("convert_selected_asset"), "{api_live}");
+    assert!(api_live.contains("AssetError"), "{api_live}");
+    assert_absent("asset_api/src/live.rs", &api_live, &["dead_asset"]);
+
+    assert!(codec_root.contains("mod live"), "{codec_root}");
+    assert!(
+        codec_root.contains("convert_selected_asset"),
+        "{codec_root}"
+    );
+    assert!(codec_root.contains("AssetReport"), "{codec_root}");
+    assert!(codec_root.contains("AssetError"), "{codec_root}");
+    assert_absent(
+        "asset_codec/src/lib.rs",
+        &codec_root,
+        &["mod dead", "DeadAssetReport", "build_dead_asset"],
+    );
+    assert!(
+        codec_live.contains("include_str!(\"assets/header.txt\")"),
+        "{codec_live}"
+    );
+    assert!(
+        codec_live.contains("include_str!(concat!(\"assets/\", \"body.txt\"))"),
+        "{codec_live}"
+    );
+    assert!(
+        codec_live.contains("impl TryFrom<RawAsset> for AssetReport"),
+        "{codec_live}"
+    );
+    assert!(
+        codec_live.contains("pub fn convert_selected_asset"),
+        "{codec_live}"
+    );
+    assert_absent(
+        "asset_codec/src/live.rs",
+        &codec_live,
+        &["DEAD_ASSET", "dead_live_asset", "dead-asset"],
+    );
+    assert!(output.join("asset_codec/src/assets/header.txt").exists());
+    assert!(output.join("asset_codec/src/assets/body.txt").exists());
+    assert!(!output.join("asset_codec/src/assets/dead.txt").exists());
+    assert!(!output.join("asset_codec/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_callback_boundary_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/callback_boundary_prune");
+    let output = temp_path("slice-case-callback-boundary-prune-output");
+    let target_dir = temp_path("slice-case-callback-boundary-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("callback_boundary_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["callback_api", "callback_runtime", "root"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_callback_score"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+    assert!(
+        report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "dynamic_callback_boundaries"),
+        "callback boundary fixture should keep explicit callback boundary evidence: {:?}",
+        report.production.hazards
+    );
+    assert!(
+        report
+            .production
+            .hazards
+            .iter()
+            .all(|hazard| hazard.severity != "error"),
+        "direct callback boundaries should not be hard errors: {:?}",
+        report.production.hazards
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("callback_api/Cargo.toml"));
+    let api_root = read(output.join("callback_api/src/lib.rs"));
+    let api_live = read(output.join("callback_api/src/live.rs"));
+    let runtime_root = read(output.join("callback_runtime/src/lib.rs"));
+    let runtime_live = read(output.join("callback_runtime/src/live.rs"));
+
+    assert!(root_manifest.contains("../callback_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_callback_score"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("callback_api::selected_callback_score"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_callback_score"]);
+
+    assert!(
+        api_manifest.contains("../callback_runtime"),
+        "{api_manifest}"
+    );
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_callback_score"), "{api_root}");
+    assert_absent(
+        "callback_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_callback_score"],
+    );
+    assert!(api_live.contains("struct ApiCallback"), "{api_live}");
+    assert!(
+        api_live.contains("impl Callback for ApiCallback"),
+        "{api_live}"
+    );
+    assert!(api_live.contains("apply_callback"), "{api_live}");
+    assert!(api_live.contains("bump_callback"), "{api_live}");
+    assert_absent(
+        "callback_api/src/live.rs",
+        &api_live,
+        &["dead_live_callback_score", "DeadCallback", "dead_callback"],
+    );
+    assert!(!output.join("callback_api/src/dead.rs").exists());
+
+    assert!(runtime_root.contains("mod live"), "{runtime_root}");
+    assert!(runtime_root.contains("CallbackInput"), "{runtime_root}");
+    assert!(runtime_root.contains("apply_callback"), "{runtime_root}");
+    assert_absent(
+        "callback_runtime/src/lib.rs",
+        &runtime_root,
+        &["mod dead", "DeadCallback", "dead_callback_fn", "DeadInput"],
+    );
+    assert!(
+        runtime_live.contains("pub trait Callback"),
+        "{runtime_live}"
+    );
+    assert!(
+        runtime_live.contains("pub type CallbackFn"),
+        "{runtime_live}"
+    );
+    assert!(
+        runtime_live.contains("handler: &dyn Callback"),
+        "{runtime_live}"
+    );
+    assert!(
+        runtime_live.contains("pub fn bump_callback"),
+        "{runtime_live}"
+    );
+    assert_absent(
+        "callback_runtime/src/live.rs",
+        &runtime_live,
+        &[
+            "unused_callback_fn",
+            "DeadCallback",
+            "dead_callback",
+            "DeadInput",
+        ],
+    );
+    assert!(!output.join("callback_runtime/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")
@@ -390,6 +616,15 @@ fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
         String::from_utf8_lossy(&output.stderr),
         root_source,
     );
+}
+
+fn assert_absent(label: &str, source: &str, tokens: &[&str]) {
+    for token in tokens {
+        assert!(
+            !source.contains(token),
+            "{label} should not contain {token:?}\n{source}"
+        );
+    }
 }
 
 fn assert_no_dead_tokens(label: &str, source: &str) {

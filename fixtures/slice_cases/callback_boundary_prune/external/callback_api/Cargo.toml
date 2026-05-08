@@ -1,0 +1,7 @@
+[package]
+name = "callback_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+callback_runtime = { path = "../callback_runtime" }
