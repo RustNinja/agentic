@@ -23,6 +23,7 @@ Use stable group prefixes when adding cases:
 | `uniffi.*` | UniFFI records/enums/objects/callbacks/scaffolding/helper attrs |
 | `manifest.*` | dependency tables, patches, path dependencies, locks, toolchains |
 | `repair.*` | compiler-feedback cleanup, import repair, repeated diagnostics |
+| `fixture.*` | checked-in category fixture workspaces with explicit expected slice output |
 
 Current executable seed cases live in
 `crates/opensource_core/tests/rule_database.rs`. The broader generated catalog
@@ -136,6 +137,7 @@ file.
 | `manifest.support_inline_facade_external_child.001` | covered | Inline support facades that declare file-backed child modules and `pub use child::*` resolve through both virtual and file-backed nodes while repeated dead glob misses do not block later live reexports |
 | `manifest.support_pub_crate_glob_private_use.001` | covered | Restricted support reexports such as `pub(crate) use module::*` are pruned as private imports when retained code uses direct module paths, while the live target module/items stay rendered |
 | `manifest.support_macro_reexport_alias_assoc.001` | covered | Copied support crates propagate methods called on macro metavariable receivers through reexported dependency type aliases, retaining only the required upstream associated methods |
+| `fixture.trim_unused.workspace.001` | covered | A checked-in three-package Rust workspace fixture (`root`, `used`, `unused`) slices a selected root through the default analyzer path, keeps only the used package/items, prunes the unused dependency package, and cargo-checks the generated workspace |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
