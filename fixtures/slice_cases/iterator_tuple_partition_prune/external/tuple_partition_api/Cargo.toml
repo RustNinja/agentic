@@ -1,0 +1,7 @@
+[package]
+name = "tuple_partition_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tuple_partition_model = { path = "../tuple_partition_model" }

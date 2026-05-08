@@ -5064,6 +5064,147 @@ fn prunes_iterator_entry_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_iterator_tuple_find_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_tuple_find_map_prune",
+        root_fn: "selected_tuple_find_map_report",
+        api_pkg: "tuple_find_map_api",
+        model_pkg: "tuple_find_map_model",
+        api_fn: "selected_tuple_find_map_report",
+        model_fn: "selected_tuple_find_map",
+        model_required: &[
+            "TupleFindMapKey",
+            "TupleFindMapValue",
+            ".find_map(|(key, value)| key.maybe_render(value))",
+            "pub fn maybe_render",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTupleFindMapItem",
+            "dead_tuple_find_map",
+            "dead_method",
+            "dead_live_tuple_find_map",
+            "dead-tuple-find-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_tuple_partition_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_tuple_partition_prune",
+        root_fn: "selected_tuple_partition_report",
+        api_pkg: "tuple_partition_api",
+        model_pkg: "tuple_partition_model",
+        api_fn: "selected_tuple_partition_report",
+        model_fn: "selected_tuple_partition",
+        model_required: &[
+            "TuplePartitionKey",
+            "TuplePartitionValue",
+            ".partition(|(key, value)| key.keep(value))",
+            ".map(|(_, value)| value.render_label())",
+            "pub fn keep",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTuplePartitionItem",
+            "dead_tuple_partition",
+            "dead_method",
+            "dead_live_tuple_partition",
+            "dead-tuple-partition",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_tuple_inspect_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_tuple_inspect_prune",
+        root_fn: "selected_tuple_inspect_report",
+        api_pkg: "tuple_inspect_api",
+        model_pkg: "tuple_inspect_model",
+        api_fn: "selected_tuple_inspect_report",
+        model_fn: "selected_tuple_inspect",
+        model_required: &[
+            "TupleInspectKey",
+            "TupleInspectValue",
+            ".inspect(|(key, value)| audit.push(key.audit(value)))",
+            ".map(|(_, value)| value.render_label())",
+            "pub fn audit",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTupleInspectItem",
+            "dead_tuple_inspect",
+            "dead_method",
+            "dead_live_tuple_inspect",
+            "dead-tuple-inspect",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_tuple_sort_by_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_tuple_sort_by_key_prune",
+        root_fn: "selected_tuple_sort_by_key_report",
+        api_pkg: "tuple_sort_key_api",
+        model_pkg: "tuple_sort_key_model",
+        api_fn: "selected_tuple_sort_by_key_report",
+        model_fn: "selected_tuple_sort_by_key",
+        model_required: &[
+            "TupleSortKey",
+            "TupleSortValue",
+            "entries.sort_by_key(|(key, value)| key.rank(value))",
+            ".map(|(key, value)| key.render_with(value))",
+            "pub fn rank",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTupleSortKeyItem",
+            "dead_tuple_sort_by_key",
+            "dead_method",
+            "dead_live_tuple_sort_by_key",
+            "dead-tuple-sort",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_nested_tuple_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_nested_tuple_map_prune",
+        root_fn: "selected_nested_tuple_map_report",
+        api_pkg: "nested_tuple_api",
+        model_pkg: "nested_tuple_model",
+        api_fn: "selected_nested_tuple_map_report",
+        model_fn: "selected_nested_tuple_map",
+        model_required: &[
+            "NestedTupleKey",
+            "NestedTupleValue",
+            "NestedTupleMeta",
+            ".map(|((key, value), meta)| key.render_nested(value, meta))",
+            "pub fn render_nested",
+            "pub fn render_label",
+            "pub fn render_tag",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadNestedTupleItem",
+            "dead_nested_tuple_map",
+            "dead_method",
+            "dead_live_nested_tuple_map",
+            "dead-nested-tuple",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

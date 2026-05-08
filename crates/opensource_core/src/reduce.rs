@@ -6455,17 +6455,43 @@ impl<'a> DependencyVisitor<'a> {
         payload_pat: &Pat,
         payload_type_arguments: &[TypeRef],
     ) -> bool {
-        let Pat::Tuple(tuple) = payload_pat else {
-            return false;
-        };
-        if tuple.elems.len() > payload_type_arguments.len() {
+        if !matches!(payload_pat, Pat::Tuple(_)) {
             return false;
         }
 
-        for (pat, type_ref) in tuple.elems.iter().zip(payload_type_arguments.iter()) {
-            self.bind_pattern_type(pat, type_ref);
+        let mut cursor = 0;
+        self.bind_pattern_from_type_argument_cursor(
+            payload_pat,
+            payload_type_arguments,
+            &mut cursor,
+        )
+    }
+
+    fn bind_pattern_from_type_argument_cursor(
+        &mut self,
+        pattern: &Pat,
+        type_arguments: &[TypeRef],
+        cursor: &mut usize,
+    ) -> bool {
+        match pattern {
+            Pat::Tuple(tuple) => tuple.elems.iter().all(|elem| {
+                self.bind_pattern_from_type_argument_cursor(elem, type_arguments, cursor)
+            }),
+            Pat::Reference(reference) => {
+                self.bind_pattern_from_type_argument_cursor(&reference.pat, type_arguments, cursor)
+            }
+            Pat::Type(pat_type) => {
+                self.bind_pattern_from_type_argument_cursor(&pat_type.pat, type_arguments, cursor)
+            }
+            _ => {
+                let Some(type_ref) = type_arguments.get(*cursor) else {
+                    return false;
+                };
+                self.bind_pattern_type(pattern, type_ref);
+                *cursor += 1;
+                true
+            }
         }
-        true
     }
 
     fn bind_adapter_tuple_payload_pattern(&mut self, receiver: &Expr, payload_pat: &Pat) -> bool {

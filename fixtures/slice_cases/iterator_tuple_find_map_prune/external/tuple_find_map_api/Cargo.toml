@@ -1,0 +1,7 @@
+[package]
+name = "tuple_find_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tuple_find_map_model = { path = "../tuple_find_map_model" }

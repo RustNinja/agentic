@@ -210,6 +210,11 @@ file.
 | `fixture.iterator_tuple_filter_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns across `filter` and downstream `map` closures while pruning dead tuple filter support |
 | `fixture.iterator_tuple_for_each_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in side-effect `for_each` closures while pruning dead side-effect support |
 | `fixture.iterator_entry_map_prune.support_chain.001` | covered | A checked-in support fixture slices through map-entry-shaped tuple payloads from `BTreeMap::iter` while pruning dead entry support |
+| `fixture.iterator_tuple_find_map_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in `find_map` closures while pruning dead optional lookup support |
+| `fixture.iterator_tuple_partition_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in `partition` plus downstream map closures while pruning dead partition support |
+| `fixture.iterator_tuple_inspect_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in `inspect` side-effect closures while pruning dead inspect support |
+| `fixture.iterator_tuple_sort_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in mutable `sort_by_key` closures while pruning dead sort-key support |
+| `fixture.iterator_nested_tuple_map_prune.support_chain.001` | covered | A checked-in support fixture slices through nested tuple payload patterns while pruning dead nested tuple support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
