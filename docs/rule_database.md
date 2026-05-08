@@ -206,6 +206,10 @@ file.
 | `fixture.iterator_sort_by_prune.support_chain.001` | covered | A checked-in support fixture slices through mutable collection `sort_by` two-item closures, retaining only the live comparator and render methods |
 | `fixture.iterator_dedup_by_prune.support_chain.001` | covered | A checked-in support fixture slices through mutable collection `dedup_by` two-item closures, retaining only the live equivalence and render methods |
 | `fixture.iterator_scan_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `scan` state/item closures, retaining the live state transition and item render path |
+| `fixture.iterator_tuple_map_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in iterator `map` closures while pruning dead tuple support methods |
+| `fixture.iterator_tuple_filter_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns across `filter` and downstream `map` closures while pruning dead tuple filter support |
+| `fixture.iterator_tuple_for_each_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in side-effect `for_each` closures while pruning dead side-effect support |
+| `fixture.iterator_entry_map_prune.support_chain.001` | covered | A checked-in support fixture slices through map-entry-shaped tuple payloads from `BTreeMap::iter` while pruning dead entry support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

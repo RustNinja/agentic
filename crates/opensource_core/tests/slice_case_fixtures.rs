@@ -4954,6 +4954,116 @@ fn prunes_iterator_scan_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_iterator_tuple_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_tuple_map_prune",
+        root_fn: "selected_tuple_map_report",
+        api_pkg: "tuple_map_api",
+        model_pkg: "tuple_map_model",
+        api_fn: "selected_tuple_map_report",
+        model_fn: "selected_tuple_map",
+        model_required: &[
+            "TupleMapKey",
+            "TupleMapValue",
+            ".map(|(key, value)| key.render_with(value))",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTupleMapItem",
+            "dead_tuple_map",
+            "dead_method",
+            "dead_live_tuple_map",
+            "dead-tuple-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_tuple_filter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_tuple_filter_prune",
+        root_fn: "selected_tuple_filter_report",
+        api_pkg: "tuple_filter_api",
+        model_pkg: "tuple_filter_model",
+        api_fn: "selected_tuple_filter_report",
+        model_fn: "selected_tuple_filter",
+        model_required: &[
+            "TupleFilterKey",
+            "TupleFilterValue",
+            ".filter(|(key, value)| key.accepts(value))",
+            ".map(|(_, value)| value.render_label())",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTupleFilterItem",
+            "dead_tuple_filter",
+            "dead_method",
+            "dead_live_tuple_filter",
+            "dead-tuple-filter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_tuple_for_each_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_tuple_for_each_prune",
+        root_fn: "selected_tuple_for_each_report",
+        api_pkg: "tuple_for_each_api",
+        model_pkg: "tuple_for_each_model",
+        api_fn: "selected_tuple_for_each_report",
+        model_fn: "selected_tuple_for_each",
+        model_required: &[
+            "TupleForEachKey",
+            "TupleForEachValue",
+            ".for_each(|(key, value)| rendered.push(key.render_with(value)))",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTupleForEachItem",
+            "dead_tuple_for_each",
+            "dead_method",
+            "dead_live_tuple_for_each",
+            "dead-tuple-for-each",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_entry_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_entry_map_prune",
+        root_fn: "selected_entry_map_report",
+        api_pkg: "entry_map_api",
+        model_pkg: "entry_map_model",
+        api_fn: "selected_entry_map_report",
+        model_fn: "selected_entry_map",
+        model_required: &[
+            "EntryMapKey",
+            "EntryMapValue",
+            "BTreeMap<EntryMapKey, EntryMapValue>",
+            ".map(|(key, value)| key.render_entry(value))",
+            "pub fn render_entry",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadEntryMapItem",
+            "dead_entry_map",
+            "dead_method",
+            "dead_live_entry_map",
+            "dead-entry-map",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

@@ -6442,8 +6442,30 @@ impl<'a> DependencyVisitor<'a> {
         if self.bind_adapter_tuple_payload_pattern(receiver, payload_pat) {
             return;
         }
+        if self.bind_tuple_payload_pattern_from_type_arguments(payload_pat, payload_type_arguments)
+        {
+            return;
+        }
         self.bind_pattern_type(payload_pat, payload_type);
         self.bind_pattern_type_arguments(payload_pat, payload_type_arguments);
+    }
+
+    fn bind_tuple_payload_pattern_from_type_arguments(
+        &mut self,
+        payload_pat: &Pat,
+        payload_type_arguments: &[TypeRef],
+    ) -> bool {
+        let Pat::Tuple(tuple) = payload_pat else {
+            return false;
+        };
+        if tuple.elems.len() > payload_type_arguments.len() {
+            return false;
+        }
+
+        for (pat, type_ref) in tuple.elems.iter().zip(payload_type_arguments.iter()) {
+            self.bind_pattern_type(pat, type_ref);
+        }
+        true
     }
 
     fn bind_adapter_tuple_payload_pattern(&mut self, receiver: &Expr, payload_pat: &Pat) -> bool {

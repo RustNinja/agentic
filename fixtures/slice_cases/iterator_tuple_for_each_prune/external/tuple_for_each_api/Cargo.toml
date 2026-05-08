@@ -1,0 +1,7 @@
+[package]
+name = "tuple_for_each_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+tuple_for_each_model = { path = "../tuple_for_each_model" }
