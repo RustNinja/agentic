@@ -1,0 +1,7 @@
+[package]
+name = "const_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+const_support = { path = "../const_support" }

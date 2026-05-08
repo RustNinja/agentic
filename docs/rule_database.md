@@ -158,6 +158,10 @@ file.
 | `fixture.poll_adapter_prune.support_chain.001` | covered | A checked-in support fixture slices through `std::task::Poll` adapter state, retaining the live frame/poller/poll method closure while pruning dead poll adapters |
 | `fixture.type_alias_surface_prune.support_chain.001` | covered | A checked-in support fixture slices through nested `Result<Option<Vec<Dto>>, Error>` type alias surfaces, retaining DTO/error/render closure and pruning dead envelope APIs |
 | `fixture.callback_store_prune.support_chain.001` | covered | A checked-in support fixture slices through stored `Arc<RwLock<Option<Arc<dyn Trait>>>>` callback state, keeping scoped trait-object hazard evidence while pruning dead callback packages/modules |
+| `fixture.const_chain_prune.support_chain.001` | covered | A checked-in support fixture slices through const/static/associated-const chains and keeps only the live const record closure while pruning dead const APIs |
+| `fixture.struct_update_prune.support_chain.001` | covered | A checked-in support fixture slices through `Default` plus struct update syntax, retaining the live settings surface and pruning dead builder/model APIs |
+| `fixture.pattern_destructure_prune.support_chain.001` | covered | A checked-in support fixture slices through `let-else` enum struct-pattern destructuring, retaining the live parser/event closure and pruning dead pattern APIs |
+| `fixture.closure_combinator_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option`/`Result` closure combinators and `transpose`, retaining live payload/error methods while pruning dead closure APIs |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

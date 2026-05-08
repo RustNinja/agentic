@@ -1997,6 +1997,332 @@ fn prunes_callback_store_support_chain_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_const_chain_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/const_chain_prune");
+    let output = temp_path("slice-case-const-chain-prune-output");
+    let target_dir = temp_path("slice-case-const-chain-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("const_chain_prune fixture should slice");
+
+    assert_eq!(report.packages, ["const_api", "const_support", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_const_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("const_api/Cargo.toml"));
+    let api_root = read(output.join("const_api/src/lib.rs"));
+    let api_live = read(output.join("const_api/src/live.rs"));
+    let support_root = read(output.join("const_support/src/lib.rs"));
+    let support_live = read(output.join("const_support/src/live.rs"));
+
+    assert!(root_manifest.contains("../const_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_const_report"));
+    assert!(root_source.contains("const_api::selected_const_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_const_report"]);
+
+    assert!(api_manifest.contains("../const_support"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_const_report"), "{api_root}");
+    assert_absent(
+        "const_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_const_report"],
+    );
+    assert!(api_live.contains("const_support::selected_const"));
+    assert_absent(
+        "const_api/src/live.rs",
+        &api_live,
+        &["dead_live_const_report"],
+    );
+    assert!(!output.join("const_api/src/dead.rs").exists());
+
+    assert!(support_root.contains("mod live"), "{support_root}");
+    assert!(support_root.contains("selected_const"), "{support_root}");
+    assert_absent(
+        "const_support/src/lib.rs",
+        &support_root,
+        &["mod dead", "DeadConstRecord", "dead_const"],
+    );
+    assert!(support_live.contains("pub const BASE"), "{support_live}");
+    assert!(support_live.contains("pub const SCALE"), "{support_live}");
+    assert!(support_live.contains("pub static LABEL"), "{support_live}");
+    assert!(
+        support_live.contains("pub struct ConstRecord"),
+        "{support_live}"
+    );
+    assert!(support_live.contains("pub const OFFSET"), "{support_live}");
+    assert!(support_live.contains("pub fn render"), "{support_live}");
+    assert!(
+        support_live.contains("pub fn selected_const"),
+        "{support_live}"
+    );
+    assert_absent(
+        "const_support/src/live.rs",
+        &support_live,
+        &["dead_method", "dead_live_const", "dead-const"],
+    );
+    assert!(!output.join("const_support/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_struct_update_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/struct_update_prune");
+    let output = temp_path("slice-case-struct-update-prune-output");
+    let target_dir = temp_path("slice-case-struct-update-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("struct_update_prune fixture should slice");
+
+    assert_eq!(report.packages, ["root", "settings_api", "settings_model"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_settings_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("settings_api/Cargo.toml"));
+    let api_root = read(output.join("settings_api/src/lib.rs"));
+    let api_live = read(output.join("settings_api/src/live.rs"));
+    let model_root = read(output.join("settings_model/src/lib.rs"));
+    let model_live = read(output.join("settings_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../settings_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_settings_report"));
+    assert!(root_source.contains("settings_api::selected_settings_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_settings_report"]);
+
+    assert!(api_manifest.contains("../settings_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_settings_report"), "{api_root}");
+    assert_absent(
+        "settings_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_settings_report"],
+    );
+    assert!(api_live.contains("settings_model::selected_settings"));
+    assert_absent(
+        "settings_api/src/live.rs",
+        &api_live,
+        &["dead_live_settings_report"],
+    );
+    assert!(!output.join("settings_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("selected_settings"), "{model_root}");
+    assert!(model_root.contains("Settings"), "{model_root}");
+    assert_absent(
+        "settings_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadSettings", "dead_settings"],
+    );
+    assert!(model_live.contains("pub struct Settings"), "{model_live}");
+    assert!(model_live.contains("impl Default for Settings"));
+    assert!(model_live.contains("..Settings::default()"));
+    assert!(model_live.contains("pub fn render"), "{model_live}");
+    assert!(
+        model_live.contains("pub fn selected_settings"),
+        "{model_live}"
+    );
+    assert_absent(
+        "settings_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_settings", "dead-settings"],
+    );
+    assert!(!output.join("settings_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_pattern_destructure_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/pattern_destructure_prune");
+    let output = temp_path("slice-case-pattern-destructure-prune-output");
+    let target_dir = temp_path("slice-case-pattern-destructure-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("pattern_destructure_prune fixture should slice");
+
+    assert_eq!(report.packages, ["pattern_api", "pattern_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_pattern_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("pattern_api/Cargo.toml"));
+    let api_root = read(output.join("pattern_api/src/lib.rs"));
+    let api_live = read(output.join("pattern_api/src/live.rs"));
+    let model_root = read(output.join("pattern_model/src/lib.rs"));
+    let model_live = read(output.join("pattern_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../pattern_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_pattern_report"));
+    assert!(root_source.contains("pattern_api::selected_pattern_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_pattern_report"]);
+
+    assert!(api_manifest.contains("../pattern_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_pattern_report"), "{api_root}");
+    assert_absent(
+        "pattern_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_pattern_report"],
+    );
+    assert!(api_live.contains("pattern_model::selected_pattern"));
+    assert_absent(
+        "pattern_api/src/live.rs",
+        &api_live,
+        &["dead_live_pattern_report"],
+    );
+    assert!(!output.join("pattern_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("selected_pattern"), "{model_root}");
+    assert_absent(
+        "pattern_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadPattern", "dead_pattern"],
+    );
+    assert!(model_live.contains("enum PatternEvent"), "{model_live}");
+    assert!(model_live.contains("Started"), "{model_live}");
+    assert!(model_live.contains("pub fn parse_event"), "{model_live}");
+    assert!(model_live.contains("let Some(PatternEvent::Started"));
+    assert!(
+        model_live.contains("pub fn selected_pattern"),
+        "{model_live}"
+    );
+    assert_absent(
+        "pattern_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_pattern", "dead-pattern"],
+    );
+    assert!(!output.join("pattern_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_closure_combinator_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/closure_combinator_prune");
+    let output = temp_path("slice-case-closure-combinator-prune-output");
+    let target_dir = temp_path("slice-case-closure-combinator-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("closure_combinator_prune fixture should slice");
+
+    assert_eq!(report.packages, ["closure_api", "closure_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_closure_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("closure_api/Cargo.toml"));
+    let api_root = read(output.join("closure_api/src/lib.rs"));
+    let api_live = read(output.join("closure_api/src/live.rs"));
+    let model_root = read(output.join("closure_model/src/lib.rs"));
+    let model_live = read(output.join("closure_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../closure_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_closure_report"));
+    assert!(root_source.contains("closure_api::selected_closure_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_closure_report"]);
+
+    assert!(api_manifest.contains("../closure_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_closure_report"), "{api_root}");
+    assert_absent(
+        "closure_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_closure_report"],
+    );
+    assert!(api_live.contains("closure_model::selected_closure"));
+    assert_absent(
+        "closure_api/src/live.rs",
+        &api_live,
+        &["dead_live_closure_report"],
+    );
+    assert!(!output.join("closure_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("selected_closure"), "{model_root}");
+    assert!(model_root.contains("RawItem"), "{model_root}");
+    assert!(model_root.contains("CleanItem"), "{model_root}");
+    assert!(model_root.contains("CleanError"), "{model_root}");
+    assert_absent(
+        "closure_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadClosure", "dead_closure"],
+    );
+    assert!(model_live.contains("pub struct RawItem"), "{model_live}");
+    assert!(model_live.contains("pub fn clean"), "{model_live}");
+    assert!(model_live.contains("pub struct CleanItem"), "{model_live}");
+    assert!(model_live.contains("pub enum CleanError"), "{model_live}");
+    assert!(model_live.contains(".transpose()"), "{model_live}");
+    assert!(
+        model_live.contains("pub fn selected_closure"),
+        "{model_live}"
+    );
+    assert_absent(
+        "closure_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_closure", "dead-raw"],
+    );
+    assert!(!output.join("closure_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")

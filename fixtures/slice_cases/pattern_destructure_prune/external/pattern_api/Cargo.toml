@@ -1,0 +1,7 @@
+[package]
+name = "pattern_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pattern_model = { path = "../pattern_model" }
