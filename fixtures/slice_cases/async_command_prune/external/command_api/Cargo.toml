@@ -1,0 +1,7 @@
+[package]
+name = "command_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+command_runtime = { path = "../command_runtime" }

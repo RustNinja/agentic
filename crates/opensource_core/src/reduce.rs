@@ -6647,6 +6647,7 @@ impl DependencyVisitor<'_> {
         if metavariables.is_empty() {
             return;
         }
+        let local_method_flows = macro_local_method_flows(&item_macro.mac.tokens);
         let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
         let Ok(arguments) = parser.parse2(mac.tokens.clone()) else {
             return;
@@ -6663,10 +6664,37 @@ impl DependencyVisitor<'_> {
             argument_types.sort();
             argument_types.dedup();
 
-            for type_ref in argument_types {
+            for type_ref in &argument_types {
                 for method in methods {
                     for callable in self.resolver.resolve_methods(&type_ref, method) {
                         self.add_method_dependency(&callable);
+                    }
+                }
+            }
+
+            for flow in local_method_flows
+                .iter()
+                .filter(|flow| &flow.metavariable == metavariable)
+            {
+                let mut return_types = Vec::new();
+                for type_ref in &argument_types {
+                    for callable in self.resolver.resolve_methods(type_ref, &flow.source_method) {
+                        self.add_method_dependency(&callable);
+                        if let Some(return_type) =
+                            self.resolver.return_type_from_callable(&callable)
+                        {
+                            return_types.push(return_type);
+                        }
+                    }
+                }
+                return_types.sort();
+                return_types.dedup();
+
+                for return_type in &return_types {
+                    for method in &flow.local_methods {
+                        for callable in self.resolver.resolve_methods(return_type, method) {
+                            self.add_method_dependency(&callable);
+                        }
                     }
                 }
             }
@@ -6808,6 +6836,72 @@ fn collect_macro_metavariable_declaration_order(tokens: &TokenStream, order: &mu
                 order.push(name);
             }
         }
+    }
+}
+
+#[derive(Debug)]
+struct MacroLocalMethodFlow {
+    metavariable: String,
+    source_method: String,
+    local_methods: BTreeSet<String>,
+}
+
+fn macro_local_method_flows(tokens: &TokenStream) -> Vec<MacroLocalMethodFlow> {
+    let mut flows = Vec::new();
+    collect_macro_local_method_flows(tokens, &mut flows);
+    flows
+}
+
+fn collect_macro_local_method_flows(tokens: &TokenStream, flows: &mut Vec<MacroLocalMethodFlow>) {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &tokens {
+        if let TokenTree::Group(group) = token {
+            collect_macro_local_method_flows(&group.stream(), flows);
+        }
+    }
+
+    let mut local_sources = BTreeMap::<String, (String, String)>::new();
+    for window in tokens.windows(7) {
+        let [TokenTree::Ident(let_ident), TokenTree::Ident(local), TokenTree::Punct(eq), TokenTree::Punct(dollar), TokenTree::Ident(metavariable), TokenTree::Punct(dot), TokenTree::Ident(source_method)] =
+            window
+        else {
+            continue;
+        };
+        if let_ident == "let"
+            && eq.as_char() == '='
+            && dollar.as_char() == '$'
+            && dot.as_char() == '.'
+        {
+            local_sources.insert(
+                local.to_string(),
+                (metavariable.to_string(), source_method.to_string()),
+            );
+        }
+    }
+
+    let mut local_methods = BTreeMap::<String, BTreeSet<String>>::new();
+    for window in tokens.windows(3) {
+        let [TokenTree::Ident(local), TokenTree::Punct(dot), TokenTree::Ident(method)] = window
+        else {
+            continue;
+        };
+        if dot.as_char() == '.' && local_sources.contains_key(&local.to_string()) {
+            local_methods
+                .entry(local.to_string())
+                .or_default()
+                .insert(method.to_string());
+        }
+    }
+
+    for (local, methods) in local_methods {
+        let Some((metavariable, source_method)) = local_sources.remove(&local) else {
+            continue;
+        };
+        flows.push(MacroLocalMethodFlow {
+            metavariable,
+            source_method,
+            local_methods: methods,
+        });
     }
 }
 
