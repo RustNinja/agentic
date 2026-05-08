@@ -220,6 +220,11 @@ file.
 | `fixture.iterator_struct_inspect_prune.support_chain.001` | covered | A checked-in support fixture slices through named-struct payload patterns in `inspect` side-effect closures while pruning dead inspect support |
 | `fixture.iterator_tuple_struct_map_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple-struct payload patterns while pruning dead tuple-struct support |
 | `fixture.iterator_nested_struct_tuple_prune.support_chain.001` | covered | A checked-in support fixture slices through nested tuple plus struct payload patterns while pruning dead nested struct support |
+| `fixture.iterator_enum_struct_filter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through enum struct-variant payloads inside iterator `filter_map` matches while pruning dead enum support |
+| `fixture.iterator_enum_tuple_find_map_prune.support_chain.001` | covered | A checked-in support fixture slices through enum tuple-variant payloads inside iterator `find_map` matches while pruning dead tuple enum support |
+| `fixture.iterator_enum_if_let_for_each_prune.support_chain.001` | covered | A checked-in support fixture slices through enum struct-variant payloads inside `if let` side-effect closures while pruning dead enum support |
+| `fixture.iterator_enum_match_map_prune.support_chain.001` | covered | A checked-in support fixture slices through enum tuple-variant payloads inside iterator `map` match closures while pruning dead match support |
+| `fixture.iterator_enum_flat_map_prune.support_chain.001` | covered | A checked-in support fixture slices through enum struct-variant payloads inside iterator `flat_map` matches while pruning dead flat-map enum support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

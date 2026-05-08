@@ -5351,6 +5351,156 @@ fn prunes_iterator_nested_struct_tuple_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_iterator_enum_struct_filter_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_enum_struct_filter_map_prune",
+        root_fn: "selected_enum_struct_report",
+        api_pkg: "enum_struct_api",
+        model_pkg: "enum_struct_model",
+        api_fn: "selected_enum_struct_report",
+        model_fn: "selected_enum_struct",
+        model_required: &[
+            "EnumStructEvent",
+            "EnumStructKey",
+            "EnumStructValue",
+            ".filter_map(|event| match event",
+            "EnumStructEvent::Live { key, value }",
+            "Some(key.render_with(value))",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadEnumStructItem",
+            "dead_enum_struct",
+            "dead_method",
+            "dead_live_enum_struct",
+            "dead-enum-struct",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_enum_tuple_find_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_enum_tuple_find_map_prune",
+        root_fn: "selected_enum_tuple_report",
+        api_pkg: "enum_tuple_api",
+        model_pkg: "enum_tuple_model",
+        api_fn: "selected_enum_tuple_report",
+        model_fn: "selected_enum_tuple",
+        model_required: &[
+            "EnumTupleEvent",
+            "EnumTupleKey",
+            "EnumTupleValue",
+            ".find_map(|event| match event",
+            "EnumTupleEvent::Live(key, value)",
+            "key.maybe_render(value)",
+            "pub fn maybe_render",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadEnumTupleItem",
+            "dead_enum_tuple",
+            "dead_method",
+            "dead_live_enum_tuple",
+            "dead-enum-tuple",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_enum_if_let_for_each_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_enum_if_let_for_each_prune",
+        root_fn: "selected_enum_if_let_report",
+        api_pkg: "enum_if_let_api",
+        model_pkg: "enum_if_let_model",
+        api_fn: "selected_enum_if_let_report",
+        model_fn: "selected_enum_if_let",
+        model_required: &[
+            "EnumIfLetEvent",
+            "EnumIfLetKey",
+            "EnumIfLetValue",
+            ".for_each(|event|",
+            "if let EnumIfLetEvent::Live { key, value } = event",
+            "rendered.push(key.render_with(value))",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadEnumIfLetItem",
+            "dead_enum_if_let",
+            "dead_method",
+            "dead_live_enum_if_let",
+            "dead-enum-if-let",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_enum_match_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_enum_match_map_prune",
+        root_fn: "selected_enum_match_report",
+        api_pkg: "enum_match_api",
+        model_pkg: "enum_match_model",
+        api_fn: "selected_enum_match_report",
+        model_fn: "selected_enum_match",
+        model_required: &[
+            "EnumMatchEvent",
+            "EnumMatchKey",
+            "EnumMatchValue",
+            ".map(|event| match event",
+            "EnumMatchEvent::Live(key, value)",
+            "key.render_with(value)",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadEnumMatchItem",
+            "dead_enum_match",
+            "dead_method",
+            "dead_live_enum_match",
+            "dead-enum-match",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_enum_flat_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_enum_flat_map_prune",
+        root_fn: "selected_enum_flat_map_report",
+        api_pkg: "enum_flat_map_api",
+        model_pkg: "enum_flat_map_model",
+        api_fn: "selected_enum_flat_map_report",
+        model_fn: "selected_enum_flat_map",
+        model_required: &[
+            "EnumFlatMapEvent",
+            "EnumFlatMapKey",
+            "EnumFlatMapValue",
+            ".flat_map(|event| match event",
+            "EnumFlatMapEvent::Live { key, value }",
+            "key.expand_with(value)",
+            "pub fn expand_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadEnumFlatMapItem",
+            "dead_enum_flat_map",
+            "dead_method",
+            "dead_live_enum_flat_map",
+            "dead-enum-flat-map",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,
