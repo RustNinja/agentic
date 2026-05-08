@@ -1614,6 +1614,389 @@ fn prunes_macro_receiver_support_chain_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_error_source_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/error_source_prune");
+    let output = temp_path("slice-case-error-source-prune-output");
+    let target_dir = temp_path("slice-case-error-source-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("error_source_prune fixture should slice");
+
+    assert_eq!(report.packages, ["error_api", "error_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_error_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("error_api/Cargo.toml"));
+    let api_root = read(output.join("error_api/src/lib.rs"));
+    let api_live = read(output.join("error_api/src/live.rs"));
+    let model_root = read(output.join("error_model/src/lib.rs"));
+    let model_live = read(output.join("error_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../error_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_error_report"));
+    assert!(root_source.contains("error_api::selected_error_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_error_report"]);
+
+    assert!(api_manifest.contains("../error_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_error_report"), "{api_root}");
+    assert_absent(
+        "error_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_error_report"],
+    );
+    assert!(api_live.contains("error_model::selected_error"));
+    assert_absent(
+        "error_api/src/live.rs",
+        &api_live,
+        &["dead_live_error_report"],
+    );
+    assert!(!output.join("error_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("selected_error"), "{model_root}");
+    assert!(model_root.contains("WireError"), "{model_root}");
+    assert!(model_root.contains("ParseFailure"), "{model_root}");
+    assert_absent(
+        "error_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadWireError", "dead_error"],
+    );
+    assert!(model_live.contains("pub enum WireError"), "{model_live}");
+    assert!(
+        model_live.contains("pub struct ParseFailure"),
+        "{model_live}"
+    );
+    assert!(model_live.contains("impl From<ParseFailure> for WireError"));
+    assert!(model_live.contains("fn normalize"), "{model_live}");
+    assert!(model_live.contains("pub fn parse_wire"), "{model_live}");
+    assert!(model_live.contains("pub fn selected_error"), "{model_live}");
+    assert_absent(
+        "error_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_error", "dead-error", "dead-parse"],
+    );
+    assert!(!output.join("error_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_poll_adapter_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/poll_adapter_prune");
+    let output = temp_path("slice-case-poll-adapter-prune-output");
+    let target_dir = temp_path("slice-case-poll-adapter-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("poll_adapter_prune fixture should slice");
+
+    assert_eq!(report.packages, ["poll_api", "poll_support", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_poll_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("poll_api/Cargo.toml"));
+    let api_root = read(output.join("poll_api/src/lib.rs"));
+    let api_live = read(output.join("poll_api/src/live.rs"));
+    let support_root = read(output.join("poll_support/src/lib.rs"));
+    let support_live = read(output.join("poll_support/src/live.rs"));
+
+    assert!(root_manifest.contains("../poll_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_poll_report"));
+    assert!(root_source.contains("poll_api::selected_poll_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_poll_report"]);
+
+    assert!(api_manifest.contains("../poll_support"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_poll_report"), "{api_root}");
+    assert_absent(
+        "poll_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_poll_report"],
+    );
+    assert!(api_live.contains("poll_support::selected_poll"));
+    assert_absent(
+        "poll_api/src/live.rs",
+        &api_live,
+        &["dead_live_poll_report"],
+    );
+    assert!(!output.join("poll_api/src/dead.rs").exists());
+
+    assert!(support_root.contains("mod live"), "{support_root}");
+    assert!(support_root.contains("selected_poll"), "{support_root}");
+    assert!(support_root.contains("PollFrame"), "{support_root}");
+    assert!(support_root.contains("Poller"), "{support_root}");
+    assert_absent(
+        "poll_support/src/lib.rs",
+        &support_root,
+        &["mod dead", "DeadPoller", "dead_poll"],
+    );
+    assert!(
+        support_live.contains("use std::task::Poll"),
+        "{support_live}"
+    );
+    assert!(
+        support_live.contains("pub struct PollFrame"),
+        "{support_live}"
+    );
+    assert!(support_live.contains("pub struct Poller"), "{support_live}");
+    assert!(support_live.contains("pub fn poll_next"), "{support_live}");
+    assert!(
+        support_live.contains("pub fn selected_poll"),
+        "{support_live}"
+    );
+    assert_absent(
+        "poll_support/src/live.rs",
+        &support_live,
+        &["dead_method", "dead_live_poll", "dead-frame"],
+    );
+    assert!(!output.join("poll_support/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_type_alias_surface_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/type_alias_surface_prune");
+    let output = temp_path("slice-case-type-alias-surface-prune-output");
+    let target_dir = temp_path("slice-case-type-alias-surface-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("type_alias_surface_prune fixture should slice");
+
+    assert_eq!(report.packages, ["envelope_api", "envelope_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_envelope_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("envelope_api/Cargo.toml"));
+    let api_root = read(output.join("envelope_api/src/lib.rs"));
+    let api_live = read(output.join("envelope_api/src/live.rs"));
+    let model_root = read(output.join("envelope_model/src/lib.rs"));
+    let model_live = read(output.join("envelope_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../envelope_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_envelope_report"));
+    assert!(root_source.contains("envelope_api::selected_envelope_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_envelope_report"]);
+
+    assert!(api_manifest.contains("../envelope_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_envelope_report"), "{api_root}");
+    assert_absent(
+        "envelope_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_envelope_report"],
+    );
+    assert!(api_live.contains("envelope_model::render_envelope"));
+    assert_absent(
+        "envelope_api/src/live.rs",
+        &api_live,
+        &["dead_live_envelope_report"],
+    );
+    assert!(!output.join("envelope_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("render_envelope"), "{model_root}");
+    assert!(model_root.contains("EnvelopeDto"), "{model_root}");
+    assert!(model_root.contains("EnvelopeError"), "{model_root}");
+    assert_absent(
+        "envelope_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadEnvelope", "dead_envelope"],
+    );
+    assert!(
+        model_live.contains("pub type EnvelopeResult"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("pub struct EnvelopeDto"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("pub enum EnvelopeError"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("pub fn selected_envelope"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("pub fn render_envelope"),
+        "{model_live}"
+    );
+    assert_absent(
+        "envelope_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_envelope", "dead-dto"],
+    );
+    assert!(!output.join("envelope_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_callback_store_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/callback_store_prune");
+    let output = temp_path("slice-case-callback-store-prune-output");
+    let target_dir = temp_path("slice-case-callback-store-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("callback_store_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["callback_store_api", "callback_store_support", "root"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_callback_store_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+    assert!(
+        report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == "trait_object_surfaces"),
+        "stored callback fixture should keep explicit dynamic-dispatch hazard evidence: {:?}",
+        report.production.hazards
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("callback_store_api/Cargo.toml"));
+    let api_root = read(output.join("callback_store_api/src/lib.rs"));
+    let api_live = read(output.join("callback_store_api/src/live.rs"));
+    let support_root = read(output.join("callback_store_support/src/lib.rs"));
+    let support_live = read(output.join("callback_store_support/src/live.rs"));
+
+    assert!(
+        root_manifest.contains("../callback_store_api"),
+        "{root_manifest}"
+    );
+    assert!(root_source.contains("pub fn selected_callback_store_report"));
+    assert!(root_source.contains("callback_store_api::selected_callback_store_report"));
+    assert_absent(
+        "root/src/lib.rs",
+        &root_source,
+        &["dead_callback_store_report"],
+    );
+
+    assert!(
+        api_manifest.contains("../callback_store_support"),
+        "{api_manifest}"
+    );
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(
+        api_root.contains("selected_callback_store_report"),
+        "{api_root}"
+    );
+    assert_absent(
+        "callback_store_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_callback_store_report"],
+    );
+    assert!(api_live.contains("callback_store_support::selected_callback_store"));
+    assert_absent(
+        "callback_store_api/src/live.rs",
+        &api_live,
+        &["dead_live_callback_store_report"],
+    );
+    assert!(!output.join("callback_store_api/src/dead.rs").exists());
+
+    assert!(support_root.contains("mod live"), "{support_root}");
+    assert!(
+        support_root.contains("selected_callback_store"),
+        "{support_root}"
+    );
+    assert!(support_root.contains("CallbackStore"), "{support_root}");
+    assert!(support_root.contains("EventRecord"), "{support_root}");
+    assert!(support_root.contains("EventSink"), "{support_root}");
+    assert_absent(
+        "callback_store_support/src/lib.rs",
+        &support_root,
+        &["mod dead", "DeadCallbackStore", "dead_callback_store"],
+    );
+    assert!(support_live.contains("Arc"), "{support_live}");
+    assert!(support_live.contains("RwLock"), "{support_live}");
+    assert!(support_live.contains("dyn EventSink"), "{support_live}");
+    assert!(
+        support_live.contains("pub trait EventSink"),
+        "{support_live}"
+    );
+    assert!(
+        support_live.contains("pub struct EventRecord"),
+        "{support_live}"
+    );
+    assert!(
+        support_live.contains("pub struct CallbackStore"),
+        "{support_live}"
+    );
+    assert!(
+        support_live.contains("pub fn selected_callback_store"),
+        "{support_live}"
+    );
+    assert_absent(
+        "callback_store_support/src/live.rs",
+        &support_live,
+        &["dead_live_callback_store", "dead-store", "dead-event"],
+    );
+    assert!(!output.join("callback_store_support/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")

@@ -1,0 +1,7 @@
+[package]
+name = "error_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+error_model = { path = "../error_model" }

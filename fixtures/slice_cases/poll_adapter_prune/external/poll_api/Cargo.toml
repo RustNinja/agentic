@@ -1,0 +1,7 @@
+[package]
+name = "poll_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+poll_support = { path = "../poll_support" }
