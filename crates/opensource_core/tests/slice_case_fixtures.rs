@@ -600,6 +600,212 @@ fn prunes_callback_boundary_support_chain_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_trait_ufcs_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/trait_ufcs_prune");
+    let output = temp_path("slice-case-trait-ufcs-prune-output");
+    let target_dir = temp_path("slice-case-trait-ufcs-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("trait_ufcs_prune fixture should slice");
+
+    assert_eq!(report.packages, ["root", "trait_api", "trait_model"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_trait_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("trait_api/Cargo.toml"));
+    let api_root = read(output.join("trait_api/src/lib.rs"));
+    let api_live = read(output.join("trait_api/src/live.rs"));
+    let model_root = read(output.join("trait_model/src/lib.rs"));
+    let model_live = read(output.join("trait_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../trait_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_trait_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("trait_api::selected_trait_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_trait_report"]);
+
+    assert!(api_manifest.contains("../trait_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_trait_report"), "{api_root}");
+    assert_absent(
+        "trait_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_trait_report"],
+    );
+    assert!(api_live.contains("LiveSurface"), "{api_live}");
+    assert!(api_live.contains("render_live_surface"), "{api_live}");
+    assert_absent(
+        "trait_api/src/live.rs",
+        &api_live,
+        &["dead_live_trait_report", "DeadSurface", "dead_trait"],
+    );
+    assert!(!output.join("trait_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("SurfaceRender"), "{model_root}");
+    assert!(model_root.contains("LiveSurface"), "{model_root}");
+    assert!(model_root.contains("render_live_surface"), "{model_root}");
+    assert_absent(
+        "trait_model/src/lib.rs",
+        &model_root,
+        &[
+            "mod dead",
+            "DeadSurface",
+            "DeadSurfaceTrait",
+            "render_dead_surface",
+        ],
+    );
+    assert!(
+        model_live.contains("pub trait SurfaceRender"),
+        "{model_live}"
+    );
+    assert!(model_live.contains("const PREFIX"), "{model_live}");
+    assert!(model_live.contains("fn render(&self)"), "{model_live}");
+    assert!(
+        model_live.contains("pub struct LiveSurface"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("impl SurfaceRender for LiveSurface"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("<LiveSurface as SurfaceRender>::render(surface)"),
+        "{model_live}"
+    );
+    assert_absent(
+        "trait_model/src/live.rs",
+        &model_live,
+        &["dead_live_surface", "dead_method", "DeadSurface"],
+    );
+    assert!(!output.join("trait_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_iterator_result_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/iterator_result_prune");
+    let output = temp_path("slice-case-iterator-result-prune-output");
+    let target_dir = temp_path("slice-case-iterator-result-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("iterator_result_prune fixture should slice");
+
+    assert_eq!(report.packages, ["root", "stream_api", "stream_model"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_stream_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("stream_api/Cargo.toml"));
+    let api_root = read(output.join("stream_api/src/lib.rs"));
+    let api_live = read(output.join("stream_api/src/live.rs"));
+    let model_root = read(output.join("stream_model/src/lib.rs"));
+    let model_live = read(output.join("stream_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../stream_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_stream_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("stream_api::selected_stream_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_stream_report"]);
+
+    assert!(api_manifest.contains("../stream_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_stream_report"), "{api_root}");
+    assert_absent(
+        "stream_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_stream_report"],
+    );
+    assert!(api_live.contains("selected_stream"), "{api_live}");
+    assert!(api_live.contains("StreamError"), "{api_live}");
+    assert_absent("stream_api/src/live.rs", &api_live, &["dead_stream"]);
+    assert!(!output.join("stream_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("StreamResult"), "{model_root}");
+    assert!(model_root.contains("EventDto"), "{model_root}");
+    assert!(model_root.contains("EventEnvelope"), "{model_root}");
+    assert!(model_root.contains("StreamError"), "{model_root}");
+    assert_absent(
+        "stream_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadEvent", "DeadEnvelope", "dead_stream"],
+    );
+    assert!(
+        model_live.contains("pub type StreamResult = Result<EventEnvelope, StreamError>"),
+        "{model_live}"
+    );
+    assert!(model_live.contains("pub struct EventDto"), "{model_live}");
+    assert!(
+        model_live.contains("pub struct EventEnvelope"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("pub struct StreamError"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("pub fn event_iter(raw: &str) -> impl Iterator<Item = EventDto>"),
+        "{model_live}"
+    );
+    assert!(
+        model_live.contains("pub fn selected_stream"),
+        "{model_live}"
+    );
+    assert_absent(
+        "stream_model/src/live.rs",
+        &model_live,
+        &[
+            "dead_live_stream",
+            "DeadEvent",
+            "DeadEnvelope",
+            "dead_stream",
+        ],
+    );
+    assert!(!output.join("stream_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")

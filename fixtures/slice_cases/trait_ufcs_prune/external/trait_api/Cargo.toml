@@ -1,0 +1,7 @@
+[package]
+name = "trait_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+trait_model = { path = "../trait_model" }
