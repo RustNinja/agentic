@@ -172,6 +172,208 @@ fn prunes_support_sub_dependencies_to_used_closure_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_alias_import_support_chain_to_used_closure_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/import_alias_prune");
+    let output = temp_path("slice-case-import-alias-prune-output");
+    let target_dir = temp_path("slice-case-import-alias-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("import_alias_prune fixture should slice");
+
+    assert_eq!(report.packages, ["domain", "gateway", "helper", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let gateway_manifest = read(output.join("gateway/Cargo.toml"));
+    let gateway_root = read(output.join("gateway/src/lib.rs"));
+    let gateway_live = read(output.join("gateway/src/live.rs"));
+    let domain_manifest = read(output.join("domain/Cargo.toml"));
+    let domain_root = read(output.join("domain/src/lib.rs"));
+    let domain_live = read(output.join("domain/src/live.rs"));
+    let helper_root = read(output.join("helper/src/lib.rs"));
+    let helper_live = read(output.join("helper/src/live.rs"));
+
+    assert!(root_manifest.contains("../gateway"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("gateway::selected_report"),
+        "{root_source}"
+    );
+    assert!(!root_source.contains("dead_report"), "{root_source}");
+
+    assert!(gateway_manifest.contains("../domain"), "{gateway_manifest}");
+    assert!(gateway_root.contains("mod live"), "{gateway_root}");
+    assert!(
+        gateway_root.contains("pub use live::{selected_report, GatewayRecord}"),
+        "{gateway_root}"
+    );
+    assert!(!gateway_root.contains("mod dead"), "{gateway_root}");
+    assert!(!gateway_root.contains("DeadGateway"), "{gateway_root}");
+    assert!(
+        gateway_live.contains("build_model as make_model"),
+        "{gateway_live}"
+    );
+    assert!(
+        gateway_live.contains("LiveModel as PublicModel"),
+        "{gateway_live}"
+    );
+    assert!(gateway_live.contains("model_prefix"), "{gateway_live}");
+    assert!(
+        gateway_live.contains("macro_rules! render_model"),
+        "{gateway_live}"
+    );
+    assert!(
+        gateway_live.contains("pub struct GatewayRecord"),
+        "{gateway_live}"
+    );
+    assert!(gateway_live.contains("pub fn new"), "{gateway_live}");
+    assert!(gateway_live.contains("pub fn render"), "{gateway_live}");
+    assert!(
+        gateway_live.contains("pub fn selected_report"),
+        "{gateway_live}"
+    );
+    assert_no_dead_tokens("gateway/src/live.rs", &gateway_live);
+    assert!(!output.join("gateway/src/dead.rs").exists());
+
+    assert!(domain_manifest.contains("../helper"), "{domain_manifest}");
+    assert!(domain_root.contains("pub mod live"), "{domain_root}");
+    assert!(domain_root.contains("pub mod prelude"), "{domain_root}");
+    assert!(
+        domain_root.contains("pub use live::{build_model, LiveModel}"),
+        "{domain_root}"
+    );
+    assert!(!domain_root.contains("pub mod dead"), "{domain_root}");
+    assert!(!domain_root.contains("DeadModel"), "{domain_root}");
+    assert!(domain_live.contains("format_label"), "{domain_live}");
+    assert!(domain_live.contains("normalize_value"), "{domain_live}");
+    assert!(
+        domain_live.contains("pub struct LiveModel"),
+        "{domain_live}"
+    );
+    assert!(domain_live.contains("pub fn new"), "{domain_live}");
+    assert!(domain_live.contains("pub fn render"), "{domain_live}");
+    assert!(domain_live.contains("pub fn build_model"), "{domain_live}");
+    assert!(domain_live.contains("pub fn model_prefix"), "{domain_live}");
+    assert_no_dead_tokens("domain/src/live.rs", &domain_live);
+    assert!(!output.join("domain/src/dead.rs").exists());
+
+    assert!(helper_root.contains("mod live"), "{helper_root}");
+    assert!(helper_root.contains("format_label"), "{helper_root}");
+    assert!(helper_root.contains("normalize_value"), "{helper_root}");
+    assert!(!helper_root.contains("mod dead"), "{helper_root}");
+    assert!(!helper_root.contains("DeadHelper"), "{helper_root}");
+    assert!(
+        helper_live.contains("pub fn normalize_value"),
+        "{helper_live}"
+    );
+    assert!(helper_live.contains("pub fn format_label"), "{helper_live}");
+    assert_no_dead_tokens("helper/src/live.rs", &helper_live);
+    assert!(!output.join("helper/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_proc_macro_surface_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/proc_macro_surface_prune");
+    let output = temp_path("slice-case-proc-macro-surface-prune-output");
+    let target_dir = temp_path("slice-case-proc-macro-surface-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("proc_macro_surface_prune fixture should slice");
+
+    assert_eq!(report.packages, ["api", "macro_support", "model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_wire"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("api/Cargo.toml"));
+    let api_root = read(output.join("api/src/lib.rs"));
+    let api_live = read(output.join("api/src/live.rs"));
+    let model_root = read(output.join("model/src/lib.rs"));
+    let model_live = read(output.join("model/src/live.rs"));
+    let macro_support = read(output.join("macro_support/src/lib.rs"));
+
+    assert!(root_manifest.contains("../api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_wire"),
+        "{root_source}"
+    );
+    assert!(root_source.contains("api::selected_wire"), "{root_source}");
+    assert!(!root_source.contains("dead_wire"), "{root_source}");
+
+    assert!(api_manifest.contains("../macro_support"), "{api_manifest}");
+    assert!(api_manifest.contains("../model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(
+        api_root.contains("pub use live::{selected_wire, ApiRecord}"),
+        "{api_root}"
+    );
+    assert!(!api_root.contains("mod dead"), "{api_root}");
+    assert!(!api_root.contains("DeadApiRecord"), "{api_root}");
+    assert!(api_live.contains("SurfaceRecord"), "{api_live}");
+    assert!(api_live.contains("surface_attr"), "{api_live}");
+    assert!(api_live.contains("model::wire_tag"), "{api_live}");
+    assert!(api_live.contains("pub struct ApiRecord"), "{api_live}");
+    assert!(api_live.contains("pub fn selected_wire"), "{api_live}");
+    assert_no_dead_tokens("api/src/live.rs", &api_live);
+    assert!(!output.join("api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(
+        model_root.contains("pub use live::{wire_tag, LiveWire}"),
+        "{model_root}"
+    );
+    assert!(!model_root.contains("mod dead"), "{model_root}");
+    assert!(!model_root.contains("DeadWire"), "{model_root}");
+    assert!(model_live.contains("pub struct LiveWire"), "{model_live}");
+    assert!(model_live.contains("pub fn new"), "{model_live}");
+    assert!(model_live.contains("pub fn render"), "{model_live}");
+    assert!(model_live.contains("fn normalize_label"), "{model_live}");
+    assert!(model_live.contains("pub fn wire_tag"), "{model_live}");
+    assert_no_dead_tokens("model/src/live.rs", &model_live);
+    assert!(!output.join("model/src/dead.rs").exists());
+
+    assert!(macro_support.contains("surface_record"), "{macro_support}");
+    assert!(macro_support.contains("surface_attr"), "{macro_support}");
+    assert!(!macro_support.contains("dead_record"), "{macro_support}");
+    assert!(!macro_support.contains("dead_attr"), "{macro_support}");
+    assert!(!macro_support.contains("DeadRecord"), "{macro_support}");
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")
@@ -188,6 +390,25 @@ fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
         String::from_utf8_lossy(&output.stderr),
         root_source,
     );
+}
+
+fn assert_no_dead_tokens(label: &str, source: &str) {
+    for token in [
+        "Dead",
+        "dead_report",
+        "dead_prefix",
+        "dead_live",
+        "dead_wire",
+        "dead-",
+        "unused_helper",
+        "dead_imported_helper",
+        "make_dead_model",
+    ] {
+        assert!(
+            !source.contains(token),
+            "{label} should not contain dead support token {token:?}\n{source}"
+        );
+    }
 }
 
 fn repo_root() -> PathBuf {
