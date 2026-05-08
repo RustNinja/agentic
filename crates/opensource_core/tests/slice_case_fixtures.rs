@@ -4536,6 +4536,223 @@ fn prunes_retain_sort_support_chain_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_iterator_for_each_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_for_each_prune",
+        root_fn: "selected_for_each_report",
+        api_pkg: "foreach_api",
+        model_pkg: "foreach_model",
+        api_fn: "selected_for_each_report",
+        model_fn: "selected_for_each",
+        model_required: &[
+            "ForEachEvent",
+            ".for_each(|event| rendered.push(event.render()))",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForEachEvent",
+            "dead_for_each",
+            "dead_method",
+            "dead_live_for_each",
+            "dead-each",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_flat_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_flat_map_prune",
+        root_fn: "selected_flat_map_report",
+        api_pkg: "flat_api",
+        model_pkg: "flat_model",
+        api_fn: "selected_flat_map_report",
+        model_fn: "selected_flat_map",
+        model_required: &[
+            "FlatSegment",
+            ".flat_map(|segment| segment.expand())",
+            "pub fn expand",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadFlatSegment",
+            "dead_flat_map",
+            "dead_method",
+            "dead_live_flat_map",
+            "dead-flat",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_map_while_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_map_while_prune",
+        root_fn: "selected_map_while_report",
+        api_pkg: "while_api",
+        model_pkg: "while_model",
+        api_fn: "selected_map_while_report",
+        model_fn: "selected_map_while",
+        model_required: &[
+            "WhileStep",
+            ".map_while(|step| step.next_render())",
+            "pub fn next_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadWhileStep",
+            "dead_map_while",
+            "dead_method",
+            "dead_live_map_while",
+            "dead-while",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_try_for_each_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_try_for_each_prune",
+        root_fn: "selected_try_for_each_report",
+        api_pkg: "try_api",
+        model_pkg: "try_model",
+        api_fn: "selected_try_for_each_report",
+        model_fn: "selected_try_for_each",
+        model_required: &[
+            "TryStep",
+            "TryError",
+            ".try_for_each(|step| step.append_to(&mut rendered))",
+            "pub fn append_to",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTryStep",
+            "dead_try_for_each",
+            "dead_method",
+            "dead_live_try_for_each",
+            "dead-try",
+        ],
+    });
+}
+
+struct SupportSliceFixture<'a> {
+    fixture_name: &'a str,
+    root_fn: &'a str,
+    api_pkg: &'a str,
+    model_pkg: &'a str,
+    api_fn: &'a str,
+    model_fn: &'a str,
+    model_required: &'a [&'a str],
+    model_absent: &'a [&'a str],
+}
+
+fn assert_support_slice_fixture(expect: SupportSliceFixture<'_>) {
+    let fixture = repo_root().join(format!("fixtures/slice_cases/{}", expect.fixture_name));
+    let output = temp_path(&format!("slice-case-{}-output", expect.fixture_name));
+    let target_dir = temp_path(&format!("slice-case-{}-target", expect.fixture_name));
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .unwrap_or_else(|err| panic!("{} fixture should slice: {err}", expect.fixture_name));
+
+    let mut expected_packages = vec![
+        expect.api_pkg.to_string(),
+        expect.model_pkg.to_string(),
+        "root".to_string(),
+    ];
+    expected_packages.sort();
+    assert_eq!(report.packages, expected_packages);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == format!("root::{}", expect.root_fn)),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join(format!("{}/Cargo.toml", expect.api_pkg)));
+    let api_root = read(output.join(format!("{}/src/lib.rs", expect.api_pkg)));
+    let api_live = read(output.join(format!("{}/src/live.rs", expect.api_pkg)));
+    let model_root = read(output.join(format!("{}/src/lib.rs", expect.model_pkg)));
+    let model_live = read(output.join(format!("{}/src/live.rs", expect.model_pkg)));
+    let dead_root_fn = expect.root_fn.replacen("selected", "dead", 1);
+    let dead_api_fn = expect.api_fn.replacen("selected", "dead", 1);
+
+    assert!(
+        root_manifest.contains(&format!("../{}", expect.api_pkg)),
+        "{root_manifest}"
+    );
+    assert!(
+        root_source.contains(&format!("pub fn {}", expect.root_fn)),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains(&format!("{}::{}", expect.api_pkg, expect.api_fn)),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &[dead_root_fn.as_str()]);
+
+    assert!(
+        api_manifest.contains(&format!("../{}", expect.model_pkg)),
+        "{api_manifest}"
+    );
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains(expect.api_fn), "{api_root}");
+    assert_absent(
+        &format!("{}/src/lib.rs", expect.api_pkg),
+        &api_root,
+        &["mod dead", dead_api_fn.as_str()],
+    );
+    assert!(
+        api_live.contains(&format!("{}::{}", expect.model_pkg, expect.model_fn)),
+        "{api_live}"
+    );
+    assert_absent(
+        &format!("{}/src/live.rs", expect.api_pkg),
+        &api_live,
+        &["dead_live"],
+    );
+    assert!(!output
+        .join(format!("{}/src/dead.rs", expect.api_pkg))
+        .exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains(expect.model_fn), "{model_root}");
+    assert_absent(
+        &format!("{}/src/lib.rs", expect.model_pkg),
+        &model_root,
+        expect.model_absent,
+    );
+    for token in expect.model_required {
+        assert!(
+            model_live.contains(token),
+            "{} should contain {token:?}\n{model_live}",
+            expect.model_pkg
+        );
+    }
+    assert_absent(
+        &format!("{}/src/live.rs", expect.model_pkg),
+        &model_live,
+        expect.model_absent,
+    );
+    assert!(!output
+        .join(format!("{}/src/dead.rs", expect.model_pkg))
+        .exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")

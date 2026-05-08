@@ -190,6 +190,10 @@ file.
 | `fixture.iterator_any_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator predicate closures such as `any`, retaining predicate/render methods on the item type while pruning dead predicate support |
 | `fixture.result_unwrap_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::unwrap_or_else`, retaining error recovery methods and the returned OK-type method chain while pruning dead error methods |
 | `fixture.retain_sort_prune.support_chain.001` | covered | A checked-in support fixture slices through mutable collection closures such as `retain` and `sort_by_key`, retaining only live predicate/key/render methods |
+| `fixture.iterator_for_each_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `for_each` closures, retaining item render methods used only for side effects while pruning dead event APIs |
+| `fixture.iterator_flat_map_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `flat_map` closures, retaining expansion methods on the item type while pruning dead flat-map support |
+| `fixture.iterator_map_while_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `map_while` closures, retaining item methods returning optional mapped values while pruning dead while-step support |
+| `fixture.iterator_try_for_each_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `try_for_each` closures, retaining item fallible methods plus the closure-returned error render path |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

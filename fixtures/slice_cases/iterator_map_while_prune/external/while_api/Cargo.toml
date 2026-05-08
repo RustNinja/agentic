@@ -1,0 +1,7 @@
+[package]
+name = "while_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+while_model = { path = "../while_model" }

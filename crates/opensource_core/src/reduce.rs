@@ -5956,6 +5956,11 @@ impl<'a> DependencyVisitor<'a> {
                     .find_map(|callable| self.resolver.return_error_type_from_callable(callable))
             }
             Expr::MethodCall(call) => {
+                if call.method == "try_for_each" {
+                    if let Some(error_type) = self.single_payload_closure_error_type(call) {
+                        return Some(error_type);
+                    }
+                }
                 if matches!(
                     call.method.to_string().as_str(),
                     "map" | "and_then" | "inspect" | "is_ok_and" | "as_ref" | "as_mut"
@@ -6290,9 +6295,9 @@ impl<'a> DependencyVisitor<'a> {
         let method = call.method.to_string();
         let type_arguments = self.expression_type_arguments(&call.receiver);
         match method.as_str() {
-            "map" | "and_then" | "filter" | "filter_map" | "find" | "find_map" | "inspect"
-            | "is_some_and" | "is_ok_and" | "any" | "all" | "position" | "retain"
-            | "sort_by_key" => self
+            "map" | "and_then" | "filter" | "filter_map" | "flat_map" | "find" | "find_map"
+            | "for_each" | "inspect" | "is_some_and" | "is_ok_and" | "any" | "all" | "position"
+            | "retain" | "sort_by_key" | "map_while" | "try_for_each" => self
                 .expression_result_ok_type(&call.receiver)
                 .or_else(|| type_arguments.first().cloned())
                 .or_else(|| self.receiver_type(&call.receiver)),
@@ -6301,6 +6306,68 @@ impl<'a> DependencyVisitor<'a> {
                 .or_else(|| type_arguments.get(1).cloned())
                 .or_else(|| type_arguments.last().cloned())
                 .or_else(|| self.receiver_type(&call.receiver)),
+            _ => None,
+        }
+    }
+
+    fn single_payload_closure_error_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
+        let Some(Expr::Closure(closure)) = call.args.first() else {
+            return None;
+        };
+        let first_input = closure.inputs.first()?;
+        let (input_name, explicit_type) = binding_name_and_type(first_input)?;
+        let payload_type = explicit_type
+            .and_then(|ty| self.resolver.resolve_receiver_type(ty))
+            .or_else(|| self.single_payload_closure_method_type(call))?;
+        self.expression_error_type_with_bound_receiver(&closure.body, &input_name, &payload_type)
+    }
+
+    fn expression_error_type_with_bound_receiver(
+        &self,
+        expression: &Expr,
+        receiver_name: &str,
+        receiver_type: &TypeRef,
+    ) -> Option<TypeRef> {
+        match expression {
+            Expr::MethodCall(call) => {
+                let Expr::Path(receiver) = call.receiver.as_ref() else {
+                    return None;
+                };
+                if receiver.path.segments.len() != 1
+                    || receiver
+                        .path
+                        .segments
+                        .first()
+                        .is_none_or(|segment| segment.ident != receiver_name)
+                {
+                    return None;
+                }
+                self.resolver
+                    .resolve_methods(receiver_type, &call.method.to_string())
+                    .iter()
+                    .find_map(|callable| self.resolver.return_error_type_from_callable(callable))
+            }
+            Expr::Try(expr) => self.expression_error_type_with_bound_receiver(
+                &expr.expr,
+                receiver_name,
+                receiver_type,
+            ),
+            Expr::Block(expr) => final_block_expression(&expr.block).and_then(|tail| {
+                self.expression_error_type_with_bound_receiver(tail, receiver_name, receiver_type)
+            }),
+            Expr::Unsafe(expr) => final_block_expression(&expr.block).and_then(|tail| {
+                self.expression_error_type_with_bound_receiver(tail, receiver_name, receiver_type)
+            }),
+            Expr::Reference(reference) => self.expression_error_type_with_bound_receiver(
+                &reference.expr,
+                receiver_name,
+                receiver_type,
+            ),
+            Expr::Paren(paren) => self.expression_error_type_with_bound_receiver(
+                &paren.expr,
+                receiver_name,
+                receiver_type,
+            ),
             _ => None,
         }
     }

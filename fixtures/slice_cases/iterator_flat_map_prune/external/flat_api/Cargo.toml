@@ -1,0 +1,7 @@
+[package]
+name = "flat_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+flat_model = { path = "../flat_model" }
