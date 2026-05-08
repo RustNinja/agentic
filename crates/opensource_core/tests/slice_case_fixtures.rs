@@ -981,6 +981,301 @@ fn prunes_macro_generated_support_chain_with_default_analyzer() {
     assert_cargo_check(&output, &target_dir, &root_source);
 }
 
+#[test]
+fn prunes_static_registry_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/static_registry_prune");
+    let output = temp_path("slice-case-static-registry-prune-output");
+    let target_dir = temp_path("slice-case-static-registry-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("static_registry_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["registry_api", "registry_support", "root"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_registry_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("registry_api/Cargo.toml"));
+    let api_root = read(output.join("registry_api/src/lib.rs"));
+    let api_live = read(output.join("registry_api/src/live.rs"));
+    let support_root = read(output.join("registry_support/src/lib.rs"));
+    let support_live = read(output.join("registry_support/src/live.rs"));
+
+    assert!(root_manifest.contains("../registry_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_registry_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("registry_api::selected_registry_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_registry_report"]);
+
+    assert!(
+        api_manifest.contains("../registry_support"),
+        "{api_manifest}"
+    );
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_registry_report"), "{api_root}");
+    assert_absent(
+        "registry_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_registry_report"],
+    );
+    assert!(
+        api_live.contains("registry_support::selected_registry"),
+        "{api_live}"
+    );
+    assert_absent(
+        "registry_api/src/live.rs",
+        &api_live,
+        &["dead_live_registry_report"],
+    );
+    assert!(!output.join("registry_api/src/dead.rs").exists());
+
+    assert!(support_root.contains("mod live"), "{support_root}");
+    assert!(support_root.contains("selected_registry"), "{support_root}");
+    assert!(support_root.contains("RegistryHandle"), "{support_root}");
+    assert_absent(
+        "registry_support/src/lib.rs",
+        &support_root,
+        &["mod dead", "DeadRegistry", "dead_registry"],
+    );
+    assert!(support_live.contains("OnceLock"), "{support_live}");
+    assert!(support_live.contains("Mutex"), "{support_live}");
+    assert!(support_live.contains("Arc"), "{support_live}");
+    assert!(support_live.contains("LIVE_REGISTRY"), "{support_live}");
+    assert!(
+        support_live.contains("pub struct RegistryHandle"),
+        "{support_live}"
+    );
+    assert!(support_live.contains("fn live_slot"), "{support_live}");
+    assert!(
+        support_live.contains("pub fn selected_registry"),
+        "{support_live}"
+    );
+    assert!(support_live.contains("pub fn render"), "{support_live}");
+    assert_absent(
+        "registry_support/src/live.rs",
+        &support_live,
+        &["dead_method", "dead_live_registry", "dead-registry"],
+    );
+    assert!(!output.join("registry_support/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_patch_state_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/patch_state_prune");
+    let output = temp_path("slice-case-patch-state-prune-output");
+    let target_dir = temp_path("slice-case-patch-state-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("patch_state_prune fixture should slice");
+
+    assert_eq!(report.packages, ["patch_api", "patch_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_patch_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("patch_api/Cargo.toml"));
+    let api_root = read(output.join("patch_api/src/lib.rs"));
+    let api_live = read(output.join("patch_api/src/live.rs"));
+    let model_root = read(output.join("patch_model/src/lib.rs"));
+    let model_live = read(output.join("patch_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../patch_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_patch_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("patch_api::selected_patch_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_patch_report"]);
+
+    assert!(api_manifest.contains("../patch_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_patch_report"), "{api_root}");
+    assert_absent(
+        "patch_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_patch_report"],
+    );
+    assert!(
+        api_live.contains("patch_model::selected_patch"),
+        "{api_live}"
+    );
+    assert_absent(
+        "patch_api/src/live.rs",
+        &api_live,
+        &["dead_live_patch_report"],
+    );
+    assert!(!output.join("patch_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("selected_patch"), "{model_root}");
+    assert!(model_root.contains("PatchRequest"), "{model_root}");
+    assert_absent(
+        "patch_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadPatch", "dead_patch"],
+    );
+    assert!(model_live.contains("pub enum PatchOp"), "{model_live}");
+    assert!(model_live.contains("pub enum PatchError"), "{model_live}");
+    assert!(
+        model_live.contains("pub struct PatchSegment"),
+        "{model_live}"
+    );
+    assert!(model_live.contains("impl TryFrom"), "{model_live}");
+    assert!(
+        model_live.contains("pub struct PatchRequest"),
+        "{model_live}"
+    );
+    assert!(model_live.contains("pub fn build_patch"), "{model_live}");
+    assert!(model_live.contains("pub fn selected_patch"), "{model_live}");
+    assert_absent(
+        "patch_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_patch", "dead-segment"],
+    );
+    assert!(!output.join("patch_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
+#[test]
+fn prunes_uniffi_runtime_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/uniffi_runtime_prune");
+    let output = temp_path("slice-case-uniffi-runtime-prune-output");
+    let target_dir = temp_path("slice-case-uniffi-runtime-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("uniffi_runtime_prune fixture should slice");
+
+    assert_eq!(report.packages, ["root", "runtime_api", "runtime_support"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_runtime_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("runtime_api/Cargo.toml"));
+    let api_root = read(output.join("runtime_api/src/lib.rs"));
+    let api_live = read(output.join("runtime_api/src/live.rs"));
+    let support_root = read(output.join("runtime_support/src/lib.rs"));
+    let support_live = read(output.join("runtime_support/src/live.rs"));
+
+    assert!(root_manifest.contains("../runtime_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_runtime_report"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("runtime_api::selected_runtime_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_runtime_report"]);
+
+    assert!(
+        api_manifest.contains("../runtime_support"),
+        "{api_manifest}"
+    );
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_runtime_report"), "{api_root}");
+    assert_absent(
+        "runtime_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_runtime_report"],
+    );
+    assert!(
+        api_live.contains("runtime_support::selected_runtime"),
+        "{api_live}"
+    );
+    assert_absent(
+        "runtime_api/src/live.rs",
+        &api_live,
+        &["dead_live_runtime_report"],
+    );
+    assert!(!output.join("runtime_api/src/dead.rs").exists());
+
+    assert!(support_root.contains("mod live"), "{support_root}");
+    assert!(support_root.contains("selected_runtime"), "{support_root}");
+    assert!(support_root.contains("RuntimeObject"), "{support_root}");
+    assert_absent(
+        "runtime_support/src/lib.rs",
+        &support_root,
+        &["mod dead", "DeadRuntimeObject", "dead_runtime"],
+    );
+    assert!(support_live.contains("OnceLock"), "{support_live}");
+    assert!(support_live.contains("Arc"), "{support_live}");
+    assert!(support_live.contains("static RUNTIME"), "{support_live}");
+    assert!(
+        support_live.contains("pub struct RuntimeObject"),
+        "{support_live}"
+    );
+    assert!(
+        support_live.contains("pub fn shared_runtime"),
+        "{support_live}"
+    );
+    assert!(
+        support_live.contains("pub fn selected_runtime"),
+        "{support_live}"
+    );
+    assert!(support_live.contains("pub fn status"), "{support_live}");
+    assert_absent(
+        "runtime_support/src/live.rs",
+        &support_live,
+        &["dead_method", "dead_live_runtime", "dead-runtime"],
+    );
+    assert!(!output.join("runtime_support/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source);
+}
+
 fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
     let output = Command::new("cargo")
         .arg("check")
