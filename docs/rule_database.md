@@ -215,6 +215,11 @@ file.
 | `fixture.iterator_tuple_inspect_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in `inspect` side-effect closures while pruning dead inspect support |
 | `fixture.iterator_tuple_sort_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple payload patterns in mutable `sort_by_key` closures while pruning dead sort-key support |
 | `fixture.iterator_nested_tuple_map_prune.support_chain.001` | covered | A checked-in support fixture slices through nested tuple payload patterns while pruning dead nested tuple support |
+| `fixture.iterator_struct_map_prune.support_chain.001` | covered | A checked-in support fixture slices through named-struct payload patterns in iterator `map` closures while pruning dead struct support |
+| `fixture.iterator_struct_filter_prune.support_chain.001` | covered | A checked-in support fixture slices through named-struct payload patterns across `filter` and downstream `map` closures while pruning dead struct filter support |
+| `fixture.iterator_struct_inspect_prune.support_chain.001` | covered | A checked-in support fixture slices through named-struct payload patterns in `inspect` side-effect closures while pruning dead inspect support |
+| `fixture.iterator_tuple_struct_map_prune.support_chain.001` | covered | A checked-in support fixture slices through tuple-struct payload patterns while pruning dead tuple-struct support |
+| `fixture.iterator_nested_struct_tuple_prune.support_chain.001` | covered | A checked-in support fixture slices through nested tuple plus struct payload patterns while pruning dead nested struct support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

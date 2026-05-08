@@ -5010,6 +5010,13 @@ impl<'a> DependencyVisitor<'a> {
             Pat::Reference(reference) => {
                 self.add_pattern_bindings_for_type(&reference.pat, type_ref);
             }
+            Pat::Type(pat_type) => {
+                if let Some(explicit_type) = self.resolver.resolve_receiver_type(&pat_type.ty) {
+                    self.add_pattern_bindings_for_type(&pat_type.pat, &explicit_type);
+                } else {
+                    self.add_pattern_bindings_for_type(&pat_type.pat, type_ref);
+                }
+            }
             Pat::TupleStruct(tuple) => {
                 let Some(variant_name) = tuple
                     .path
@@ -5019,9 +5026,14 @@ impl<'a> DependencyVisitor<'a> {
                 else {
                     return;
                 };
-                let field_types = self
+                let mut field_types = self
                     .resolver
                     .enum_tuple_variant_field_types(type_ref, &variant_name);
+                if field_types.is_empty() {
+                    field_types = self
+                        .resolver
+                        .tuple_struct_field_types(type_ref, &variant_name);
+                }
                 for (pat, field_type) in tuple.elems.iter().zip(field_types) {
                     self.add_pattern_bindings_for_type(pat, &field_type);
                 }
@@ -6446,7 +6458,7 @@ impl<'a> DependencyVisitor<'a> {
         {
             return;
         }
-        self.bind_pattern_type(payload_pat, payload_type);
+        self.bind_single_payload_pattern(payload_pat, payload_type);
         self.bind_pattern_type_arguments(payload_pat, payload_type_arguments);
     }
 
@@ -6487,7 +6499,7 @@ impl<'a> DependencyVisitor<'a> {
                 let Some(type_ref) = type_arguments.get(*cursor) else {
                     return false;
                 };
-                self.bind_pattern_type(pattern, type_ref);
+                self.bind_single_payload_pattern(pattern, type_ref);
                 *cursor += 1;
                 true
             }
@@ -9093,6 +9105,48 @@ impl Resolver<'_> {
                 continue;
             };
             let syn::Fields::Unnamed(fields) = &variant.fields else {
+                continue;
+            };
+            let resolver = Resolver {
+                project: self.project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            return fields
+                .unnamed
+                .iter()
+                .filter_map(|field| resolver.resolve_receiver_type(&field.ty))
+                .collect();
+        }
+
+        Vec::new()
+    }
+
+    fn tuple_struct_field_types(&self, receiver: &TypeRef, constructor_name: &str) -> Vec<TypeRef> {
+        for candidate in self.type_ref_candidates(receiver) {
+            if candidate
+                .type_path
+                .last()
+                .is_none_or(|name| name != constructor_name)
+            {
+                continue;
+            }
+            let Some(item) = self.find_item(
+                &candidate.package,
+                &candidate.type_path,
+                &[ItemKind::Struct],
+            ) else {
+                continue;
+            };
+            let Some(record) = self.project.items.get(&item) else {
+                continue;
+            };
+            let syn::Item::Struct(item_struct) = &record.item else {
+                continue;
+            };
+            let syn::Fields::Unnamed(fields) = &item_struct.fields else {
                 continue;
             };
             let resolver = Resolver {

@@ -5205,6 +5205,152 @@ fn prunes_iterator_nested_tuple_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_iterator_struct_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_struct_map_prune",
+        root_fn: "selected_struct_map_report",
+        api_pkg: "struct_map_api",
+        model_pkg: "struct_map_model",
+        api_fn: "selected_struct_map_report",
+        model_fn: "selected_struct_map",
+        model_required: &[
+            "StructMapPayload",
+            "StructMapKey",
+            "StructMapValue",
+            ".map(|StructMapPayload { key, value }| key.render_with(value))",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadStructMapItem",
+            "dead_struct_map",
+            "dead_method",
+            "dead_live_struct_map",
+            "dead-struct-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_struct_filter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_struct_filter_prune",
+        root_fn: "selected_struct_filter_report",
+        api_pkg: "struct_filter_api",
+        model_pkg: "struct_filter_model",
+        api_fn: "selected_struct_filter_report",
+        model_fn: "selected_struct_filter",
+        model_required: &[
+            "StructFilterPayload",
+            "StructFilterKey",
+            "StructFilterValue",
+            ".filter(|StructFilterPayload { key, value }| key.accepts(value))",
+            ".map(|StructFilterPayload { value, .. }| value.render_label())",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadStructFilterItem",
+            "dead_struct_filter",
+            "dead_method",
+            "dead_live_struct_filter",
+            "dead-struct-filter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_struct_inspect_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_struct_inspect_prune",
+        root_fn: "selected_struct_inspect_report",
+        api_pkg: "struct_inspect_api",
+        model_pkg: "struct_inspect_model",
+        api_fn: "selected_struct_inspect_report",
+        model_fn: "selected_struct_inspect",
+        model_required: &[
+            "StructInspectPayload",
+            "StructInspectKey",
+            "StructInspectValue",
+            "StructInspectPayload { key, value }",
+            "audit.push(key.audit(value))",
+            ".map(|StructInspectPayload { value, .. }| value.render_label())",
+            "pub fn audit",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadStructInspectItem",
+            "dead_struct_inspect",
+            "dead_method",
+            "dead_live_struct_inspect",
+            "dead-struct-inspect",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_tuple_struct_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_tuple_struct_map_prune",
+        root_fn: "selected_tuple_struct_report",
+        api_pkg: "tuple_struct_api",
+        model_pkg: "tuple_struct_model",
+        api_fn: "selected_tuple_struct_report",
+        model_fn: "selected_tuple_struct",
+        model_required: &[
+            "TupleStructPayload",
+            "TupleStructKey",
+            "TupleStructValue",
+            ".map(|TupleStructPayload(key, value)| key.render_with(value))",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTupleStructItem",
+            "dead_tuple_struct",
+            "dead_method",
+            "dead_live_tuple_struct",
+            "dead-tuple-struct",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_nested_struct_tuple_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_nested_struct_tuple_prune",
+        root_fn: "selected_nested_struct_report",
+        api_pkg: "nested_struct_api",
+        model_pkg: "nested_struct_model",
+        api_fn: "selected_nested_struct_report",
+        model_fn: "selected_nested_struct",
+        model_required: &[
+            "NestedStructPayload",
+            "NestedStructKey",
+            "NestedStructValue",
+            "NestedStructMeta",
+            "NestedStructPayload { key, value }",
+            "key.render_with(value, meta)",
+            "pub fn render_with",
+            "pub fn render_label",
+            "pub fn render_tag",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadNestedStructItem",
+            "dead_nested_struct",
+            "dead_method",
+            "dead_live_nested_struct",
+            "dead-nested-struct",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,
