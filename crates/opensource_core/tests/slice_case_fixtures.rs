@@ -4743,6 +4743,112 @@ fn prunes_iterator_try_fold_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_iterator_cloned_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_cloned_prune",
+        root_fn: "selected_cloned_report",
+        api_pkg: "cloned_api",
+        model_pkg: "cloned_model",
+        api_fn: "selected_cloned_report",
+        model_fn: "selected_cloned",
+        model_required: &[
+            "ClonedItem",
+            ".cloned()",
+            ".map(|item| item.render())",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadClonedItem",
+            "dead_cloned",
+            "dead_method",
+            "dead_live_cloned",
+            "dead-cloned",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_chain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_chain_prune",
+        root_fn: "selected_chain_report",
+        api_pkg: "chain_api",
+        model_pkg: "chain_model",
+        api_fn: "selected_chain_report",
+        model_fn: "selected_chain",
+        model_required: &[
+            "ChainItem",
+            ".chain(fallback.iter())",
+            ".map(|item| item.render())",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadChainItem",
+            "dead_chain",
+            "dead_method",
+            "dead_live_chain",
+            "dead-chain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_enumerate_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_enumerate_prune",
+        root_fn: "selected_enumerate_report",
+        api_pkg: "enumerate_api",
+        model_pkg: "enumerate_model",
+        api_fn: "selected_enumerate_report",
+        model_fn: "selected_enumerate",
+        model_required: &[
+            "EnumerateItem",
+            ".enumerate()",
+            ".map(|(index, item)| item.render_at(index))",
+            "pub fn render_at",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadEnumerateItem",
+            "dead_enumerate",
+            "dead_method",
+            "dead_live_enumerate",
+            "dead-enumerate",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_zip_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_zip_prune",
+        root_fn: "selected_zip_report",
+        api_pkg: "zip_api",
+        model_pkg: "zip_model",
+        api_fn: "selected_zip_report",
+        model_fn: "selected_zip",
+        model_required: &[
+            "ZipLeft",
+            "ZipRight",
+            ".zip(right.iter())",
+            ".map(|(left, right)| left.render_with(right))",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadZipItem",
+            "dead_zip",
+            "dead_method",
+            "dead_live_zip",
+            "dead-zip",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

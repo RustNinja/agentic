@@ -1,0 +1,7 @@
+[package]
+name = "cloned_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cloned_model = { path = "../cloned_model" }

@@ -5858,13 +5858,22 @@ impl<'a> DependencyVisitor<'a> {
                     call.method.to_string().as_str(),
                     "as_ref"
                         | "as_mut"
+                        | "by_ref"
+                        | "chain"
                         | "clone"
+                        | "cloned"
+                        | "copied"
+                        | "cycle"
                         | "filter"
+                        | "fuse"
                         | "inspect"
                         | "into_iter"
                         | "iter"
                         | "iter_mut"
+                        | "peekable"
+                        | "rev"
                         | "skip_while"
+                        | "step_by"
                         | "take_while"
                 ) {
                     return self.expression_type_arguments(&call.receiver);
@@ -6303,8 +6312,12 @@ impl<'a> DependencyVisitor<'a> {
         let variable_type_arguments = self.variable_type_arguments.clone();
         let variable_result_ok_types = self.variable_result_ok_types.clone();
         let variable_result_error_types = self.variable_result_error_types.clone();
-        self.bind_pattern_type(payload_pat, &payload_type);
-        self.bind_pattern_type_arguments(payload_pat, &payload_type_arguments);
+        self.bind_single_payload_closure_pattern(
+            &call.receiver,
+            payload_pat,
+            &payload_type,
+            &payload_type_arguments,
+        );
         self.visit_expr(&closure.body);
         self.variables = variables;
         self.variable_candidates = variable_candidates;
@@ -6312,6 +6325,72 @@ impl<'a> DependencyVisitor<'a> {
         self.variable_result_ok_types = variable_result_ok_types;
         self.variable_result_error_types = variable_result_error_types;
         true
+    }
+
+    fn bind_single_payload_closure_pattern(
+        &mut self,
+        receiver: &Expr,
+        payload_pat: &Pat,
+        payload_type: &TypeRef,
+        payload_type_arguments: &[TypeRef],
+    ) {
+        if self.bind_adapter_tuple_payload_pattern(receiver, payload_pat) {
+            return;
+        }
+        self.bind_pattern_type(payload_pat, payload_type);
+        self.bind_pattern_type_arguments(payload_pat, payload_type_arguments);
+    }
+
+    fn bind_adapter_tuple_payload_pattern(&mut self, receiver: &Expr, payload_pat: &Pat) -> bool {
+        let Pat::Tuple(tuple) = payload_pat else {
+            return false;
+        };
+        let Expr::MethodCall(adapter) = receiver else {
+            return false;
+        };
+
+        match adapter.method.to_string().as_str() {
+            "enumerate" => {
+                let Some(item_pat) = tuple.elems.get(1) else {
+                    return false;
+                };
+                let Some(item_type) = self
+                    .expression_type_arguments(&adapter.receiver)
+                    .first()
+                    .cloned()
+                else {
+                    return false;
+                };
+                self.bind_pattern_type(item_pat, &item_type);
+                true
+            }
+            "zip" => {
+                let Some(left_pat) = tuple.elems.first() else {
+                    return false;
+                };
+                let Some(right_pat) = tuple.elems.get(1) else {
+                    return false;
+                };
+                let Some(left_type) = self
+                    .expression_type_arguments(&adapter.receiver)
+                    .first()
+                    .cloned()
+                else {
+                    return false;
+                };
+                let Some(right_type) = adapter
+                    .args
+                    .first()
+                    .and_then(|arg| self.expression_type_arguments(arg).first().cloned())
+                else {
+                    return false;
+                };
+                self.bind_pattern_type(left_pat, &left_type);
+                self.bind_pattern_type(right_pat, &right_type);
+                true
+            }
+            _ => false,
+        }
     }
 
     fn single_payload_closure_method_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {

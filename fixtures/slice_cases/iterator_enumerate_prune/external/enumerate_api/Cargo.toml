@@ -1,0 +1,7 @@
+[package]
+name = "enumerate_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+enumerate_model = { path = "../enumerate_model" }

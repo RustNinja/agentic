@@ -198,6 +198,10 @@ file.
 | `fixture.iterator_skip_while_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `skip_while` closures, retaining live skip predicates and downstream render methods while pruning dead skip APIs |
 | `fixture.iterator_partition_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `partition` closure item typing, retaining only the live partition predicate and pruning dead partition support |
 | `fixture.iterator_try_fold_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `try_fold` accumulator/item closures, retaining item fallible methods, accumulator render methods, and closure error recovery |
+| `fixture.iterator_cloned_prune.support_chain.001` | covered | A checked-in support fixture slices through pass-through iterator `cloned` adapters, retaining cloned item render methods without keeping dead cloned support |
+| `fixture.iterator_chain_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `chain` adapters, retaining chained item render methods while pruning dead chain support |
+| `fixture.iterator_enumerate_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `enumerate` tuple closure patterns, binding the item half precisely enough to retain only the live indexed render method |
+| `fixture.iterator_zip_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `zip` tuple closure patterns, binding both zipped item halves and pruning dead zip support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
