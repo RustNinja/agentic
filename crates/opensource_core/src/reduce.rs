@@ -5856,7 +5856,16 @@ impl<'a> DependencyVisitor<'a> {
                 }
                 if matches!(
                     call.method.to_string().as_str(),
-                    "as_ref" | "as_mut" | "clone" | "into_iter" | "iter" | "iter_mut"
+                    "as_ref"
+                        | "as_mut"
+                        | "clone"
+                        | "filter"
+                        | "inspect"
+                        | "into_iter"
+                        | "iter"
+                        | "iter_mut"
+                        | "skip_while"
+                        | "take_while"
                 ) {
                     return self.expression_type_arguments(&call.receiver);
                 }
@@ -5914,6 +5923,15 @@ impl<'a> DependencyVisitor<'a> {
                     .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
             }
             Expr::MethodCall(call) => {
+                if call.method == "try_fold" {
+                    if let Some(ok_type) = call
+                        .args
+                        .first()
+                        .and_then(|initial| self.infer_expr_type(initial))
+                    {
+                        return Some(ok_type);
+                    }
+                }
                 if matches!(
                     call.method.to_string().as_str(),
                     "map_err" | "or_else" | "inspect_err" | "as_ref" | "as_mut"
@@ -5958,6 +5976,11 @@ impl<'a> DependencyVisitor<'a> {
             Expr::MethodCall(call) => {
                 if call.method == "try_for_each" {
                     if let Some(error_type) = self.single_payload_closure_error_type(call) {
+                        return Some(error_type);
+                    }
+                }
+                if call.method == "try_fold" {
+                    if let Some(error_type) = self.fold_closure_error_type(call) {
                         return Some(error_type);
                     }
                 }
@@ -6297,7 +6320,8 @@ impl<'a> DependencyVisitor<'a> {
         match method.as_str() {
             "map" | "and_then" | "filter" | "filter_map" | "flat_map" | "find" | "find_map"
             | "for_each" | "inspect" | "is_some_and" | "is_ok_and" | "any" | "all" | "position"
-            | "retain" | "sort_by_key" | "map_while" | "try_for_each" => self
+            | "partition" | "retain" | "skip_while" | "sort_by_key" | "take_while"
+            | "map_while" | "try_for_each" => self
                 .expression_result_ok_type(&call.receiver)
                 .or_else(|| type_arguments.first().cloned())
                 .or_else(|| self.receiver_type(&call.receiver)),
@@ -6320,6 +6344,27 @@ impl<'a> DependencyVisitor<'a> {
             .and_then(|ty| self.resolver.resolve_receiver_type(ty))
             .or_else(|| self.single_payload_closure_method_type(call))?;
         self.expression_error_type_with_bound_receiver(&closure.body, &input_name, &payload_type)
+    }
+
+    fn fold_closure_error_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
+        if call.args.len() != 2 {
+            return None;
+        }
+        let mut args = call.args.iter();
+        let _initial = args.next()?;
+        let Some(Expr::Closure(closure)) = args.next() else {
+            return None;
+        };
+        let item_input = closure.inputs.iter().nth(1)?;
+        let (item_name, explicit_type) = binding_name_and_type(item_input)?;
+        let item_type = explicit_type
+            .and_then(|ty| self.resolver.resolve_receiver_type(ty))
+            .or_else(|| {
+                self.expression_type_arguments(&call.receiver)
+                    .first()
+                    .cloned()
+            })?;
+        self.expression_error_type_with_bound_receiver(&closure.body, &item_name, &item_type)
     }
 
     fn expression_error_type_with_bound_receiver(

@@ -4638,6 +4638,111 @@ fn prunes_iterator_try_for_each_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_iterator_take_while_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_take_while_prune",
+        root_fn: "selected_take_while_report",
+        api_pkg: "take_api",
+        model_pkg: "take_model",
+        api_fn: "selected_take_while_report",
+        model_fn: "selected_take_while",
+        model_required: &[
+            "TakeItem",
+            ".take_while(|item| item.keep_prefix())",
+            "pub fn keep_prefix",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTakeItem",
+            "dead_take_while",
+            "dead_method",
+            "dead_live_take_while",
+            "dead-take",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_skip_while_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_skip_while_prune",
+        root_fn: "selected_skip_while_report",
+        api_pkg: "skip_api",
+        model_pkg: "skip_model",
+        api_fn: "selected_skip_while_report",
+        model_fn: "selected_skip_while",
+        model_required: &[
+            "SkipItem",
+            ".skip_while(|item| item.skip_prefix())",
+            "pub fn skip_prefix",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSkipItem",
+            "dead_skip_while",
+            "dead_method",
+            "dead_live_skip_while",
+            "dead-skip",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_partition_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_partition_prune",
+        root_fn: "selected_partition_report",
+        api_pkg: "partition_api",
+        model_pkg: "partition_model",
+        api_fn: "selected_partition_report",
+        model_fn: "selected_partition",
+        model_required: &[
+            "PartitionItem",
+            ".partition(|item| item.is_selected())",
+            "pub fn is_selected",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadPartitionItem",
+            "dead_partition",
+            "dead_method",
+            "dead_live_partition",
+            "dead-partition",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_try_fold_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_try_fold_prune",
+        root_fn: "selected_try_fold_report",
+        api_pkg: "try_fold_api",
+        model_pkg: "try_fold_model",
+        api_fn: "selected_try_fold_report",
+        model_fn: "selected_try_fold",
+        model_required: &[
+            "TryFoldStep",
+            "TryFoldState",
+            "TryFoldError",
+            ".try_fold(TryFoldState::new(), |state, step| step.append_to(state))",
+            "pub fn append_to",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadTryFoldItem",
+            "dead_try_fold",
+            "dead_method",
+            "dead_live_try_fold",
+            "dead-try-fold",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

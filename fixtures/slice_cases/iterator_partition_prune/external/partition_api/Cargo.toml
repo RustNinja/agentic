@@ -1,0 +1,7 @@
+[package]
+name = "partition_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+partition_model = { path = "../partition_model" }

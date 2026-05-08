@@ -194,6 +194,10 @@ file.
 | `fixture.iterator_flat_map_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `flat_map` closures, retaining expansion methods on the item type while pruning dead flat-map support |
 | `fixture.iterator_map_while_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `map_while` closures, retaining item methods returning optional mapped values while pruning dead while-step support |
 | `fixture.iterator_try_for_each_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `try_for_each` closures, retaining item fallible methods plus the closure-returned error render path |
+| `fixture.iterator_take_while_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `take_while` closures, retaining live prefix predicates and downstream render methods while pruning dead take APIs |
+| `fixture.iterator_skip_while_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `skip_while` closures, retaining live skip predicates and downstream render methods while pruning dead skip APIs |
+| `fixture.iterator_partition_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `partition` closure item typing, retaining only the live partition predicate and pruning dead partition support |
+| `fixture.iterator_try_fold_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `try_fold` accumulator/item closures, retaining item fallible methods, accumulator render methods, and closure error recovery |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
