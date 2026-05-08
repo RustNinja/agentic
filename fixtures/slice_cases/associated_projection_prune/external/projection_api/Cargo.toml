@@ -1,0 +1,7 @@
+[package]
+name = "projection_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+projection_model = { path = "../projection_model" }

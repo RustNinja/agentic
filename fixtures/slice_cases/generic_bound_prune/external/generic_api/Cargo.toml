@@ -1,0 +1,7 @@
+[package]
+name = "generic_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+generic_model = { path = "../generic_model" }

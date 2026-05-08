@@ -162,6 +162,10 @@ file.
 | `fixture.struct_update_prune.support_chain.001` | covered | A checked-in support fixture slices through `Default` plus struct update syntax, retaining the live settings surface and pruning dead builder/model APIs |
 | `fixture.pattern_destructure_prune.support_chain.001` | covered | A checked-in support fixture slices through `let-else` enum struct-pattern destructuring, retaining the live parser/event closure and pruning dead pattern APIs |
 | `fixture.closure_combinator_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option`/`Result` closure combinators and `transpose`, retaining live payload/error methods while pruning dead closure APIs |
+| `fixture.generic_bound_prune.support_chain.001` | covered | A checked-in support fixture slices through generic trait bounds, retained impl methods, and dependency package reexports while pruning dead generic APIs |
+| `fixture.enum_variant_constructor_prune.support_chain.001` | covered | A checked-in support fixture slices through enum variant constructors used as iterator function values while pruning dead enum APIs and sibling support modules |
+| `fixture.associated_projection_prune.support_chain.001` | covered | A checked-in support fixture slices through associated type projections and projected render bounds while pruning dead projection APIs |
+| `fixture.iterator_method_ref_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator method references such as `map(Type::method)`, retaining the used method closure while pruning dead iterator APIs |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
