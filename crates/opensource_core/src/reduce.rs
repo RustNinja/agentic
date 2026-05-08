@@ -4790,6 +4790,16 @@ impl<'a> DependencyVisitor<'a> {
         if call.method == "lock" && call.args.is_empty() {
             return self.receiver_type(&call.receiver);
         }
+        if matches!(
+            call.method.to_string().as_str(),
+            "unwrap_or" | "unwrap_or_else"
+        ) {
+            return self.expression_result_ok_type(&call.receiver).or_else(|| {
+                self.expression_type_arguments(&call.receiver)
+                    .first()
+                    .cloned()
+            });
+        }
         self.receiver_type(&call.receiver)
             .and_then(|receiver| {
                 self.resolver
@@ -6280,11 +6290,13 @@ impl<'a> DependencyVisitor<'a> {
         let method = call.method.to_string();
         let type_arguments = self.expression_type_arguments(&call.receiver);
         match method.as_str() {
-            "map" | "and_then" | "filter" | "inspect" | "is_some_and" | "is_ok_and" => self
+            "map" | "and_then" | "filter" | "filter_map" | "find" | "find_map" | "inspect"
+            | "is_some_and" | "is_ok_and" | "any" | "all" | "position" | "retain"
+            | "sort_by_key" => self
                 .expression_result_ok_type(&call.receiver)
                 .or_else(|| type_arguments.first().cloned())
                 .or_else(|| self.receiver_type(&call.receiver)),
-            "map_err" | "or_else" | "inspect_err" | "is_err_and" => self
+            "map_err" | "or_else" | "inspect_err" | "is_err_and" | "unwrap_or_else" => self
                 .expression_result_error_type(&call.receiver)
                 .or_else(|| type_arguments.get(1).cloned())
                 .or_else(|| type_arguments.last().cloned())

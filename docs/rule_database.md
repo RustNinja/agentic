@@ -186,6 +186,10 @@ file.
 | `fixture.global_mutex_prune.support_chain.001` | covered | A checked-in support fixture slices through a global `Mutex<Vec<T>>` registry, retaining only the live entry constructor/render closure while pruning dead registry modules and methods |
 | `fixture.protocol_projection_prune.support_chain.001` | covered | A checked-in support fixture slices through an internal protocol enum projection with struct-variant payload methods, retaining selected match payload dependencies while pruning dead protocol APIs |
 | `fixture.iterator_fold_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `fold` closure item typing, retaining item methods used only inside the fold closure while pruning dead fold support code |
+| `fixture.iterator_filter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `filter_map` closure item typing, retaining payload methods used only inside filter-map closures while pruning dead filter APIs |
+| `fixture.iterator_any_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator predicate closures such as `any`, retaining predicate/render methods on the item type while pruning dead predicate support |
+| `fixture.result_unwrap_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::unwrap_or_else`, retaining error recovery methods and the returned OK-type method chain while pruning dead error methods |
+| `fixture.retain_sort_prune.support_chain.001` | covered | A checked-in support fixture slices through mutable collection closures such as `retain` and `sort_by_key`, retaining only live predicate/key/render methods |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

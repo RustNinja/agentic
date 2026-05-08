@@ -1,0 +1,7 @@
+[package]
+name = "filter_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+filter_model = { path = "../filter_model" }
