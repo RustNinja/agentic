@@ -5932,6 +5932,14 @@ impl<'a> DependencyVisitor<'a> {
                     .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
             }
             Expr::MethodCall(call) => {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "max_by" | "min_by" | "reduce"
+                ) {
+                    if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
+                        return Some(ok_type.clone());
+                    }
+                }
                 if call.method == "try_fold" {
                     if let Some(ok_type) = call
                         .args
@@ -6276,6 +6284,103 @@ impl<'a> DependencyVisitor<'a> {
         }
         if closure.inputs.len() > item_types.len() + 1 {
             for input in closure.inputs.iter().skip(item_types.len() + 1) {
+                self.visit_pat(input);
+            }
+        }
+        self.visit_expr(&closure.body);
+        self.variables = variables;
+        self.variable_candidates = variable_candidates;
+        self.variable_type_arguments = variable_type_arguments;
+        self.variable_result_ok_types = variable_result_ok_types;
+        self.variable_result_error_types = variable_result_error_types;
+        true
+    }
+
+    fn visit_state_item_closure_method_call(&mut self, call: &ExprMethodCall) -> bool {
+        if call.method != "scan" || call.args.len() != 2 {
+            return false;
+        }
+
+        let mut args = call.args.iter();
+        let Some(initial) = args.next() else {
+            return false;
+        };
+        let Some(closure_expr) = args.next() else {
+            return false;
+        };
+        let Some(state_type) = self.infer_expr_type(initial) else {
+            return false;
+        };
+        let Expr::Closure(closure) = closure_expr else {
+            return false;
+        };
+        let Some(state_pat) = closure.inputs.first() else {
+            return false;
+        };
+        let Some(item_pat) = closure.inputs.iter().nth(1) else {
+            return false;
+        };
+        let Some(item_type) = self
+            .expression_type_arguments(&call.receiver)
+            .first()
+            .cloned()
+        else {
+            return false;
+        };
+
+        self.visit_expr(&call.receiver);
+        self.visit_expr(initial);
+        let variables = self.variables.clone();
+        let variable_candidates = self.variable_candidates.clone();
+        let variable_type_arguments = self.variable_type_arguments.clone();
+        let variable_result_ok_types = self.variable_result_ok_types.clone();
+        let variable_result_error_types = self.variable_result_error_types.clone();
+        self.bind_pattern_type(state_pat, &state_type);
+        self.bind_pattern_type(item_pat, &item_type);
+        self.visit_expr(&closure.body);
+        self.variables = variables;
+        self.variable_candidates = variable_candidates;
+        self.variable_type_arguments = variable_type_arguments;
+        self.variable_result_ok_types = variable_result_ok_types;
+        self.variable_result_error_types = variable_result_error_types;
+        true
+    }
+
+    fn visit_two_payload_closure_method_call(&mut self, call: &ExprMethodCall) -> bool {
+        if call.args.len() != 1 {
+            return false;
+        }
+        if !matches!(
+            call.method.to_string().as_str(),
+            "dedup_by" | "max_by" | "min_by" | "reduce" | "sort_by"
+        ) {
+            return false;
+        }
+        if !self.resolved_methods_for_call(call).is_empty() {
+            return false;
+        }
+        let Some(item_type) = self
+            .expression_type_arguments(&call.receiver)
+            .first()
+            .cloned()
+        else {
+            return false;
+        };
+        let Some(Expr::Closure(closure)) = call.args.first() else {
+            return false;
+        };
+
+        self.visit_expr(&call.receiver);
+        let variables = self.variables.clone();
+        let variable_candidates = self.variable_candidates.clone();
+        let variable_type_arguments = self.variable_type_arguments.clone();
+        let variable_result_ok_types = self.variable_result_ok_types.clone();
+        let variable_result_error_types = self.variable_result_error_types.clone();
+        for input in closure.inputs.iter().take(2) {
+            self.bind_pattern_type(input, &item_type);
+        }
+        if closure.inputs.len() > 2 {
+            for input in closure.inputs.iter().skip(2) {
                 self.visit_pat(input);
             }
         }
@@ -6876,6 +6981,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
         if self.visit_fold_method_call(call) {
+            return;
+        }
+        if self.visit_state_item_closure_method_call(call) {
+            return;
+        }
+        if self.visit_two_payload_closure_method_call(call) {
             return;
         }
         if self.visit_single_payload_closure_method_call(call) {

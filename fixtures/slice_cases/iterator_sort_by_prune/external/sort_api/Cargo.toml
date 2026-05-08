@@ -1,0 +1,7 @@
+[package]
+name = "sort_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sort_model = { path = "../sort_model" }

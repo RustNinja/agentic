@@ -4849,6 +4849,111 @@ fn prunes_iterator_zip_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_iterator_reduce_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_reduce_prune",
+        root_fn: "selected_reduce_report",
+        api_pkg: "reduce_api",
+        model_pkg: "reduce_model",
+        api_fn: "selected_reduce_report",
+        model_fn: "selected_reduce",
+        model_required: &[
+            "ReduceItem",
+            ".reduce(|left, right| left.merge(right))",
+            "pub fn merge",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadReduceItem",
+            "dead_reduce",
+            "dead_method",
+            "dead_live_reduce",
+            "dead-reduce",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_sort_by_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_sort_by_prune",
+        root_fn: "selected_sort_by_report",
+        api_pkg: "sort_api",
+        model_pkg: "sort_model",
+        api_fn: "selected_sort_by_report",
+        model_fn: "selected_sort_by",
+        model_required: &[
+            "SortItem",
+            "items.sort_by(|left, right| left.compare_rank(right))",
+            "pub fn compare_rank",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSortItem",
+            "dead_sort_by",
+            "dead_method",
+            "dead_live_sort_by",
+            "dead-sort",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_dedup_by_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_dedup_by_prune",
+        root_fn: "selected_dedup_by_report",
+        api_pkg: "dedup_api",
+        model_pkg: "dedup_model",
+        api_fn: "selected_dedup_by_report",
+        model_fn: "selected_dedup_by",
+        model_required: &[
+            "DedupItem",
+            "items.dedup_by(|left, right| left.same_group(right))",
+            "pub fn same_group",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadDedupItem",
+            "dead_dedup_by",
+            "dead_method",
+            "dead_live_dedup_by",
+            "dead-dedup",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_scan_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_scan_prune",
+        root_fn: "selected_scan_report",
+        api_pkg: "scan_api",
+        model_pkg: "scan_model",
+        api_fn: "selected_scan_report",
+        model_fn: "selected_scan",
+        model_required: &[
+            "ScanItem",
+            "ScanState",
+            ".scan(ScanState::new(), |state, item| state.accept(item))",
+            "pub fn accept",
+            "pub fn render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadScanItem",
+            "dead_scan",
+            "dead_method",
+            "dead_live_scan",
+            "dead-scan",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,
