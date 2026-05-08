@@ -6642,6 +6642,35 @@ impl DependencyVisitor<'_> {
                 }
             }
         }
+
+        let metavariables = macro_metavariable_declaration_order(&item_macro.mac.tokens);
+        if metavariables.is_empty() {
+            return;
+        }
+        let parser = syn::punctuated::Punctuated::<Expr, syn::Token![,]>::parse_terminated;
+        let Ok(arguments) = parser.parse2(mac.tokens.clone()) else {
+            return;
+        };
+
+        for (metavariable, argument) in metavariables.iter().zip(arguments.iter()) {
+            let Some(methods) = receiver_methods.get(metavariable) else {
+                continue;
+            };
+            let mut argument_types = self.receiver_type_candidates(argument);
+            if let Some(type_ref) = self.receiver_type(argument) {
+                argument_types.push(type_ref);
+            }
+            argument_types.sort();
+            argument_types.dedup();
+
+            for type_ref in argument_types {
+                for method in methods {
+                    for callable in self.resolver.resolve_methods(&type_ref, method) {
+                        self.add_method_dependency(&callable);
+                    }
+                }
+            }
+        }
     }
 
     fn add_macro_token_dependencies(&mut self, tokens: &TokenStream) {
@@ -6750,6 +6779,34 @@ fn collect_macro_metavariable_method_names(
                 .entry(receiver.to_string())
                 .or_default()
                 .insert(method.to_string());
+        }
+    }
+}
+
+fn macro_metavariable_declaration_order(tokens: &TokenStream) -> Vec<String> {
+    let mut order = Vec::new();
+    collect_macro_metavariable_declaration_order(tokens, &mut order);
+    order
+}
+
+fn collect_macro_metavariable_declaration_order(tokens: &TokenStream, order: &mut Vec<String>) {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &tokens {
+        if let TokenTree::Group(group) = token {
+            collect_macro_metavariable_declaration_order(&group.stream(), order);
+        }
+    }
+
+    for window in tokens.windows(3) {
+        let [TokenTree::Punct(dollar), TokenTree::Ident(name), TokenTree::Punct(colon)] = window
+        else {
+            continue;
+        };
+        if dollar.as_char() == '$' && colon.as_char() == ':' {
+            let name = name.to_string();
+            if !order.contains(&name) {
+                order.push(name);
+            }
         }
     }
 }
