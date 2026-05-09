@@ -12826,6 +12826,271 @@ fn prunes_binaryheap_append_into_sorted_vec_support_chain_with_default_analyzer(
     });
 }
 
+#[test]
+fn prunes_hashset_intersection_support_chain_with_default_analyzer() {
+    assert_set_algebra_support_fixture(
+        "hashset_intersection_prune",
+        "hashset_intersection",
+        "HashSet",
+        "intersection",
+        "DeadHashsetIntersectionItem",
+        "dead-hashset-intersection",
+    );
+}
+
+#[test]
+fn prunes_hashset_union_support_chain_with_default_analyzer() {
+    assert_set_algebra_support_fixture(
+        "hashset_union_prune",
+        "hashset_union",
+        "HashSet",
+        "union",
+        "DeadHashsetUnionItem",
+        "dead-hashset-union",
+    );
+}
+
+#[test]
+fn prunes_hashset_difference_support_chain_with_default_analyzer() {
+    assert_set_algebra_support_fixture(
+        "hashset_difference_prune",
+        "hashset_difference",
+        "HashSet",
+        "difference",
+        "DeadHashsetDifferenceItem",
+        "dead-hashset-difference",
+    );
+}
+
+#[test]
+fn prunes_hashset_symmetric_difference_support_chain_with_default_analyzer() {
+    assert_set_algebra_support_fixture(
+        "hashset_symmetric_difference_prune",
+        "hashset_symmetric_difference",
+        "HashSet",
+        "symmetric_difference",
+        "DeadHashsetSymmetricDifferenceItem",
+        "dead-hashset-symmetric-difference",
+    );
+}
+
+#[test]
+fn prunes_btreeset_intersection_support_chain_with_default_analyzer() {
+    assert_set_algebra_support_fixture(
+        "btreeset_intersection_prune",
+        "btreeset_intersection",
+        "BTreeSet",
+        "intersection",
+        "DeadBtreesetIntersectionItem",
+        "dead-btreeset-intersection",
+    );
+}
+
+#[test]
+fn prunes_btreeset_union_support_chain_with_default_analyzer() {
+    assert_set_algebra_support_fixture(
+        "btreeset_union_prune",
+        "btreeset_union",
+        "BTreeSet",
+        "union",
+        "DeadBtreesetUnionItem",
+        "dead-btreeset-union",
+    );
+}
+
+#[test]
+fn prunes_btreeset_difference_support_chain_with_default_analyzer() {
+    assert_set_algebra_support_fixture(
+        "btreeset_difference_prune",
+        "btreeset_difference",
+        "BTreeSet",
+        "difference",
+        "DeadBtreesetDifferenceItem",
+        "dead-btreeset-difference",
+    );
+}
+
+#[test]
+fn prunes_btreeset_symmetric_difference_support_chain_with_default_analyzer() {
+    assert_set_algebra_support_fixture(
+        "btreeset_symmetric_difference_prune",
+        "btreeset_symmetric_difference",
+        "BTreeSet",
+        "symmetric_difference",
+        "DeadBtreesetSymmetricDifferenceItem",
+        "dead-btreeset-symmetric-difference",
+    );
+}
+
+#[test]
+fn prunes_hashmap_values_mut_support_chain_with_default_analyzer() {
+    assert_mut_map_values_support_fixture(
+        "hashmap_values_mut_prune",
+        "hashmap_values_mut",
+        "HashMap",
+        "DeadHashmapValuesMutItem",
+        "dead-hashmap-values-mut",
+    );
+}
+
+#[test]
+fn prunes_btreemap_values_mut_support_chain_with_default_analyzer() {
+    assert_mut_map_values_support_fixture(
+        "btreemap_values_mut_prune",
+        "btreemap_values_mut",
+        "BTreeMap",
+        "DeadBtreemapValuesMutItem",
+        "dead-btreemap-values-mut",
+    );
+}
+
+#[test]
+fn prunes_vec_append_iter_support_chain_with_default_analyzer() {
+    assert_append_iter_support_fixture(
+        "vec_append_iter_prune",
+        "vec_append_iter",
+        "",
+        "DeadVecAppendIterItem",
+        "dead-vec-append-iter",
+    );
+}
+
+#[test]
+fn prunes_vecdeque_append_iter_support_chain_with_default_analyzer() {
+    assert_append_iter_support_fixture(
+        "vecdeque_append_iter_prune",
+        "vecdeque_append_iter",
+        "VecDeque",
+        "DeadVecdequeAppendIterItem",
+        "dead-vecdeque-append-iter",
+    );
+}
+
+fn assert_set_algebra_support_fixture(
+    fixture_name: &str,
+    stem: &str,
+    collection: &str,
+    operation: &str,
+    dead_item: &str,
+    dead_token: &str,
+) {
+    let root_fn = format!("selected_{stem}_report");
+    let api_pkg = format!("{stem}_api");
+    let model_pkg = format!("{stem}_model");
+    let api_fn = format!("selected_{stem}_report");
+    let model_fn = format!("selected_{stem}");
+    let operation_token = format!(".{operation}(&right)");
+    let dead_fn = format!("dead_{stem}");
+    let model_required = [
+        collection,
+        operation_token.as_str(),
+        ".map(|payload| payload.render_label())",
+        "pub fn render_label",
+    ];
+    let model_absent = [
+        "mod dead",
+        dead_item,
+        dead_fn.as_str(),
+        "dead_method",
+        dead_token,
+    ];
+
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name,
+        root_fn: root_fn.as_str(),
+        api_pkg: api_pkg.as_str(),
+        model_pkg: model_pkg.as_str(),
+        api_fn: api_fn.as_str(),
+        model_fn: model_fn.as_str(),
+        model_required: &model_required,
+        model_absent: &model_absent,
+    });
+}
+
+fn assert_mut_map_values_support_fixture(
+    fixture_name: &str,
+    stem: &str,
+    collection: &str,
+    dead_item: &str,
+    dead_token: &str,
+) {
+    let root_fn = format!("selected_{stem}_report");
+    let api_pkg = format!("{stem}_api");
+    let model_pkg = format!("{stem}_model");
+    let api_fn = format!("selected_{stem}_report");
+    let model_fn = format!("selected_{stem}");
+    let dead_fn = format!("dead_{stem}");
+    let model_required = [
+        collection,
+        ".values_mut()",
+        ".map(|payload| payload.bump_and_render())",
+        "pub fn bump_and_render",
+    ];
+    let model_absent = [
+        "mod dead",
+        dead_item,
+        dead_fn.as_str(),
+        "pub fn render_label",
+        "dead_key_method",
+        "dead_method",
+        dead_token,
+    ];
+
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name,
+        root_fn: root_fn.as_str(),
+        api_pkg: api_pkg.as_str(),
+        model_pkg: model_pkg.as_str(),
+        api_fn: api_fn.as_str(),
+        model_fn: model_fn.as_str(),
+        model_required: &model_required,
+        model_absent: &model_absent,
+    });
+}
+
+fn assert_append_iter_support_fixture(
+    fixture_name: &str,
+    stem: &str,
+    collection: &str,
+    dead_item: &str,
+    dead_token: &str,
+) {
+    let root_fn = format!("selected_{stem}_report");
+    let api_pkg = format!("{stem}_api");
+    let model_pkg = format!("{stem}_model");
+    let api_fn = format!("selected_{stem}_report");
+    let model_fn = format!("selected_{stem}");
+    let dead_fn = format!("dead_{stem}");
+    let mut required = vec![
+        ".append(&mut extras)",
+        ".iter()",
+        ".map(|payload| payload.render_label())",
+        "pub fn render_label",
+    ];
+    if !collection.is_empty() {
+        required.push(collection);
+    }
+    let model_absent = [
+        "mod dead",
+        dead_item,
+        dead_fn.as_str(),
+        "pub fn bump_and_render",
+        "dead_method",
+        dead_token,
+    ];
+
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name,
+        root_fn: root_fn.as_str(),
+        api_pkg: api_pkg.as_str(),
+        model_pkg: model_pkg.as_str(),
+        api_fn: api_fn.as_str(),
+        model_fn: model_fn.as_str(),
+        model_required: &required,
+        model_absent: &model_absent,
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

@@ -1,0 +1,7 @@
+[package]
+name = "vec_append_iter_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_append_iter_model = { path = "../vec_append_iter_model" }

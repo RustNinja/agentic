@@ -1,0 +1,7 @@
+[package]
+name = "btreeset_intersection_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreeset_intersection_model = { path = "../btreeset_intersection_model" }

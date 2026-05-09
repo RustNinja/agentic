@@ -1,0 +1,7 @@
+[package]
+name = "hashset_difference_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hashset_difference_model = { path = "../hashset_difference_model" }
