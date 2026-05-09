@@ -4353,7 +4353,7 @@ impl<'a> DependencyVisitor<'a> {
                 .or_else(|| self.resolver.resolve_type_path(&path.path)),
             Expr::Call(call) => self
                 .wrapper_constructor_arg_type(call)
-                .or_else(|| self.std_mem_return_type(call))
+                .or_else(|| self.known_associated_return_type(call))
                 .or_else(|| {
                     if let Expr::Path(path) = call.func.as_ref() {
                         self.resolver.type_from_expr_path_call(path)
@@ -4402,7 +4402,7 @@ impl<'a> DependencyVisitor<'a> {
             }
             Expr::Call(call) => {
                 if let Some(type_ref) = self.wrapper_constructor_arg_type(call).or_else(|| {
-                    self.std_mem_return_type(call).or_else(|| {
+                    self.known_associated_return_type(call).or_else(|| {
                         if let Expr::Path(path) = call.func.as_ref() {
                             self.resolver.type_from_expr_path_call(path)
                         } else {
@@ -4899,7 +4899,7 @@ impl<'a> DependencyVisitor<'a> {
         match expression {
             Expr::Call(call) => self
                 .wrapper_constructor_arg_type(call)
-                .or_else(|| self.std_mem_return_type(call))
+                .or_else(|| self.known_associated_return_type(call))
                 .or_else(|| {
                     if let Expr::Path(path) = call.func.as_ref() {
                         self.resolver.type_from_expr_path_call(path)
@@ -5103,30 +5103,37 @@ impl<'a> DependencyVisitor<'a> {
             .and_then(|argument| self.infer_expr_type(argument))
     }
 
-    fn std_mem_return_type(&self, call: &ExprCall) -> Option<TypeRef> {
+    fn known_associated_return_type(&self, call: &ExprCall) -> Option<TypeRef> {
         let Expr::Path(path) = call.func.as_ref() else {
             return None;
         };
-        match std_mem_return_function(&path.path)?.as_str() {
-            "take" => call.args.first().and_then(|argument| {
-                self.receiver_type(argument)
-                    .or_else(|| self.infer_expr_type(argument))
-            }),
+        match known_associated_return_function(&path.path)?.as_str() {
+            "take" => call
+                .args
+                .first()
+                .and_then(|argument| self.first_arg_receiver_type(argument)),
             "replace" => call
                 .args
                 .first()
-                .and_then(|argument| {
-                    self.receiver_type(argument)
-                        .or_else(|| self.infer_expr_type(argument))
-                })
+                .and_then(|argument| self.first_arg_receiver_type(argument))
                 .or_else(|| {
                     call.args
                         .iter()
                         .nth(1)
                         .and_then(|argument| self.infer_expr_type(argument))
                 }),
+            "into_inner" | "make_mut" | "pin" | "from" => call
+                .args
+                .first()
+                .and_then(|argument| self.first_arg_receiver_type(argument)),
             _ => None,
         }
+    }
+
+    fn first_arg_receiver_type(&self, argument: &Expr) -> Option<TypeRef> {
+        self.receiver_type(argument)
+            .or_else(|| self.expression_type_arguments(argument).first().cloned())
+            .or_else(|| self.infer_expr_type(argument))
     }
 
     fn add_expected_parse_types_from_return(&mut self, output: &ReturnType) {
@@ -9699,7 +9706,18 @@ impl Resolver<'_> {
         let wrapper = last.ident.to_string();
         if !matches!(
             wrapper.as_str(),
-            "Box" | "Rc" | "Arc" | "Cow" | "Pin" | "Ref" | "RefMut" | "Mutex" | "RwLock"
+            "Box"
+                | "Rc"
+                | "Arc"
+                | "Cow"
+                | "Pin"
+                | "Ref"
+                | "RefMut"
+                | "Mutex"
+                | "RwLock"
+                | "ManuallyDrop"
+                | "MaybeUninit"
+                | "NonNull"
         ) {
             return None;
         }
@@ -10965,19 +10983,59 @@ fn path_segments(path: &Path) -> Vec<String> {
         .collect()
 }
 
-fn std_mem_return_function(path: &Path) -> Option<String> {
+fn known_associated_return_function(path: &Path) -> Option<String> {
     let segments = path_segments(path);
     let function = segments.last()?;
-    if !matches!(function.as_str(), "take" | "replace") {
+    if !matches!(
+        function.as_str(),
+        "take" | "replace" | "into_inner" | "make_mut" | "pin" | "from"
+    ) {
         return None;
     }
     let prefix = &segments[..segments.len().saturating_sub(1)];
-    if matches!(prefix, [module] if module == "mem")
-        || matches!(prefix, [root, module] if matches!(root.as_str(), "std" | "core") && module == "mem")
-    {
-        Some(function.clone())
-    } else {
-        None
+    match (prefix, function.as_str()) {
+        ([module], "take" | "replace") if module == "mem" => Some(function.clone()),
+        ([root, module], "take" | "replace")
+            if matches!(root.as_str(), "std" | "core") && module == "mem" =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "into_inner") if wrapper == "ManuallyDrop" => Some(function.clone()),
+        ([root, module, wrapper], "into_inner")
+            if matches!(root.as_str(), "std" | "core")
+                && module == "mem"
+                && wrapper == "ManuallyDrop" =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "make_mut") if matches!(wrapper.as_str(), "Arc" | "Rc") => {
+            Some(function.clone())
+        }
+        ([root, module, wrapper], "make_mut")
+            if matches!(
+                (root.as_str(), module.as_str(), wrapper.as_str()),
+                ("std" | "alloc", "sync", "Arc") | ("std" | "alloc", "rc", "Rc")
+            ) =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "pin") if wrapper == "Box" => Some(function.clone()),
+        ([root, module, wrapper], "pin")
+            if matches!(root.as_str(), "std" | "alloc")
+                && module == "boxed"
+                && wrapper == "Box" =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "from") if wrapper == "NonNull" => Some(function.clone()),
+        ([root, module, wrapper], "from")
+            if matches!(root.as_str(), "std" | "core")
+                && module == "ptr"
+                && wrapper == "NonNull" =>
+        {
+            Some(function.clone())
+        }
+        _ => None,
     }
 }
 

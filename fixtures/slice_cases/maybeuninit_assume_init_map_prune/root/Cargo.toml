@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+maybeuninit_assume_init_map_api = { path = "../external/maybeuninit_assume_init_map_api" }

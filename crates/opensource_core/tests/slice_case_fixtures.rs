@@ -11885,6 +11885,317 @@ fn prunes_iter_successors_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_as_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_as_mut_map_prune",
+        root_fn: "selected_option_as_mut_map_report",
+        api_pkg: "option_as_mut_map_api",
+        model_pkg: "option_as_mut_map_model",
+        api_fn: "selected_option_as_mut_map_report",
+        model_fn: "selected_option_as_mut_map",
+        model_required: &[
+            ".as_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionAsMutMapItem",
+            "dead_option_as_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-option-as-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_as_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_as_mut_map_prune",
+        root_fn: "selected_result_as_mut_map_report",
+        api_pkg: "result_as_mut_map_api",
+        model_pkg: "result_as_mut_map_model",
+        api_fn: "selected_result_as_mut_map_report",
+        model_fn: "selected_result_as_mut_map",
+        model_required: &[
+            "ResultAsMutMapError",
+            ".as_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+            "pub fn render_error",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultAsMutMapItem",
+            "dead_result_as_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead_error_method",
+            "dead-result-as-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_take_if_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_take_if_map_prune",
+        root_fn: "selected_option_take_if_map_report",
+        api_pkg: "option_take_if_map_api",
+        model_pkg: "option_take_if_map_model",
+        api_fn: "selected_option_take_if_map_report",
+        model_fn: "selected_option_take_if_map",
+        model_required: &[
+            ".take_if(|payload| payload.allow())",
+            ".map(|payload| payload.render_label())",
+            "pub fn allow",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionTakeIfMapItem",
+            "dead_option_take_if_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-option-take-if-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_mem_swap_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "mem_swap_map_prune",
+        root_fn: "selected_mem_swap_map_report",
+        api_pkg: "mem_swap_map_api",
+        model_pkg: "mem_swap_map_model",
+        api_fn: "selected_mem_swap_map_report",
+        model_fn: "selected_mem_swap_map",
+        model_required: &[
+            "use std::mem;",
+            "mem::swap(&mut left, &mut right)",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMemSwapMapItem",
+            "dead_mem_swap_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-mem-swap-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_maybeuninit_assume_init_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "maybeuninit_assume_init_map_prune",
+        root_fn: "selected_maybeuninit_assume_init_map_report",
+        api_pkg: "maybeuninit_assume_init_map_api",
+        model_pkg: "maybeuninit_assume_init_map_model",
+        api_fn: "selected_maybeuninit_assume_init_map_report",
+        model_fn: "selected_maybeuninit_assume_init_map",
+        model_required: &[
+            "use std::mem::MaybeUninit;",
+            "MaybeUninit<MaybeUninitAssumeInitMapPayload>",
+            ".assume_init().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMaybeUninitAssumeInitMapItem",
+            "dead_maybeuninit_assume_init_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-maybeuninit-assume-init-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_manuallydrop_into_inner_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "manuallydrop_into_inner_map_prune",
+        root_fn: "selected_manuallydrop_into_inner_map_report",
+        api_pkg: "manuallydrop_into_inner_map_api",
+        model_pkg: "manuallydrop_into_inner_map_model",
+        api_fn: "selected_manuallydrop_into_inner_map_report",
+        model_fn: "selected_manuallydrop_into_inner_map",
+        model_required: &[
+            "use std::mem::ManuallyDrop;",
+            "ManuallyDrop<ManuallyDropIntoInnerMapPayload>",
+            "ManuallyDrop::into_inner(payload).render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadManuallyDropIntoInnerMapItem",
+            "dead_manuallydrop_into_inner_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-manuallydrop-into-inner-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_nonnull_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "nonnull_as_ref_map_prune",
+        root_fn: "selected_nonnull_as_ref_map_report",
+        api_pkg: "nonnull_as_ref_map_api",
+        model_pkg: "nonnull_as_ref_map_model",
+        api_fn: "selected_nonnull_as_ref_map_report",
+        model_fn: "selected_nonnull_as_ref_map",
+        model_required: &[
+            "use std::ptr::NonNull;",
+            "NonNull<NonNullAsRefMapPayload>",
+            "pointer.as_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadNonNullAsRefMapItem",
+            "dead_nonnull_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-nonnull-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_box_pin_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "box_pin_as_ref_map_prune",
+        root_fn: "selected_box_pin_as_ref_map_report",
+        api_pkg: "box_pin_as_ref_map_api",
+        model_pkg: "box_pin_as_ref_map_model",
+        api_fn: "selected_box_pin_as_ref_map_report",
+        model_fn: "selected_box_pin_as_ref_map",
+        model_required: &[
+            "use std::pin::Pin;",
+            "Pin<Box<BoxPinAsRefMapPayload>>",
+            "Box::pin",
+            "pinned.as_ref().get_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBoxPinAsRefMapItem",
+            "dead_box_pin_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-box-pin-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_arc_make_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "arc_make_mut_map_prune",
+        root_fn: "selected_arc_make_mut_map_report",
+        api_pkg: "arc_make_mut_map_api",
+        model_pkg: "arc_make_mut_map_model",
+        api_fn: "selected_arc_make_mut_map_report",
+        model_fn: "selected_arc_make_mut_map",
+        model_required: &[
+            "use std::sync::Arc;",
+            "Arc::make_mut(&mut payload).bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadArcMakeMutMapItem",
+            "dead_arc_make_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-arc-make-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_rc_make_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "rc_make_mut_map_prune",
+        root_fn: "selected_rc_make_mut_map_report",
+        api_pkg: "rc_make_mut_map_api",
+        model_pkg: "rc_make_mut_map_model",
+        api_fn: "selected_rc_make_mut_map_report",
+        model_fn: "selected_rc_make_mut_map",
+        model_required: &[
+            "use std::rc::Rc;",
+            "Rc::make_mut(&mut payload).bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRcMakeMutMapItem",
+            "dead_rc_make_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-rc-make-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_control_flow_continue_match_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "control_flow_continue_match_map_prune",
+        root_fn: "selected_control_flow_continue_match_map_report",
+        api_pkg: "control_flow_continue_match_map_api",
+        model_pkg: "control_flow_continue_match_map_model",
+        api_fn: "selected_control_flow_continue_match_map_report",
+        model_fn: "selected_control_flow_continue_match_map",
+        model_required: &[
+            "use std::ops::ControlFlow;",
+            "ControlFlow<(), ControlFlowContinueMatchMapPayload>",
+            "ControlFlow::Continue(payload) => payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadControlFlowContinueMatchMapItem",
+            "dead_control_flow_continue_match_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-control-flow-continue-match-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_control_flow_break_match_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "control_flow_break_match_map_prune",
+        root_fn: "selected_control_flow_break_match_map_report",
+        api_pkg: "control_flow_break_match_map_api",
+        model_pkg: "control_flow_break_match_map_model",
+        api_fn: "selected_control_flow_break_match_map_report",
+        model_fn: "selected_control_flow_break_match_map",
+        model_required: &[
+            "use std::ops::ControlFlow;",
+            "ControlFlow<ControlFlowBreakMatchMapPayload, ()>",
+            "ControlFlow::Break(payload) => payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadControlFlowBreakMatchMapItem",
+            "dead_control_flow_break_match_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-control-flow-break-match-map",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

@@ -1,0 +1,7 @@
+[package]
+name = "control_flow_continue_match_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+control_flow_continue_match_map_model = { path = "../control_flow_continue_match_map_model" }
