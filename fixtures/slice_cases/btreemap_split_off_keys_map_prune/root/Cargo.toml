@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+btreemap_split_off_keys_map_api = { path = "../external/btreemap_split_off_keys_map_api" }

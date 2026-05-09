@@ -1,0 +1,7 @@
+[package]
+name = "pathbuf_pop_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pathbuf_pop_map_model = { path = "../pathbuf_pop_map_model" }

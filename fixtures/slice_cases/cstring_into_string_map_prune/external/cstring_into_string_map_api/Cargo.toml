@@ -1,0 +1,7 @@
+[package]
+name = "cstring_into_string_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cstring_into_string_map_model = { path = "../cstring_into_string_map_model" }

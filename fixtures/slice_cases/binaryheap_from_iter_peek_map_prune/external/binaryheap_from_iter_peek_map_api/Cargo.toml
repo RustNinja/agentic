@@ -1,0 +1,7 @@
+[package]
+name = "binaryheap_from_iter_peek_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binaryheap_from_iter_peek_map_model = { path = "../binaryheap_from_iter_peek_map_model" }

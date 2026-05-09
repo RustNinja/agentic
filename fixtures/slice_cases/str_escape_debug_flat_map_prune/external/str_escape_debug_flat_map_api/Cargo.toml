@@ -1,0 +1,7 @@
+[package]
+name = "str_escape_debug_flat_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+str_escape_debug_flat_map_model = { path = "../str_escape_debug_flat_map_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "vecdeque_swap_front_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vecdeque_swap_front_map_model = { path = "../vecdeque_swap_front_map_model" }

@@ -656,6 +656,26 @@ file.
 | `fixture.pathbuf_push_to_str_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::push` plus `to_str`, retaining path payload rendering only |
 | `fixture.pathbuf_set_extension_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::set_extension` plus `to_str`, retaining extension-mutated path payload rendering only |
 | `fixture.osstring_into_string_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `OsString::into_string().ok().map(...)`, retaining UTF-8 OS-string payload rendering only |
+| `fixture.string_drain_collect_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::drain(..).collect::<String>()`, retaining drained string payload rendering only |
+| `fixture.string_pop_char_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::pop().map(...)`, retaining popped character payload rendering only |
+| `fixture.string_remove_char_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::remove` character extraction without retaining unrelated string helpers |
+| `fixture.string_replace_range_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::replace_range`, retaining the mutated string payload render path only |
+| `fixture.str_escape_debug_flat_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `char::escape_debug` flat-map chains, retaining escaped character payload rendering only |
+| `fixture.str_bytes_enumerate_map_prune.support_chain.001` | covered | A checked-in support fixture slices through byte enumeration tuple payloads and format-derived construction without dead string helpers |
+| `fixture.string_from_utf8_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::from_utf8(...).ok().map(...)`, retaining decoded payload rendering only |
+| `fixture.string_from_utf16_map_prune.support_chain.001` | covered | A checked-in support fixture slices through UTF-16 collection and `String::from_utf16` decoding without retaining dead conversion helpers |
+| `fixture.cstring_into_string_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `CString::new(...).into_string()` conversion chains while pruning dead FFI-string helpers |
+| `fixture.osstring_push_into_string_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `OsString::push` plus `into_string`, retaining only live OS-string payload rendering |
+| `fixture.pathbuf_pop_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::pop` and post-pop string rendering without retaining dead path helpers |
+| `fixture.pathbuf_set_file_name_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::set_file_name` plus `to_str`, retaining renamed path payload rendering only |
+| `fixture.vecdeque_front_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque::front_mut().map(...)`, retaining mutable front payload methods only |
+| `fixture.vecdeque_back_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque::back_mut().map(...)`, retaining mutable back payload methods only |
+| `fixture.vecdeque_swap_front_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque::swap` followed by front payload rendering without dead deque helpers |
+| `fixture.vec_insert_get_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::insert` plus indexed access, retaining inserted payload rendering only |
+| `fixture.vec_resize_with_pop_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::resize_with` and `pop`, retaining generated payload rendering only |
+| `fixture.hashmap_drain_filter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap::drain().filter_map(...)`, retaining drained value payload rendering only |
+| `fixture.btreemap_split_off_keys_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap::split_off(...).keys().map(...)`, retaining split key payload rendering only |
+| `fixture.binaryheap_from_iter_peek_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap::from([...]).peek()`, retaining heap top payload rendering only |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
