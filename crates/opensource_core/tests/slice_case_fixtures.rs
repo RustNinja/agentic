@@ -9835,6 +9835,327 @@ fn prunes_slice_select_nth_unstable_by_key_support_chain_with_default_analyzer()
     });
 }
 
+#[test]
+fn prunes_hashmap_retain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_retain_prune",
+        root_fn: "selected_hashmap_retain_report",
+        api_pkg: "hashmap_retain_api",
+        model_pkg: "hashmap_retain_model",
+        api_fn: "selected_hashmap_retain_report",
+        model_fn: "selected_hashmap_retain",
+        model_required: &[
+            "HashMap<",
+            "HashMapRetainKey",
+            "HashMapRetainItem",
+            "entries.retain",
+            "key.keep()",
+            "item.is_live()",
+            ".values()",
+            "pub fn keep",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashMapRetainItem",
+            "dead_hashmap_retain",
+            "pub fn sort_key",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_key_method",
+            "dead_method",
+            "dead-hashmap-retain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_retain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_retain_prune",
+        root_fn: "selected_btreemap_retain_report",
+        api_pkg: "btreemap_retain_api",
+        model_pkg: "btreemap_retain_model",
+        api_fn: "selected_btreemap_retain_report",
+        model_fn: "selected_btreemap_retain",
+        model_required: &[
+            "BTreeMap<",
+            "BTreeMapRetainKey",
+            "BTreeMapRetainItem",
+            "entries.retain",
+            "key.keep()",
+            "item.is_live()",
+            ".values()",
+            "pub fn keep",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBTreeMapRetainItem",
+            "dead_btreemap_retain",
+            "pub fn sort_key",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_key_method",
+            "dead_method",
+            "dead-btreemap-retain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashset_retain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashset_retain_prune",
+        root_fn: "selected_hashset_retain_report",
+        api_pkg: "hashset_retain_api",
+        model_pkg: "hashset_retain_model",
+        api_fn: "selected_hashset_retain_report",
+        model_fn: "selected_hashset_retain",
+        model_required: &[
+            "HashSet<",
+            "HashSetRetainItem",
+            "entries.retain",
+            "item.is_live()",
+            ".iter()",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashSetRetainItem",
+            "dead_hashset_retain",
+            "pub fn sort_key",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-hashset-retain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreeset_retain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreeset_retain_prune",
+        root_fn: "selected_btreeset_retain_report",
+        api_pkg: "btreeset_retain_api",
+        model_pkg: "btreeset_retain_model",
+        api_fn: "selected_btreeset_retain_report",
+        model_fn: "selected_btreeset_retain",
+        model_required: &[
+            "BTreeSet<",
+            "BTreeSetRetainItem",
+            "entries.retain",
+            "item.is_live()",
+            ".iter()",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBTreeSetRetainItem",
+            "dead_btreeset_retain",
+            "pub fn sort_key",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-btreeset-retain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_binaryheap_retain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "binaryheap_retain_prune",
+        root_fn: "selected_binaryheap_retain_report",
+        api_pkg: "binaryheap_retain_api",
+        model_pkg: "binaryheap_retain_model",
+        api_fn: "selected_binaryheap_retain_report",
+        model_fn: "selected_binaryheap_retain",
+        model_required: &[
+            "BinaryHeap<",
+            "BinaryHeapRetainItem",
+            "entries.retain",
+            "item.is_live()",
+            ".iter()",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBinaryHeapRetainItem",
+            "dead_binaryheap_retain",
+            "pub fn sort_key",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-binaryheap-retain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_retain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_retain_prune",
+        root_fn: "selected_vecdeque_retain_report",
+        api_pkg: "vecdeque_retain_api",
+        model_pkg: "vecdeque_retain_model",
+        api_fn: "selected_vecdeque_retain_report",
+        model_fn: "selected_vecdeque_retain",
+        model_required: &[
+            "VecDeque<",
+            "VecDequeRetainItem",
+            "entries.retain",
+            "item.is_live()",
+            ".iter()",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecDequeRetainItem",
+            "dead_vecdeque_retain",
+            "pub fn sort_key",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vecdeque-retain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_make_contiguous_sort_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_make_contiguous_sort_prune",
+        root_fn: "selected_vecdeque_make_contiguous_sort_report",
+        api_pkg: "vecdeque_make_contiguous_sort_api",
+        model_pkg: "vecdeque_make_contiguous_sort_model",
+        api_fn: "selected_vecdeque_make_contiguous_sort_report",
+        model_fn: "selected_vecdeque_make_contiguous_sort",
+        model_required: &[
+            "VecDeque<",
+            "VecDequeMakeContiguousSortItem",
+            ".make_contiguous().sort_by_key",
+            "item.sort_key()",
+            ".iter()",
+            "pub fn sort_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecDequeMakeContiguousSortItem",
+            "dead_vecdeque_make_contiguous_sort",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vecdeque-make-contiguous-sort",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_as_slice_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_as_slice_iter_prune",
+        root_fn: "selected_vec_as_slice_iter_report",
+        api_pkg: "vec_as_slice_iter_api",
+        model_pkg: "vec_as_slice_iter_model",
+        api_fn: "selected_vec_as_slice_iter_report",
+        model_fn: "selected_vec_as_slice_iter",
+        model_required: &[
+            "Vec<VecAsSliceIterItem>",
+            ".as_slice()",
+            ".find(|item| item.is_live())",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecAsSliceIterItem",
+            "dead_vec_as_slice_iter",
+            "pub fn sort_key",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vec-as-slice-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_as_mut_slice_iter_mut_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_as_mut_slice_iter_mut_prune",
+        root_fn: "selected_vec_as_mut_slice_iter_mut_report",
+        api_pkg: "vec_as_mut_slice_iter_mut_api",
+        model_pkg: "vec_as_mut_slice_iter_mut_model",
+        api_fn: "selected_vec_as_mut_slice_iter_mut_report",
+        model_fn: "selected_vec_as_mut_slice_iter_mut",
+        model_required: &[
+            "Vec<VecAsMutSliceIterMutItem>",
+            ".as_mut_slice()",
+            ".iter_mut()",
+            "item.bump().render_label()",
+            "pub fn bump",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecAsMutSliceIterMutItem",
+            "dead_vec_as_mut_slice_iter_mut",
+            "pub fn sort_key",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vec-as-mut-slice-iter-mut",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_as_slice_chunks_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_as_slice_chunks_prune",
+        root_fn: "selected_vec_as_slice_chunks_report",
+        api_pkg: "vec_as_slice_chunks_api",
+        model_pkg: "vec_as_slice_chunks_model",
+        api_fn: "selected_vec_as_slice_chunks_report",
+        model_fn: "selected_vec_as_slice_chunks",
+        model_required: &[
+            "Vec<VecAsSliceChunksItem>",
+            ".as_slice()",
+            ".chunks(2)",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecAsSliceChunksItem",
+            "dead_vec_as_slice_chunks",
+            "pub fn sort_key",
+            "pub fn bump",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vec-as-slice-chunks",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

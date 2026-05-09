@@ -1,0 +1,7 @@
+[package]
+name = "binaryheap_retain_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binaryheap_retain_model = { path = "../binaryheap_retain_model" }

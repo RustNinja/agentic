@@ -3786,6 +3786,7 @@ struct DependencyVisitor<'a> {
     variables: HashMap<String, TypeRef>,
     variable_candidates: HashMap<String, Vec<TypeRef>>,
     variable_type_arguments: HashMap<String, Vec<TypeRef>>,
+    variable_map_key_types: HashMap<String, TypeRef>,
     variable_map_value_types: HashMap<String, TypeRef>,
     variable_entry_value_types: HashMap<String, TypeRef>,
     variable_result_ok_types: HashMap<String, TypeRef>,
@@ -3812,6 +3813,7 @@ impl<'a> DependencyVisitor<'a> {
             variables: HashMap::new(),
             variable_candidates: HashMap::new(),
             variable_type_arguments: HashMap::new(),
+            variable_map_key_types: HashMap::new(),
             variable_map_value_types: HashMap::new(),
             variable_entry_value_types: HashMap::new(),
             variable_result_ok_types: HashMap::new(),
@@ -4181,6 +4183,9 @@ impl<'a> DependencyVisitor<'a> {
             self.variable_type_arguments
                 .insert(name.clone(), type_arguments);
         }
+        if let Some(key_type) = self.resolver.map_key_type(ty) {
+            self.variable_map_key_types.insert(name.clone(), key_type);
+        }
         if let Some(value_type) = self.resolver.map_value_type(ty) {
             self.variable_map_value_types
                 .insert(name.clone(), value_type);
@@ -4199,6 +4204,9 @@ impl<'a> DependencyVisitor<'a> {
         if !type_arguments.is_empty() {
             self.variable_type_arguments
                 .insert(name.clone(), type_arguments);
+        }
+        if let Some(key_type) = self.expression_map_key_type(expression) {
+            self.variable_map_key_types.insert(name.clone(), key_type);
         }
         if let Some(value_type) = self.expression_map_value_type(expression) {
             self.variable_map_value_types
@@ -6098,7 +6106,9 @@ impl<'a> DependencyVisitor<'a> {
                 if matches!(
                     call.method.to_string().as_str(),
                     "as_ref"
+                        | "as_slice"
                         | "as_mut"
+                        | "as_mut_slice"
                         | "by_ref"
                         | "chain"
                         | "chunks"
@@ -6117,6 +6127,7 @@ impl<'a> DependencyVisitor<'a> {
                         | "into_iter"
                         | "iter"
                         | "iter_mut"
+                        | "make_contiguous"
                         | "max_by"
                         | "max_by_key"
                         | "min_by"
@@ -6334,6 +6345,43 @@ impl<'a> DependencyVisitor<'a> {
     fn single_expression_type_argument(&self, expression: &Expr) -> Option<TypeRef> {
         let mut type_arguments = self.expression_type_arguments(expression);
         (type_arguments.len() == 1).then(|| type_arguments.remove(0))
+    }
+
+    fn expression_map_key_type(&self, expression: &Expr) -> Option<TypeRef> {
+        match expression {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first()?.ident.to_string();
+                self.variable_map_key_types.get(&name).cloned()
+            }
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return None;
+                };
+                let callables = if path.qself.is_some() {
+                    self.resolver.resolve_qself_call(path)
+                } else {
+                    self.resolver.resolve_call_path(&path.path)
+                };
+                callables
+                    .iter()
+                    .find_map(|callable| self.resolver.return_map_key_type_from_callable(callable))
+            }
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "as_ref" | "as_mut" | "clone"
+                ) =>
+            {
+                self.expression_map_key_type(&call.receiver)
+            }
+            Expr::Block(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_map_key_type(expr)),
+            Expr::Unsafe(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_map_key_type(expr)),
+            Expr::Reference(reference) => self.expression_map_key_type(&reference.expr),
+            Expr::Paren(paren) => self.expression_map_key_type(&paren.expr),
+            _ => None,
+        }
     }
 
     fn expression_map_value_type(&self, expression: &Expr) -> Option<TypeRef> {
@@ -6821,6 +6869,51 @@ impl<'a> DependencyVisitor<'a> {
             for input in closure.inputs.iter().skip(2) {
                 self.visit_pat(input);
             }
+        }
+        self.visit_expr(&closure.body);
+        self.variables = variables;
+        self.variable_candidates = variable_candidates;
+        self.variable_type_arguments = variable_type_arguments;
+        self.variable_result_ok_types = variable_result_ok_types;
+        self.variable_result_error_types = variable_result_error_types;
+        true
+    }
+
+    fn visit_key_value_payload_closure_method_call(&mut self, call: &ExprMethodCall) -> bool {
+        if call.method != "retain" || call.args.len() != 1 {
+            return false;
+        }
+        let Some(Expr::Closure(closure)) = call.args.first() else {
+            return false;
+        };
+        if closure.inputs.len() < 2 {
+            return false;
+        }
+        let type_arguments = self.expression_type_arguments(&call.receiver);
+        let key_type = self
+            .expression_map_key_type(&call.receiver)
+            .or_else(|| type_arguments.first().cloned());
+        let value_type = self
+            .expression_map_value_type(&call.receiver)
+            .or_else(|| type_arguments.get(1).cloned());
+        let (Some(key_type), Some(value_type)) = (key_type, value_type) else {
+            return false;
+        };
+
+        self.visit_expr(&call.receiver);
+        let variables = self.variables.clone();
+        let variable_candidates = self.variable_candidates.clone();
+        let variable_type_arguments = self.variable_type_arguments.clone();
+        let variable_result_ok_types = self.variable_result_ok_types.clone();
+        let variable_result_error_types = self.variable_result_error_types.clone();
+        if let Some(key_pat) = closure.inputs.first() {
+            self.bind_pattern_type(key_pat, &key_type);
+        }
+        if let Some(value_pat) = closure.inputs.iter().nth(1) {
+            self.bind_pattern_type(value_pat, &value_type);
+        }
+        for input in closure.inputs.iter().skip(2) {
+            self.visit_pat(input);
         }
         self.visit_expr(&closure.body);
         self.variables = variables;
@@ -7657,6 +7750,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             return;
         }
         if self.visit_two_payload_closure_method_call(call) {
+            return;
+        }
+        if self.visit_key_value_payload_closure_method_call(call) {
             return;
         }
         if self.visit_map_or_method_call(call) {
@@ -8889,6 +8985,38 @@ impl Resolver<'_> {
         }
     }
 
+    fn return_map_key_type_from_callable(&self, callable: &CallableId) -> Option<TypeRef> {
+        match callable {
+            CallableId::Free { .. } => {
+                let record = self.project.functions.get(callable)?;
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.map_key_type_from_return_type(&record.item.sig.output)
+            }
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let record = self.project.methods.get(callable)?;
+                let resolver = Resolver {
+                    project: self.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(TypeRef {
+                        package: package.clone(),
+                        type_path: type_path.clone(),
+                    }),
+                };
+                resolver.map_key_type_from_return_type(&record.item.sig.output)
+            }
+        }
+    }
+
     fn closure_argument_input_types(
         &self,
         callable: &CallableId,
@@ -9232,6 +9360,13 @@ impl Resolver<'_> {
         self.map_value_type(ty)
     }
 
+    fn map_key_type_from_return_type(&self, output: &ReturnType) -> Option<TypeRef> {
+        let ReturnType::Type(_, ty) = output else {
+            return None;
+        };
+        self.map_key_type(ty)
+    }
+
     fn result_ok_type(&self, ty: &Type) -> Option<TypeRef> {
         match ty {
             Type::Path(type_path) => {
@@ -9352,6 +9487,34 @@ impl Resolver<'_> {
         }
     }
 
+    fn map_key_type(&self, ty: &Type) -> Option<TypeRef> {
+        match ty {
+            Type::Path(type_path) => {
+                if let Some(key_type) = self.map_key_type_from_path(&type_path.path) {
+                    return Some(key_type);
+                }
+                let alias = self.resolve_type_path(&type_path.path)?;
+                let item = self.resolver_item_for_type(&alias)?;
+                let record = self.project.items.get(&item)?;
+                let Item::Type(type_alias) = &record.item else {
+                    return None;
+                };
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.map_key_type(&type_alias.ty)
+            }
+            Type::Reference(reference) => self.map_key_type(&reference.elem),
+            Type::Group(group) => self.map_key_type(&group.elem),
+            Type::Paren(paren) => self.map_key_type(&paren.elem),
+            _ => None,
+        }
+    }
+
     fn map_value_type_from_path(&self, path: &Path) -> Option<TypeRef> {
         let last = path.segments.last()?;
         if !matches!(
@@ -9372,6 +9535,26 @@ impl Resolver<'_> {
         type_arguments.next()?;
         let value_type = type_arguments.next()?;
         self.resolve_receiver_type(value_type)
+    }
+
+    fn map_key_type_from_path(&self, path: &Path) -> Option<TypeRef> {
+        let last = path.segments.last()?;
+        if !matches!(
+            last.ident.to_string().as_str(),
+            "BTreeMap" | "HashMap" | "IndexMap"
+        ) {
+            return None;
+        }
+        let PathArguments::AngleBracketed(arguments) = &last.arguments else {
+            return None;
+        };
+        let key_type = arguments.args.iter().find_map(|argument| {
+            let GenericArgument::Type(ty) = argument else {
+                return None;
+            };
+            Some(ty)
+        })?;
+        self.resolve_receiver_type(key_type)
     }
 
     fn resolver_item_for_type(&self, type_ref: &TypeRef) -> Option<ItemId> {

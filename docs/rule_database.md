@@ -379,6 +379,16 @@ file.
 | `fixture.slice_sort_unstable_by_prune.support_chain.001` | covered | A checked-in support fixture slices through two-argument `sort_unstable_by(...)` comparator closures while pruning unused key and mutation helpers |
 | `fixture.slice_select_nth_unstable_by_prune.support_chain.001` | covered | A checked-in support fixture slices through `select_nth_unstable_by(index, comparator)`, retaining only the second-argument comparator and live render methods |
 | `fixture.slice_select_nth_unstable_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through `select_nth_unstable_by_key(index, key)`, retaining only the second-argument key closure and live render methods |
+| `fixture.hashmap_retain_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap<K, V>::retain(key, value)`, retaining key and value methods separately while pruning dead support methods |
+| `fixture.btreemap_retain_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::retain(key, value)`, retaining key and value methods separately while pruning dead support methods |
+| `fixture.hashset_retain_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashSet<T>::retain(...)`, retaining only live predicate and render methods |
+| `fixture.btreeset_retain_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::retain(...)`, retaining only live predicate and render methods |
+| `fixture.binaryheap_retain_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap<T>::retain(...)`, retaining only live predicate and render methods |
+| `fixture.vecdeque_retain_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::retain(...)`, retaining only live predicate and render methods |
+| `fixture.vecdeque_make_contiguous_sort_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::make_contiguous().sort_by_key(...)`, preserving slice-view payload typing without retaining dead sort helpers |
+| `fixture.vec_as_slice_iter_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::as_slice().iter().find(...)`, preserving payload typing across slice views |
+| `fixture.vec_as_mut_slice_iter_mut_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::as_mut_slice().iter_mut().map(...)`, preserving mutable payload typing across slice views |
+| `fixture.vec_as_slice_chunks_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::as_slice().chunks(...).map(...)`, preserving nested slice payload typing across slice views |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
