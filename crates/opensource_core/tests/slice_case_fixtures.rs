@@ -7445,6 +7445,282 @@ fn prunes_vecdeque_pop_back_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_hashmap_get_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_get_prune",
+        root_fn: "selected_hashmap_get_report",
+        api_pkg: "hashmap_get_api",
+        model_pkg: "hashmap_get_model",
+        api_fn: "selected_hashmap_get_report",
+        model_fn: "selected_hashmap_get",
+        model_required: &[
+            "HashmapGetKey",
+            "HashmapGetPayload",
+            ".get(&HashmapGetKey::live())",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapGetItem",
+            "dead_hashmap_get",
+            "dead_method",
+            "dead_live_hashmap_get",
+            "dead-hashmap-get",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_get_mut_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_get_mut_prune",
+        root_fn: "selected_hashmap_get_mut_report",
+        api_pkg: "hashmap_get_mut_api",
+        model_pkg: "hashmap_get_mut_model",
+        api_fn: "selected_hashmap_get_mut_report",
+        model_fn: "selected_hashmap_get_mut",
+        model_required: &[
+            "HashmapGetMutKey",
+            "HashmapGetMutPayload",
+            ".get_mut(&HashmapGetMutKey::live())",
+            ".map(|payload| payload.mark_live().render_label())",
+            "pub fn mark_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapGetMutItem",
+            "dead_hashmap_get_mut",
+            "dead_method",
+            "dead_live_hashmap_get_mut",
+            "dead-hashmap-get-mut",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_remove_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_remove_prune",
+        root_fn: "selected_hashmap_remove_report",
+        api_pkg: "hashmap_remove_api",
+        model_pkg: "hashmap_remove_model",
+        api_fn: "selected_hashmap_remove_report",
+        model_fn: "selected_hashmap_remove",
+        model_required: &[
+            "HashmapRemoveKey",
+            "HashmapRemovePayload",
+            ".remove(&HashmapRemoveKey::live())",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapRemoveItem",
+            "dead_hashmap_remove",
+            "dead_method",
+            "dead_live_hashmap_remove",
+            "dead-hashmap-remove",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_values_next_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_values_next_prune",
+        root_fn: "selected_hashmap_values_next_report",
+        api_pkg: "hashmap_values_next_api",
+        model_pkg: "hashmap_values_next_model",
+        api_fn: "selected_hashmap_values_next_report",
+        model_fn: "selected_hashmap_values_next",
+        model_required: &[
+            "HashmapValuesNextKey",
+            "HashmapValuesNextPayload",
+            ".values()",
+            ".next()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapValuesNextItem",
+            "dead_hashmap_values_next",
+            "dead_method",
+            "dead_live_hashmap_values_next",
+            "dead-hashmap-values-next",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_into_values_next_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_into_values_next_prune",
+        root_fn: "selected_hashmap_into_values_next_report",
+        api_pkg: "hashmap_into_values_next_api",
+        model_pkg: "hashmap_into_values_next_model",
+        api_fn: "selected_hashmap_into_values_next_report",
+        model_fn: "selected_hashmap_into_values_next",
+        model_required: &[
+            "HashmapIntoValuesNextKey",
+            "HashmapIntoValuesNextPayload",
+            ".into_values()",
+            ".next()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapIntoValuesNextItem",
+            "dead_hashmap_into_values_next",
+            "dead_method",
+            "dead_live_hashmap_into_values_next",
+            "dead-hashmap-into-values-next",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_get_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_get_prune",
+        root_fn: "selected_btreemap_get_report",
+        api_pkg: "btreemap_get_api",
+        model_pkg: "btreemap_get_model",
+        api_fn: "selected_btreemap_get_report",
+        model_fn: "selected_btreemap_get",
+        model_required: &[
+            "BtreemapGetKey",
+            "BtreemapGetPayload",
+            ".get(&BtreemapGetKey::live())",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapGetItem",
+            "dead_btreemap_get",
+            "dead_method",
+            "dead_live_btreemap_get",
+            "dead-btreemap-get",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_get_mut_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_get_mut_prune",
+        root_fn: "selected_btreemap_get_mut_report",
+        api_pkg: "btreemap_get_mut_api",
+        model_pkg: "btreemap_get_mut_model",
+        api_fn: "selected_btreemap_get_mut_report",
+        model_fn: "selected_btreemap_get_mut",
+        model_required: &[
+            "BtreemapGetMutKey",
+            "BtreemapGetMutPayload",
+            ".get_mut(&BtreemapGetMutKey::live())",
+            ".map(|payload| payload.mark_live().render_label())",
+            "pub fn mark_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapGetMutItem",
+            "dead_btreemap_get_mut",
+            "dead_method",
+            "dead_live_btreemap_get_mut",
+            "dead-btreemap-get-mut",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_remove_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_remove_prune",
+        root_fn: "selected_btreemap_remove_report",
+        api_pkg: "btreemap_remove_api",
+        model_pkg: "btreemap_remove_model",
+        api_fn: "selected_btreemap_remove_report",
+        model_fn: "selected_btreemap_remove",
+        model_required: &[
+            "BtreemapRemoveKey",
+            "BtreemapRemovePayload",
+            ".remove(&BtreemapRemoveKey::live())",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapRemoveItem",
+            "dead_btreemap_remove",
+            "dead_method",
+            "dead_live_btreemap_remove",
+            "dead-btreemap-remove",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_values_last_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_values_last_prune",
+        root_fn: "selected_btreemap_values_last_report",
+        api_pkg: "btreemap_values_last_api",
+        model_pkg: "btreemap_values_last_model",
+        api_fn: "selected_btreemap_values_last_report",
+        model_fn: "selected_btreemap_values_last",
+        model_required: &[
+            "BtreemapValuesLastKey",
+            "BtreemapValuesLastPayload",
+            ".values()",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapValuesLastItem",
+            "dead_btreemap_values_last",
+            "dead_method",
+            "dead_live_btreemap_values_last",
+            "dead-btreemap-values-last",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_into_values_next_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_into_values_next_prune",
+        root_fn: "selected_btreemap_into_values_next_report",
+        api_pkg: "btreemap_into_values_next_api",
+        model_pkg: "btreemap_into_values_next_model",
+        api_fn: "selected_btreemap_into_values_next_report",
+        model_fn: "selected_btreemap_into_values_next",
+        model_required: &[
+            "BtreemapIntoValuesNextKey",
+            "BtreemapIntoValuesNextPayload",
+            ".into_values()",
+            ".next()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapIntoValuesNextItem",
+            "dead_btreemap_into_values_next",
+            "dead_method",
+            "dead_live_btreemap_into_values_next",
+            "dead-btreemap-into-values-next",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

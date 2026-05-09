@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_get_mut_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_get_mut_model = { path = "../btreemap_get_mut_model" }

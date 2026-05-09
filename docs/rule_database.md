@@ -297,6 +297,16 @@ file.
 | `fixture.vecdeque_back_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::back().map(...)` payload typing while pruning dead deque back support |
 | `fixture.vecdeque_pop_front_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::pop_front().map(...)` payload typing while pruning dead deque pop-front support |
 | `fixture.vecdeque_pop_back_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::pop_back().map(...)` payload typing while pruning dead deque pop-back support |
+| `fixture.hashmap_get_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap<K, V>::get(...).map(...)` value payload typing with a local key type while pruning dead hash-map support |
+| `fixture.hashmap_get_mut_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap<K, V>::get_mut(...).map(...)` mutable value payload typing while pruning dead hash-map support |
+| `fixture.hashmap_remove_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap<K, V>::remove(...).map(...)` owned value payload typing while pruning dead hash-map support |
+| `fixture.hashmap_values_next_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap<K, V>::values().next().map(...)` value iterator typing while pruning dead hash-map support |
+| `fixture.hashmap_into_values_next_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap<K, V>::into_values().next().map(...)` owned value iterator typing while pruning dead hash-map support |
+| `fixture.btreemap_get_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::get(...).map(...)` value payload typing with a local key type while pruning dead tree-map support |
+| `fixture.btreemap_get_mut_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::get_mut(...).map(...)` mutable value payload typing while pruning dead tree-map support |
+| `fixture.btreemap_remove_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::remove(...).map(...)` owned value payload typing while pruning dead tree-map support |
+| `fixture.btreemap_values_last_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::values().last().map(...)` value iterator typing while pruning dead tree-map support |
+| `fixture.btreemap_into_values_next_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::into_values().next().map(...)` owned value iterator typing while pruning dead tree-map support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

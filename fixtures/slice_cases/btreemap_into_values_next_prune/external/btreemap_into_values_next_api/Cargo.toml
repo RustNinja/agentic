@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_into_values_next_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_into_values_next_model = { path = "../btreemap_into_values_next_model" }

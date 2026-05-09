@@ -3786,6 +3786,7 @@ struct DependencyVisitor<'a> {
     variables: HashMap<String, TypeRef>,
     variable_candidates: HashMap<String, Vec<TypeRef>>,
     variable_type_arguments: HashMap<String, Vec<TypeRef>>,
+    variable_map_value_types: HashMap<String, TypeRef>,
     variable_result_ok_types: HashMap<String, TypeRef>,
     variable_result_error_types: HashMap<String, TypeRef>,
     local_value_scopes: Vec<BTreeSet<String>>,
@@ -3810,6 +3811,7 @@ impl<'a> DependencyVisitor<'a> {
             variables: HashMap::new(),
             variable_candidates: HashMap::new(),
             variable_type_arguments: HashMap::new(),
+            variable_map_value_types: HashMap::new(),
             variable_result_ok_types: HashMap::new(),
             variable_result_error_types: HashMap::new(),
             local_value_scopes: vec![BTreeSet::new()],
@@ -4177,6 +4179,10 @@ impl<'a> DependencyVisitor<'a> {
             self.variable_type_arguments
                 .insert(name.clone(), type_arguments);
         }
+        if let Some(value_type) = self.resolver.map_value_type(ty) {
+            self.variable_map_value_types
+                .insert(name.clone(), value_type);
+        }
         if let Some(ok_type) = self.resolver.result_ok_type(ty) {
             self.variable_result_ok_types.insert(name.clone(), ok_type);
         }
@@ -4191,6 +4197,10 @@ impl<'a> DependencyVisitor<'a> {
         if !type_arguments.is_empty() {
             self.variable_type_arguments
                 .insert(name.clone(), type_arguments);
+        }
+        if let Some(value_type) = self.expression_map_value_type(expression) {
+            self.variable_map_value_types
+                .insert(name.clone(), value_type);
         }
         if let Some(ok_type) = self.expression_result_ok_type(expression) {
             self.variable_result_ok_types.insert(name.clone(), ok_type);
@@ -6057,6 +6067,15 @@ impl<'a> DependencyVisitor<'a> {
                 }
                 if matches!(
                     call.method.to_string().as_str(),
+                    "values" | "values_mut" | "into_values"
+                ) {
+                    return self
+                        .expression_map_value_type(&call.receiver)
+                        .into_iter()
+                        .collect();
+                }
+                if matches!(
+                    call.method.to_string().as_str(),
                     "as_ref"
                         | "as_mut"
                         | "by_ref"
@@ -6202,7 +6221,22 @@ impl<'a> DependencyVisitor<'a> {
                 }
                 if matches!(
                     call.method.to_string().as_str(),
-                    "first" | "get" | "pop" | "front" | "back" | "pop_front" | "pop_back"
+                    "get" | "get_mut" | "remove"
+                ) {
+                    if let Some(value_type) = self.expression_map_value_type(&call.receiver) {
+                        return Some(value_type);
+                    }
+                }
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "first"
+                        | "get"
+                        | "get_mut"
+                        | "pop"
+                        | "front"
+                        | "back"
+                        | "pop_front"
+                        | "pop_back"
                 ) {
                     if let Some(ok_type) = self.single_expression_type_argument(&call.receiver) {
                         return Some(ok_type);
@@ -6260,6 +6294,43 @@ impl<'a> DependencyVisitor<'a> {
     fn single_expression_type_argument(&self, expression: &Expr) -> Option<TypeRef> {
         let mut type_arguments = self.expression_type_arguments(expression);
         (type_arguments.len() == 1).then(|| type_arguments.remove(0))
+    }
+
+    fn expression_map_value_type(&self, expression: &Expr) -> Option<TypeRef> {
+        match expression {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first()?.ident.to_string();
+                self.variable_map_value_types.get(&name).cloned()
+            }
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return None;
+                };
+                let callables = if path.qself.is_some() {
+                    self.resolver.resolve_qself_call(path)
+                } else {
+                    self.resolver.resolve_call_path(&path.path)
+                };
+                callables.iter().find_map(|callable| {
+                    self.resolver.return_map_value_type_from_callable(callable)
+                })
+            }
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "as_ref" | "as_mut" | "clone"
+                ) =>
+            {
+                self.expression_map_value_type(&call.receiver)
+            }
+            Expr::Block(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_map_value_type(expr)),
+            Expr::Unsafe(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_map_value_type(expr)),
+            Expr::Reference(reference) => self.expression_map_value_type(&reference.expr),
+            Expr::Paren(paren) => self.expression_map_value_type(&paren.expr),
+            _ => None,
+        }
     }
 
     fn expression_result_error_type(&self, expression: &Expr) -> Option<TypeRef> {
@@ -8663,6 +8734,38 @@ impl Resolver<'_> {
         }
     }
 
+    fn return_map_value_type_from_callable(&self, callable: &CallableId) -> Option<TypeRef> {
+        match callable {
+            CallableId::Free { .. } => {
+                let record = self.project.functions.get(callable)?;
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.map_value_type_from_return_type(&record.item.sig.output)
+            }
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let record = self.project.methods.get(callable)?;
+                let resolver = Resolver {
+                    project: self.project,
+                    package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: Some(TypeRef {
+                        package: package.clone(),
+                        type_path: type_path.clone(),
+                    }),
+                };
+                resolver.map_value_type_from_return_type(&record.item.sig.output)
+            }
+        }
+    }
+
     fn closure_argument_input_types(
         &self,
         callable: &CallableId,
@@ -8999,6 +9102,13 @@ impl Resolver<'_> {
         self.result_error_type(ty)
     }
 
+    fn map_value_type_from_return_type(&self, output: &ReturnType) -> Option<TypeRef> {
+        let ReturnType::Type(_, ty) = output else {
+            return None;
+        };
+        self.map_value_type(ty)
+    }
+
     fn result_ok_type(&self, ty: &Type) -> Option<TypeRef> {
         match ty {
             Type::Path(type_path) => {
@@ -9089,6 +9199,56 @@ impl Resolver<'_> {
         type_arguments.next()?;
         let error_type = type_arguments.next()?;
         self.resolve_receiver_type(error_type)
+    }
+
+    fn map_value_type(&self, ty: &Type) -> Option<TypeRef> {
+        match ty {
+            Type::Path(type_path) => {
+                if let Some(value_type) = self.map_value_type_from_path(&type_path.path) {
+                    return Some(value_type);
+                }
+                let alias = self.resolve_type_path(&type_path.path)?;
+                let item = self.resolver_item_for_type(&alias)?;
+                let record = self.project.items.get(&item)?;
+                let Item::Type(type_alias) = &record.item else {
+                    return None;
+                };
+                let resolver = Resolver {
+                    project: self.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                resolver.map_value_type(&type_alias.ty)
+            }
+            Type::Reference(reference) => self.map_value_type(&reference.elem),
+            Type::Group(group) => self.map_value_type(&group.elem),
+            Type::Paren(paren) => self.map_value_type(&paren.elem),
+            _ => None,
+        }
+    }
+
+    fn map_value_type_from_path(&self, path: &Path) -> Option<TypeRef> {
+        let last = path.segments.last()?;
+        if !matches!(
+            last.ident.to_string().as_str(),
+            "BTreeMap" | "HashMap" | "IndexMap"
+        ) {
+            return None;
+        }
+        let PathArguments::AngleBracketed(arguments) = &last.arguments else {
+            return None;
+        };
+        let mut type_arguments = arguments.args.iter().filter_map(|argument| {
+            let GenericArgument::Type(ty) = argument else {
+                return None;
+            };
+            Some(ty)
+        });
+        type_arguments.next()?;
+        let value_type = type_arguments.next()?;
+        self.resolve_receiver_type(value_type)
     }
 
     fn resolver_item_for_type(&self, type_ref: &TypeRef) -> Option<ItemId> {
