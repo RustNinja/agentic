@@ -251,6 +251,12 @@ file.
 | `fixture.option_tuple_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option<(T, U)>` tuple destructuring while pruning dead tuple support |
 | `fixture.option_tuple_struct_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option<TupleStruct>` tuple-struct destructuring while pruning dead tuple-struct support |
 | `fixture.option_enum_named_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option<Enum::Variant { ... }>` named-variant destructuring while pruning dead enum support |
+| `fixture.option_map_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::map_or_else` payload and fallback closures while pruning dead fallback support |
+| `fixture.result_map_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::map_or_else` OK/error closures while pruning dead result fallback support |
+| `fixture.option_unwrap_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::unwrap_or_else` fallback constructors plus downstream receiver methods while pruning dead unwrap support |
+| `fixture.option_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::or_else` fallback constructors plus downstream map payloads while pruning dead option fallback support |
+| `fixture.result_is_ok_and_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::is_ok_and` OK payload predicates while pruning dead OK-check support |
+| `fixture.result_is_err_and_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::is_err_and` error payload predicates while pruning dead error-check support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

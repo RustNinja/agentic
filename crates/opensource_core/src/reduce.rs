@@ -6068,6 +6068,10 @@ impl<'a> DependencyVisitor<'a> {
                         | "into_iter"
                         | "iter"
                         | "iter_mut"
+                        | "ok_or"
+                        | "ok_or_else"
+                        | "or"
+                        | "or_else"
                         | "peekable"
                         | "rev"
                         | "skip_while"
@@ -6149,7 +6153,14 @@ impl<'a> DependencyVisitor<'a> {
                 }
                 if matches!(
                     call.method.to_string().as_str(),
-                    "map_err" | "or_else" | "inspect_err" | "as_ref" | "as_mut"
+                    "map_err"
+                        | "ok_or"
+                        | "ok_or_else"
+                        | "or"
+                        | "or_else"
+                        | "inspect_err"
+                        | "as_ref"
+                        | "as_mut"
                 ) {
                     return self.expression_result_ok_type(&call.receiver);
                 }
@@ -6628,6 +6639,81 @@ impl<'a> DependencyVisitor<'a> {
         self.variable_result_ok_types = variable_result_ok_types;
         self.variable_result_error_types = variable_result_error_types;
         true
+    }
+
+    fn visit_map_or_else_method_call(&mut self, call: &ExprMethodCall) -> bool {
+        if call.method != "map_or_else" || call.args.len() != 2 {
+            return false;
+        }
+        if !self.resolved_methods_for_call(call).is_empty() {
+            return false;
+        }
+        let mut args = call.args.iter();
+        let Some(Expr::Closure(default_closure)) = args.next() else {
+            return false;
+        };
+        let Some(Expr::Closure(payload_closure)) = args.next() else {
+            return false;
+        };
+        let type_arguments = self.expression_type_arguments(&call.receiver);
+        let Some(payload_type) = self
+            .expression_result_ok_type(&call.receiver)
+            .or_else(|| type_arguments.first().cloned())
+            .or_else(|| self.receiver_type(&call.receiver))
+        else {
+            return false;
+        };
+        let error_type = self
+            .expression_result_error_type(&call.receiver)
+            .or_else(|| type_arguments.get(1).cloned());
+
+        self.visit_expr(&call.receiver);
+        if let Some(error_type) = error_type
+            .as_ref()
+            .filter(|_| !default_closure.inputs.is_empty())
+        {
+            self.visit_closure_with_input_types(default_closure, std::slice::from_ref(error_type));
+        } else {
+            self.visit_closure_with_input_types(default_closure, &[]);
+        }
+        self.visit_payload_closure_with_type(
+            &call.receiver,
+            payload_closure,
+            &payload_type,
+            &type_arguments,
+        );
+        true
+    }
+
+    fn visit_payload_closure_with_type(
+        &mut self,
+        receiver: &Expr,
+        closure: &syn::ExprClosure,
+        payload_type: &TypeRef,
+        payload_type_arguments: &[TypeRef],
+    ) {
+        let variables = self.variables.clone();
+        let variable_candidates = self.variable_candidates.clone();
+        let variable_type_arguments = self.variable_type_arguments.clone();
+        let variable_result_ok_types = self.variable_result_ok_types.clone();
+        let variable_result_error_types = self.variable_result_error_types.clone();
+        if let Some(payload_pat) = closure.inputs.first() {
+            self.bind_single_payload_closure_pattern(
+                receiver,
+                payload_pat,
+                payload_type,
+                payload_type_arguments,
+            );
+        }
+        for input in closure.inputs.iter().skip(1) {
+            self.visit_pat(input);
+        }
+        self.visit_expr(&closure.body);
+        self.variables = variables;
+        self.variable_candidates = variable_candidates;
+        self.variable_type_arguments = variable_type_arguments;
+        self.variable_result_ok_types = variable_result_ok_types;
+        self.variable_result_error_types = variable_result_error_types;
     }
 
     fn bind_single_payload_closure_pattern(
@@ -7261,6 +7347,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             return;
         }
         if self.visit_two_payload_closure_method_call(call) {
+            return;
+        }
+        if self.visit_map_or_else_method_call(call) {
             return;
         }
         if self.visit_single_payload_closure_method_call(call) {

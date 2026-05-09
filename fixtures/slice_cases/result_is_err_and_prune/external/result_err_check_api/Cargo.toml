@@ -1,0 +1,7 @@
+[package]
+name = "result_err_check_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+result_err_check_model = { path = "../result_err_check_model" }

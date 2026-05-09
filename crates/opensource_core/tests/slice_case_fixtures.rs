@@ -6219,6 +6219,169 @@ fn prunes_option_enum_named_pattern_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_map_or_else_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_map_or_else_prune",
+        root_fn: "selected_option_map_or_report",
+        api_pkg: "option_map_or_api",
+        model_pkg: "option_map_or_model",
+        api_fn: "selected_option_map_or_report",
+        model_fn: "selected_option_map_or",
+        model_required: &[
+            "OptionMapOrPayload",
+            "OptionMapOrFallback",
+            ".map_or_else(",
+            "OptionMapOrFallback::new(raw).render_missing()",
+            "|payload| payload.render_label()",
+            "pub fn render_missing",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionMapOrItem",
+            "dead_option_map_or",
+            "dead_method",
+            "dead_live_option_map_or",
+            "dead-option-map-or",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_map_or_else_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_map_or_else_prune",
+        root_fn: "selected_result_map_or_report",
+        api_pkg: "result_map_or_api",
+        model_pkg: "result_map_or_model",
+        api_fn: "selected_result_map_or_report",
+        model_fn: "selected_result_map_or",
+        model_required: &[
+            "ResultMapOrPayload",
+            "ResultMapOrError",
+            ".map_or_else(|err| err.render_error(), |payload| payload.render_label())",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultMapOrItem",
+            "dead_result_map_or",
+            "dead_method",
+            "dead_live_result_map_or",
+            "dead-result-map-or",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_unwrap_or_else_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_unwrap_or_else_prune",
+        root_fn: "selected_option_unwrap_report",
+        api_pkg: "option_unwrap_api",
+        model_pkg: "option_unwrap_model",
+        api_fn: "selected_option_unwrap_report",
+        model_fn: "selected_option_unwrap",
+        model_required: &[
+            "OptionUnwrapPayload",
+            ".unwrap_or_else(|| OptionUnwrapPayload::fallback(raw))",
+            ".render_label()",
+            "pub fn fallback",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionUnwrapItem",
+            "dead_option_unwrap",
+            "dead_method",
+            "dead_live_option_unwrap",
+            "dead-option-unwrap",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_or_else_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_or_else_prune",
+        root_fn: "selected_option_or_report",
+        api_pkg: "option_or_api",
+        model_pkg: "option_or_model",
+        api_fn: "selected_option_or_report",
+        model_fn: "selected_option_or",
+        model_required: &[
+            "OptionOrPayload",
+            ".or_else(|| Some(OptionOrPayload::fallback(raw)))",
+            ".map(|payload| payload.render_label())",
+            "pub fn fallback",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionOrItem",
+            "dead_option_or",
+            "dead_method",
+            "dead_live_option_or",
+            "dead-option-or",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_is_ok_and_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_is_ok_and_prune",
+        root_fn: "selected_result_ok_check_report",
+        api_pkg: "result_ok_check_api",
+        model_pkg: "result_ok_check_model",
+        api_fn: "selected_result_ok_check_report",
+        model_fn: "selected_result_ok_check",
+        model_required: &[
+            "ResultOkCheckPayload",
+            ".is_ok_and(|payload| payload.accepts())",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultOkCheckItem",
+            "dead_result_ok_check",
+            "dead_method",
+            "dead_live_result_ok_check",
+            "dead-result-ok-check",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_is_err_and_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_is_err_and_prune",
+        root_fn: "selected_result_err_check_report",
+        api_pkg: "result_err_check_api",
+        model_pkg: "result_err_check_model",
+        api_fn: "selected_result_err_check_report",
+        model_fn: "selected_result_err_check",
+        model_required: &[
+            "ResultErrCheckPayload",
+            "ResultErrCheckError",
+            ".is_err_and(|err| err.is_retryable())",
+            "pub fn is_retryable",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultErrCheckItem",
+            "dead_result_err_check",
+            "dead_method",
+            "dead_live_result_err_check",
+            "dead-result-err-check",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

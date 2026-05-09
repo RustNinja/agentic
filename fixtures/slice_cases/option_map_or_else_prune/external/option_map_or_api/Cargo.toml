@@ -1,0 +1,7 @@
+[package]
+name = "option_map_or_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_map_or_model = { path = "../option_map_or_model" }
