@@ -1,0 +1,4 @@
+[package]
+name = "btreemap_entry_or_insert_with_key_model"
+version = "0.1.0"
+edition = "2021"

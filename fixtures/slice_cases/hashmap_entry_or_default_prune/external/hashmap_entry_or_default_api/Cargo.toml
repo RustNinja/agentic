@@ -1,0 +1,7 @@
+[package]
+name = "hashmap_entry_or_default_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hashmap_entry_or_default_model = { path = "../hashmap_entry_or_default_model" }

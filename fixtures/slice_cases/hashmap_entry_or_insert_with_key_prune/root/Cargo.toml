@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+hashmap_entry_or_insert_with_key_api = { path = "../external/hashmap_entry_or_insert_with_key_api" }

@@ -3787,6 +3787,7 @@ struct DependencyVisitor<'a> {
     variable_candidates: HashMap<String, Vec<TypeRef>>,
     variable_type_arguments: HashMap<String, Vec<TypeRef>>,
     variable_map_value_types: HashMap<String, TypeRef>,
+    variable_entry_value_types: HashMap<String, TypeRef>,
     variable_result_ok_types: HashMap<String, TypeRef>,
     variable_result_error_types: HashMap<String, TypeRef>,
     local_value_scopes: Vec<BTreeSet<String>>,
@@ -3812,6 +3813,7 @@ impl<'a> DependencyVisitor<'a> {
             variable_candidates: HashMap::new(),
             variable_type_arguments: HashMap::new(),
             variable_map_value_types: HashMap::new(),
+            variable_entry_value_types: HashMap::new(),
             variable_result_ok_types: HashMap::new(),
             variable_result_error_types: HashMap::new(),
             local_value_scopes: vec![BTreeSet::new()],
@@ -4200,6 +4202,10 @@ impl<'a> DependencyVisitor<'a> {
         }
         if let Some(value_type) = self.expression_map_value_type(expression) {
             self.variable_map_value_types
+                .insert(name.clone(), value_type);
+        }
+        if let Some(value_type) = self.expression_entry_value_type(expression) {
+            self.variable_entry_value_types
                 .insert(name.clone(), value_type);
         }
         if let Some(ok_type) = self.expression_result_ok_type(expression) {
@@ -4930,6 +4936,12 @@ impl<'a> DependencyVisitor<'a> {
         }
         if matches!(call.method.to_string().as_str(), "remove" | "swap_remove") {
             return self.single_expression_type_argument(&call.receiver);
+        }
+        if matches!(
+            call.method.to_string().as_str(),
+            "or_insert" | "or_insert_with" | "or_insert_with_key" | "or_default"
+        ) {
+            return self.expression_entry_value_type(&call.receiver);
         }
         if matches!(call.method.to_string().as_str(), "as_ref" | "clone") {
             return self.receiver_type(&call.receiver);
@@ -6333,6 +6345,28 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn expression_entry_value_type(&self, expression: &Expr) -> Option<TypeRef> {
+        match expression {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first()?.ident.to_string();
+                self.variable_entry_value_types.get(&name).cloned()
+            }
+            Expr::MethodCall(call) => match call.method.to_string().as_str() {
+                "entry" => self.expression_map_value_type(&call.receiver),
+                "and_modify" => self.expression_entry_value_type(&call.receiver),
+                "as_ref" | "as_mut" | "clone" => self.expression_entry_value_type(&call.receiver),
+                _ => None,
+            },
+            Expr::Block(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_entry_value_type(expr)),
+            Expr::Unsafe(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_entry_value_type(expr)),
+            Expr::Reference(reference) => self.expression_entry_value_type(&reference.expr),
+            Expr::Paren(paren) => self.expression_entry_value_type(&paren.expr),
+            _ => None,
+        }
+    }
+
     fn expression_result_error_type(&self, expression: &Expr) -> Option<TypeRef> {
         match expression {
             Expr::Path(path) if path.path.segments.len() == 1 => {
@@ -7021,6 +7055,7 @@ impl<'a> DependencyVisitor<'a> {
         let method = call.method.to_string();
         let type_arguments = self.expression_type_arguments(&call.receiver);
         match method.as_str() {
+            "and_modify" => self.expression_entry_value_type(&call.receiver),
             "map" | "and_then" | "filter" | "filter_map" | "flat_map" | "find" | "find_map"
             | "for_each" | "inspect" | "is_some_and" | "is_ok_and" | "any" | "all" | "position"
             | "rposition" | "partition" | "retain" | "skip_while" | "sort_by_key"
@@ -7527,6 +7562,11 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        if call.method == "or_default" {
+            if let Some(value_type) = self.expression_entry_value_type(&call.receiver) {
+                self.add_trait_impls_for_type_named(&value_type, "Default");
+            }
+        }
         if self.visit_fold_method_call(call) {
             return;
         }

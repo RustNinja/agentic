@@ -1,0 +1,4 @@
+[package]
+name = "hashmap_entry_or_insert_model"
+version = "0.1.0"
+edition = "2021"

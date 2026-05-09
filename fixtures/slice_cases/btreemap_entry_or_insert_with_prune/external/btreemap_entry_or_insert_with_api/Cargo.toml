@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_entry_or_insert_with_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_entry_or_insert_with_model = { path = "../btreemap_entry_or_insert_with_model" }

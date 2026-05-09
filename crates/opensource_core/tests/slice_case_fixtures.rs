@@ -7721,6 +7721,290 @@ fn prunes_btreemap_into_values_next_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_hashmap_entry_or_insert_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_entry_or_insert_prune",
+        root_fn: "selected_hashmap_entry_or_insert_report",
+        api_pkg: "hashmap_entry_or_insert_api",
+        model_pkg: "hashmap_entry_or_insert_model",
+        api_fn: "selected_hashmap_entry_or_insert_report",
+        model_fn: "selected_hashmap_entry_or_insert",
+        model_required: &[
+            "HashmapEntryOrInsertKey",
+            "HashmapEntryOrInsertPayload",
+            ".entry(HashmapEntryOrInsertKey::live())",
+            ".or_insert(HashmapEntryOrInsertPayload::new(raw))",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapEntryOrInsertItem",
+            "dead_hashmap_entry_or_insert",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_hashmap_entry_or_insert",
+            "dead-hashmap-entry-or-insert",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_entry_or_insert_with_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_entry_or_insert_with_prune",
+        root_fn: "selected_hashmap_entry_or_insert_with_report",
+        api_pkg: "hashmap_entry_or_insert_with_api",
+        model_pkg: "hashmap_entry_or_insert_with_model",
+        api_fn: "selected_hashmap_entry_or_insert_with_report",
+        model_fn: "selected_hashmap_entry_or_insert_with",
+        model_required: &[
+            "HashmapEntryOrInsertWithKey",
+            "HashmapEntryOrInsertWithPayload",
+            ".entry(HashmapEntryOrInsertWithKey::live())",
+            ".or_insert_with(|| HashmapEntryOrInsertWithPayload::new(raw))",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapEntryOrInsertWithItem",
+            "dead_hashmap_entry_or_insert_with",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_hashmap_entry_or_insert_with",
+            "dead-hashmap-entry-or-insert-with",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_entry_and_modify_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_entry_and_modify_prune",
+        root_fn: "selected_hashmap_entry_and_modify_report",
+        api_pkg: "hashmap_entry_and_modify_api",
+        model_pkg: "hashmap_entry_and_modify_model",
+        api_fn: "selected_hashmap_entry_and_modify_report",
+        model_fn: "selected_hashmap_entry_and_modify",
+        model_required: &[
+            "HashmapEntryAndModifyKey",
+            "HashmapEntryAndModifyPayload",
+            ".entry(HashmapEntryAndModifyKey::live())",
+            ".and_modify(|payload| {",
+            "payload.mark_live();",
+            "pub fn mark_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapEntryAndModifyItem",
+            "dead_hashmap_entry_and_modify",
+            "dead_method",
+            "dead_live_hashmap_entry_and_modify",
+            "dead-hashmap-entry-and-modify",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_entry_or_default_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_entry_or_default_prune",
+        root_fn: "selected_hashmap_entry_or_default_report",
+        api_pkg: "hashmap_entry_or_default_api",
+        model_pkg: "hashmap_entry_or_default_model",
+        api_fn: "selected_hashmap_entry_or_default_report",
+        model_fn: "selected_hashmap_entry_or_default",
+        model_required: &[
+            "HashmapEntryOrDefaultKey",
+            "HashmapEntryOrDefaultPayload",
+            ".entry(HashmapEntryOrDefaultKey::live())",
+            ".or_default()",
+            "impl Default for HashmapEntryOrDefaultPayload",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapEntryOrDefaultItem",
+            "dead_hashmap_entry_or_default",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_hashmap_entry_or_default",
+            "dead-hashmap-entry-or-default",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_entry_or_insert_with_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_entry_or_insert_with_key_prune",
+        root_fn: "selected_hashmap_entry_or_insert_with_key_report",
+        api_pkg: "hashmap_entry_or_insert_with_key_api",
+        model_pkg: "hashmap_entry_or_insert_with_key_model",
+        api_fn: "selected_hashmap_entry_or_insert_with_key_report",
+        model_fn: "selected_hashmap_entry_or_insert_with_key",
+        model_required: &[
+            "HashmapEntryOrInsertWithKeyKey",
+            "HashmapEntryOrInsertWithKeyPayload",
+            ".entry(HashmapEntryOrInsertWithKeyKey::live())",
+            ".or_insert_with_key(|_| HashmapEntryOrInsertWithKeyPayload::new(raw))",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapEntryOrInsertWithKeyItem",
+            "dead_hashmap_entry_or_insert_with_key",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_hashmap_entry_or_insert_with_key",
+            "dead-hashmap-entry-or-insert-with-key",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_entry_or_insert_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_entry_or_insert_prune",
+        root_fn: "selected_btreemap_entry_or_insert_report",
+        api_pkg: "btreemap_entry_or_insert_api",
+        model_pkg: "btreemap_entry_or_insert_model",
+        api_fn: "selected_btreemap_entry_or_insert_report",
+        model_fn: "selected_btreemap_entry_or_insert",
+        model_required: &[
+            "BtreemapEntryOrInsertKey",
+            "BtreemapEntryOrInsertPayload",
+            ".entry(BtreemapEntryOrInsertKey::live())",
+            ".or_insert(BtreemapEntryOrInsertPayload::new(raw))",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapEntryOrInsertItem",
+            "dead_btreemap_entry_or_insert",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_btreemap_entry_or_insert",
+            "dead-btreemap-entry-or-insert",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_entry_or_insert_with_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_entry_or_insert_with_prune",
+        root_fn: "selected_btreemap_entry_or_insert_with_report",
+        api_pkg: "btreemap_entry_or_insert_with_api",
+        model_pkg: "btreemap_entry_or_insert_with_model",
+        api_fn: "selected_btreemap_entry_or_insert_with_report",
+        model_fn: "selected_btreemap_entry_or_insert_with",
+        model_required: &[
+            "BtreemapEntryOrInsertWithKey",
+            "BtreemapEntryOrInsertWithPayload",
+            ".entry(BtreemapEntryOrInsertWithKey::live())",
+            ".or_insert_with(|| BtreemapEntryOrInsertWithPayload::new(raw))",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapEntryOrInsertWithItem",
+            "dead_btreemap_entry_or_insert_with",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_btreemap_entry_or_insert_with",
+            "dead-btreemap-entry-or-insert-with",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_entry_and_modify_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_entry_and_modify_prune",
+        root_fn: "selected_btreemap_entry_and_modify_report",
+        api_pkg: "btreemap_entry_and_modify_api",
+        model_pkg: "btreemap_entry_and_modify_model",
+        api_fn: "selected_btreemap_entry_and_modify_report",
+        model_fn: "selected_btreemap_entry_and_modify",
+        model_required: &[
+            "BtreemapEntryAndModifyKey",
+            "BtreemapEntryAndModifyPayload",
+            ".entry(BtreemapEntryAndModifyKey::live())",
+            ".and_modify(|payload| {",
+            "payload.mark_live();",
+            "pub fn mark_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapEntryAndModifyItem",
+            "dead_btreemap_entry_and_modify",
+            "dead_method",
+            "dead_live_btreemap_entry_and_modify",
+            "dead-btreemap-entry-and-modify",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_entry_or_default_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_entry_or_default_prune",
+        root_fn: "selected_btreemap_entry_or_default_report",
+        api_pkg: "btreemap_entry_or_default_api",
+        model_pkg: "btreemap_entry_or_default_model",
+        api_fn: "selected_btreemap_entry_or_default_report",
+        model_fn: "selected_btreemap_entry_or_default",
+        model_required: &[
+            "BtreemapEntryOrDefaultKey",
+            "BtreemapEntryOrDefaultPayload",
+            ".entry(BtreemapEntryOrDefaultKey::live())",
+            ".or_default()",
+            "impl Default for BtreemapEntryOrDefaultPayload",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapEntryOrDefaultItem",
+            "dead_btreemap_entry_or_default",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_btreemap_entry_or_default",
+            "dead-btreemap-entry-or-default",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_entry_or_insert_with_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_entry_or_insert_with_key_prune",
+        root_fn: "selected_btreemap_entry_or_insert_with_key_report",
+        api_pkg: "btreemap_entry_or_insert_with_key_api",
+        model_pkg: "btreemap_entry_or_insert_with_key_model",
+        api_fn: "selected_btreemap_entry_or_insert_with_key_report",
+        model_fn: "selected_btreemap_entry_or_insert_with_key",
+        model_required: &[
+            "BtreemapEntryOrInsertWithKeyKey",
+            "BtreemapEntryOrInsertWithKeyPayload",
+            ".entry(BtreemapEntryOrInsertWithKeyKey::live())",
+            ".or_insert_with_key(|_| BtreemapEntryOrInsertWithKeyPayload::new(raw))",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapEntryOrInsertWithKeyItem",
+            "dead_btreemap_entry_or_insert_with_key",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_btreemap_entry_or_insert_with_key",
+            "dead-btreemap-entry-or-insert-with-key",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,
