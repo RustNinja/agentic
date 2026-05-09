@@ -287,6 +287,16 @@ file.
 | `fixture.iterator_peekable_nth_prune.support_chain.001` | covered | A checked-in support fixture slices through `peekable().nth(...).map(...)` payload pass-through while pruning dead peekable support |
 | `fixture.iterator_fuse_last_prune.support_chain.001` | covered | A checked-in support fixture slices through `fuse().last().map(...)` payload pass-through while pruning dead fuse support |
 | `fixture.iterator_cycle_nth_prune.support_chain.001` | covered | A checked-in support fixture slices through `cycle().nth(...).map(...)` payload pass-through while pruning dead cycle support |
+| `fixture.vec_first_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::first().map(...)` payload typing while pruning dead vector support |
+| `fixture.vec_last_prune.support_chain.001` | covered | A checked-in support fixture slices through collection `last().map(...)` payload typing while pruning dead vector-last support |
+| `fixture.vec_get_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::get(...).map(...)` payload typing while pruning dead indexed support |
+| `fixture.vec_pop_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::pop().map(...)` payload typing while pruning dead pop support |
+| `fixture.vec_remove_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::remove(...).method()` receiver typing while pruning dead remove support |
+| `fixture.vec_swap_remove_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::swap_remove(...).method()` receiver typing while pruning dead swap-remove support |
+| `fixture.vecdeque_front_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::front().map(...)` payload typing while pruning dead deque front support |
+| `fixture.vecdeque_back_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::back().map(...)` payload typing while pruning dead deque back support |
+| `fixture.vecdeque_pop_front_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::pop_front().map(...)` payload typing while pruning dead deque pop-front support |
+| `fixture.vecdeque_pop_back_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::pop_back().map(...)` payload typing while pruning dead deque pop-back support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

@@ -4918,6 +4918,9 @@ impl<'a> DependencyVisitor<'a> {
                 .first()
                 .and_then(|initial| self.infer_expr_type(initial));
         }
+        if matches!(call.method.to_string().as_str(), "remove" | "swap_remove") {
+            return self.single_expression_type_argument(&call.receiver);
+        }
         if matches!(call.method.to_string().as_str(), "as_ref" | "clone") {
             return self.receiver_type(&call.receiver);
         }
@@ -6197,6 +6200,14 @@ impl<'a> DependencyVisitor<'a> {
                         return Some(ok_type.clone());
                     }
                 }
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "first" | "get" | "pop" | "front" | "back" | "pop_front" | "pop_back"
+                ) {
+                    if let Some(ok_type) = self.single_expression_type_argument(&call.receiver) {
+                        return Some(ok_type);
+                    }
+                }
                 if matches!(call.method.to_string().as_str(), "last" | "next" | "nth") {
                     if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
                         return Some(ok_type.clone());
@@ -6244,6 +6255,11 @@ impl<'a> DependencyVisitor<'a> {
             Expr::Paren(paren) => self.expression_result_ok_type(&paren.expr),
             _ => None,
         }
+    }
+
+    fn single_expression_type_argument(&self, expression: &Expr) -> Option<TypeRef> {
+        let mut type_arguments = self.expression_type_arguments(expression);
+        (type_arguments.len() == 1).then(|| type_arguments.remove(0))
     }
 
     fn expression_result_error_type(&self, expression: &Expr) -> Option<TypeRef> {

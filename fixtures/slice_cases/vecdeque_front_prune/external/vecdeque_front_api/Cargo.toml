@@ -1,0 +1,7 @@
+[package]
+name = "vecdeque_front_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vecdeque_front_model = { path = "../vecdeque_front_model" }

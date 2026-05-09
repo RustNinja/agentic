@@ -7187,6 +7187,264 @@ fn prunes_iterator_cycle_nth_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_vec_first_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_first_prune",
+        root_fn: "selected_vec_first_report",
+        api_pkg: "vec_first_api",
+        model_pkg: "vec_first_model",
+        api_fn: "selected_vec_first_report",
+        model_fn: "selected_vec_first",
+        model_required: &[
+            "VecFirstPayload",
+            ".first()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecFirstItem",
+            "dead_vec_first",
+            "dead_method",
+            "dead_live_vec_first",
+            "dead-vec-first",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_last_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_last_prune",
+        root_fn: "selected_vec_last_report",
+        api_pkg: "vec_last_api",
+        model_pkg: "vec_last_model",
+        api_fn: "selected_vec_last_report",
+        model_fn: "selected_vec_last",
+        model_required: &[
+            "VecLastPayload",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecLastItem",
+            "dead_vec_last",
+            "dead_method",
+            "dead_live_vec_last",
+            "dead-vec-last",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_get_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_get_prune",
+        root_fn: "selected_vec_get_report",
+        api_pkg: "vec_get_api",
+        model_pkg: "vec_get_model",
+        api_fn: "selected_vec_get_report",
+        model_fn: "selected_vec_get",
+        model_required: &[
+            "VecGetPayload",
+            ".get(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecGetItem",
+            "dead_vec_get",
+            "dead_method",
+            "dead_live_vec_get",
+            "dead-vec-get",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_pop_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_pop_prune",
+        root_fn: "selected_vec_pop_report",
+        api_pkg: "vec_pop_api",
+        model_pkg: "vec_pop_model",
+        api_fn: "selected_vec_pop_report",
+        model_fn: "selected_vec_pop",
+        model_required: &[
+            "VecPopPayload",
+            ".pop()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecPopItem",
+            "dead_vec_pop",
+            "dead_method",
+            "dead_live_vec_pop",
+            "dead-vec-pop",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_remove_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_remove_prune",
+        root_fn: "selected_vec_remove_report",
+        api_pkg: "vec_remove_api",
+        model_pkg: "vec_remove_model",
+        api_fn: "selected_vec_remove_report",
+        model_fn: "selected_vec_remove",
+        model_required: &[
+            "VecRemovePayload",
+            ".remove(0).render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecRemoveItem",
+            "dead_vec_remove",
+            "dead_method",
+            "dead_live_vec_remove",
+            "dead-vec-remove",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_swap_remove_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_swap_remove_prune",
+        root_fn: "selected_vec_swap_remove_report",
+        api_pkg: "vec_swap_remove_api",
+        model_pkg: "vec_swap_remove_model",
+        api_fn: "selected_vec_swap_remove_report",
+        model_fn: "selected_vec_swap_remove",
+        model_required: &[
+            "VecSwapRemovePayload",
+            ".swap_remove(0).render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecSwapRemoveItem",
+            "dead_vec_swap_remove",
+            "dead_method",
+            "dead_live_vec_swap_remove",
+            "dead-vec-swap-remove",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_front_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_front_prune",
+        root_fn: "selected_vecdeque_front_report",
+        api_pkg: "vecdeque_front_api",
+        model_pkg: "vecdeque_front_model",
+        api_fn: "selected_vecdeque_front_report",
+        model_fn: "selected_vecdeque_front",
+        model_required: &[
+            "VecdequeFrontPayload",
+            ".front()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequeFrontItem",
+            "dead_vecdeque_front",
+            "dead_method",
+            "dead_live_vecdeque_front",
+            "dead-vecdeque-front",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_back_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_back_prune",
+        root_fn: "selected_vecdeque_back_report",
+        api_pkg: "vecdeque_back_api",
+        model_pkg: "vecdeque_back_model",
+        api_fn: "selected_vecdeque_back_report",
+        model_fn: "selected_vecdeque_back",
+        model_required: &[
+            "VecdequeBackPayload",
+            ".back()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequeBackItem",
+            "dead_vecdeque_back",
+            "dead_method",
+            "dead_live_vecdeque_back",
+            "dead-vecdeque-back",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_pop_front_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_pop_front_prune",
+        root_fn: "selected_vecdeque_pop_front_report",
+        api_pkg: "vecdeque_pop_front_api",
+        model_pkg: "vecdeque_pop_front_model",
+        api_fn: "selected_vecdeque_pop_front_report",
+        model_fn: "selected_vecdeque_pop_front",
+        model_required: &[
+            "VecdequePopFrontPayload",
+            ".pop_front()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequePopFrontItem",
+            "dead_vecdeque_pop_front",
+            "dead_method",
+            "dead_live_vecdeque_pop_front",
+            "dead-vecdeque-pop-front",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_pop_back_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_pop_back_prune",
+        root_fn: "selected_vecdeque_pop_back_report",
+        api_pkg: "vecdeque_pop_back_api",
+        model_pkg: "vecdeque_pop_back_model",
+        api_fn: "selected_vecdeque_pop_back_report",
+        model_fn: "selected_vecdeque_pop_back",
+        model_required: &[
+            "VecdequePopBackPayload",
+            ".pop_back()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequePopBackItem",
+            "dead_vecdeque_pop_back",
+            "dead_method",
+            "dead_live_vecdeque_pop_back",
+            "dead-vecdeque-pop-back",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

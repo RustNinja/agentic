@@ -1,0 +1,7 @@
+[package]
+name = "vec_pop_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_pop_model = { path = "../vec_pop_model" }
