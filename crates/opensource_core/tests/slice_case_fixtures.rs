@@ -12966,6 +12966,150 @@ fn prunes_vecdeque_append_iter_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_slice_strip_prefix_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "slice_strip_prefix_iter_prune",
+        "slice_strip_prefix_iter",
+        ".strip_prefix(&prefix)",
+        "DeadSliceStripPrefixIterItem",
+        "dead-slice-strip-prefix-iter",
+        Some(".unwrap_or(&payloads)"),
+    );
+}
+
+#[test]
+fn prunes_slice_strip_suffix_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "slice_strip_suffix_iter_prune",
+        "slice_strip_suffix_iter",
+        ".strip_suffix(&suffix)",
+        "DeadSliceStripSuffixIterItem",
+        "dead-slice-strip-suffix-iter",
+        Some(".unwrap_or(&payloads)"),
+    );
+}
+
+#[test]
+fn prunes_vec_truncate_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "vec_truncate_iter_prune",
+        "vec_truncate_iter",
+        ".truncate(2)",
+        "DeadVecTruncateIterItem",
+        "dead-vec-truncate-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_vec_reverse_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "vec_reverse_iter_prune",
+        "vec_reverse_iter",
+        ".reverse()",
+        "DeadVecReverseIterItem",
+        "dead-vec-reverse-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_vec_rotate_left_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "vec_rotate_left_iter_prune",
+        "vec_rotate_left_iter",
+        ".rotate_left(1)",
+        "DeadVecRotateLeftIterItem",
+        "dead-vec-rotate-left-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_vec_rotate_right_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "vec_rotate_right_iter_prune",
+        "vec_rotate_right_iter",
+        ".rotate_right(1)",
+        "DeadVecRotateRightIterItem",
+        "dead-vec-rotate-right-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_vec_swap_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "vec_swap_iter_prune",
+        "vec_swap_iter",
+        ".swap(0, 1)",
+        "DeadVecSwapIterItem",
+        "dead-vec-swap-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_vec_fill_with_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "vec_fill_with_iter_prune",
+        "vec_fill_with_iter",
+        ".fill_with(||",
+        "DeadVecFillWithIterItem",
+        "dead-vec-fill-with-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_slice_reverse_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "slice_reverse_iter_prune",
+        "slice_reverse_iter",
+        ".reverse()",
+        "DeadSliceReverseIterItem",
+        "dead-slice-reverse-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_slice_rotate_left_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "slice_rotate_left_iter_prune",
+        "slice_rotate_left_iter",
+        ".rotate_left(1)",
+        "DeadSliceRotateLeftIterItem",
+        "dead-slice-rotate-left-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_slice_rotate_right_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "slice_rotate_right_iter_prune",
+        "slice_rotate_right_iter",
+        ".rotate_right(1)",
+        "DeadSliceRotateRightIterItem",
+        "dead-slice-rotate-right-iter",
+        None,
+    );
+}
+
+#[test]
+fn prunes_slice_swap_iter_support_chain_with_default_analyzer() {
+    assert_iter_adapter_support_fixture(
+        "slice_swap_iter_prune",
+        "slice_swap_iter",
+        ".swap(0, 1)",
+        "DeadSliceSwapIterItem",
+        "dead-slice-swap-iter",
+        None,
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,
@@ -12991,6 +13135,50 @@ fn assert_set_algebra_support_fixture(
         "mod dead",
         dead_item,
         dead_fn.as_str(),
+        "dead_method",
+        dead_token,
+    ];
+
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name,
+        root_fn: root_fn.as_str(),
+        api_pkg: api_pkg.as_str(),
+        model_pkg: model_pkg.as_str(),
+        api_fn: api_fn.as_str(),
+        model_fn: model_fn.as_str(),
+        model_required: &model_required,
+        model_absent: &model_absent,
+    });
+}
+
+fn assert_iter_adapter_support_fixture(
+    fixture_name: &str,
+    stem: &str,
+    operation: &str,
+    dead_item: &str,
+    dead_token: &str,
+    extra_operation: Option<&str>,
+) {
+    let root_fn = format!("selected_{stem}_report");
+    let api_pkg = format!("{stem}_api");
+    let model_pkg = format!("{stem}_model");
+    let api_fn = format!("selected_{stem}_report");
+    let model_fn = format!("selected_{stem}");
+    let dead_fn = format!("dead_{stem}");
+    let mut model_required = vec![
+        operation,
+        ".iter()",
+        ".map(|payload| payload.render_label())",
+        "pub fn render_label",
+    ];
+    if let Some(extra_operation) = extra_operation {
+        model_required.push(extra_operation);
+    }
+    let model_absent = [
+        "mod dead",
+        dead_item,
+        dead_fn.as_str(),
+        "pub fn bump_and_render",
         "dead_method",
         dead_token,
     ];

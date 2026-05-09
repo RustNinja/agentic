@@ -6209,9 +6209,14 @@ impl<'a> DependencyVisitor<'a> {
                         | "splitn"
                         | "split_off"
                         | "step_by"
+                        | "strip_prefix"
+                        | "strip_suffix"
                         | "symmetric_difference"
                         | "take_while"
                         | "union"
+                        | "unwrap_or"
+                        | "unwrap_or_default"
+                        | "unwrap_or_else"
                         | "windows"
                 ) {
                     return self.expression_type_arguments(&call.receiver);
