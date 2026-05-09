@@ -1,0 +1,4 @@
+[package]
+name = "iterator_map_while_result_ok_model"
+version = "0.1.0"
+edition = "2021"

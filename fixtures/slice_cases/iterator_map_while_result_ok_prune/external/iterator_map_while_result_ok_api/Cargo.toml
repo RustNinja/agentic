@@ -1,0 +1,7 @@
+[package]
+name = "iterator_map_while_result_ok_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_map_while_result_ok_model = { path = "../iterator_map_while_result_ok_model" }

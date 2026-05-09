@@ -1,0 +1,7 @@
+[package]
+name = "option_zip_tuple_render_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_zip_tuple_render_model = { path = "../option_zip_tuple_render_model" }
