@@ -5637,6 +5637,144 @@ fn prunes_result_or_else_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_filter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_filter_prune",
+        root_fn: "selected_option_filter_report",
+        api_pkg: "option_filter_api",
+        model_pkg: "option_filter_model",
+        api_fn: "selected_option_filter_report",
+        model_fn: "selected_option_filter",
+        model_required: &[
+            "OptionFilterPayload",
+            ".filter(|payload| payload.accepts())",
+            ".map(|payload| payload.render_label())",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionFilterItem",
+            "dead_option_filter",
+            "dead_method",
+            "dead_live_option_filter",
+            "dead-option-filter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_ok_or_else_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_ok_or_else_prune",
+        root_fn: "selected_option_ok_report",
+        api_pkg: "option_ok_api",
+        model_pkg: "option_ok_model",
+        api_fn: "selected_option_ok_report",
+        model_fn: "selected_option_ok",
+        model_required: &[
+            "OptionOkPayload",
+            "OptionOkError",
+            ".ok_or_else(|| OptionOkError::new(raw))",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionOkItem",
+            "dead_option_ok",
+            "dead_method",
+            "dead_live_option_ok",
+            "dead-option-ok",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_as_ref_map_prune",
+        root_fn: "selected_option_ref_report",
+        api_pkg: "option_ref_api",
+        model_pkg: "option_ref_model",
+        api_fn: "selected_option_ref_report",
+        model_fn: "selected_option_ref",
+        model_required: &[
+            "OptionRefPayload",
+            ".as_ref()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionRefItem",
+            "dead_option_ref",
+            "dead_method",
+            "dead_live_option_ref",
+            "dead-option-ref",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_and_then_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_and_then_prune",
+        root_fn: "selected_result_and_report",
+        api_pkg: "result_and_api",
+        model_pkg: "result_and_model",
+        api_fn: "selected_result_and_report",
+        model_fn: "selected_result_and",
+        model_required: &[
+            "ResultAndPayload",
+            "ResultAndError",
+            ".and_then(|payload| payload.expand())",
+            "pub fn expand",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultAndItem",
+            "dead_result_and",
+            "dead_method",
+            "dead_live_result_and",
+            "dead-result-and",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_inspect_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_inspect_prune",
+        root_fn: "selected_result_inspect_ok_report",
+        api_pkg: "result_inspect_ok_api",
+        model_pkg: "result_inspect_ok_model",
+        api_fn: "selected_result_inspect_ok_report",
+        model_fn: "selected_result_inspect_ok",
+        model_required: &[
+            "ResultInspectOkPayload",
+            "ResultInspectOkError",
+            ".inspect(|payload| audit.push(payload.audit()))",
+            ".map(|payload| payload.render_label())",
+            "pub fn audit",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultInspectOkItem",
+            "dead_result_inspect_ok",
+            "dead_method",
+            "dead_live_result_inspect_ok",
+            "dead-result-inspect-ok",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

@@ -230,6 +230,11 @@ file.
 | `fixture.option_inspect_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::inspect` side-effect closures plus downstream map payloads while pruning dead inspect support |
 | `fixture.result_inspect_err_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::inspect_err` error-payload closures plus OK mapping while pruning dead result support |
 | `fixture.result_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::or_else` recovery closures plus recovered payload mapping while pruning dead fallback support |
+| `fixture.option_filter_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::filter` predicate payload closures plus downstream map payloads while pruning dead filter support |
+| `fixture.option_ok_or_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::ok_or_else` error constructors plus result mapping while pruning dead option-to-result support |
+| `fixture.option_as_ref_map_prune.support_chain.001` | covered | A checked-in support fixture slices through borrowed `Option::as_ref().map(...)` payload closures while pruning dead borrowed-option support |
+| `fixture.result_and_then_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::and_then` payload closures and shared error fallbacks while pruning dead result chaining support |
+| `fixture.result_inspect_prune.support_chain.001` | covered | A checked-in support fixture slices through OK-side `Result::inspect` side-effect closures plus downstream map payloads while pruning dead inspect support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

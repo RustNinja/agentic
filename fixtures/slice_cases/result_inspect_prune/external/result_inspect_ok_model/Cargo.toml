@@ -1,0 +1,4 @@
+[package]
+name = "result_inspect_ok_model"
+version = "0.1.0"
+edition = "2021"
