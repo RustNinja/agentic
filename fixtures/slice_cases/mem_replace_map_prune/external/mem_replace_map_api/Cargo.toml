@@ -1,0 +1,7 @@
+[package]
+name = "mem_replace_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mem_replace_map_model = { path = "../mem_replace_map_model" }

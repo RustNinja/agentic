@@ -11572,6 +11572,319 @@ fn prunes_phantomdata_surface_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_weak_upgrade_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "weak_upgrade_map_prune",
+        root_fn: "selected_weak_upgrade_map_report",
+        api_pkg: "weak_upgrade_map_api",
+        model_pkg: "weak_upgrade_map_model",
+        api_fn: "selected_weak_upgrade_map_report",
+        model_fn: "selected_weak_upgrade_map",
+        model_required: &[
+            "use std::sync::{Arc, Weak};",
+            "Arc::downgrade",
+            ".upgrade()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadWeakUpgradeMapItem",
+            "dead_weak_upgrade_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-weak-upgrade-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_rc_weak_upgrade_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "rc_weak_upgrade_map_prune",
+        root_fn: "selected_rc_weak_upgrade_map_report",
+        api_pkg: "rc_weak_upgrade_map_api",
+        model_pkg: "rc_weak_upgrade_map_model",
+        api_fn: "selected_rc_weak_upgrade_map_report",
+        model_fn: "selected_rc_weak_upgrade_map",
+        model_required: &[
+            "use std::rc::{Rc, Weak};",
+            "Rc::downgrade",
+            ".upgrade()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRcWeakUpgradeMapItem",
+            "dead_rc_weak_upgrade_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-rc-weak-upgrade-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_take_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_take_map_prune",
+        root_fn: "selected_option_take_map_report",
+        api_pkg: "option_take_map_api",
+        model_pkg: "option_take_map_model",
+        api_fn: "selected_option_take_map_report",
+        model_fn: "selected_option_take_map",
+        model_required: &[
+            "pub struct OptionTakeMapSlot",
+            ".take()",
+            "pub fn take_render",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionTakeMapItem",
+            "dead_option_take_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_slot_method",
+            "dead-option-take-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_get_or_insert_with_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_get_or_insert_with_map_prune",
+        root_fn: "selected_option_get_or_insert_with_map_report",
+        api_pkg: "option_get_or_insert_with_map_api",
+        model_pkg: "option_get_or_insert_with_map_model",
+        api_fn: "selected_option_get_or_insert_with_map_report",
+        model_fn: "selected_option_get_or_insert_with_map",
+        model_required: &[
+            "pub struct OptionGetOrInsertWithMapSlot",
+            ".get_or_insert_with(",
+            "pub fn ensure_render",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionGetOrInsertWithMapItem",
+            "dead_option_get_or_insert_with_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_slot_method",
+            "dead-option-get-or-insert-with-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_insert_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_insert_map_prune",
+        root_fn: "selected_option_insert_map_report",
+        api_pkg: "option_insert_map_api",
+        model_pkg: "option_insert_map_model",
+        api_fn: "selected_option_insert_map_report",
+        model_fn: "selected_option_insert_map",
+        model_required: &[
+            "pub struct OptionInsertMapSlot",
+            ".insert(",
+            "pub fn insert_render",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionInsertMapItem",
+            "dead_option_insert_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_slot_method",
+            "dead-option-insert-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_mem_take_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "mem_take_map_prune",
+        root_fn: "selected_mem_take_map_report",
+        api_pkg: "mem_take_map_api",
+        model_pkg: "mem_take_map_model",
+        api_fn: "selected_mem_take_map_report",
+        model_fn: "selected_mem_take_map",
+        model_required: &[
+            "use std::mem;",
+            "mem::take(&mut payload)",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMemTakeMapItem",
+            "dead_mem_take_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-mem-take-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_mem_replace_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "mem_replace_map_prune",
+        root_fn: "selected_mem_replace_map_report",
+        api_pkg: "mem_replace_map_api",
+        model_pkg: "mem_replace_map_model",
+        api_fn: "selected_mem_replace_map_report",
+        model_fn: "selected_mem_replace_map",
+        model_required: &[
+            "use std::mem;",
+            "mem::replace(&mut payload",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMemReplaceMapItem",
+            "dead_mem_replace_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-mem-replace-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_cell_replace_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "cell_replace_map_prune",
+        root_fn: "selected_cell_replace_map_report",
+        api_pkg: "cell_replace_map_api",
+        model_pkg: "cell_replace_map_model",
+        api_fn: "selected_cell_replace_map_report",
+        model_fn: "selected_cell_replace_map",
+        model_required: &[
+            "use std::cell::Cell;",
+            "Cell::new",
+            ".replace(",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCellReplaceMapItem",
+            "dead_cell_replace_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-cell-replace-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_refcell_replace_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "refcell_replace_map_prune",
+        root_fn: "selected_refcell_replace_map_report",
+        api_pkg: "refcell_replace_map_api",
+        model_pkg: "refcell_replace_map_model",
+        api_fn: "selected_refcell_replace_map_report",
+        model_fn: "selected_refcell_replace_map",
+        model_required: &[
+            "use std::cell::RefCell;",
+            "RefCell::new",
+            ".replace(",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRefCellReplaceMapItem",
+            "dead_refcell_replace_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-refcell-replace-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_once_lock_get_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "once_lock_get_map_prune",
+        root_fn: "selected_once_lock_get_map_report",
+        api_pkg: "once_lock_get_map_api",
+        model_pkg: "once_lock_get_map_model",
+        api_fn: "selected_once_lock_get_map_report",
+        model_fn: "selected_once_lock_get_map",
+        model_required: &[
+            "use std::sync::OnceLock;",
+            "OnceLock::new",
+            ".get()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOnceLockGetMapItem",
+            "dead_once_lock_get_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-once-lock-get-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iter_from_fn_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iter_from_fn_map_prune",
+        root_fn: "selected_iter_from_fn_map_report",
+        api_pkg: "iter_from_fn_map_api",
+        model_pkg: "iter_from_fn_map_model",
+        api_fn: "selected_iter_from_fn_map_report",
+        model_fn: "selected_iter_from_fn_map",
+        model_required: &[
+            "use std::iter;",
+            "iter::from_fn",
+            ".next()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadIterFromFnMapItem",
+            "dead_iter_from_fn_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-iter-from-fn-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iter_successors_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iter_successors_map_prune",
+        root_fn: "selected_iter_successors_map_report",
+        api_pkg: "iter_successors_map_api",
+        model_pkg: "iter_successors_map_model",
+        api_fn: "selected_iter_successors_map_report",
+        model_fn: "selected_iter_successors_map",
+        model_required: &[
+            "use std::iter;",
+            "iter::successors",
+            ".next()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadIterSuccessorsMapItem",
+            "dead_iter_successors_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-iter-successors-map",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

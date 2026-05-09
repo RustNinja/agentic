@@ -4351,13 +4351,16 @@ impl<'a> DependencyVisitor<'a> {
                 .resolver
                 .type_from_value_path(&path.path)
                 .or_else(|| self.resolver.resolve_type_path(&path.path)),
-            Expr::Call(call) => self.wrapper_constructor_arg_type(call).or_else(|| {
-                if let Expr::Path(path) = call.func.as_ref() {
-                    self.resolver.type_from_expr_path_call(path)
-                } else {
-                    None
-                }
-            }),
+            Expr::Call(call) => self
+                .wrapper_constructor_arg_type(call)
+                .or_else(|| self.std_mem_return_type(call))
+                .or_else(|| {
+                    if let Expr::Path(path) = call.func.as_ref() {
+                        self.resolver.type_from_expr_path_call(path)
+                    } else {
+                        None
+                    }
+                }),
             Expr::MethodCall(call) => self.method_call_return_type(call),
             Expr::Try(expr) => self
                 .expression_type_arguments(&expr.expr)
@@ -4399,11 +4402,13 @@ impl<'a> DependencyVisitor<'a> {
             }
             Expr::Call(call) => {
                 if let Some(type_ref) = self.wrapper_constructor_arg_type(call).or_else(|| {
-                    if let Expr::Path(path) = call.func.as_ref() {
-                        self.resolver.type_from_expr_path_call(path)
-                    } else {
-                        None
-                    }
+                    self.std_mem_return_type(call).or_else(|| {
+                        if let Expr::Path(path) = call.func.as_ref() {
+                            self.resolver.type_from_expr_path_call(path)
+                        } else {
+                            None
+                        }
+                    })
                 }) {
                     candidates.extend(self.resolver.type_ref_candidates(&type_ref));
                 }
@@ -4892,13 +4897,16 @@ impl<'a> DependencyVisitor<'a> {
 
     fn infer_expr_type(&self, expression: &Expr) -> Option<TypeRef> {
         match expression {
-            Expr::Call(call) => self.wrapper_constructor_arg_type(call).or_else(|| {
-                if let Expr::Path(path) = call.func.as_ref() {
-                    self.resolver.type_from_expr_path_call(path)
-                } else {
-                    None
-                }
-            }),
+            Expr::Call(call) => self
+                .wrapper_constructor_arg_type(call)
+                .or_else(|| self.std_mem_return_type(call))
+                .or_else(|| {
+                    if let Expr::Path(path) = call.func.as_ref() {
+                        self.resolver.type_from_expr_path_call(path)
+                    } else {
+                        None
+                    }
+                }),
             Expr::MethodCall(call) => self.method_call_return_type(call),
             Expr::Try(expr) => self
                 .expression_type_arguments(&expr.expr)
@@ -5093,6 +5101,32 @@ impl<'a> DependencyVisitor<'a> {
         call.args
             .first()
             .and_then(|argument| self.infer_expr_type(argument))
+    }
+
+    fn std_mem_return_type(&self, call: &ExprCall) -> Option<TypeRef> {
+        let Expr::Path(path) = call.func.as_ref() else {
+            return None;
+        };
+        match std_mem_return_function(&path.path)?.as_str() {
+            "take" => call.args.first().and_then(|argument| {
+                self.receiver_type(argument)
+                    .or_else(|| self.infer_expr_type(argument))
+            }),
+            "replace" => call
+                .args
+                .first()
+                .and_then(|argument| {
+                    self.receiver_type(argument)
+                        .or_else(|| self.infer_expr_type(argument))
+                })
+                .or_else(|| {
+                    call.args
+                        .iter()
+                        .nth(1)
+                        .and_then(|argument| self.infer_expr_type(argument))
+                }),
+            _ => None,
+        }
     }
 
     fn add_expected_parse_types_from_return(&mut self, output: &ReturnType) {
@@ -10929,6 +10963,22 @@ fn path_segments(path: &Path) -> Vec<String> {
         .iter()
         .map(|segment| segment.ident.to_string())
         .collect()
+}
+
+fn std_mem_return_function(path: &Path) -> Option<String> {
+    let segments = path_segments(path);
+    let function = segments.last()?;
+    if !matches!(function.as_str(), "take" | "replace") {
+        return None;
+    }
+    let prefix = &segments[..segments.len().saturating_sub(1)];
+    if matches!(prefix, [module] if module == "mem")
+        || matches!(prefix, [root, module] if matches!(root.as_str(), "std" | "core") && module == "mem")
+    {
+        Some(function.clone())
+    } else {
+        None
+    }
 }
 
 fn generic_parameter_name_from_type(ty: &Type) -> Option<String> {

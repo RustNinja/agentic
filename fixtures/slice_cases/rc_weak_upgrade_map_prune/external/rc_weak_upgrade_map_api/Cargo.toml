@@ -1,0 +1,7 @@
+[package]
+name = "rc_weak_upgrade_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rc_weak_upgrade_map_model = { path = "../rc_weak_upgrade_map_model" }
