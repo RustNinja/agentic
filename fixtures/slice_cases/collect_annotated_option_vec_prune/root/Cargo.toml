@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+collect_annotated_option_vec_api = { path = "../external/collect_annotated_option_vec_api" }
+opensourced = { path = "../../../../crates/opensourced" }

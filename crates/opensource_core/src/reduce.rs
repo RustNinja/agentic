@@ -4178,7 +4178,7 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn insert_variable_type_data_from_type(&mut self, name: String, ty: &Type) {
-        let type_arguments = self.resolver.type_argument_refs_in_type(ty);
+        let type_arguments = self.resolver.project_type_argument_refs_in_type(ty);
         if !type_arguments.is_empty() {
             self.variable_type_arguments
                 .insert(name.clone(), type_arguments);
@@ -6606,97 +6606,10 @@ impl<'a> DependencyVisitor<'a> {
             let GenericArgument::Type(ty) = argument else {
                 continue;
             };
-            self.collect_project_turbofish_type_arguments(ty, &mut type_refs);
+            type_refs.extend(self.resolver.project_type_argument_refs_in_type(ty));
         }
         dedup_type_refs_preserve_order(&mut type_refs);
         type_refs
-    }
-
-    fn collect_project_turbofish_type_arguments(&self, ty: &Type, type_refs: &mut Vec<TypeRef>) {
-        match ty {
-            Type::Path(type_path) => {
-                for segment in &type_path.path.segments {
-                    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-                        continue;
-                    };
-                    for argument in &arguments.args {
-                        let GenericArgument::Type(ty) = argument else {
-                            continue;
-                        };
-                        if let Some(type_ref) = self.resolver.resolve_receiver_type(ty) {
-                            if self.resolver.resolver_item_for_type(&type_ref).is_some() {
-                                type_refs.push(type_ref);
-                            }
-                        }
-                        self.collect_project_turbofish_type_arguments(ty, type_refs);
-                    }
-                }
-            }
-            Type::ImplTrait(impl_trait) => {
-                for bound in &impl_trait.bounds {
-                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
-                        continue;
-                    };
-                    self.collect_project_path_argument_types(&trait_bound.path, type_refs);
-                }
-            }
-            Type::TraitObject(trait_object) => {
-                for bound in &trait_object.bounds {
-                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
-                        continue;
-                    };
-                    self.collect_project_path_argument_types(&trait_bound.path, type_refs);
-                }
-            }
-            Type::Reference(reference) => {
-                self.collect_project_turbofish_type_arguments(&reference.elem, type_refs)
-            }
-            Type::Ptr(pointer) => {
-                self.collect_project_turbofish_type_arguments(&pointer.elem, type_refs)
-            }
-            Type::Slice(slice) => {
-                self.collect_project_turbofish_type_arguments(&slice.elem, type_refs)
-            }
-            Type::Array(array) => {
-                self.collect_project_turbofish_type_arguments(&array.elem, type_refs)
-            }
-            Type::Group(group) => {
-                self.collect_project_turbofish_type_arguments(&group.elem, type_refs)
-            }
-            Type::Paren(paren) => {
-                self.collect_project_turbofish_type_arguments(&paren.elem, type_refs)
-            }
-            Type::Tuple(tuple) => {
-                for elem in &tuple.elems {
-                    if let Some(type_ref) = self.resolver.resolve_receiver_type(elem) {
-                        if self.resolver.resolver_item_for_type(&type_ref).is_some() {
-                            type_refs.push(type_ref);
-                        }
-                    }
-                    self.collect_project_turbofish_type_arguments(elem, type_refs);
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn collect_project_path_argument_types(&self, path: &Path, type_refs: &mut Vec<TypeRef>) {
-        for segment in &path.segments {
-            let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
-                continue;
-            };
-            for argument in &arguments.args {
-                let GenericArgument::Type(ty) = argument else {
-                    continue;
-                };
-                if let Some(type_ref) = self.resolver.resolve_receiver_type(ty) {
-                    if self.resolver.resolver_item_for_type(&type_ref).is_some() {
-                        type_refs.push(type_ref);
-                    }
-                }
-                self.collect_project_turbofish_type_arguments(ty, type_refs);
-            }
-        }
     }
 
     fn add_closure_arg_dependencies(
@@ -9802,10 +9715,7 @@ impl Resolver<'_> {
         let ReturnType::Type(_, ty) = output else {
             return Vec::new();
         };
-        let mut type_refs = Vec::new();
-        self.collect_type_arguments(ty, &mut type_refs);
-        dedup_type_refs_preserve_order(&mut type_refs);
-        type_refs
+        self.project_type_argument_refs_in_type(ty)
     }
 
     fn type_refs_in_type(&self, ty: &Type) -> Vec<TypeRef> {
@@ -9813,10 +9723,91 @@ impl Resolver<'_> {
     }
 
     fn type_argument_refs_in_type(&self, ty: &Type) -> Vec<TypeRef> {
+        self.project_type_argument_refs_in_type(ty)
+    }
+
+    fn project_type_argument_refs_in_type(&self, ty: &Type) -> Vec<TypeRef> {
         let mut type_refs = Vec::new();
-        self.collect_type_arguments(ty, &mut type_refs);
+        self.collect_project_type_arguments(ty, &mut type_refs);
         dedup_type_refs_preserve_order(&mut type_refs);
         type_refs
+    }
+
+    fn collect_project_type_arguments(&self, ty: &Type, type_refs: &mut Vec<TypeRef>) {
+        match ty {
+            Type::Path(type_path) => {
+                for segment in &type_path.path.segments {
+                    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                        continue;
+                    };
+                    for argument in &arguments.args {
+                        let GenericArgument::Type(ty) = argument else {
+                            continue;
+                        };
+                        if let Some(type_ref) = self.resolve_receiver_type(ty) {
+                            if self.resolver_item_for_type(&type_ref).is_some() {
+                                type_refs.push(type_ref);
+                            }
+                        }
+                        self.collect_project_type_arguments(ty, type_refs);
+                    }
+                }
+            }
+            Type::ImplTrait(impl_trait) => {
+                for bound in &impl_trait.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_project_path_argument_types(&trait_bound.path, type_refs);
+                }
+            }
+            Type::TraitObject(trait_object) => {
+                for bound in &trait_object.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_project_path_argument_types(&trait_bound.path, type_refs);
+                }
+            }
+            Type::Reference(reference) => {
+                self.collect_project_type_arguments(&reference.elem, type_refs)
+            }
+            Type::Ptr(pointer) => self.collect_project_type_arguments(&pointer.elem, type_refs),
+            Type::Slice(slice) => self.collect_project_type_arguments(&slice.elem, type_refs),
+            Type::Array(array) => self.collect_project_type_arguments(&array.elem, type_refs),
+            Type::Group(group) => self.collect_project_type_arguments(&group.elem, type_refs),
+            Type::Paren(paren) => self.collect_project_type_arguments(&paren.elem, type_refs),
+            Type::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    if let Some(type_ref) = self.resolve_receiver_type(elem) {
+                        if self.resolver_item_for_type(&type_ref).is_some() {
+                            type_refs.push(type_ref);
+                        }
+                    }
+                    self.collect_project_type_arguments(elem, type_refs);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_project_path_argument_types(&self, path: &Path, type_refs: &mut Vec<TypeRef>) {
+        for segment in &path.segments {
+            let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                continue;
+            };
+            for argument in &arguments.args {
+                let GenericArgument::Type(ty) = argument else {
+                    continue;
+                };
+                if let Some(type_ref) = self.resolve_receiver_type(ty) {
+                    if self.resolver_item_for_type(&type_ref).is_some() {
+                        type_refs.push(type_ref);
+                    }
+                }
+                self.collect_project_type_arguments(ty, type_refs);
+            }
+        }
     }
 
     fn collect_type_arguments(&self, ty: &Type, type_refs: &mut Vec<TypeRef>) {

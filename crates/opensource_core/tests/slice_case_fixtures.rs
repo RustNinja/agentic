@@ -10471,6 +10471,322 @@ fn prunes_collect_option_vec_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_collect_annotated_hashmap_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_hashmap_prune",
+        root_fn: "selected_collect_annotated_hashmap_report",
+        api_pkg: "collect_annotated_hashmap_api",
+        model_pkg: "collect_annotated_hashmap_model",
+        api_fn: "selected_collect_annotated_hashmap_report",
+        model_fn: "selected_collect_annotated_hashmap",
+        model_required: &[
+            "let collected: HashMap<",
+            "CollectAnnotatedHashMapKey::from_source",
+            "CollectAnnotatedHashMapItem::from_source",
+            ".values()",
+            "pub fn key_seed",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedHashMapItem",
+            "dead_collect_annotated_hashmap",
+            "pub fn is_live_source",
+            "pub fn render_key",
+            "dead_key_method",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-hashmap",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_btreemap_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_btreemap_prune",
+        root_fn: "selected_collect_annotated_btreemap_report",
+        api_pkg: "collect_annotated_btreemap_api",
+        model_pkg: "collect_annotated_btreemap_model",
+        api_fn: "selected_collect_annotated_btreemap_report",
+        model_fn: "selected_collect_annotated_btreemap",
+        model_required: &[
+            "let collected: BTreeMap<",
+            "CollectAnnotatedBTreeMapKey::from_source",
+            "CollectAnnotatedBTreeMapItem::from_source",
+            ".values()",
+            "pub fn key_seed",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedBTreeMapItem",
+            "dead_collect_annotated_btreemap",
+            "pub fn is_live_source",
+            "pub fn render_key",
+            "dead_key_method",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-btreemap",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_hashset_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_hashset_prune",
+        root_fn: "selected_collect_annotated_hashset_report",
+        api_pkg: "collect_annotated_hashset_api",
+        model_pkg: "collect_annotated_hashset_model",
+        api_fn: "selected_collect_annotated_hashset_report",
+        model_fn: "selected_collect_annotated_hashset",
+        model_required: &[
+            "let collected: HashSet<",
+            ".filter(|source| source.is_live_source())",
+            "CollectAnnotatedHashSetItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedHashSetItem",
+            "dead_collect_annotated_hashset",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-hashset",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_btreeset_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_btreeset_prune",
+        root_fn: "selected_collect_annotated_btreeset_report",
+        api_pkg: "collect_annotated_btreeset_api",
+        model_pkg: "collect_annotated_btreeset_model",
+        api_fn: "selected_collect_annotated_btreeset_report",
+        model_fn: "selected_collect_annotated_btreeset",
+        model_required: &[
+            "let collected: BTreeSet<",
+            ".filter(|source| source.is_live_source())",
+            "CollectAnnotatedBTreeSetItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedBTreeSetItem",
+            "dead_collect_annotated_btreeset",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-btreeset",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_binaryheap_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_binaryheap_prune",
+        root_fn: "selected_collect_annotated_binaryheap_report",
+        api_pkg: "collect_annotated_binaryheap_api",
+        model_pkg: "collect_annotated_binaryheap_model",
+        api_fn: "selected_collect_annotated_binaryheap_report",
+        model_fn: "selected_collect_annotated_binaryheap",
+        model_required: &[
+            "let collected: BinaryHeap<",
+            ".filter(|source| source.is_live_source())",
+            "CollectAnnotatedBinaryHeapItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedBinaryHeapItem",
+            "dead_collect_annotated_binaryheap",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-binaryheap",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_vecdeque_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_vecdeque_prune",
+        root_fn: "selected_collect_annotated_vecdeque_report",
+        api_pkg: "collect_annotated_vecdeque_api",
+        model_pkg: "collect_annotated_vecdeque_model",
+        api_fn: "selected_collect_annotated_vecdeque_report",
+        model_fn: "selected_collect_annotated_vecdeque",
+        model_required: &[
+            "let collected: VecDeque<",
+            ".filter(|source| source.is_live_source())",
+            "CollectAnnotatedVecDequeItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedVecDequeItem",
+            "dead_collect_annotated_vecdeque",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-vecdeque",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_linkedlist_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_linkedlist_prune",
+        root_fn: "selected_collect_annotated_linkedlist_report",
+        api_pkg: "collect_annotated_linkedlist_api",
+        model_pkg: "collect_annotated_linkedlist_model",
+        api_fn: "selected_collect_annotated_linkedlist_report",
+        model_fn: "selected_collect_annotated_linkedlist",
+        model_required: &[
+            "let collected: LinkedList<",
+            ".filter(|source| source.is_live_source())",
+            "CollectAnnotatedLinkedListItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedLinkedListItem",
+            "dead_collect_annotated_linkedlist",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-linkedlist",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_vec_tuple_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_vec_tuple_prune",
+        root_fn: "selected_collect_annotated_vec_tuple_report",
+        api_pkg: "collect_annotated_vec_tuple_api",
+        model_pkg: "collect_annotated_vec_tuple_model",
+        api_fn: "selected_collect_annotated_vec_tuple_report",
+        model_fn: "selected_collect_annotated_vec_tuple",
+        model_required: &[
+            "let collected: Vec<(",
+            "CollectAnnotatedVecTupleKey::from_source",
+            "CollectAnnotatedVecTupleItem::from_source",
+            "pub fn key_seed",
+            "pub fn value_seed",
+            "pub fn render_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedVecTupleItem",
+            "dead_collect_annotated_vec_tuple",
+            "pub fn is_live_source",
+            "dead_key_method",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-vec-tuple",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_result_vec_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_result_vec_prune",
+        root_fn: "selected_collect_annotated_result_vec_report",
+        api_pkg: "collect_annotated_result_vec_api",
+        model_pkg: "collect_annotated_result_vec_model",
+        api_fn: "selected_collect_annotated_result_vec_report",
+        model_fn: "selected_collect_annotated_result_vec",
+        model_required: &[
+            "let collected: Result<",
+            "Vec<CollectAnnotatedResultVecItem>",
+            "collect_annotated_result_vec_convert",
+            "Ok(CollectAnnotatedResultVecItem::from_source",
+            "Err(CollectAnnotatedResultVecError::from_source",
+            "pub fn key_seed",
+            "pub fn value_seed",
+            "pub fn render_label",
+            "pub fn render_error",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedResultVecItem",
+            "dead_collect_annotated_result_vec",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead_error_method",
+            "dead-collect-annotated-result-vec",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_annotated_option_vec_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_annotated_option_vec_prune",
+        root_fn: "selected_collect_annotated_option_vec_report",
+        api_pkg: "collect_annotated_option_vec_api",
+        model_pkg: "collect_annotated_option_vec_model",
+        api_fn: "selected_collect_annotated_option_vec_report",
+        model_fn: "selected_collect_annotated_option_vec",
+        model_required: &[
+            "let collected: Option<Vec<",
+            "collect_annotated_option_vec_convert",
+            ".then(|| CollectAnnotatedOptionVecItem::from_source",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectAnnotatedOptionVecItem",
+            "dead_collect_annotated_option_vec",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-annotated-option-vec",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

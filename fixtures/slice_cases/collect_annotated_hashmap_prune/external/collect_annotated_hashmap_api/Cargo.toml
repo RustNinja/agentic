@@ -1,0 +1,7 @@
+[package]
+name = "collect_annotated_hashmap_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+collect_annotated_hashmap_model = { path = "../collect_annotated_hashmap_model" }
