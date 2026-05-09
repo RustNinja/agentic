@@ -6011,8 +6011,7 @@ impl<'a> DependencyVisitor<'a> {
             return;
         }
         let mut type_arguments = type_arguments.to_vec();
-        type_arguments.sort();
-        type_arguments.dedup();
+        dedup_type_refs_preserve_order(&mut type_arguments);
         match pattern {
             Pat::Ident(ident) => {
                 self.variable_type_arguments
@@ -6082,6 +6081,9 @@ impl<'a> DependencyVisitor<'a> {
                     .collect()
             }
             Expr::MethodCall(call) => {
+                if call.method == "collect" {
+                    return self.method_turbofish_type_argument_refs(call);
+                }
                 if call.method == "parse" {
                     return self.method_turbofish_type_refs(call);
                 }
@@ -6252,6 +6254,11 @@ impl<'a> DependencyVisitor<'a> {
                     .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
             }
             Expr::MethodCall(call) => {
+                if call.method == "collect" {
+                    if let Some(ok_type) = self.collect_turbofish_result_ok_type(call) {
+                        return Some(ok_type);
+                    }
+                }
                 if matches!(
                     call.method.to_string().as_str(),
                     "max_by" | "max_by_key" | "min_by" | "min_by_key" | "reduce"
@@ -6366,6 +6373,9 @@ impl<'a> DependencyVisitor<'a> {
                     .iter()
                     .find_map(|callable| self.resolver.return_map_key_type_from_callable(callable))
             }
+            Expr::MethodCall(call) if call.method == "collect" => {
+                self.collect_turbofish_map_key_type(call)
+            }
             Expr::MethodCall(call)
                 if matches!(
                     call.method.to_string().as_str(),
@@ -6402,6 +6412,9 @@ impl<'a> DependencyVisitor<'a> {
                 callables.iter().find_map(|callable| {
                     self.resolver.return_map_value_type_from_callable(callable)
                 })
+            }
+            Expr::MethodCall(call) if call.method == "collect" => {
+                self.collect_turbofish_map_value_type(call)
             }
             Expr::MethodCall(call)
                 if matches!(
@@ -6463,6 +6476,11 @@ impl<'a> DependencyVisitor<'a> {
                     .find_map(|callable| self.resolver.return_error_type_from_callable(callable))
             }
             Expr::MethodCall(call) => {
+                if call.method == "collect" {
+                    if let Some(error_type) = self.collect_turbofish_result_error_type(call) {
+                        return Some(error_type);
+                    }
+                }
                 if call.method == "try_for_each" {
                     if let Some(error_type) = self.single_payload_closure_error_type(call) {
                         return Some(error_type);
@@ -6528,6 +6546,39 @@ impl<'a> DependencyVisitor<'a> {
             .flatten()
     }
 
+    fn collect_turbofish_map_key_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
+        self.collect_turbofish_target_type(call)
+            .and_then(|target| self.resolver.map_key_type(target))
+    }
+
+    fn collect_turbofish_map_value_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
+        self.collect_turbofish_target_type(call)
+            .and_then(|target| self.resolver.map_value_type(target))
+    }
+
+    fn collect_turbofish_result_ok_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
+        self.collect_turbofish_target_type(call)
+            .and_then(|target| self.resolver.result_ok_type(target))
+    }
+
+    fn collect_turbofish_result_error_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
+        self.collect_turbofish_target_type(call)
+            .and_then(|target| self.resolver.result_error_type(target))
+    }
+
+    fn collect_turbofish_target_type<'b>(&self, call: &'b ExprMethodCall) -> Option<&'b Type> {
+        if call.method != "collect" {
+            return None;
+        }
+        let arguments = call.turbofish.as_ref()?;
+        arguments.args.iter().find_map(|argument| {
+            let GenericArgument::Type(ty) = argument else {
+                return None;
+            };
+            Some(ty)
+        })
+    }
+
     fn method_turbofish_type_refs(&self, call: &ExprMethodCall) -> Vec<TypeRef> {
         let Some(arguments) = &call.turbofish else {
             return Vec::new();
@@ -6542,9 +6593,110 @@ impl<'a> DependencyVisitor<'a> {
                 self.resolver.resolve_receiver_type(ty)
             })
             .collect::<Vec<_>>();
-        type_refs.sort();
-        type_refs.dedup();
+        dedup_type_refs_preserve_order(&mut type_refs);
         type_refs
+    }
+
+    fn method_turbofish_type_argument_refs(&self, call: &ExprMethodCall) -> Vec<TypeRef> {
+        let Some(arguments) = &call.turbofish else {
+            return Vec::new();
+        };
+        let mut type_refs = Vec::new();
+        for argument in &arguments.args {
+            let GenericArgument::Type(ty) = argument else {
+                continue;
+            };
+            self.collect_project_turbofish_type_arguments(ty, &mut type_refs);
+        }
+        dedup_type_refs_preserve_order(&mut type_refs);
+        type_refs
+    }
+
+    fn collect_project_turbofish_type_arguments(&self, ty: &Type, type_refs: &mut Vec<TypeRef>) {
+        match ty {
+            Type::Path(type_path) => {
+                for segment in &type_path.path.segments {
+                    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                        continue;
+                    };
+                    for argument in &arguments.args {
+                        let GenericArgument::Type(ty) = argument else {
+                            continue;
+                        };
+                        if let Some(type_ref) = self.resolver.resolve_receiver_type(ty) {
+                            if self.resolver.resolver_item_for_type(&type_ref).is_some() {
+                                type_refs.push(type_ref);
+                            }
+                        }
+                        self.collect_project_turbofish_type_arguments(ty, type_refs);
+                    }
+                }
+            }
+            Type::ImplTrait(impl_trait) => {
+                for bound in &impl_trait.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_project_path_argument_types(&trait_bound.path, type_refs);
+                }
+            }
+            Type::TraitObject(trait_object) => {
+                for bound in &trait_object.bounds {
+                    let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                        continue;
+                    };
+                    self.collect_project_path_argument_types(&trait_bound.path, type_refs);
+                }
+            }
+            Type::Reference(reference) => {
+                self.collect_project_turbofish_type_arguments(&reference.elem, type_refs)
+            }
+            Type::Ptr(pointer) => {
+                self.collect_project_turbofish_type_arguments(&pointer.elem, type_refs)
+            }
+            Type::Slice(slice) => {
+                self.collect_project_turbofish_type_arguments(&slice.elem, type_refs)
+            }
+            Type::Array(array) => {
+                self.collect_project_turbofish_type_arguments(&array.elem, type_refs)
+            }
+            Type::Group(group) => {
+                self.collect_project_turbofish_type_arguments(&group.elem, type_refs)
+            }
+            Type::Paren(paren) => {
+                self.collect_project_turbofish_type_arguments(&paren.elem, type_refs)
+            }
+            Type::Tuple(tuple) => {
+                for elem in &tuple.elems {
+                    if let Some(type_ref) = self.resolver.resolve_receiver_type(elem) {
+                        if self.resolver.resolver_item_for_type(&type_ref).is_some() {
+                            type_refs.push(type_ref);
+                        }
+                    }
+                    self.collect_project_turbofish_type_arguments(elem, type_refs);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn collect_project_path_argument_types(&self, path: &Path, type_refs: &mut Vec<TypeRef>) {
+        for segment in &path.segments {
+            let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                continue;
+            };
+            for argument in &arguments.args {
+                let GenericArgument::Type(ty) = argument else {
+                    continue;
+                };
+                if let Some(type_ref) = self.resolver.resolve_receiver_type(ty) {
+                    if self.resolver.resolver_item_for_type(&type_ref).is_some() {
+                        type_refs.push(type_ref);
+                    }
+                }
+                self.collect_project_turbofish_type_arguments(ty, type_refs);
+            }
+        }
     }
 
     fn add_closure_arg_dependencies(
@@ -8421,6 +8573,11 @@ struct TypeRef {
     type_path: Vec<String>,
 }
 
+fn dedup_type_refs_preserve_order(type_refs: &mut Vec<TypeRef>) {
+    let mut seen = BTreeSet::new();
+    type_refs.retain(|type_ref| seen.insert(type_ref.clone()));
+}
+
 #[derive(Clone, Debug)]
 struct GenericConversionBound {
     impl_trait_name: String,
@@ -9149,8 +9306,7 @@ impl Resolver<'_> {
     fn closure_input_types_from_type(&self, ty: &Type) -> Vec<TypeRef> {
         let mut type_refs = Vec::new();
         self.collect_closure_input_types(ty, &mut type_refs);
-        type_refs.sort();
-        type_refs.dedup();
+        dedup_type_refs_preserve_order(&mut type_refs);
         type_refs
     }
 
@@ -9648,8 +9804,7 @@ impl Resolver<'_> {
         };
         let mut type_refs = Vec::new();
         self.collect_type_arguments(ty, &mut type_refs);
-        type_refs.sort();
-        type_refs.dedup();
+        dedup_type_refs_preserve_order(&mut type_refs);
         type_refs
     }
 
@@ -9660,8 +9815,7 @@ impl Resolver<'_> {
     fn type_argument_refs_in_type(&self, ty: &Type) -> Vec<TypeRef> {
         let mut type_refs = Vec::new();
         self.collect_type_arguments(ty, &mut type_refs);
-        type_refs.sort();
-        type_refs.dedup();
+        dedup_type_refs_preserve_order(&mut type_refs);
         type_refs
     }
 

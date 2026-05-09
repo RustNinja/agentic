@@ -1,0 +1,7 @@
+[package]
+name = "collect_result_vec_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+collect_result_vec_model = { path = "../collect_result_vec_model" }

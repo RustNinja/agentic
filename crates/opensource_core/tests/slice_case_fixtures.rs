@@ -10156,6 +10156,321 @@ fn prunes_vec_as_slice_chunks_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_collect_hashmap_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_hashmap_prune",
+        root_fn: "selected_collect_hashmap_report",
+        api_pkg: "collect_hashmap_api",
+        model_pkg: "collect_hashmap_model",
+        api_fn: "selected_collect_hashmap_report",
+        model_fn: "selected_collect_hashmap",
+        model_required: &[
+            "collect::<HashMap<CollectHashMapKey, CollectHashMapItem>>()",
+            "CollectHashMapKey::from_source",
+            "CollectHashMapItem::from_source",
+            ".values()",
+            "pub fn key_seed",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectHashMapItem",
+            "dead_collect_hashmap",
+            "pub fn is_live_source",
+            "pub fn render_key",
+            "dead_key_method",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-hashmap",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_btreemap_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_btreemap_prune",
+        root_fn: "selected_collect_btreemap_report",
+        api_pkg: "collect_btreemap_api",
+        model_pkg: "collect_btreemap_model",
+        api_fn: "selected_collect_btreemap_report",
+        model_fn: "selected_collect_btreemap",
+        model_required: &[
+            "collect::<BTreeMap<CollectBTreeMapKey, CollectBTreeMapItem>>()",
+            "CollectBTreeMapKey::from_source",
+            "CollectBTreeMapItem::from_source",
+            ".values()",
+            "pub fn key_seed",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectBTreeMapItem",
+            "dead_collect_btreemap",
+            "pub fn is_live_source",
+            "pub fn render_key",
+            "dead_key_method",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-btreemap",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_hashset_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_hashset_prune",
+        root_fn: "selected_collect_hashset_report",
+        api_pkg: "collect_hashset_api",
+        model_pkg: "collect_hashset_model",
+        api_fn: "selected_collect_hashset_report",
+        model_fn: "selected_collect_hashset",
+        model_required: &[
+            "collect::<HashSet<CollectHashSetItem>>()",
+            ".filter(|source| source.is_live_source())",
+            "CollectHashSetItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectHashSetItem",
+            "dead_collect_hashset",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-hashset",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_btreeset_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_btreeset_prune",
+        root_fn: "selected_collect_btreeset_report",
+        api_pkg: "collect_btreeset_api",
+        model_pkg: "collect_btreeset_model",
+        api_fn: "selected_collect_btreeset_report",
+        model_fn: "selected_collect_btreeset",
+        model_required: &[
+            "collect::<BTreeSet<CollectBTreeSetItem>>()",
+            ".filter(|source| source.is_live_source())",
+            "CollectBTreeSetItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectBTreeSetItem",
+            "dead_collect_btreeset",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-btreeset",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_binaryheap_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_binaryheap_prune",
+        root_fn: "selected_collect_binaryheap_report",
+        api_pkg: "collect_binaryheap_api",
+        model_pkg: "collect_binaryheap_model",
+        api_fn: "selected_collect_binaryheap_report",
+        model_fn: "selected_collect_binaryheap",
+        model_required: &[
+            "collect::<BinaryHeap<CollectBinaryHeapItem>>()",
+            ".filter(|source| source.is_live_source())",
+            "CollectBinaryHeapItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectBinaryHeapItem",
+            "dead_collect_binaryheap",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-binaryheap",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_vecdeque_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_vecdeque_prune",
+        root_fn: "selected_collect_vecdeque_report",
+        api_pkg: "collect_vecdeque_api",
+        model_pkg: "collect_vecdeque_model",
+        api_fn: "selected_collect_vecdeque_report",
+        model_fn: "selected_collect_vecdeque",
+        model_required: &[
+            "collect::<VecDeque<CollectVecDequeItem>>()",
+            ".filter(|source| source.is_live_source())",
+            "CollectVecDequeItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectVecDequeItem",
+            "dead_collect_vecdeque",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-vecdeque",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_linkedlist_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_linkedlist_prune",
+        root_fn: "selected_collect_linkedlist_report",
+        api_pkg: "collect_linkedlist_api",
+        model_pkg: "collect_linkedlist_model",
+        api_fn: "selected_collect_linkedlist_report",
+        model_fn: "selected_collect_linkedlist",
+        model_required: &[
+            "collect::<LinkedList<CollectLinkedListItem>>()",
+            ".filter(|source| source.is_live_source())",
+            "CollectLinkedListItem::from_source",
+            ".iter()",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectLinkedListItem",
+            "dead_collect_linkedlist",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-linkedlist",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_vec_tuple_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_vec_tuple_prune",
+        root_fn: "selected_collect_vec_tuple_report",
+        api_pkg: "collect_vec_tuple_api",
+        model_pkg: "collect_vec_tuple_model",
+        api_fn: "selected_collect_vec_tuple_report",
+        model_fn: "selected_collect_vec_tuple",
+        model_required: &[
+            "collect::<Vec<(CollectVecTupleKey, CollectVecTupleItem)>>()",
+            "CollectVecTupleKey::from_source",
+            "CollectVecTupleItem::from_source",
+            "pub fn key_seed",
+            "pub fn value_seed",
+            "pub fn render_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectVecTupleItem",
+            "dead_collect_vec_tuple",
+            "pub fn is_live_source",
+            "dead_key_method",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-vec-tuple",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_result_vec_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_result_vec_prune",
+        root_fn: "selected_collect_result_vec_report",
+        api_pkg: "collect_result_vec_api",
+        model_pkg: "collect_result_vec_model",
+        api_fn: "selected_collect_result_vec_report",
+        model_fn: "selected_collect_result_vec",
+        model_required: &[
+            "collect::<Result<Vec<CollectResultVecItem>, CollectResultVecError>>()",
+            "collect_result_vec_convert",
+            "Ok(CollectResultVecItem::from_source",
+            "Err(CollectResultVecError::from_source",
+            "pub fn key_seed",
+            "pub fn value_seed",
+            "pub fn render_label",
+            "pub fn render_error",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectResultVecItem",
+            "dead_collect_result_vec",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead_error_method",
+            "dead-collect-result-vec",
+        ],
+    });
+}
+
+#[test]
+fn prunes_collect_option_vec_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "collect_option_vec_prune",
+        root_fn: "selected_collect_option_vec_report",
+        api_pkg: "collect_option_vec_api",
+        model_pkg: "collect_option_vec_model",
+        api_fn: "selected_collect_option_vec_report",
+        model_fn: "selected_collect_option_vec",
+        model_required: &[
+            "collect::<Option<Vec<CollectOptionVecItem>>>()",
+            "collect_option_vec_convert",
+            ".then(|| CollectOptionVecItem::from_source",
+            "pub fn is_live_source",
+            "pub fn value_seed",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCollectOptionVecItem",
+            "dead_collect_option_vec",
+            "pub fn key_seed",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-collect-option-vec",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

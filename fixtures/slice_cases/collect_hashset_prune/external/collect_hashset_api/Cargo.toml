@@ -1,0 +1,7 @@
+[package]
+name = "collect_hashset_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+collect_hashset_model = { path = "../collect_hashset_model" }

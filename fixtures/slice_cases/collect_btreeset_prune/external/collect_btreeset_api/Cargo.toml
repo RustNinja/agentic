@@ -1,0 +1,7 @@
+[package]
+name = "collect_btreeset_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+collect_btreeset_model = { path = "../collect_btreeset_model" }

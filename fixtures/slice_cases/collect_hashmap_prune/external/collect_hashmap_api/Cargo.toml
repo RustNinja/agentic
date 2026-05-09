@@ -1,0 +1,7 @@
+[package]
+name = "collect_hashmap_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+collect_hashmap_model = { path = "../collect_hashmap_model" }
