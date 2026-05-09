@@ -1,0 +1,7 @@
+[package]
+name = "linkedlist_iter_find_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+linkedlist_iter_find_model = { path = "../linkedlist_iter_find_model" }

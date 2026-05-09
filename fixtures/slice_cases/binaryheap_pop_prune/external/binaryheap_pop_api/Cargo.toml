@@ -1,0 +1,7 @@
+[package]
+name = "binaryheap_pop_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binaryheap_pop_model = { path = "../binaryheap_pop_model" }

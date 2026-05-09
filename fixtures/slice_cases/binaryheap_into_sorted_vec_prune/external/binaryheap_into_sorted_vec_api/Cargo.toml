@@ -1,0 +1,7 @@
+[package]
+name = "binaryheap_into_sorted_vec_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binaryheap_into_sorted_vec_model = { path = "../binaryheap_into_sorted_vec_model" }

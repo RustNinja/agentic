@@ -1,0 +1,7 @@
+[package]
+name = "vecdeque_into_iter_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vecdeque_into_iter_model = { path = "../vecdeque_into_iter_model" }

@@ -8646,6 +8646,515 @@ fn prunes_btreeset_pop_last_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_binaryheap_peek_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "binaryheap_peek_prune",
+        root_fn: "selected_binaryheap_peek_report",
+        api_pkg: "binaryheap_peek_api",
+        model_pkg: "binaryheap_peek_model",
+        api_fn: "selected_binaryheap_peek_report",
+        model_fn: "selected_binaryheap_peek",
+        model_required: &[
+            "BinaryheapPeekItem",
+            "BinaryHeap<BinaryheapPeekItem>",
+            ".peek()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBinaryheapPeekItem",
+            "dead_binaryheap_peek",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_binaryheap_peek",
+            "dead-binaryheap-peek",
+        ],
+    });
+}
+
+#[test]
+fn prunes_binaryheap_pop_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "binaryheap_pop_prune",
+        root_fn: "selected_binaryheap_pop_report",
+        api_pkg: "binaryheap_pop_api",
+        model_pkg: "binaryheap_pop_model",
+        api_fn: "selected_binaryheap_pop_report",
+        model_fn: "selected_binaryheap_pop",
+        model_required: &[
+            "BinaryheapPopItem",
+            "BinaryHeap<BinaryheapPopItem>",
+            ".pop()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBinaryheapPopItem",
+            "dead_binaryheap_pop",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_binaryheap_pop",
+            "dead-binaryheap-pop",
+        ],
+    });
+}
+
+#[test]
+fn prunes_binaryheap_iter_find_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "binaryheap_iter_find_prune",
+        root_fn: "selected_binaryheap_iter_find_report",
+        api_pkg: "binaryheap_iter_find_api",
+        model_pkg: "binaryheap_iter_find_model",
+        api_fn: "selected_binaryheap_iter_find_report",
+        model_fn: "selected_binaryheap_iter_find",
+        model_required: &[
+            "BinaryheapIterFindItem",
+            "BinaryHeap<BinaryheapIterFindItem>",
+            ".iter()",
+            ".find(|item| item.is_live())",
+            ".map(|item| item.render_label())",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBinaryheapIterFindItem",
+            "dead_binaryheap_iter_find",
+            "dead_method",
+            "dead_live_binaryheap_iter_find",
+            "dead-binaryheap-iter-find",
+        ],
+    });
+}
+
+#[test]
+fn prunes_binaryheap_drain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "binaryheap_drain_prune",
+        root_fn: "selected_binaryheap_drain_report",
+        api_pkg: "binaryheap_drain_api",
+        model_pkg: "binaryheap_drain_model",
+        api_fn: "selected_binaryheap_drain_report",
+        model_fn: "selected_binaryheap_drain",
+        model_required: &[
+            "BinaryheapDrainItem",
+            "BinaryHeap<BinaryheapDrainItem>",
+            ".drain()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBinaryheapDrainItem",
+            "dead_binaryheap_drain",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_binaryheap_drain",
+            "dead-binaryheap-drain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_binaryheap_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "binaryheap_into_iter_prune",
+        root_fn: "selected_binaryheap_into_iter_report",
+        api_pkg: "binaryheap_into_iter_api",
+        model_pkg: "binaryheap_into_iter_model",
+        api_fn: "selected_binaryheap_into_iter_report",
+        model_fn: "selected_binaryheap_into_iter",
+        model_required: &[
+            "BinaryheapIntoIterItem",
+            "BinaryHeap<BinaryheapIntoIterItem>",
+            ".into_iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBinaryheapIntoIterItem",
+            "dead_binaryheap_into_iter",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_binaryheap_into_iter",
+            "dead-binaryheap-into-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_binaryheap_into_sorted_vec_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "binaryheap_into_sorted_vec_prune",
+        root_fn: "selected_binaryheap_into_sorted_vec_report",
+        api_pkg: "binaryheap_into_sorted_vec_api",
+        model_pkg: "binaryheap_into_sorted_vec_model",
+        api_fn: "selected_binaryheap_into_sorted_vec_report",
+        model_fn: "selected_binaryheap_into_sorted_vec",
+        model_required: &[
+            "BinaryheapIntoSortedVecItem",
+            "BinaryHeap<BinaryheapIntoSortedVecItem>",
+            ".into_sorted_vec()",
+            ".into_iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBinaryheapIntoSortedVecItem",
+            "dead_binaryheap_into_sorted_vec",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_binaryheap_into_sorted_vec",
+            "dead-binaryheap-into-sorted-vec",
+        ],
+    });
+}
+
+#[test]
+fn prunes_linkedlist_front_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "linkedlist_front_prune",
+        root_fn: "selected_linkedlist_front_report",
+        api_pkg: "linkedlist_front_api",
+        model_pkg: "linkedlist_front_model",
+        api_fn: "selected_linkedlist_front_report",
+        model_fn: "selected_linkedlist_front",
+        model_required: &[
+            "LinkedlistFrontItem",
+            "LinkedList<LinkedlistFrontItem>",
+            ".front()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadLinkedlistFrontItem",
+            "dead_linkedlist_front",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_linkedlist_front",
+            "dead-linkedlist-front",
+        ],
+    });
+}
+
+#[test]
+fn prunes_linkedlist_back_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "linkedlist_back_prune",
+        root_fn: "selected_linkedlist_back_report",
+        api_pkg: "linkedlist_back_api",
+        model_pkg: "linkedlist_back_model",
+        api_fn: "selected_linkedlist_back_report",
+        model_fn: "selected_linkedlist_back",
+        model_required: &[
+            "LinkedlistBackItem",
+            "LinkedList<LinkedlistBackItem>",
+            ".back()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadLinkedlistBackItem",
+            "dead_linkedlist_back",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_linkedlist_back",
+            "dead-linkedlist-back",
+        ],
+    });
+}
+
+#[test]
+fn prunes_linkedlist_pop_front_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "linkedlist_pop_front_prune",
+        root_fn: "selected_linkedlist_pop_front_report",
+        api_pkg: "linkedlist_pop_front_api",
+        model_pkg: "linkedlist_pop_front_model",
+        api_fn: "selected_linkedlist_pop_front_report",
+        model_fn: "selected_linkedlist_pop_front",
+        model_required: &[
+            "LinkedlistPopFrontItem",
+            "LinkedList<LinkedlistPopFrontItem>",
+            ".pop_front()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadLinkedlistPopFrontItem",
+            "dead_linkedlist_pop_front",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_linkedlist_pop_front",
+            "dead-linkedlist-pop-front",
+        ],
+    });
+}
+
+#[test]
+fn prunes_linkedlist_pop_back_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "linkedlist_pop_back_prune",
+        root_fn: "selected_linkedlist_pop_back_report",
+        api_pkg: "linkedlist_pop_back_api",
+        model_pkg: "linkedlist_pop_back_model",
+        api_fn: "selected_linkedlist_pop_back_report",
+        model_fn: "selected_linkedlist_pop_back",
+        model_required: &[
+            "LinkedlistPopBackItem",
+            "LinkedList<LinkedlistPopBackItem>",
+            ".pop_back()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadLinkedlistPopBackItem",
+            "dead_linkedlist_pop_back",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_linkedlist_pop_back",
+            "dead-linkedlist-pop-back",
+        ],
+    });
+}
+
+#[test]
+fn prunes_linkedlist_iter_find_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "linkedlist_iter_find_prune",
+        root_fn: "selected_linkedlist_iter_find_report",
+        api_pkg: "linkedlist_iter_find_api",
+        model_pkg: "linkedlist_iter_find_model",
+        api_fn: "selected_linkedlist_iter_find_report",
+        model_fn: "selected_linkedlist_iter_find",
+        model_required: &[
+            "LinkedlistIterFindItem",
+            "LinkedList<LinkedlistIterFindItem>",
+            ".iter()",
+            ".find(|item| item.is_live())",
+            ".map(|item| item.render_label())",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadLinkedlistIterFindItem",
+            "dead_linkedlist_iter_find",
+            "dead_method",
+            "dead_live_linkedlist_iter_find",
+            "dead-linkedlist-iter-find",
+        ],
+    });
+}
+
+#[test]
+fn prunes_linkedlist_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "linkedlist_into_iter_prune",
+        root_fn: "selected_linkedlist_into_iter_report",
+        api_pkg: "linkedlist_into_iter_api",
+        model_pkg: "linkedlist_into_iter_model",
+        api_fn: "selected_linkedlist_into_iter_report",
+        model_fn: "selected_linkedlist_into_iter",
+        model_required: &[
+            "LinkedlistIntoIterItem",
+            "LinkedList<LinkedlistIntoIterItem>",
+            ".into_iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadLinkedlistIntoIterItem",
+            "dead_linkedlist_into_iter",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_linkedlist_into_iter",
+            "dead-linkedlist-into-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_iter_find_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_iter_find_prune",
+        root_fn: "selected_vec_iter_find_report",
+        api_pkg: "vec_iter_find_api",
+        model_pkg: "vec_iter_find_model",
+        api_fn: "selected_vec_iter_find_report",
+        model_fn: "selected_vec_iter_find",
+        model_required: &[
+            "VecIterFindItem",
+            "Vec<VecIterFindItem>",
+            ".iter()",
+            ".find(|item| item.is_live())",
+            ".map(|item| item.render_label())",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecIterFindItem",
+            "dead_vec_iter_find",
+            "dead_method",
+            "dead_live_vec_iter_find",
+            "dead-vec-iter-find",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_drain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_drain_prune",
+        root_fn: "selected_vec_drain_report",
+        api_pkg: "vec_drain_api",
+        model_pkg: "vec_drain_model",
+        api_fn: "selected_vec_drain_report",
+        model_fn: "selected_vec_drain",
+        model_required: &[
+            "VecDrainItem",
+            "Vec<VecDrainItem>",
+            ".drain(..)",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecDrainItem",
+            "dead_vec_drain",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_vec_drain",
+            "dead-vec-drain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_into_iter_prune",
+        root_fn: "selected_vec_into_iter_report",
+        api_pkg: "vec_into_iter_api",
+        model_pkg: "vec_into_iter_model",
+        api_fn: "selected_vec_into_iter_report",
+        model_fn: "selected_vec_into_iter",
+        model_required: &[
+            "VecIntoIterItem",
+            "Vec<VecIntoIterItem>",
+            ".into_iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecIntoIterItem",
+            "dead_vec_into_iter",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_vec_into_iter",
+            "dead-vec-into-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_iter_find_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_iter_find_prune",
+        root_fn: "selected_vecdeque_iter_find_report",
+        api_pkg: "vecdeque_iter_find_api",
+        model_pkg: "vecdeque_iter_find_model",
+        api_fn: "selected_vecdeque_iter_find_report",
+        model_fn: "selected_vecdeque_iter_find",
+        model_required: &[
+            "VecdequeIterFindItem",
+            "VecDeque<VecdequeIterFindItem>",
+            ".iter()",
+            ".find(|item| item.is_live())",
+            ".map(|item| item.render_label())",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequeIterFindItem",
+            "dead_vecdeque_iter_find",
+            "dead_method",
+            "dead_live_vecdeque_iter_find",
+            "dead-vecdeque-iter-find",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_drain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_drain_prune",
+        root_fn: "selected_vecdeque_drain_report",
+        api_pkg: "vecdeque_drain_api",
+        model_pkg: "vecdeque_drain_model",
+        api_fn: "selected_vecdeque_drain_report",
+        model_fn: "selected_vecdeque_drain",
+        model_required: &[
+            "VecdequeDrainItem",
+            "VecDeque<VecdequeDrainItem>",
+            ".drain(..)",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequeDrainItem",
+            "dead_vecdeque_drain",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_vecdeque_drain",
+            "dead-vecdeque-drain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_into_iter_prune",
+        root_fn: "selected_vecdeque_into_iter_report",
+        api_pkg: "vecdeque_into_iter_api",
+        model_pkg: "vecdeque_into_iter_model",
+        api_fn: "selected_vecdeque_into_iter_report",
+        model_fn: "selected_vecdeque_into_iter",
+        model_required: &[
+            "VecdequeIntoIterItem",
+            "VecDeque<VecdequeIntoIterItem>",
+            ".into_iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequeIntoIterItem",
+            "dead_vecdeque_into_iter",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_vecdeque_into_iter",
+            "dead-vecdeque-into-iter",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

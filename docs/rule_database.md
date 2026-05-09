@@ -339,6 +339,24 @@ file.
 | `fixture.btreeset_range_find_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::range(...).find(...).map(...)` payload typing while pruning dead set support |
 | `fixture.btreeset_pop_first_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::pop_first().map(...)` owned payload typing while pruning dead set support |
 | `fixture.btreeset_pop_last_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::pop_last().map(...)` owned payload typing while pruning dead set support |
+| `fixture.binaryheap_peek_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap<T>::peek().map(...)` borrowed payload typing while pruning dead heap support |
+| `fixture.binaryheap_pop_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap<T>::pop().map(...)` owned payload typing while pruning dead heap support |
+| `fixture.binaryheap_iter_find_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap<T>::iter().find(...).map(...)` payload typing while pruning dead heap support |
+| `fixture.binaryheap_drain_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap<T>::drain().map(...)` owned payload typing while pruning dead heap support |
+| `fixture.binaryheap_into_iter_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap<T>::into_iter().map(...)` owned payload typing while pruning dead heap support |
+| `fixture.binaryheap_into_sorted_vec_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap<T>::into_sorted_vec().into_iter().map(...)` owned payload typing while pruning dead heap support |
+| `fixture.linkedlist_front_prune.support_chain.001` | covered | A checked-in support fixture slices through `LinkedList<T>::front().map(...)` borrowed payload typing while pruning dead linked-list support |
+| `fixture.linkedlist_back_prune.support_chain.001` | covered | A checked-in support fixture slices through `LinkedList<T>::back().map(...)` borrowed payload typing while pruning dead linked-list support |
+| `fixture.linkedlist_pop_front_prune.support_chain.001` | covered | A checked-in support fixture slices through `LinkedList<T>::pop_front().map(...)` owned payload typing while pruning dead linked-list support |
+| `fixture.linkedlist_pop_back_prune.support_chain.001` | covered | A checked-in support fixture slices through `LinkedList<T>::pop_back().map(...)` owned payload typing while pruning dead linked-list support |
+| `fixture.linkedlist_iter_find_prune.support_chain.001` | covered | A checked-in support fixture slices through `LinkedList<T>::iter().find(...).map(...)` payload typing while pruning dead linked-list support |
+| `fixture.linkedlist_into_iter_prune.support_chain.001` | covered | A checked-in support fixture slices through `LinkedList<T>::into_iter().map(...)` owned payload typing while pruning dead linked-list support |
+| `fixture.vec_iter_find_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::iter().find(...).map(...)` payload typing while pruning dead vector support |
+| `fixture.vec_drain_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::drain(..).map(...)` owned payload typing while pruning dead vector support |
+| `fixture.vec_into_iter_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::into_iter().map(...)` owned payload typing while pruning dead vector support |
+| `fixture.vecdeque_iter_find_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::iter().find(...).map(...)` payload typing while pruning dead deque support |
+| `fixture.vecdeque_drain_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::drain(..).map(...)` owned payload typing while pruning dead deque support |
+| `fixture.vecdeque_into_iter_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque<T>::into_iter().map(...)` owned payload typing while pruning dead deque support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

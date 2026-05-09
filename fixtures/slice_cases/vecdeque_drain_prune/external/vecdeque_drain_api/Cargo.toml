@@ -1,0 +1,7 @@
+[package]
+name = "vecdeque_drain_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vecdeque_drain_model = { path = "../vecdeque_drain_model" }

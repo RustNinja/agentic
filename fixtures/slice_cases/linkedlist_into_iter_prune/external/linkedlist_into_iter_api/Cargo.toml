@@ -1,0 +1,7 @@
+[package]
+name = "linkedlist_into_iter_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+linkedlist_into_iter_model = { path = "../linkedlist_into_iter_model" }
