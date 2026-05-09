@@ -1,0 +1,7 @@
+[package]
+name = "refcell_borrow_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refcell_borrow_model = { path = "../refcell_borrow_model" }

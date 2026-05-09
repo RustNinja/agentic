@@ -11023,6 +11023,290 @@ fn prunes_option_copied_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_refcell_borrow_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "refcell_borrow_map_prune",
+        root_fn: "selected_refcell_borrow_map_report",
+        api_pkg: "refcell_borrow_api",
+        model_pkg: "refcell_borrow_model",
+        api_fn: "selected_refcell_borrow_map_report",
+        model_fn: "selected_refcell_borrow_map",
+        model_required: &[
+            "use std::cell::RefCell;",
+            ".borrow().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRefCellBorrowMapItem",
+            "dead_refcell_borrow_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-refcell-borrow-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_refcell_borrow_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "refcell_borrow_mut_map_prune",
+        root_fn: "selected_refcell_borrow_mut_map_report",
+        api_pkg: "refcell_borrow_mut_api",
+        model_pkg: "refcell_borrow_mut_model",
+        api_fn: "selected_refcell_borrow_mut_map_report",
+        model_fn: "selected_refcell_borrow_mut_map",
+        model_required: &[
+            "use std::cell::RefCell;",
+            ".borrow_mut().bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRefCellBorrowMutMapItem",
+            "dead_refcell_borrow_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-refcell-borrow-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_cell_get_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "cell_get_map_prune",
+        root_fn: "selected_cell_get_map_report",
+        api_pkg: "cell_get_api",
+        model_pkg: "cell_get_model",
+        api_fn: "selected_cell_get_map_report",
+        model_fn: "selected_cell_get_map",
+        model_required: &[
+            "use std::cell::Cell;",
+            ".get().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCellGetMapItem",
+            "dead_cell_get_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-cell-get-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_once_lock_get_or_init_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "once_lock_get_or_init_map_prune",
+        root_fn: "selected_once_lock_get_or_init_map_report",
+        api_pkg: "once_lock_get_or_init_api",
+        model_pkg: "once_lock_get_or_init_model",
+        api_fn: "selected_once_lock_get_or_init_map_report",
+        model_fn: "selected_once_lock_get_or_init_map",
+        model_required: &[
+            "use std::sync::OnceLock;",
+            ".get_or_init(||",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOnceLockGetOrInitMapItem",
+            "dead_once_lock_get_or_init_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-once-lock-get-or-init-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_mutex_lock_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "mutex_lock_map_prune",
+        root_fn: "selected_mutex_lock_map_report",
+        api_pkg: "mutex_lock_api",
+        model_pkg: "mutex_lock_model",
+        api_fn: "selected_mutex_lock_map_report",
+        model_fn: "selected_mutex_lock_map",
+        model_required: &[
+            "use std::sync::Mutex;",
+            ".lock()",
+            "guard.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMutexLockMapItem",
+            "dead_mutex_lock_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-mutex-lock-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_mutex_lock_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "mutex_lock_mut_map_prune",
+        root_fn: "selected_mutex_lock_mut_map_report",
+        api_pkg: "mutex_lock_mut_api",
+        model_pkg: "mutex_lock_mut_model",
+        api_fn: "selected_mutex_lock_mut_map_report",
+        model_fn: "selected_mutex_lock_mut_map",
+        model_required: &[
+            "use std::sync::Mutex;",
+            ".lock()",
+            "guard.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMutexLockMutMapItem",
+            "dead_mutex_lock_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-mutex-lock-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_rwlock_read_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "rwlock_read_map_prune",
+        root_fn: "selected_rwlock_read_map_report",
+        api_pkg: "rwlock_read_api",
+        model_pkg: "rwlock_read_model",
+        api_fn: "selected_rwlock_read_map_report",
+        model_fn: "selected_rwlock_read_map",
+        model_required: &[
+            "use std::sync::RwLock;",
+            ".read()",
+            "guard.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRwLockReadMapItem",
+            "dead_rwlock_read_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-rwlock-read-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_rwlock_write_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "rwlock_write_map_prune",
+        root_fn: "selected_rwlock_write_map_report",
+        api_pkg: "rwlock_write_api",
+        model_pkg: "rwlock_write_model",
+        api_fn: "selected_rwlock_write_map_report",
+        model_fn: "selected_rwlock_write_map",
+        model_required: &[
+            "use std::sync::RwLock;",
+            ".write()",
+            "guard.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRwLockWriteMapItem",
+            "dead_rwlock_write_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-rwlock-write-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_refcell_borrow_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_refcell_borrow_map_prune",
+        root_fn: "selected_option_refcell_borrow_map_report",
+        api_pkg: "option_refcell_borrow_api",
+        model_pkg: "option_refcell_borrow_model",
+        api_fn: "selected_option_refcell_borrow_map_report",
+        model_fn: "selected_option_refcell_borrow_map",
+        model_required: &[
+            "use std::cell::RefCell;",
+            ".as_ref()",
+            ".borrow().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionRefCellBorrowMapItem",
+            "dead_option_refcell_borrow_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-option-refcell-borrow-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_arc_mutex_lock_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "arc_mutex_lock_map_prune",
+        root_fn: "selected_arc_mutex_lock_map_report",
+        api_pkg: "arc_mutex_lock_api",
+        model_pkg: "arc_mutex_lock_model",
+        api_fn: "selected_arc_mutex_lock_map_report",
+        model_fn: "selected_arc_mutex_lock_map",
+        model_required: &[
+            "use std::sync::{Arc, Mutex};",
+            "Arc::new(Mutex::new",
+            ".lock()",
+            "guard.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadArcMutexLockMapItem",
+            "dead_arc_mutex_lock_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-arc-mutex-lock-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_rc_refcell_borrow_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "rc_refcell_borrow_map_prune",
+        root_fn: "selected_rc_refcell_borrow_map_report",
+        api_pkg: "rc_refcell_borrow_api",
+        model_pkg: "rc_refcell_borrow_model",
+        api_fn: "selected_rc_refcell_borrow_map_report",
+        model_fn: "selected_rc_refcell_borrow_map",
+        model_required: &[
+            "use std::cell::RefCell;",
+            "use std::rc::Rc;",
+            "Rc::new(RefCell::new",
+            ".borrow().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRcRefCellBorrowMapItem",
+            "dead_rc_refcell_borrow_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-rc-refcell-borrow-map",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

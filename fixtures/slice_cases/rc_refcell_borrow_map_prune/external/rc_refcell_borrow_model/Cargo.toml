@@ -1,0 +1,4 @@
+[package]
+name = "rc_refcell_borrow_model"
+version = "0.1.0"
+edition = "2021"

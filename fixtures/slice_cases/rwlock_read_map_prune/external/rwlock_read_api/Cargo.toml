@@ -1,0 +1,7 @@
+[package]
+name = "rwlock_read_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rwlock_read_model = { path = "../rwlock_read_model" }

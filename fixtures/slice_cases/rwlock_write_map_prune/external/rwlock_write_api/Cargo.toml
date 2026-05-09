@@ -1,0 +1,7 @@
+[package]
+name = "rwlock_write_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rwlock_write_model = { path = "../rwlock_write_model" }

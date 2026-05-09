@@ -419,6 +419,17 @@ file.
 | `fixture.rc_as_ref_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Rc<T>::as_ref()` receiver calls, retaining the required `Rc` import and only the referenced payload method |
 | `fixture.vec_box_iter_as_ref_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<Box<T>>::iter().map(|x| x.as_ref().method())`, retaining boxed collection payload methods without dead sibling retention |
 | `fixture.option_copied_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option<&T>::copied().map(...)`, retaining copied value payload methods while pruning unused mutable/dead methods |
+| `fixture.refcell_borrow_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `RefCell<T>::borrow().method()`, retaining only the borrowed payload method and pruning dead/mutable siblings |
+| `fixture.refcell_borrow_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `RefCell<T>::borrow_mut().method()`, retaining only the mutable payload method and pruning dead/immutable siblings |
+| `fixture.cell_get_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Cell<T>::get().method()` for copy payloads while pruning unused mutable/dead siblings |
+| `fixture.once_lock_get_or_init_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `OnceLock<T>::get_or_init(...).method()`, retaining initializer payload construction and only the returned reference method |
+| `fixture.mutex_lock_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Mutex<T>::lock()` guard autoderef, retaining only the immutable guard payload method |
+| `fixture.mutex_lock_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through mutable `Mutex<T>::lock()` guard autoderef, retaining only the mutable guard payload method |
+| `fixture.rwlock_read_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `RwLock<T>::read()` guard autoderef, retaining only the immutable guard payload method |
+| `fixture.rwlock_write_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `RwLock<T>::write()` guard autoderef, retaining only the mutable guard payload method |
+| `fixture.option_refcell_borrow_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option<RefCell<T>>::as_ref().map(|x| x.borrow().method())`, retaining only the nested borrowed payload method |
+| `fixture.arc_mutex_lock_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Arc<Mutex<T>>::lock()` guard autoderef, retaining only the live synchronized payload method and imports |
+| `fixture.rc_refcell_borrow_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Rc<RefCell<T>>::borrow()` guard autoderef, retaining only the live interior-mutable payload method and imports |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |
