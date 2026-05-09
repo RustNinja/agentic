@@ -4587,6 +4587,225 @@ fn prunes_iterator_flat_map_support_chain_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_iterator_flatten_option_array_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_flatten_option_array_prune",
+        "iterator_flatten_option_array",
+        &[
+            "[Some(IteratorFlattenOptionArrayPayload::new(raw)), None]",
+            ".into_iter()",
+            ".flatten()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFlattenOptionArrayItem",
+        "dead-iterator-flatten-option-array",
+        "pub fn bump_and_render",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_flatten_option_refs_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_flatten_option_refs_prune",
+        "iterator_flatten_option_refs",
+        &[
+            "[&left, &right]",
+            ".into_iter()",
+            ".flatten()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFlattenOptionRefsItem",
+        "dead-iterator-flatten-option-refs",
+        "pub fn bump_and_render",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_flatten_result_vec_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_flatten_result_vec_prune",
+        "iterator_flatten_result_vec",
+        &[
+            "Result<IteratorFlattenResultVecPayload, IteratorFlattenResultVecError>",
+            ".into_iter()",
+            ".flatten()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFlattenResultVecItem",
+        "dead-iterator-flatten-result-vec",
+        "pub fn bump_and_render",
+        &["dead_error_method"],
+    );
+}
+
+#[test]
+fn prunes_iterator_flatten_result_refs_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_flatten_result_refs_prune",
+        "iterator_flatten_result_refs",
+        &[
+            "[&left, &right]",
+            ".into_iter()",
+            ".flatten()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFlattenResultRefsItem",
+        "dead-iterator-flatten-result-refs",
+        "pub fn bump_and_render",
+        &["dead_error_method"],
+    );
+}
+
+#[test]
+fn prunes_iterator_flatten_vec_vec_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_flatten_vec_vec_prune",
+        "iterator_flatten_vec_vec",
+        &[
+            "Vec<Vec<IteratorFlattenVecVecPayload>>",
+            ".into_iter()",
+            ".flatten()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFlattenVecVecItem",
+        "dead-iterator-flatten-vec-vec",
+        "pub fn bump_and_render",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_flatten_take_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_flatten_take_map_prune",
+        "iterator_flatten_take_map",
+        &[
+            "Vec<Option<IteratorFlattenTakeMapPayload>>",
+            ".flatten()",
+            ".take(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFlattenTakeMapItem",
+        "dead-iterator-flatten-take-map",
+        "pub fn bump_and_render",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_filter_map_result_ok_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_filter_map_result_ok_prune",
+        "iterator_filter_map_result_ok",
+        &[
+            "Result::ok",
+            ".filter_map(Result::ok)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFilterMapResultOkItem",
+        "dead-iterator-filter-map-result-ok",
+        "pub fn bump_and_render",
+        &["dead_error_method"],
+    );
+}
+
+#[test]
+fn prunes_iterator_filter_map_result_err_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_filter_map_result_err_prune",
+        "iterator_filter_map_result_err",
+        &[
+            "Result::err",
+            ".filter_map(Result::err)",
+            ".map(|err| err.render_error())",
+            "pub fn render_error",
+        ],
+        "DeadIteratorFilterMapResultErrItem",
+        "dead-iterator-filter-map-result-err",
+        "pub fn render_label",
+        &["dead_error_method"],
+    );
+}
+
+#[test]
+fn prunes_iterator_find_map_result_ok_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_find_map_result_ok_prune",
+        "iterator_find_map_result_ok",
+        &[
+            ".find_map(Result::ok)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFindMapResultOkItem",
+        "dead-iterator-find-map-result-ok",
+        "pub fn bump_and_render",
+        &["dead_error_method"],
+    );
+}
+
+#[test]
+fn prunes_iterator_filter_map_option_identity_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_filter_map_option_identity_prune",
+        "iterator_filter_map_option_identity",
+        &[
+            "Vec<Option<IteratorFilterMapOptionIdentityPayload>>",
+            ".filter_map(|payload| payload)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFilterMapOptionIdentityItem",
+        "dead-iterator-filter-map-option-identity",
+        "pub fn bump_and_render",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_for_loop_flatten_option_refs_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_for_loop_flatten_option_refs_prune",
+        "iterator_for_loop_flatten_option_refs",
+        &[
+            "for payload in [&left, &right].into_iter().flatten()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadIteratorForLoopFlattenOptionRefsItem",
+        "dead-iterator-for-loop-flatten-option-refs",
+        "pub fn bump_and_render",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_for_loop_flatten_result_vec_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_for_loop_flatten_result_vec_prune",
+        "iterator_for_loop_flatten_result_vec",
+        &[
+            "for payload in results.into_iter().flatten()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadIteratorForLoopFlattenResultVecItem",
+        "dead-iterator-for-loop-flatten-result-vec",
+        "pub fn bump_and_render",
+        &["dead_error_method"],
+    );
+}
+
+#[test]
 fn prunes_iterator_map_while_support_chain_with_default_analyzer() {
     assert_support_slice_fixture(SupportSliceFixture {
         fixture_name: "iterator_map_while_prune",
@@ -13822,13 +14041,33 @@ fn assert_tuple_adapter_support_fixture(
     dead_token: &str,
     absent_live_method: &str,
 ) {
+    assert_extended_tuple_adapter_support_fixture(
+        fixture_name,
+        stem,
+        required,
+        dead_item,
+        dead_token,
+        absent_live_method,
+        &[],
+    );
+}
+
+fn assert_extended_tuple_adapter_support_fixture(
+    fixture_name: &str,
+    stem: &str,
+    required: &[&str],
+    dead_item: &str,
+    dead_token: &str,
+    absent_live_method: &str,
+    extra_absent: &[&str],
+) {
     let root_fn = format!("selected_{stem}_report");
     let api_pkg = format!("{stem}_api");
     let model_pkg = format!("{stem}_model");
     let api_fn = format!("selected_{stem}_report");
     let model_fn = format!("selected_{stem}");
     let dead_fn = format!("dead_{stem}");
-    let model_absent = [
+    let mut model_absent = vec![
         "mod dead",
         dead_item,
         dead_fn.as_str(),
@@ -13836,6 +14075,7 @@ fn assert_tuple_adapter_support_fixture(
         "dead_method",
         dead_token,
     ];
+    model_absent.extend_from_slice(extra_absent);
 
     assert_support_slice_fixture(SupportSliceFixture {
         fixture_name,
@@ -13845,7 +14085,7 @@ fn assert_tuple_adapter_support_fixture(
         api_fn: api_fn.as_str(),
         model_fn: model_fn.as_str(),
         model_required: required,
-        model_absent: &model_absent,
+        model_absent: model_absent.as_slice(),
     });
 }
 

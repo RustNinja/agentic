@@ -1,0 +1,7 @@
+[package]
+name = "iterator_for_loop_flatten_result_vec_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_for_loop_flatten_result_vec_model = { path = "../iterator_for_loop_flatten_result_vec_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "iterator_flatten_option_refs_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_flatten_option_refs_model = { path = "../iterator_flatten_option_refs_model" }
