@@ -1,0 +1,7 @@
+[package]
+name = "btreeset_replace_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreeset_replace_model = { path = "../btreeset_replace_model" }

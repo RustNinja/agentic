@@ -8308,6 +8308,344 @@ fn prunes_btreemap_range_mut_pairs_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_hashset_get_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashset_get_prune",
+        root_fn: "selected_hashset_get_report",
+        api_pkg: "hashset_get_api",
+        model_pkg: "hashset_get_model",
+        api_fn: "selected_hashset_get_report",
+        model_fn: "selected_hashset_get",
+        model_required: &[
+            "HashsetGetItem",
+            "HashSet<HashsetGetItem>",
+            ".get(&HashsetGetItem::live())",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashsetGetItem",
+            "dead_hashset_get",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_hashset_get",
+            "dead-hashset-get",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashset_take_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashset_take_prune",
+        root_fn: "selected_hashset_take_report",
+        api_pkg: "hashset_take_api",
+        model_pkg: "hashset_take_model",
+        api_fn: "selected_hashset_take_report",
+        model_fn: "selected_hashset_take",
+        model_required: &[
+            "HashsetTakeItem",
+            "HashSet<HashsetTakeItem>",
+            ".take(&HashsetTakeItem::live())",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashsetTakeItem",
+            "dead_hashset_take",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_hashset_take",
+            "dead-hashset-take",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashset_replace_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashset_replace_prune",
+        root_fn: "selected_hashset_replace_report",
+        api_pkg: "hashset_replace_api",
+        model_pkg: "hashset_replace_model",
+        api_fn: "selected_hashset_replace_report",
+        model_fn: "selected_hashset_replace",
+        model_required: &[
+            "HashsetReplaceItem",
+            "HashSet<HashsetReplaceItem>",
+            ".replace(HashsetReplaceItem::live())",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashsetReplaceItem",
+            "dead_hashset_replace",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_hashset_replace",
+            "dead-hashset-replace",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashset_iter_find_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashset_iter_find_prune",
+        root_fn: "selected_hashset_iter_find_report",
+        api_pkg: "hashset_iter_find_api",
+        model_pkg: "hashset_iter_find_model",
+        api_fn: "selected_hashset_iter_find_report",
+        model_fn: "selected_hashset_iter_find",
+        model_required: &[
+            "HashsetIterFindItem",
+            "HashSet<HashsetIterFindItem>",
+            ".iter()",
+            ".find(|item| item.is_live())",
+            ".map(|item| item.render_label())",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashsetIterFindItem",
+            "dead_hashset_iter_find",
+            "dead_method",
+            "dead_live_hashset_iter_find",
+            "dead-hashset-iter-find",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashset_drain_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashset_drain_prune",
+        root_fn: "selected_hashset_drain_report",
+        api_pkg: "hashset_drain_api",
+        model_pkg: "hashset_drain_model",
+        api_fn: "selected_hashset_drain_report",
+        model_fn: "selected_hashset_drain",
+        model_required: &[
+            "HashsetDrainItem",
+            "HashSet<HashsetDrainItem>",
+            ".drain()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashsetDrainItem",
+            "dead_hashset_drain",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_hashset_drain",
+            "dead-hashset-drain",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashset_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashset_into_iter_prune",
+        root_fn: "selected_hashset_into_iter_report",
+        api_pkg: "hashset_into_iter_api",
+        model_pkg: "hashset_into_iter_model",
+        api_fn: "selected_hashset_into_iter_report",
+        model_fn: "selected_hashset_into_iter",
+        model_required: &[
+            "HashsetIntoIterItem",
+            "HashSet<HashsetIntoIterItem>",
+            ".into_iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashsetIntoIterItem",
+            "dead_hashset_into_iter",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_hashset_into_iter",
+            "dead-hashset-into-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreeset_get_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreeset_get_prune",
+        root_fn: "selected_btreeset_get_report",
+        api_pkg: "btreeset_get_api",
+        model_pkg: "btreeset_get_model",
+        api_fn: "selected_btreeset_get_report",
+        model_fn: "selected_btreeset_get",
+        model_required: &[
+            "BtreesetGetItem",
+            "BTreeSet<BtreesetGetItem>",
+            ".get(&BtreesetGetItem::live())",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreesetGetItem",
+            "dead_btreeset_get",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_btreeset_get",
+            "dead-btreeset-get",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreeset_take_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreeset_take_prune",
+        root_fn: "selected_btreeset_take_report",
+        api_pkg: "btreeset_take_api",
+        model_pkg: "btreeset_take_model",
+        api_fn: "selected_btreeset_take_report",
+        model_fn: "selected_btreeset_take",
+        model_required: &[
+            "BtreesetTakeItem",
+            "BTreeSet<BtreesetTakeItem>",
+            ".take(&BtreesetTakeItem::live())",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreesetTakeItem",
+            "dead_btreeset_take",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_btreeset_take",
+            "dead-btreeset-take",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreeset_replace_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreeset_replace_prune",
+        root_fn: "selected_btreeset_replace_report",
+        api_pkg: "btreeset_replace_api",
+        model_pkg: "btreeset_replace_model",
+        api_fn: "selected_btreeset_replace_report",
+        model_fn: "selected_btreeset_replace",
+        model_required: &[
+            "BtreesetReplaceItem",
+            "BTreeSet<BtreesetReplaceItem>",
+            ".replace(BtreesetReplaceItem::live())",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreesetReplaceItem",
+            "dead_btreeset_replace",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_btreeset_replace",
+            "dead-btreeset-replace",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreeset_range_find_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreeset_range_find_prune",
+        root_fn: "selected_btreeset_range_find_report",
+        api_pkg: "btreeset_range_find_api",
+        model_pkg: "btreeset_range_find_model",
+        api_fn: "selected_btreeset_range_find_report",
+        model_fn: "selected_btreeset_range_find",
+        model_required: &[
+            "BtreesetRangeFindItem",
+            "BTreeSet<BtreesetRangeFindItem>",
+            ".range(BtreesetRangeFindItem::live()..)",
+            ".find(|item| item.is_live())",
+            ".map(|item| item.render_label())",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreesetRangeFindItem",
+            "dead_btreeset_range_find",
+            "dead_method",
+            "dead_live_btreeset_range_find",
+            "dead-btreeset-range-find",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreeset_pop_first_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreeset_pop_first_prune",
+        root_fn: "selected_btreeset_pop_first_report",
+        api_pkg: "btreeset_pop_first_api",
+        model_pkg: "btreeset_pop_first_model",
+        api_fn: "selected_btreeset_pop_first_report",
+        model_fn: "selected_btreeset_pop_first",
+        model_required: &[
+            "BtreesetPopFirstItem",
+            "BTreeSet<BtreesetPopFirstItem>",
+            ".pop_first()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreesetPopFirstItem",
+            "dead_btreeset_pop_first",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_btreeset_pop_first",
+            "dead-btreeset-pop-first",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreeset_pop_last_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreeset_pop_last_prune",
+        root_fn: "selected_btreeset_pop_last_report",
+        api_pkg: "btreeset_pop_last_api",
+        model_pkg: "btreeset_pop_last_model",
+        api_fn: "selected_btreeset_pop_last_report",
+        model_fn: "selected_btreeset_pop_last",
+        model_required: &[
+            "BtreesetPopLastItem",
+            "BTreeSet<BtreesetPopLastItem>",
+            ".pop_last()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreesetPopLastItem",
+            "dead_btreeset_pop_last",
+            "pub fn is_live",
+            "dead_method",
+            "dead_live_btreeset_pop_last",
+            "dead-btreeset-pop-last",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

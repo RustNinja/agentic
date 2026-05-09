@@ -6257,10 +6257,14 @@ impl<'a> DependencyVisitor<'a> {
                         | "get"
                         | "get_mut"
                         | "pop"
+                        | "take"
+                        | "replace"
                         | "front"
                         | "back"
                         | "pop_front"
                         | "pop_back"
+                        | "pop_first"
+                        | "pop_last"
                 ) {
                     if let Some(ok_type) = self.single_expression_type_argument(&call.receiver) {
                         return Some(ok_type);

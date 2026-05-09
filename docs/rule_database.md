@@ -327,6 +327,18 @@ file.
 | `fixture.btreemap_into_iter_pairs_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::into_iter().map(|(K, V)| ...)` owned pair payload typing while pruning dead tree-map support |
 | `fixture.btreemap_range_pairs_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::range(...).map(|(K, V)| ...)` range pair payload typing while pruning dead tree-map support |
 | `fixture.btreemap_range_mut_pairs_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap<K, V>::range_mut(...).for_each(|(K, V)| ...)` mutable range pair payload typing while pruning dead tree-map support |
+| `fixture.hashset_get_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashSet<T>::get(...).map(...)` payload typing while pruning dead set support |
+| `fixture.hashset_take_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashSet<T>::take(...).map(...)` owned payload typing while pruning dead set support |
+| `fixture.hashset_replace_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashSet<T>::replace(...).map(...)` owned payload typing while pruning dead set support |
+| `fixture.hashset_iter_find_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashSet<T>::iter().find(...).map(...)` payload typing while pruning dead set support |
+| `fixture.hashset_drain_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashSet<T>::drain().map(...)` owned payload typing while pruning dead set support |
+| `fixture.hashset_into_iter_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashSet<T>::into_iter().map(...)` owned payload typing while pruning dead set support |
+| `fixture.btreeset_get_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::get(...).map(...)` payload typing while pruning dead set support |
+| `fixture.btreeset_take_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::take(...).map(...)` owned payload typing while pruning dead set support |
+| `fixture.btreeset_replace_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::replace(...).map(...)` owned payload typing while pruning dead set support |
+| `fixture.btreeset_range_find_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::range(...).find(...).map(...)` payload typing while pruning dead set support |
+| `fixture.btreeset_pop_first_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::pop_first().map(...)` owned payload typing while pruning dead set support |
+| `fixture.btreeset_pop_last_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet<T>::pop_last().map(...)` owned payload typing while pruning dead set support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

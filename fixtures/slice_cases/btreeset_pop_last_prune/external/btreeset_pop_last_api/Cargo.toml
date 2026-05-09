@@ -1,0 +1,7 @@
+[package]
+name = "btreeset_pop_last_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreeset_pop_last_model = { path = "../btreeset_pop_last_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "hashset_into_iter_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+hashset_into_iter_model = { path = "../hashset_into_iter_model" }
