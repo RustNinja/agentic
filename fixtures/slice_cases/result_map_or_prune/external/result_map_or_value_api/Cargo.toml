@@ -1,0 +1,7 @@
+[package]
+name = "result_map_or_value_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+result_map_or_value_model = { path = "../result_map_or_value_model" }

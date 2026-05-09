@@ -6063,22 +6063,46 @@ impl<'a> DependencyVisitor<'a> {
                         | "copied"
                         | "cycle"
                         | "filter"
+                        | "find"
                         | "fuse"
                         | "inspect"
                         | "into_iter"
                         | "iter"
                         | "iter_mut"
+                        | "max_by"
+                        | "min_by"
                         | "ok_or"
                         | "ok_or_else"
                         | "or"
                         | "or_else"
                         | "peekable"
+                        | "reduce"
                         | "rev"
                         | "skip_while"
                         | "step_by"
                         | "take_while"
                 ) {
                     return self.expression_type_arguments(&call.receiver);
+                }
+                if matches!(call.method.to_string().as_str(), "ok" | "err") {
+                    return match call.method.to_string().as_str() {
+                        "ok" => self
+                            .expression_result_ok_type(&call.receiver)
+                            .into_iter()
+                            .collect(),
+                        "err" => self
+                            .expression_result_error_type(&call.receiver)
+                            .into_iter()
+                            .collect(),
+                        _ => Vec::new(),
+                    };
+                }
+                if call.method == "zip" {
+                    let mut type_arguments = self.expression_type_arguments(&call.receiver);
+                    if let Some(argument) = call.args.first() {
+                        type_arguments.extend(self.expression_type_arguments(argument));
+                    }
+                    return type_arguments;
                 }
                 let Some(receiver) = self.receiver_type(&call.receiver) else {
                     return Vec::new();
@@ -6141,6 +6165,17 @@ impl<'a> DependencyVisitor<'a> {
                     if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
                         return Some(ok_type.clone());
                     }
+                }
+                if call.method == "find" {
+                    if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
+                        return Some(ok_type.clone());
+                    }
+                }
+                if call.method == "ok" {
+                    return self.expression_result_ok_type(&call.receiver);
+                }
+                if call.method == "err" {
+                    return self.expression_result_error_type(&call.receiver);
                 }
                 if call.method == "try_fold" {
                     if let Some(ok_type) = call
@@ -6676,6 +6711,40 @@ impl<'a> DependencyVisitor<'a> {
         } else {
             self.visit_closure_with_input_types(default_closure, &[]);
         }
+        self.visit_payload_closure_with_type(
+            &call.receiver,
+            payload_closure,
+            &payload_type,
+            &type_arguments,
+        );
+        true
+    }
+
+    fn visit_map_or_method_call(&mut self, call: &ExprMethodCall) -> bool {
+        if call.method != "map_or" || call.args.len() != 2 {
+            return false;
+        }
+        if !self.resolved_methods_for_call(call).is_empty() {
+            return false;
+        }
+        let mut args = call.args.iter();
+        let Some(default_expr) = args.next() else {
+            return false;
+        };
+        let Some(Expr::Closure(payload_closure)) = args.next() else {
+            return false;
+        };
+        let type_arguments = self.expression_type_arguments(&call.receiver);
+        let Some(payload_type) = self
+            .expression_result_ok_type(&call.receiver)
+            .or_else(|| type_arguments.first().cloned())
+            .or_else(|| self.receiver_type(&call.receiver))
+        else {
+            return false;
+        };
+
+        self.visit_expr(&call.receiver);
+        self.visit_expr(default_expr);
         self.visit_payload_closure_with_type(
             &call.receiver,
             payload_closure,
@@ -7347,6 +7416,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             return;
         }
         if self.visit_two_payload_closure_method_call(call) {
+            return;
+        }
+        if self.visit_map_or_method_call(call) {
             return;
         }
         if self.visit_map_or_else_method_call(call) {

@@ -1,0 +1,7 @@
+[package]
+name = "max_by_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+max_by_model = { path = "../max_by_model" }

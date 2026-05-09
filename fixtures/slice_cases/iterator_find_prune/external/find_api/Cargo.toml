@@ -1,0 +1,7 @@
+[package]
+name = "find_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+find_model = { path = "../find_model" }

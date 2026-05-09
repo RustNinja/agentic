@@ -6382,6 +6382,280 @@ fn prunes_result_is_err_and_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_map_prune",
+        root_fn: "selected_option_map_report",
+        api_pkg: "option_map_api",
+        model_pkg: "option_map_model",
+        api_fn: "selected_option_map_report",
+        model_fn: "selected_option_map",
+        model_required: &[
+            "OptionMapPayload",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionMapItem",
+            "dead_option_map",
+            "dead_method",
+            "dead_live_option_map",
+            "dead-option-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_map_prune",
+        root_fn: "selected_result_map_report",
+        api_pkg: "result_map_api",
+        model_pkg: "result_map_model",
+        api_fn: "selected_result_map_report",
+        model_fn: "selected_result_map",
+        model_required: &[
+            "ResultMapPayload",
+            "ResultMapError",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultMapItem",
+            "dead_result_map",
+            "dead_method",
+            "dead_live_result_map",
+            "dead-result-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_map_or_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_map_or_prune",
+        root_fn: "selected_option_map_or_value_report",
+        api_pkg: "option_map_or_value_api",
+        model_pkg: "option_map_or_value_model",
+        api_fn: "selected_option_map_or_value_report",
+        model_fn: "selected_option_map_or_value",
+        model_required: &[
+            "OptionMapOrValuePayload",
+            "OptionMapOrValueDefault",
+            ".map_or(",
+            "OptionMapOrValueDefault::new(raw).render_missing()",
+            "|payload| payload.render_label()",
+            "pub fn render_missing",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionMapOrValueItem",
+            "dead_option_map_or_value",
+            "dead_method",
+            "dead_live_option_map_or_value",
+            "dead-option-map-or-value",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_map_or_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_map_or_prune",
+        root_fn: "selected_result_map_or_value_report",
+        api_pkg: "result_map_or_value_api",
+        model_pkg: "result_map_or_value_model",
+        api_fn: "selected_result_map_or_value_report",
+        model_fn: "selected_result_map_or_value",
+        model_required: &[
+            "ResultMapOrValuePayload",
+            "ResultMapOrValueError",
+            "ResultMapOrValueDefault",
+            ".map_or(",
+            "ResultMapOrValueDefault::new(raw).render_missing()",
+            "|payload| payload.render_label()",
+            "pub fn render_missing",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultMapOrValueItem",
+            "dead_result_map_or_value",
+            "dead_method",
+            "dead_live_result_map_or_value",
+            "dead-result-map-or-value",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_ok_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_ok_map_prune",
+        root_fn: "selected_result_ok_map_report",
+        api_pkg: "result_ok_map_api",
+        model_pkg: "result_ok_map_model",
+        api_fn: "selected_result_ok_map_report",
+        model_fn: "selected_result_ok_map",
+        model_required: &[
+            "ResultOkMapPayload",
+            "ResultOkMapError",
+            ".ok()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultOkMapItem",
+            "dead_result_ok_map",
+            "dead_method",
+            "dead_live_result_ok_map",
+            "dead-result-ok-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_err_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_err_map_prune",
+        root_fn: "selected_result_err_map_report",
+        api_pkg: "result_err_map_api",
+        model_pkg: "result_err_map_model",
+        api_fn: "selected_result_err_map_report",
+        model_fn: "selected_result_err_map",
+        model_required: &[
+            "ResultErrMapPayload",
+            "ResultErrMapError",
+            ".err()",
+            ".map(|err| err.render_error())",
+            "pub fn render_error",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultErrMapItem",
+            "dead_result_err_map",
+            "dead_method",
+            "dead_live_result_err_map",
+            "dead-result-err-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_zip_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_zip_prune",
+        root_fn: "selected_option_zip_report",
+        api_pkg: "option_zip_api",
+        model_pkg: "option_zip_model",
+        api_fn: "selected_option_zip_report",
+        model_fn: "selected_option_zip",
+        model_required: &[
+            "OptionZipLeft",
+            "OptionZipRight",
+            ".zip(option_zip_right(raw))",
+            "left.render_left()",
+            "right.render_right()",
+            "pub fn render_left",
+            "pub fn render_right",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionZipItem",
+            "dead_option_zip",
+            "dead_method",
+            "dead_live_option_zip",
+            "dead-option-zip",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_all_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_all_prune",
+        root_fn: "selected_all_report",
+        api_pkg: "all_api",
+        model_pkg: "all_model",
+        api_fn: "selected_all_report",
+        model_fn: "selected_all",
+        model_required: &[
+            "AllPayload",
+            ".all(|payload| payload.accepts())",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadAllItem",
+            "dead_all",
+            "dead_method",
+            "dead_live_all",
+            "dead-all",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_find_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_find_prune",
+        root_fn: "selected_find_report",
+        api_pkg: "find_api",
+        model_pkg: "find_model",
+        api_fn: "selected_find_report",
+        model_fn: "selected_find",
+        model_required: &[
+            "FindPayload",
+            ".find(|payload| payload.accepts())",
+            ".map(|payload| payload.render_label())",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadFindItem",
+            "dead_find",
+            "dead_method",
+            "dead_live_find",
+            "dead-find",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_max_by_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_max_by_prune",
+        root_fn: "selected_max_by_report",
+        api_pkg: "max_by_api",
+        model_pkg: "max_by_model",
+        api_fn: "selected_max_by_report",
+        model_fn: "selected_max_by",
+        model_required: &[
+            "MaxByPayload",
+            ".max_by(|left, right| left.rank().cmp(&right.rank()))",
+            ".map(|payload| payload.render_label())",
+            "pub fn rank",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMaxByItem",
+            "dead_max_by",
+            "dead_method",
+            "dead_live_max_by",
+            "dead-max-by",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,
