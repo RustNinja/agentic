@@ -3,7 +3,7 @@ use std::{
     path::{Path as FsPath, PathBuf},
 };
 
-use proc_macro2::{Literal, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Literal, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::{
     parse::Parser,
@@ -5569,6 +5569,58 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_matches_macro_dependencies(&mut self, mac: &Macro) {
+        if !macro_path_ends_with(&mac.path, "matches") {
+            return;
+        }
+        let Some((subject_tokens, pattern_tokens)) =
+            split_macro_tokens_at_first_top_level_comma(&mac.tokens)
+        else {
+            return;
+        };
+        let Ok(subject) = syn::parse2::<Expr>(subject_tokens) else {
+            return;
+        };
+
+        self.visit_expr(&subject);
+        let payload_types = self.expression_type_arguments(&subject);
+        let ok_type = self.expression_result_ok_type(&subject);
+        let error_type = self.expression_result_error_type(&subject);
+        let bindings = matches_macro_pattern_bindings(
+            &pattern_tokens,
+            payload_types.first(),
+            ok_type.as_ref().or_else(|| payload_types.first()),
+            error_type
+                .as_ref()
+                .or_else(|| payload_types.get(1))
+                .or_else(|| payload_types.last()),
+        );
+        if bindings.is_empty() {
+            return;
+        }
+
+        let variables = self.variables.clone();
+        let variable_candidates = self.variable_candidates.clone();
+        let variable_type_arguments = self.variable_type_arguments.clone();
+        let variable_result_ok_types = self.variable_result_ok_types.clone();
+        let variable_result_error_types = self.variable_result_error_types.clone();
+        self.push_local_value_scope();
+        for (name, type_ref) in bindings {
+            self.insert_variable_type(name.clone(), type_ref);
+            self.local_value_scopes
+                .last_mut()
+                .expect("macro binding scope should exist")
+                .insert(name);
+        }
+        self.add_macro_token_dependencies(&pattern_tokens);
+        self.pop_local_value_scope();
+        self.variables = variables;
+        self.variable_candidates = variable_candidates;
+        self.variable_type_arguments = variable_type_arguments;
+        self.variable_result_ok_types = variable_result_ok_types;
+        self.variable_result_error_types = variable_result_error_types;
+    }
+
     fn add_local_initializer_trait_dependencies(&mut self, local: &Local, type_ref: &TypeRef) {
         if local
             .init
@@ -7011,6 +7063,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         self.add_macro_definition_receiver_dependencies(mac);
         self.add_format_macro_trait_dependencies(mac);
         self.add_expression_macro_dependencies(mac);
+        self.add_matches_macro_dependencies(mac);
         self.add_rusqlite_param_macro_trait_dependencies(mac);
         self.add_macro_token_dependencies(&mac.tokens);
         visit::visit_macro(self, mac);
@@ -7533,6 +7586,117 @@ fn collect_macro_local_method_flows(tokens: &TokenStream, flows: &mut Vec<MacroL
             local_methods: methods,
         });
     }
+}
+
+fn split_macro_tokens_at_first_top_level_comma(
+    tokens: &TokenStream,
+) -> Option<(TokenStream, TokenStream)> {
+    let mut before = Vec::new();
+    let mut after = Vec::new();
+    let mut found = false;
+    for token in tokens.clone() {
+        if !found && matches!(&token, TokenTree::Punct(punct) if punct.as_char() == ',') {
+            found = true;
+            continue;
+        }
+        if found {
+            after.push(token);
+        } else {
+            before.push(token);
+        }
+    }
+    found.then(|| (before.into_iter().collect(), after.into_iter().collect()))
+}
+
+fn matches_macro_pattern_bindings(
+    tokens: &TokenStream,
+    some_type: Option<&TypeRef>,
+    ok_type: Option<&TypeRef>,
+    error_type: Option<&TypeRef>,
+) -> Vec<(String, TypeRef)> {
+    let mut bindings = Vec::new();
+    collect_matches_macro_pattern_bindings(tokens, some_type, ok_type, error_type, &mut bindings);
+    bindings.sort();
+    bindings.dedup();
+    bindings
+}
+
+fn collect_matches_macro_pattern_bindings(
+    tokens: &TokenStream,
+    some_type: Option<&TypeRef>,
+    ok_type: Option<&TypeRef>,
+    error_type: Option<&TypeRef>,
+    bindings: &mut Vec<(String, TypeRef)>,
+) {
+    let token_trees = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &token_trees {
+        if let TokenTree::Group(group) = token {
+            collect_matches_macro_pattern_bindings(
+                &group.stream(),
+                some_type,
+                ok_type,
+                error_type,
+                bindings,
+            );
+        }
+    }
+
+    for window in token_trees.windows(2) {
+        let [TokenTree::Ident(variant), TokenTree::Group(group)] = window else {
+            continue;
+        };
+        if group.delimiter() != Delimiter::Parenthesis {
+            continue;
+        }
+        let type_ref = match variant.to_string().as_str() {
+            "Some" => some_type,
+            "Ok" => ok_type,
+            "Err" => error_type,
+            _ => None,
+        };
+        let Some(type_ref) = type_ref else {
+            continue;
+        };
+        let mut names = BTreeSet::new();
+        collect_macro_pattern_binding_idents(&group.stream(), &mut names);
+        bindings.extend(names.into_iter().map(|name| (name, type_ref.clone())));
+    }
+}
+
+fn collect_macro_pattern_binding_idents(tokens: &TokenStream, names: &mut BTreeSet<String>) {
+    for token in tokens.clone() {
+        match token {
+            TokenTree::Ident(ident) => {
+                let ident = ident.to_string();
+                if macro_pattern_binding_ident(&ident) {
+                    names.insert(ident);
+                }
+            }
+            TokenTree::Group(group) => collect_macro_pattern_binding_idents(&group.stream(), names),
+            TokenTree::Punct(_) | TokenTree::Literal(_) => {}
+        }
+    }
+}
+
+fn macro_pattern_binding_ident(ident: &str) -> bool {
+    ident != "_"
+        && ident
+            .chars()
+            .next()
+            .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+        && !matches!(
+            ident,
+            "as" | "box"
+                | "false"
+                | "if"
+                | "in"
+                | "let"
+                | "match"
+                | "mut"
+                | "ref"
+                | "self"
+                | "true"
+        )
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]

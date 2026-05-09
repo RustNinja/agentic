@@ -1,0 +1,7 @@
+[package]
+name = "option_if_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_if_model = { path = "../option_if_model" }

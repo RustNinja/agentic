@@ -235,6 +235,11 @@ file.
 | `fixture.option_as_ref_map_prune.support_chain.001` | covered | A checked-in support fixture slices through borrowed `Option::as_ref().map(...)` payload closures while pruning dead borrowed-option support |
 | `fixture.result_and_then_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::and_then` payload closures and shared error fallbacks while pruning dead result chaining support |
 | `fixture.result_inspect_prune.support_chain.001` | covered | A checked-in support fixture slices through OK-side `Result::inspect` side-effect closures plus downstream map payloads while pruning dead inspect support |
+| `fixture.option_if_let_prune.support_chain.001` | covered | A checked-in support fixture slices through `if let Some(...)` option payload bindings while pruning dead option support |
+| `fixture.result_match_prune.support_chain.001` | covered | A checked-in support fixture slices through `match Result` OK/error payload bindings while pruning dead result-match support |
+| `fixture.while_let_payload_prune.support_chain.001` | covered | A checked-in support fixture slices through `while let Some(...)` iterator payload bindings while pruning dead loop support |
+| `fixture.for_loop_payload_prune.support_chain.001` | covered | A checked-in support fixture slices through `for` loop iterable payload bindings while pruning dead loop support |
+| `fixture.matches_guard_prune.support_chain.001` | covered | A checked-in support fixture slices through `matches!` guard payload bindings and downstream map payloads while pruning dead guard support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

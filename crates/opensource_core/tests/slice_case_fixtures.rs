@@ -5775,6 +5775,140 @@ fn prunes_result_inspect_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_if_let_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_if_let_prune",
+        root_fn: "selected_option_if_report",
+        api_pkg: "option_if_api",
+        model_pkg: "option_if_model",
+        api_fn: "selected_option_if_report",
+        model_fn: "selected_option_if",
+        model_required: &[
+            "OptionIfPayload",
+            "if let Some(payload) = option_if_payload(raw)",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionIfItem",
+            "dead_option_if",
+            "dead_method",
+            "dead_live_option_if",
+            "dead-option-if",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_match_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_match_prune",
+        root_fn: "selected_result_match_report",
+        api_pkg: "result_match_api",
+        model_pkg: "result_match_model",
+        api_fn: "selected_result_match_report",
+        model_fn: "selected_result_match",
+        model_required: &[
+            "ResultMatchPayload",
+            "ResultMatchError",
+            "match result_match_payload(raw)",
+            "Ok(payload) => payload.render_label()",
+            "Err(err) => err.render_error()",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultMatchItem",
+            "dead_result_match",
+            "dead_method",
+            "dead_live_result_match",
+            "dead-result-match",
+        ],
+    });
+}
+
+#[test]
+fn prunes_while_let_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "while_let_payload_prune",
+        root_fn: "selected_while_let_report",
+        api_pkg: "while_let_api",
+        model_pkg: "while_let_model",
+        api_fn: "selected_while_let_report",
+        model_fn: "selected_while_let",
+        model_required: &[
+            "WhileLetPayload",
+            "while let Some(payload) = items.next()",
+            "rendered.push(payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadWhileLetItem",
+            "dead_while_let",
+            "dead_method",
+            "dead_live_while_let",
+            "dead-while-let",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_loop_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_loop_payload_prune",
+        root_fn: "selected_for_loop_report",
+        api_pkg: "for_loop_api",
+        model_pkg: "for_loop_model",
+        api_fn: "selected_for_loop_report",
+        model_fn: "selected_for_loop",
+        model_required: &[
+            "ForLoopPayload",
+            "for payload in for_loop_payloads(raw)",
+            "rendered.push(payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForLoopItem",
+            "dead_for_loop",
+            "dead_method",
+            "dead_live_for_loop",
+            "dead-for-loop",
+        ],
+    });
+}
+
+#[test]
+fn prunes_matches_guard_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "matches_guard_prune",
+        root_fn: "selected_matches_guard_report",
+        api_pkg: "matches_guard_api",
+        model_pkg: "matches_guard_model",
+        api_fn: "selected_matches_guard_report",
+        model_fn: "selected_matches_guard",
+        model_required: &[
+            "MatchesGuardPayload",
+            "matches!(payload.as_ref(), Some(candidate) if candidate.accepts())",
+            ".map(|candidate| candidate.render_label())",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMatchesGuardItem",
+            "dead_matches_guard",
+            "dead_method",
+            "dead_live_matches_guard",
+            "dead-matches-guard",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,
