@@ -1,0 +1,4 @@
+[package]
+name = "vecdeque_rotate_left_front_map_model"
+version = "0.1.0"
+edition = "2021"

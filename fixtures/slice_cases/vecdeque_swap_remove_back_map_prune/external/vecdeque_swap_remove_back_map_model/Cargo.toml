@@ -1,0 +1,4 @@
+[package]
+name = "vecdeque_swap_remove_back_map_model"
+version = "0.1.0"
+edition = "2021"

@@ -1,0 +1,7 @@
+[package]
+name = "str_lines_rev_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+str_lines_rev_map_model = { path = "../str_lines_rev_map_model" }

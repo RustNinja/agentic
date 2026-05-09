@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_entry_remove_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_entry_remove_map_model = { path = "../btreemap_entry_remove_map_model" }
