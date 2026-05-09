@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+str_split_terminator_filter_map_api = { path = "../external/str_split_terminator_filter_map_api" }

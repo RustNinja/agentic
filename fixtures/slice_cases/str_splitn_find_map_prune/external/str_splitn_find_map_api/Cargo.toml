@@ -1,0 +1,7 @@
+[package]
+name = "str_splitn_find_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+str_splitn_find_map_model = { path = "../str_splitn_find_map_model" }

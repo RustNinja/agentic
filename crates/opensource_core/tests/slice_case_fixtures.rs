@@ -14366,6 +14366,216 @@ fn prunes_btreemap_range_find_map_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_str_rsplit_once_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "str_rsplit_once_map_prune",
+        "str_rsplit_once_map",
+        &[
+            ".rsplit_once('/')",
+            ".map(|(_, value)| StrRsplitOnceMapPayload::new(value).render_label())",
+            "pub fn render_label",
+        ],
+        "DeadStrRsplitOnceMapItem",
+        "dead-str-rsplit-once-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_str_splitn_find_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "str_splitn_find_map_prune",
+        "str_splitn_find_map",
+        &[
+            ".splitn(3, ',')",
+            ".map(StrSplitnFindMapPayload::new)",
+            ".find_map(|payload| payload.maybe_label())",
+            "pub fn maybe_label",
+            "pub fn render_label",
+        ],
+        "DeadStrSplitnFindMapItem",
+        "dead-str-splitn-find-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_str_split_terminator_filter_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "str_split_terminator_filter_map_prune",
+        "str_split_terminator_filter_map",
+        &[
+            ".split_terminator(';')",
+            ".filter_map(|part|",
+            "StrSplitTerminatorFilterMapPayload::new(part).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadStrSplitTerminatorFilterMapItem",
+        "dead-str-split-terminator-filter-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_str_char_indices_filter_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "str_char_indices_filter_map_prune",
+        "str_char_indices_filter_map",
+        &[
+            ".char_indices()",
+            ".is_alphabetic()",
+            "format!(\"{index}:{ch}\")",
+            "pub fn render_label",
+        ],
+        "DeadStrCharIndicesFilterMapItem",
+        "dead-str-char-indices-filter-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_str_match_indices_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "str_match_indices_map_prune",
+        "str_match_indices_map",
+        &[
+            ".match_indices(\"live\")",
+            "format!(\"{index}:{part}\")",
+            ".map(|(index, part)|",
+            "pub fn render_label",
+        ],
+        "DeadStrMatchIndicesMapItem",
+        "dead-str-match-indices-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_path_components_filter_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "path_components_filter_map_prune",
+        "path_components_filter_map",
+        &[
+            "use std::path::{Component, Path};",
+            "Path::new(raw)",
+            ".components()",
+            "Component::Normal(part)",
+            "part.to_string_lossy()",
+            "pub fn render_label",
+        ],
+        "DeadPathComponentsFilterMapItem",
+        "dead-path-components-filter-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_path_file_name_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "path_file_name_map_prune",
+        "path_file_name_map",
+        &[
+            "use std::path::Path;",
+            "Path::new(raw)",
+            ".file_name()",
+            ".and_then(|name| name.to_str())",
+            ".map(PathFileNameMapPayload::new)",
+            "pub fn render_label",
+        ],
+        "DeadPathFileNameMapItem",
+        "dead-path-file-name-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_osstr_to_str_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "osstr_to_str_map_prune",
+        "osstr_to_str_map",
+        &[
+            "use std::ffi::OsStr;",
+            "OsStr::new(raw)",
+            ".to_str()",
+            ".map(OsstrToStrMapPayload::new)",
+            "pub fn render_label",
+        ],
+        "DeadOsstrToStrMapItem",
+        "dead-osstr-to-str-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_hashmap_get_key_value_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "hashmap_get_key_value_map_prune",
+        "hashmap_get_key_value_map",
+        &[
+            "use std::collections::HashMap;",
+            ".get_key_value(\"live\")",
+            "format!(\"{key}:{}\", payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadHashmapGetKeyValueMapItem",
+        "dead-hashmap-get-key-value-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_btreemap_range_mut_find_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "btreemap_range_mut_find_map_prune",
+        "btreemap_range_mut_find_map",
+        &[
+            "use std::collections::BTreeMap;",
+            ".range_mut(0..=3)",
+            ".find_map(|(_, payload)| payload.maybe_label_mut())",
+            "pub fn maybe_label_mut",
+            "pub fn render_label",
+        ],
+        "DeadBtreemapRangeMutFindMapItem",
+        "dead-btreemap-range-mut-find-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_iterator_peekable_peek_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_peekable_peek_map_prune",
+        "iterator_peekable_peek_map",
+        &[
+            ".peekable()",
+            "iter.peek()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorPeekablePeekMapItem",
+        "dead-iterator-peekable-peek-map",
+        "pub fn unused_label",
+    );
+}
+
+#[test]
+fn prunes_iter_repeat_with_take_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iter_repeat_with_take_map_prune",
+        "iter_repeat_with_take_map",
+        &[
+            "std::iter::repeat_with(|| IterRepeatWithTakeMapPayload::new(raw))",
+            ".take(2)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIterRepeatWithTakeMapItem",
+        "dead-iter-repeat-with-take-map",
+        "pub fn unused_label",
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,
