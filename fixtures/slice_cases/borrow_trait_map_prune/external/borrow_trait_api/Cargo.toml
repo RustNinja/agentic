@@ -1,0 +1,7 @@
+[package]
+name = "borrow_trait_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+borrow_trait_model = { path = "../borrow_trait_model" }

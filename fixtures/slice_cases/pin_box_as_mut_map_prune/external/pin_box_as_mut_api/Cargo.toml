@@ -1,0 +1,7 @@
+[package]
+name = "pin_box_as_mut_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+pin_box_as_mut_model = { path = "../pin_box_as_mut_model" }

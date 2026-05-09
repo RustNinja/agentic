@@ -11307,6 +11307,271 @@ fn prunes_rc_refcell_borrow_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_cow_borrowed_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "cow_borrowed_as_ref_map_prune",
+        root_fn: "selected_cow_borrowed_as_ref_map_report",
+        api_pkg: "cow_borrowed_as_ref_api",
+        model_pkg: "cow_borrowed_as_ref_model",
+        api_fn: "selected_cow_borrowed_as_ref_map_report",
+        model_fn: "selected_cow_borrowed_as_ref_map",
+        model_required: &[
+            "use std::borrow::Cow;",
+            "Cow::Borrowed",
+            ".as_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCowBorrowedAsRefMapItem",
+            "dead_cow_borrowed_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-cow-borrowed-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_cow_owned_into_owned_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "cow_owned_into_owned_map_prune",
+        root_fn: "selected_cow_owned_into_owned_map_report",
+        api_pkg: "cow_owned_into_owned_api",
+        model_pkg: "cow_owned_into_owned_model",
+        api_fn: "selected_cow_owned_into_owned_map_report",
+        model_fn: "selected_cow_owned_into_owned_map",
+        model_required: &[
+            "use std::borrow::Cow;",
+            "Cow::Owned",
+            ".into_owned().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCowOwnedIntoOwnedMapItem",
+            "dead_cow_owned_into_owned_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-cow-owned-into-owned-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_cow_to_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "cow_to_mut_map_prune",
+        root_fn: "selected_cow_to_mut_map_report",
+        api_pkg: "cow_to_mut_api",
+        model_pkg: "cow_to_mut_model",
+        api_fn: "selected_cow_to_mut_map_report",
+        model_fn: "selected_cow_to_mut_map",
+        model_required: &[
+            "use std::borrow::Cow;",
+            ".to_mut().bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCowToMutMapItem",
+            "dead_cow_to_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-cow-to-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_borrow_trait_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "borrow_trait_map_prune",
+        root_fn: "selected_borrow_trait_map_report",
+        api_pkg: "borrow_trait_api",
+        model_pkg: "borrow_trait_model",
+        api_fn: "selected_borrow_trait_map_report",
+        model_fn: "selected_borrow_trait_map",
+        model_required: &[
+            "use std::borrow::Borrow;",
+            "impl Borrow<BorrowTraitMapPayload>",
+            ".borrow()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBorrowTraitMapItem",
+            "dead_borrow_trait_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_wrapper_method",
+            "dead-borrow-trait-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_as_ref_trait_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "as_ref_trait_map_prune",
+        root_fn: "selected_as_ref_trait_map_report",
+        api_pkg: "as_ref_trait_api",
+        model_pkg: "as_ref_trait_model",
+        api_fn: "selected_as_ref_trait_map_report",
+        model_fn: "selected_as_ref_trait_map",
+        model_required: &[
+            "impl AsRef<AsRefTraitMapPayload>",
+            ".as_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadAsRefTraitMapItem",
+            "dead_as_ref_trait_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_wrapper_method",
+            "dead-as-ref-trait-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_as_mut_trait_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "as_mut_trait_map_prune",
+        root_fn: "selected_as_mut_trait_map_report",
+        api_pkg: "as_mut_trait_api",
+        model_pkg: "as_mut_trait_model",
+        api_fn: "selected_as_mut_trait_map_report",
+        model_fn: "selected_as_mut_trait_map",
+        model_required: &[
+            "impl AsMut<AsMutTraitMapPayload>",
+            ".as_mut().bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadAsMutTraitMapItem",
+            "dead_as_mut_trait_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead_wrapper_method",
+            "dead-as-mut-trait-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_deref_mut_trait_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "deref_mut_trait_map_prune",
+        root_fn: "selected_deref_mut_trait_map_report",
+        api_pkg: "deref_mut_trait_api",
+        model_pkg: "deref_mut_trait_model",
+        api_fn: "selected_deref_mut_trait_map_report",
+        model_fn: "selected_deref_mut_trait_map",
+        model_required: &[
+            "use std::ops::{Deref, DerefMut};",
+            "impl Deref for DerefMutTraitMapWrapper",
+            "impl DerefMut for DerefMutTraitMapWrapper",
+            "wrapper.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadDerefMutTraitMapItem",
+            "dead_deref_mut_trait_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead_wrapper_method",
+            "dead-deref-mut-trait-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_pin_box_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "pin_box_as_ref_map_prune",
+        root_fn: "selected_pin_box_as_ref_map_report",
+        api_pkg: "pin_box_as_ref_api",
+        model_pkg: "pin_box_as_ref_model",
+        api_fn: "selected_pin_box_as_ref_map_report",
+        model_fn: "selected_pin_box_as_ref_map",
+        model_required: &[
+            "use std::pin::Pin;",
+            "Pin::new(Box::new",
+            ".as_ref().get_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadPinBoxAsRefMapItem",
+            "dead_pin_box_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-pin-box-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_pin_box_as_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "pin_box_as_mut_map_prune",
+        root_fn: "selected_pin_box_as_mut_map_report",
+        api_pkg: "pin_box_as_mut_api",
+        model_pkg: "pin_box_as_mut_model",
+        api_fn: "selected_pin_box_as_mut_map_report",
+        model_fn: "selected_pin_box_as_mut_map",
+        model_required: &[
+            "use std::pin::Pin;",
+            "Pin::new(Box::new",
+            ".as_mut().get_mut().bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadPinBoxAsMutMapItem",
+            "dead_pin_box_as_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-pin-box-as-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_phantomdata_surface_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "phantomdata_surface_map_prune",
+        root_fn: "selected_phantomdata_surface_map_report",
+        api_pkg: "phantomdata_surface_api",
+        model_pkg: "phantomdata_surface_model",
+        api_fn: "selected_phantomdata_surface_map_report",
+        model_fn: "selected_phantomdata_surface_map",
+        model_required: &[
+            "use std::marker::PhantomData;",
+            "PhantomData<T>",
+            "PhantomDataSurfaceMapMarker",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadPhantomDataSurfaceMapItem",
+            "DeadPhantomDataSurfaceMapMarker",
+            "dead_phantomdata_surface_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_wrapper_method",
+            "dead-phantomdata-surface-map",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

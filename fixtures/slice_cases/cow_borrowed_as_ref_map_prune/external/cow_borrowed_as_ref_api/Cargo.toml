@@ -1,0 +1,7 @@
+[package]
+name = "cow_borrowed_as_ref_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cow_borrowed_as_ref_model = { path = "../cow_borrowed_as_ref_model" }

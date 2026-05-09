@@ -1,0 +1,7 @@
+[package]
+name = "as_mut_trait_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+as_mut_trait_model = { path = "../as_mut_trait_model" }

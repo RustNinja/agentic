@@ -1,0 +1,7 @@
+[package]
+name = "cow_owned_into_owned_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cow_owned_into_owned_model = { path = "../cow_owned_into_owned_model" }

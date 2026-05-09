@@ -1,0 +1,4 @@
+[package]
+name = "cow_owned_into_owned_model"
+version = "0.1.0"
+edition = "2021"

@@ -1,0 +1,7 @@
+[package]
+name = "phantomdata_surface_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+phantomdata_surface_model = { path = "../phantomdata_surface_model" }
