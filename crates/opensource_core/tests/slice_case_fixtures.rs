@@ -6053,6 +6053,172 @@ fn prunes_matches_result_guard_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_result_option_match_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_option_match_prune",
+        root_fn: "selected_result_option_report",
+        api_pkg: "result_option_api",
+        model_pkg: "result_option_model",
+        api_fn: "selected_result_option_report",
+        model_fn: "selected_result_option",
+        model_required: &[
+            "ResultOptionPayload",
+            "ResultOptionError",
+            "Result<Option<ResultOptionPayload>, ResultOptionError>",
+            "Ok(Some(payload)) => payload.render_label()",
+            "Err(err) => err.render_error()",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultOptionItem",
+            "dead_result_option",
+            "dead_method",
+            "dead_live_result_option",
+            "dead-result-option",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_option_if_let_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_option_if_let_prune",
+        root_fn: "selected_result_option_if_report",
+        api_pkg: "result_option_if_api",
+        model_pkg: "result_option_if_model",
+        api_fn: "selected_result_option_if_report",
+        model_fn: "selected_result_option_if",
+        model_required: &[
+            "ResultOptionIfPayload",
+            "ResultOptionIfError",
+            "if let Ok(Some(payload)) = result_option_if_payload(raw)",
+            "payload.render_label()",
+            "err.render_error()",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultOptionIfItem",
+            "dead_result_option_if",
+            "dead_method",
+            "dead_live_result_option_if",
+            "dead-result-option-if",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_struct_pattern_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_struct_pattern_prune",
+        root_fn: "selected_option_struct_report",
+        api_pkg: "option_struct_api",
+        model_pkg: "option_struct_model",
+        api_fn: "selected_option_struct_report",
+        model_fn: "selected_option_struct",
+        model_required: &[
+            "OptionStructPayload",
+            "OptionStructInner",
+            "Some(OptionStructPayload { inner })",
+            "inner.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionStructItem",
+            "dead_option_struct",
+            "dead_method",
+            "dead_live_option_struct",
+            "dead-option-struct",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_tuple_pattern_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_tuple_pattern_prune",
+        root_fn: "selected_option_tuple_report",
+        api_pkg: "option_tuple_api",
+        model_pkg: "option_tuple_model",
+        api_fn: "selected_option_tuple_report",
+        model_fn: "selected_option_tuple",
+        model_required: &[
+            "OptionTupleKey",
+            "OptionTupleValue",
+            "Some((key, value)) => key.render_with(value)",
+            "pub fn render_with",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionTupleItem",
+            "dead_option_tuple",
+            "dead_method",
+            "dead_live_option_tuple",
+            "dead-option-tuple",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_tuple_struct_pattern_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_tuple_struct_pattern_prune",
+        root_fn: "selected_option_tuple_struct_report",
+        api_pkg: "option_tuple_struct_api",
+        model_pkg: "option_tuple_struct_model",
+        api_fn: "selected_option_tuple_struct_report",
+        model_fn: "selected_option_tuple_struct",
+        model_required: &[
+            "OptionTupleStructPayload",
+            "OptionTupleStructInner",
+            "Some(OptionTupleStructPayload(inner))",
+            "inner.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionTupleStructItem",
+            "dead_option_tuple_struct",
+            "dead_method",
+            "dead_live_option_tuple_struct",
+            "dead-option-tuple-struct",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_enum_named_pattern_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_enum_named_pattern_prune",
+        root_fn: "selected_option_enum_named_report",
+        api_pkg: "option_enum_named_api",
+        model_pkg: "option_enum_named_model",
+        api_fn: "selected_option_enum_named_report",
+        model_fn: "selected_option_enum_named",
+        model_required: &[
+            "OptionEnumNamedEvent",
+            "OptionEnumNamedPayload",
+            "Some(OptionEnumNamedEvent::Live { payload })",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionEnumNamedItem",
+            "dead_option_enum_named",
+            "dead_method",
+            "dead_live_option_enum_named",
+            "dead-option-enum-named",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

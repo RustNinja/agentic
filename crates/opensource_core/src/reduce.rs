@@ -4676,15 +4676,25 @@ impl<'a> DependencyVisitor<'a> {
                 }
             }
             (Pat::TupleStruct(pattern), Type::Path(type_path)) => {
+                let mut matched_generic_variant = false;
                 for (pattern, ty) in generic_tuple_variant_field_types(pattern, &type_path.path) {
+                    matched_generic_variant = true;
                     self.collect_pattern_type_bindings(pattern, ty, resolver, bindings);
+                }
+                if matched_generic_variant {
+                    return;
+                }
+                if let Some(type_ref) = resolver.resolve_receiver_type(ty) {
+                    self.collect_tuple_struct_pattern_type_bindings(
+                        pattern, &type_ref, resolver, bindings,
+                    );
                 }
             }
             (Pat::Struct(pattern), _) => {
                 let Some(type_ref) = resolver.resolve_receiver_type(ty) else {
                     return;
                 };
-                self.collect_struct_pattern_type_bindings(pattern, &type_ref, bindings);
+                self.collect_named_pattern_type_bindings(pattern, &type_ref, resolver, bindings);
             }
             (_, Type::Group(group)) => {
                 self.collect_pattern_type_bindings(pattern, &group.elem, resolver, bindings);
@@ -4696,15 +4706,134 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn collect_tuple_struct_pattern_type_bindings(
+        &self,
+        pattern: &PatTupleStruct,
+        type_ref: &TypeRef,
+        resolver: &Resolver<'_>,
+        bindings: &mut Vec<(String, TypeRef, Vec<TypeRef>)>,
+    ) {
+        let Some(constructor_name) = pattern
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return;
+        };
+
+        for candidate in resolver.type_ref_candidates(type_ref) {
+            if let Some((record, variant)) =
+                resolver.enum_variant_record(&candidate, &constructor_name)
+            {
+                let syn::Fields::Unnamed(fields) = &variant.fields else {
+                    continue;
+                };
+                let field_resolver = Resolver {
+                    project: self.resolver.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                for (pattern, field) in pattern.elems.iter().zip(fields.unnamed.iter()) {
+                    self.collect_pattern_type_bindings(
+                        pattern,
+                        &field.ty,
+                        &field_resolver,
+                        bindings,
+                    );
+                }
+                return;
+            }
+        }
+
+        for candidate in resolver.type_ref_candidates(type_ref) {
+            if candidate
+                .type_path
+                .last()
+                .is_none_or(|name| name != &constructor_name)
+            {
+                continue;
+            }
+            let Some(item) = resolver.find_item(
+                &candidate.package,
+                &candidate.type_path,
+                &[ItemKind::Struct],
+            ) else {
+                continue;
+            };
+            let Some(record) = self.resolver.project.items.get(&item) else {
+                continue;
+            };
+            let Item::Struct(item_struct) = &record.item else {
+                continue;
+            };
+            let syn::Fields::Unnamed(fields) = &item_struct.fields else {
+                continue;
+            };
+            let field_resolver = Resolver {
+                project: self.resolver.project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            for (pattern, field) in pattern.elems.iter().zip(fields.unnamed.iter()) {
+                self.collect_pattern_type_bindings(pattern, &field.ty, &field_resolver, bindings);
+            }
+            return;
+        }
+    }
+
+    fn collect_named_pattern_type_bindings(
+        &self,
+        pattern: &syn::PatStruct,
+        type_ref: &TypeRef,
+        resolver: &Resolver<'_>,
+        bindings: &mut Vec<(String, TypeRef, Vec<TypeRef>)>,
+    ) {
+        let Some(variant_name) = pattern
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return;
+        };
+
+        for candidate in resolver.type_ref_candidates(type_ref) {
+            if let Some((record, variant)) = resolver.enum_variant_record(&candidate, &variant_name)
+            {
+                let field_resolver = Resolver {
+                    project: self.resolver.project,
+                    package: &record.package,
+                    module_path: &record.module_path,
+                    aliases: &record.aliases,
+                    self_type: None,
+                };
+                for field in &pattern.fields {
+                    let Some(ty) = field_member_type(&variant.fields, &field.member) else {
+                        continue;
+                    };
+                    self.collect_pattern_type_bindings(&field.pat, ty, &field_resolver, bindings);
+                }
+                return;
+            }
+        }
+
+        self.collect_struct_pattern_type_bindings(pattern, type_ref, resolver, bindings);
+    }
+
     fn collect_struct_pattern_type_bindings(
         &self,
         pattern: &syn::PatStruct,
         type_ref: &TypeRef,
+        resolver: &Resolver<'_>,
         bindings: &mut Vec<(String, TypeRef, Vec<TypeRef>)>,
     ) {
         let Some(item) =
-            self.resolver
-                .find_item(&type_ref.package, &type_ref.type_path, &[ItemKind::Struct])
+            resolver.find_item(&type_ref.package, &type_ref.type_path, &[ItemKind::Struct])
         else {
             return;
         };

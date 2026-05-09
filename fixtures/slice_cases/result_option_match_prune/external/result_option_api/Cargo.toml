@@ -1,0 +1,7 @@
+[package]
+name = "result_option_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+result_option_model = { path = "../result_option_model" }

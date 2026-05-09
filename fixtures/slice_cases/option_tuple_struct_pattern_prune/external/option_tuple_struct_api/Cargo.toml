@@ -1,0 +1,7 @@
+[package]
+name = "option_tuple_struct_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_tuple_struct_model = { path = "../option_tuple_struct_model" }
