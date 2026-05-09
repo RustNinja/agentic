@@ -6086,6 +6086,15 @@ impl<'a> DependencyVisitor<'a> {
                         .into_iter()
                         .collect();
                 }
+                if call.method == "keys" && self.expression_map_value_type(&call.receiver).is_some()
+                {
+                    return self
+                        .expression_type_arguments(&call.receiver)
+                        .first()
+                        .cloned()
+                        .into_iter()
+                        .collect();
+                }
                 if matches!(
                     call.method.to_string().as_str(),
                     "as_ref"
@@ -6096,6 +6105,7 @@ impl<'a> DependencyVisitor<'a> {
                         | "cloned"
                         | "copied"
                         | "cycle"
+                        | "drain"
                         | "filter"
                         | "find"
                         | "flatten"
@@ -6113,6 +6123,8 @@ impl<'a> DependencyVisitor<'a> {
                         | "or"
                         | "or_else"
                         | "peekable"
+                        | "range"
+                        | "range_mut"
                         | "reduce"
                         | "rev"
                         | "skip_while"

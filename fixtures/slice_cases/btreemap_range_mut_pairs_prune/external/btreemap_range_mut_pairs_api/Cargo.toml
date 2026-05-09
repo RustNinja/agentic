@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_range_mut_pairs_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_range_mut_pairs_model = { path = "../btreemap_range_mut_pairs_model" }

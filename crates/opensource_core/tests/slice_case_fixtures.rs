@@ -8005,6 +8005,309 @@ fn prunes_btreemap_entry_or_insert_with_key_support_chain_with_default_analyzer(
     });
 }
 
+#[test]
+fn prunes_hashmap_iter_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_iter_pairs_prune",
+        root_fn: "selected_hashmap_iter_pairs_report",
+        api_pkg: "hashmap_iter_pairs_api",
+        model_pkg: "hashmap_iter_pairs_model",
+        api_fn: "selected_hashmap_iter_pairs_report",
+        model_fn: "selected_hashmap_iter_pairs",
+        model_required: &[
+            "HashmapIterPairsKey",
+            "HashmapIterPairsPayload",
+            ".iter()",
+            ".map(|(_key, payload)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapIterPairsItem",
+            "dead_hashmap_iter_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_hashmap_iter_pairs",
+            "dead-hashmap-iter-pairs",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_iter_mut_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_iter_mut_pairs_prune",
+        root_fn: "selected_hashmap_iter_mut_pairs_report",
+        api_pkg: "hashmap_iter_mut_pairs_api",
+        model_pkg: "hashmap_iter_mut_pairs_model",
+        api_fn: "selected_hashmap_iter_mut_pairs_report",
+        model_fn: "selected_hashmap_iter_mut_pairs",
+        model_required: &[
+            "HashmapIterMutPairsKey",
+            "HashmapIterMutPairsPayload",
+            ".iter_mut()",
+            ".for_each(|(_key, payload)| {",
+            "payload.mark_live();",
+            "pub fn mark_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapIterMutPairsItem",
+            "dead_hashmap_iter_mut_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "dead_method",
+            "dead_live_hashmap_iter_mut_pairs",
+            "dead-hashmap-iter-mut-pairs",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_into_iter_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_into_iter_pairs_prune",
+        root_fn: "selected_hashmap_into_iter_pairs_report",
+        api_pkg: "hashmap_into_iter_pairs_api",
+        model_pkg: "hashmap_into_iter_pairs_model",
+        api_fn: "selected_hashmap_into_iter_pairs_report",
+        model_fn: "selected_hashmap_into_iter_pairs",
+        model_required: &[
+            "HashmapIntoIterPairsKey",
+            "HashmapIntoIterPairsPayload",
+            ".into_iter()",
+            ".map(|(_key, payload)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapIntoIterPairsItem",
+            "dead_hashmap_into_iter_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_hashmap_into_iter_pairs",
+            "dead-hashmap-into-iter-pairs",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_drain_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_drain_pairs_prune",
+        root_fn: "selected_hashmap_drain_pairs_report",
+        api_pkg: "hashmap_drain_pairs_api",
+        model_pkg: "hashmap_drain_pairs_model",
+        api_fn: "selected_hashmap_drain_pairs_report",
+        model_fn: "selected_hashmap_drain_pairs",
+        model_required: &[
+            "HashmapDrainPairsKey",
+            "HashmapDrainPairsPayload",
+            ".drain()",
+            ".map(|(_key, payload)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapDrainPairsItem",
+            "dead_hashmap_drain_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_hashmap_drain_pairs",
+            "dead-hashmap-drain-pairs",
+        ],
+    });
+}
+
+#[test]
+fn prunes_hashmap_keys_find_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "hashmap_keys_find_prune",
+        root_fn: "selected_hashmap_keys_find_report",
+        api_pkg: "hashmap_keys_find_api",
+        model_pkg: "hashmap_keys_find_model",
+        api_fn: "selected_hashmap_keys_find_report",
+        model_fn: "selected_hashmap_keys_find",
+        model_required: &[
+            "HashmapKeysFindKey",
+            "HashmapKeysFindPayload",
+            ".keys()",
+            ".find(|key| key.is_live())",
+            ".map(|key| key.render_key())",
+            "pub fn is_live",
+            "pub fn render_key",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadHashmapKeysFindItem",
+            "dead_hashmap_keys_find",
+            "pub fn mark_live",
+            "pub fn render_label",
+            "dead_method",
+            "dead_live_hashmap_keys_find",
+            "dead-hashmap-keys-find",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_iter_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_iter_pairs_prune",
+        root_fn: "selected_btreemap_iter_pairs_report",
+        api_pkg: "btreemap_iter_pairs_api",
+        model_pkg: "btreemap_iter_pairs_model",
+        api_fn: "selected_btreemap_iter_pairs_report",
+        model_fn: "selected_btreemap_iter_pairs",
+        model_required: &[
+            "BtreemapIterPairsKey",
+            "BtreemapIterPairsPayload",
+            ".iter()",
+            ".map(|(_key, payload)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapIterPairsItem",
+            "dead_btreemap_iter_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_btreemap_iter_pairs",
+            "dead-btreemap-iter-pairs",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_iter_mut_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_iter_mut_pairs_prune",
+        root_fn: "selected_btreemap_iter_mut_pairs_report",
+        api_pkg: "btreemap_iter_mut_pairs_api",
+        model_pkg: "btreemap_iter_mut_pairs_model",
+        api_fn: "selected_btreemap_iter_mut_pairs_report",
+        model_fn: "selected_btreemap_iter_mut_pairs",
+        model_required: &[
+            "BtreemapIterMutPairsKey",
+            "BtreemapIterMutPairsPayload",
+            ".iter_mut()",
+            ".for_each(|(_key, payload)| {",
+            "payload.mark_live();",
+            "pub fn mark_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapIterMutPairsItem",
+            "dead_btreemap_iter_mut_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "dead_method",
+            "dead_live_btreemap_iter_mut_pairs",
+            "dead-btreemap-iter-mut-pairs",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_into_iter_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_into_iter_pairs_prune",
+        root_fn: "selected_btreemap_into_iter_pairs_report",
+        api_pkg: "btreemap_into_iter_pairs_api",
+        model_pkg: "btreemap_into_iter_pairs_model",
+        api_fn: "selected_btreemap_into_iter_pairs_report",
+        model_fn: "selected_btreemap_into_iter_pairs",
+        model_required: &[
+            "BtreemapIntoIterPairsKey",
+            "BtreemapIntoIterPairsPayload",
+            ".into_iter()",
+            ".map(|(_key, payload)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapIntoIterPairsItem",
+            "dead_btreemap_into_iter_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_btreemap_into_iter_pairs",
+            "dead-btreemap-into-iter-pairs",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_range_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_range_pairs_prune",
+        root_fn: "selected_btreemap_range_pairs_report",
+        api_pkg: "btreemap_range_pairs_api",
+        model_pkg: "btreemap_range_pairs_model",
+        api_fn: "selected_btreemap_range_pairs_report",
+        model_fn: "selected_btreemap_range_pairs",
+        model_required: &[
+            "BtreemapRangePairsKey",
+            "BtreemapRangePairsPayload",
+            ".range(BtreemapRangePairsKey::live()..)",
+            ".map(|(_key, payload)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapRangePairsItem",
+            "dead_btreemap_range_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "pub fn mark_live",
+            "dead_method",
+            "dead_live_btreemap_range_pairs",
+            "dead-btreemap-range-pairs",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_range_mut_pairs_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_range_mut_pairs_prune",
+        root_fn: "selected_btreemap_range_mut_pairs_report",
+        api_pkg: "btreemap_range_mut_pairs_api",
+        model_pkg: "btreemap_range_mut_pairs_model",
+        api_fn: "selected_btreemap_range_mut_pairs_report",
+        model_fn: "selected_btreemap_range_mut_pairs",
+        model_required: &[
+            "BtreemapRangeMutPairsKey",
+            "BtreemapRangeMutPairsPayload",
+            ".range_mut(BtreemapRangeMutPairsKey::live()..)",
+            "payload.mark_live();",
+            "pub fn mark_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapRangeMutPairsItem",
+            "dead_btreemap_range_mut_pairs",
+            "pub fn is_live",
+            "pub fn render_key",
+            "dead_method",
+            "dead_live_btreemap_range_mut_pairs",
+            "dead-btreemap-range-mut-pairs",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

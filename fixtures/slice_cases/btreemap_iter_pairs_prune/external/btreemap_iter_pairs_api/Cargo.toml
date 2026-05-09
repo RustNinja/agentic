@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_iter_pairs_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_iter_pairs_model = { path = "../btreemap_iter_pairs_model" }
