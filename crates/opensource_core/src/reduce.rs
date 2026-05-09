@@ -6176,10 +6176,12 @@ impl<'a> DependencyVisitor<'a> {
                         | "flatten"
                         | "fuse"
                         | "inspect"
+                        | "into_boxed_slice"
                         | "into_sorted_vec"
                         | "into_iter"
                         | "iter"
                         | "iter_mut"
+                        | "leak"
                         | "make_contiguous"
                         | "max_by"
                         | "max_by_key"
@@ -6199,9 +6201,11 @@ impl<'a> DependencyVisitor<'a> {
                         | "rsplit"
                         | "rsplitn"
                         | "skip_while"
+                        | "splice"
                         | "split"
                         | "split_inclusive"
                         | "splitn"
+                        | "split_off"
                         | "step_by"
                         | "take_while"
                         | "windows"
@@ -6430,7 +6434,7 @@ impl<'a> DependencyVisitor<'a> {
             Expr::MethodCall(call)
                 if matches!(
                     call.method.to_string().as_str(),
-                    "as_ref" | "as_mut" | "clone"
+                    "as_ref" | "as_mut" | "clone" | "split_off"
                 ) =>
             {
                 self.expression_map_key_type(&call.receiver)
@@ -6470,7 +6474,7 @@ impl<'a> DependencyVisitor<'a> {
             Expr::MethodCall(call)
                 if matches!(
                     call.method.to_string().as_str(),
-                    "as_ref" | "as_mut" | "clone"
+                    "as_ref" | "as_mut" | "clone" | "split_off"
                 ) =>
             {
                 self.expression_map_value_type(&call.receiver)

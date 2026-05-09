@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_append_values_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_append_values_model = { path = "../btreemap_append_values_model" }

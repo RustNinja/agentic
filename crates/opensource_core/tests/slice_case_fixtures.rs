@@ -12509,6 +12509,323 @@ fn prunes_array_from_fn_iter_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_vec_split_off_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_split_off_into_iter_prune",
+        root_fn: "selected_vec_split_off_into_iter_report",
+        api_pkg: "vec_split_off_into_iter_api",
+        model_pkg: "vec_split_off_into_iter_model",
+        api_fn: "selected_vec_split_off_into_iter_report",
+        model_fn: "selected_vec_split_off_into_iter",
+        model_required: &[
+            ".split_off(1)",
+            ".into_iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecSplitOffIntoIterItem",
+            "dead_vec_split_off_into_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-vec-split-off-into-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_splice_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_splice_map_prune",
+        root_fn: "selected_vec_splice_map_report",
+        api_pkg: "vec_splice_map_api",
+        model_pkg: "vec_splice_map_model",
+        api_fn: "selected_vec_splice_map_report",
+        model_fn: "selected_vec_splice_map",
+        model_required: &[
+            ".splice(0..1",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecSpliceMapItem",
+            "dead_vec_splice_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-vec-splice-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_into_boxed_slice_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_into_boxed_slice_iter_prune",
+        root_fn: "selected_vec_into_boxed_slice_iter_report",
+        api_pkg: "vec_into_boxed_slice_iter_api",
+        model_pkg: "vec_into_boxed_slice_iter_model",
+        api_fn: "selected_vec_into_boxed_slice_iter_report",
+        model_fn: "selected_vec_into_boxed_slice_iter",
+        model_required: &[
+            ".into_boxed_slice()",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecIntoBoxedSliceIterItem",
+            "dead_vec_into_boxed_slice_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-vec-into-boxed-slice-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_leak_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_leak_iter_prune",
+        root_fn: "selected_vec_leak_iter_report",
+        api_pkg: "vec_leak_iter_api",
+        model_pkg: "vec_leak_iter_model",
+        api_fn: "selected_vec_leak_iter_report",
+        model_fn: "selected_vec_leak_iter",
+        model_required: &[
+            ".leak()",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecLeakIterItem",
+            "dead_vec_leak_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-vec-leak-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_resize_with_last_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_resize_with_last_prune",
+        root_fn: "selected_vec_resize_with_last_report",
+        api_pkg: "vec_resize_with_last_api",
+        model_pkg: "vec_resize_with_last_model",
+        api_fn: "selected_vec_resize_with_last_report",
+        model_fn: "selected_vec_resize_with_last",
+        model_required: &[
+            ".resize_with(2",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecResizeWithLastItem",
+            "dead_vec_resize_with_last",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-vec-resize-with-last",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_extend_from_slice_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_extend_from_slice_iter_prune",
+        root_fn: "selected_vec_extend_from_slice_iter_report",
+        api_pkg: "vec_extend_from_slice_iter_api",
+        model_pkg: "vec_extend_from_slice_iter_model",
+        api_fn: "selected_vec_extend_from_slice_iter_report",
+        model_fn: "selected_vec_extend_from_slice_iter",
+        model_required: &[
+            ".extend_from_slice(&extras)",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecExtendFromSliceIterItem",
+            "dead_vec_extend_from_slice_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-vec-extend-from-slice-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_split_off_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_split_off_into_iter_prune",
+        root_fn: "selected_vecdeque_split_off_into_iter_report",
+        api_pkg: "vecdeque_split_off_into_iter_api",
+        model_pkg: "vecdeque_split_off_into_iter_model",
+        api_fn: "selected_vecdeque_split_off_into_iter_report",
+        model_fn: "selected_vecdeque_split_off_into_iter",
+        model_required: &[
+            "VecDeque",
+            ".split_off(1)",
+            ".into_iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequeSplitOffIntoIterItem",
+            "dead_vecdeque_split_off_into_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-vecdeque-split-off-into-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_linkedlist_split_off_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "linkedlist_split_off_into_iter_prune",
+        root_fn: "selected_linkedlist_split_off_into_iter_report",
+        api_pkg: "linkedlist_split_off_into_iter_api",
+        model_pkg: "linkedlist_split_off_into_iter_model",
+        api_fn: "selected_linkedlist_split_off_into_iter_report",
+        model_fn: "selected_linkedlist_split_off_into_iter",
+        model_required: &[
+            "LinkedList",
+            ".split_off(1)",
+            ".into_iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadLinkedlistSplitOffIntoIterItem",
+            "dead_linkedlist_split_off_into_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-linkedlist-split-off-into-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreeset_split_off_into_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreeset_split_off_into_iter_prune",
+        root_fn: "selected_btreeset_split_off_into_iter_report",
+        api_pkg: "btreeset_split_off_into_iter_api",
+        model_pkg: "btreeset_split_off_into_iter_model",
+        api_fn: "selected_btreeset_split_off_into_iter_report",
+        model_fn: "selected_btreeset_split_off_into_iter",
+        model_required: &[
+            "BTreeSet",
+            ".split_off(",
+            ".into_iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreesetSplitOffIntoIterItem",
+            "dead_btreeset_split_off_into_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-btreeset-split-off-into-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_split_off_into_values_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_split_off_into_values_prune",
+        root_fn: "selected_btreemap_split_off_into_values_report",
+        api_pkg: "btreemap_split_off_into_values_api",
+        model_pkg: "btreemap_split_off_into_values_model",
+        api_fn: "selected_btreemap_split_off_into_values_report",
+        model_fn: "selected_btreemap_split_off_into_values",
+        model_required: &[
+            "BTreeMap",
+            ".split_off(",
+            ".into_values()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapSplitOffIntoValuesItem",
+            "dead_btreemap_split_off_into_values",
+            "dead_key_method",
+            "dead_method",
+            "dead-btreemap-split-off-into-values",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_append_values_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_append_values_prune",
+        root_fn: "selected_btreemap_append_values_report",
+        api_pkg: "btreemap_append_values_api",
+        model_pkg: "btreemap_append_values_model",
+        api_fn: "selected_btreemap_append_values_report",
+        model_fn: "selected_btreemap_append_values",
+        model_required: &[
+            "BTreeMap",
+            ".append(&mut extras)",
+            ".values()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapAppendValuesItem",
+            "dead_btreemap_append_values",
+            "dead_key_method",
+            "dead_method",
+            "dead-btreemap-append-values",
+        ],
+    });
+}
+
+#[test]
+fn prunes_binaryheap_append_into_sorted_vec_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "binaryheap_append_into_sorted_vec_prune",
+        root_fn: "selected_binaryheap_append_into_sorted_vec_report",
+        api_pkg: "binaryheap_append_into_sorted_vec_api",
+        model_pkg: "binaryheap_append_into_sorted_vec_model",
+        api_fn: "selected_binaryheap_append_into_sorted_vec_report",
+        model_fn: "selected_binaryheap_append_into_sorted_vec",
+        model_required: &[
+            "BinaryHeap",
+            ".append(&mut extras)",
+            ".into_sorted_vec()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBinaryheapAppendIntoSortedVecItem",
+            "dead_binaryheap_append_into_sorted_vec",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-binaryheap-append-into-sorted-vec",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

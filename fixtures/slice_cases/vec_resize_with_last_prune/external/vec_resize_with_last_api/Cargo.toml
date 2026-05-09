@@ -1,0 +1,7 @@
+[package]
+name = "vec_resize_with_last_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_resize_with_last_model = { path = "../vec_resize_with_last_model" }

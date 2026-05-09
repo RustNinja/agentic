@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_split_off_into_values_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_split_off_into_values_model = { path = "../btreemap_split_off_into_values_model" }

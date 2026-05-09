@@ -1,0 +1,4 @@
+[package]
+name = "binaryheap_append_into_sorted_vec_model"
+version = "0.1.0"
+edition = "2021"

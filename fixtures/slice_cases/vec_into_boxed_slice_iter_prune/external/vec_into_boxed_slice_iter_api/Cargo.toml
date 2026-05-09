@@ -1,0 +1,7 @@
+[package]
+name = "vec_into_boxed_slice_iter_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_into_boxed_slice_iter_model = { path = "../vec_into_boxed_slice_iter_model" }

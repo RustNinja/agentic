@@ -1,0 +1,4 @@
+[package]
+name = "vec_extend_from_slice_iter_model"
+version = "0.1.0"
+edition = "2021"
