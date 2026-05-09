@@ -1,0 +1,4 @@
+[package]
+name = "option_ok_or_map_model"
+version = "0.1.0"
+edition = "2021"

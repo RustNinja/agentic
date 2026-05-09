@@ -1,0 +1,7 @@
+[package]
+name = "iterator_unzip_pair_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_unzip_pair_map_model = { path = "../iterator_unzip_pair_map_model" }

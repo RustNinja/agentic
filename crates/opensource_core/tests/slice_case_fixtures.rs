@@ -13308,6 +13308,223 @@ fn prunes_vecdeque_as_mut_slices_iter_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_option_get_or_insert_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "option_get_or_insert_map_prune",
+        "option_get_or_insert_map",
+        &[
+            ".get_or_insert(",
+            ".bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadOptionGetOrInsertMapItem",
+        "dead-option-get-or-insert-map",
+        "pub fn render_label",
+    );
+}
+
+#[test]
+fn prunes_option_get_or_insert_default_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "option_get_or_insert_default_map_prune",
+        "option_get_or_insert_default_map",
+        &[
+            ".get_or_insert_default()",
+            "impl Default for OptionGetOrInsertDefaultMapPayload",
+            ".bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadOptionGetOrInsertDefaultMapItem",
+        "dead-option-get-or-insert-default-map",
+        "pub fn render_label",
+    );
+}
+
+#[test]
+fn prunes_option_unwrap_or_default_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "option_unwrap_or_default_map_prune",
+        "option_unwrap_or_default_map",
+        &[
+            ".unwrap_or_default()",
+            "impl Default for OptionUnwrapOrDefaultMapPayload",
+            ".render_label()",
+            "pub fn render_label",
+        ],
+        "DeadOptionUnwrapOrDefaultMapItem",
+        "dead-option-unwrap-or-default-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_result_unwrap_or_default_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "result_unwrap_or_default_map_prune",
+        "result_unwrap_or_default_map",
+        &[
+            "Result<ResultUnwrapOrDefaultMapPayload, ResultUnwrapOrDefaultMapError>",
+            ".unwrap_or_default()",
+            "impl Default for ResultUnwrapOrDefaultMapPayload",
+            ".render_label()",
+            "pub fn render_label",
+        ],
+        "DeadResultUnwrapOrDefaultMapItem",
+        "dead-result-unwrap-or-default-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_option_ok_or_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "option_ok_or_map_prune",
+        "option_ok_or_map",
+        &[
+            ".ok_or(",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+            "pub fn render_error",
+        ],
+        "DeadOptionOkOrMapItem",
+        "dead-option-ok-or-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_option_cloned_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "option_cloned_map_prune",
+        "option_cloned_map",
+        &[
+            ".cloned()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadOptionClonedMapItem",
+        "dead-option-cloned-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_result_cloned_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "result_cloned_map_prune",
+        "result_cloned_map",
+        &[
+            "Result<&ResultClonedMapPayload, ResultClonedMapError>",
+            ".cloned()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+            "pub fn render_error",
+        ],
+        "DeadResultClonedMapItem",
+        "dead-result-cloned-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_result_copied_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "result_copied_map_prune",
+        "result_copied_map",
+        &[
+            "#[derive(Clone, Copy)]",
+            "Result<&ResultCopiedMapPayload, ResultCopiedMapError>",
+            ".copied()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+            "pub fn render_error",
+        ],
+        "DeadResultCopiedMapItem",
+        "dead-result-copied-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_option_transpose_unwrap_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "option_transpose_unwrap_map_prune",
+        "option_transpose_unwrap_map",
+        &[
+            "let optional: Option<",
+            "Result<OptionTransposeUnwrapMapPayload, OptionTransposeUnwrapMapError>",
+            ".transpose()",
+            "let _ = err.render_error();",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+            "pub fn render_error",
+        ],
+        "DeadOptionTransposeUnwrapMapItem",
+        "dead-option-transpose-unwrap-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_result_transpose_unwrap_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "result_transpose_unwrap_map_prune",
+        "result_transpose_unwrap_map",
+        &[
+            "let result: Result<",
+            "Option<ResultTransposeUnwrapMapPayload>",
+            "ResultTransposeUnwrapMapError",
+            ".transpose()",
+            "Ok(ResultTransposeUnwrapMapPayload::new(\"fallback\"))",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+            "pub fn render_error",
+        ],
+        "DeadResultTransposeUnwrapMapItem",
+        "dead-result-transpose-unwrap-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_option_unzip_pair_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "option_unzip_pair_map_prune",
+        "option_unzip_pair_map",
+        &[
+            ".unzip()",
+            "let (left, right)",
+            ".map(|payload| payload.render_left())",
+            ".map(|payload| payload.render_right())",
+            "pub fn render_left",
+            "pub fn render_right",
+        ],
+        "DeadOptionUnzipPairMapItem",
+        "dead-option-unzip-pair-map",
+        "pub fn render_label",
+    );
+}
+
+#[test]
+fn prunes_iterator_unzip_pair_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_unzip_pair_map_prune",
+        "iterator_unzip_pair_map",
+        &[
+            ".into_iter().unzip()",
+            "let (left, right): (Vec<_>, Vec<_>)",
+            ".map(|payload| payload.render_left())",
+            ".map(|payload| payload.render_right())",
+            "pub fn render_left",
+            "pub fn render_right",
+        ],
+        "DeadIteratorUnzipPairMapItem",
+        "dead-iterator-unzip-pair-map",
+        "pub fn render_label",
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,

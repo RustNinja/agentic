@@ -1,0 +1,7 @@
+[package]
+name = "result_copied_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+result_copied_map_model = { path = "../result_copied_map_model" }

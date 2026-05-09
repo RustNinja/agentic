@@ -4959,6 +4959,15 @@ impl<'a> DependencyVisitor<'a> {
         ) {
             return self.expression_entry_value_type(&call.receiver);
         }
+        if matches!(
+            call.method.to_string().as_str(),
+            "get_or_insert" | "get_or_insert_with" | "get_or_insert_default" | "insert"
+        ) {
+            return self
+                .expression_type_arguments(&call.receiver)
+                .first()
+                .cloned();
+        }
         if matches!(call.method.to_string().as_str(), "as_ref" | "clone") {
             return self.receiver_type(&call.receiver);
         }
@@ -4967,7 +4976,7 @@ impl<'a> DependencyVisitor<'a> {
         }
         if matches!(
             call.method.to_string().as_str(),
-            "expect" | "unwrap" | "unwrap_or" | "unwrap_or_else"
+            "expect" | "unwrap" | "unwrap_or" | "unwrap_or_default" | "unwrap_or_else"
         ) {
             return self.expression_result_ok_type(&call.receiver).or_else(|| {
                 self.expression_type_arguments(&call.receiver)
@@ -6075,13 +6084,19 @@ impl<'a> DependencyVisitor<'a> {
         };
         if !matches!(
             call.method.to_string().as_str(),
-            "as_slices" | "as_mut_slices" | "split_at" | "split_at_mut"
+            "as_slices" | "as_mut_slices" | "split_at" | "split_at_mut" | "unzip"
         ) {
             return false;
         }
         let type_arguments = self.expression_type_arguments(&call.receiver);
         if type_arguments.is_empty() {
             return false;
+        }
+        if call.method == "unzip" {
+            for (elem, type_ref) in tuple.elems.iter().zip(type_arguments.iter()) {
+                self.bind_pattern_type_arguments(elem, std::slice::from_ref(type_ref));
+            }
+            return true;
         }
         for elem in &tuple.elems {
             self.bind_pattern_type_arguments(elem, &type_arguments);
@@ -6201,6 +6216,9 @@ impl<'a> DependencyVisitor<'a> {
                         | "find"
                         | "flatten"
                         | "fuse"
+                        | "get_or_insert"
+                        | "get_or_insert_default"
+                        | "get_or_insert_with"
                         | "inspect"
                         | "intersection"
                         | "into_boxed_slice"
@@ -6245,6 +6263,8 @@ impl<'a> DependencyVisitor<'a> {
                         | "symmetric_difference"
                         | "take_while"
                         | "union"
+                        | "transpose"
+                        | "unzip"
                         | "unwrap_or"
                         | "unwrap_or_default"
                         | "unwrap_or_else"
@@ -7920,6 +7940,20 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
         if call.method == "or_default" {
             if let Some(value_type) = self.expression_entry_value_type(&call.receiver) {
+                self.add_trait_impls_for_type_named(&value_type, "Default");
+            }
+        }
+        if call.method == "get_or_insert_default" {
+            if let Some(value_type) = self.expression_type_arguments(&call.receiver).first() {
+                self.add_trait_impls_for_type_named(value_type, "Default");
+            }
+        }
+        if call.method == "unwrap_or_default" {
+            if let Some(value_type) = self.expression_result_ok_type(&call.receiver).or_else(|| {
+                self.expression_type_arguments(&call.receiver)
+                    .first()
+                    .cloned()
+            }) {
                 self.add_trait_impls_for_type_named(&value_type, "Default");
             }
         }
