@@ -13110,6 +13110,204 @@ fn prunes_slice_swap_iter_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_slice_split_first_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "slice_split_first_map_prune",
+        "slice_split_first_map",
+        &[
+            ".split_first()",
+            ".map(|(payload, _tail)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadSliceSplitFirstMapItem",
+        "dead-slice-split-first-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_slice_split_last_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "slice_split_last_map_prune",
+        "slice_split_last_map",
+        &[
+            ".split_last()",
+            ".map(|(payload, _tail)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadSliceSplitLastMapItem",
+        "dead-slice-split-last-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_slice_split_first_mut_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "slice_split_first_mut_map_prune",
+        "slice_split_first_mut_map",
+        &[
+            ".split_first_mut()",
+            ".map(|(payload, _tail)| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceSplitFirstMutMapItem",
+        "dead-slice-split-first-mut-map",
+        "pub fn render_label",
+    );
+}
+
+#[test]
+fn prunes_slice_split_last_mut_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "slice_split_last_mut_map_prune",
+        "slice_split_last_mut_map",
+        &[
+            ".split_last_mut()",
+            ".map(|(payload, _tail)| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceSplitLastMutMapItem",
+        "dead-slice-split-last-mut-map",
+        "pub fn render_label",
+    );
+}
+
+#[test]
+fn prunes_vec_split_first_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "vec_split_first_map_prune",
+        "vec_split_first_map",
+        &[
+            ".split_first()",
+            ".map(|(payload, _tail)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecSplitFirstMapItem",
+        "dead-vec-split-first-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_vec_split_last_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "vec_split_last_map_prune",
+        "vec_split_last_map",
+        &[
+            ".split_last()",
+            ".map(|(payload, _tail)| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecSplitLastMapItem",
+        "dead-vec-split-last-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_vec_split_first_mut_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "vec_split_first_mut_map_prune",
+        "vec_split_first_mut_map",
+        &[
+            ".split_first_mut()",
+            ".map(|(payload, _tail)| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadVecSplitFirstMutMapItem",
+        "dead-vec-split-first-mut-map",
+        "pub fn render_label",
+    );
+}
+
+#[test]
+fn prunes_vec_split_last_mut_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "vec_split_last_mut_map_prune",
+        "vec_split_last_mut_map",
+        &[
+            ".split_last_mut()",
+            ".map(|(payload, _tail)| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadVecSplitLastMutMapItem",
+        "dead-vec-split-last-mut-map",
+        "pub fn render_label",
+    );
+}
+
+#[test]
+fn prunes_slice_split_at_tail_iter_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "slice_split_at_tail_iter_prune",
+        "slice_split_at_tail_iter",
+        &[
+            ".split_at(1)",
+            "tail.iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadSliceSplitAtTailIterItem",
+        "dead-slice-split-at-tail-iter",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_slice_split_at_mut_tail_iter_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "slice_split_at_mut_tail_iter_prune",
+        "slice_split_at_mut_tail_iter",
+        &[
+            ".split_at_mut(1)",
+            "tail.iter_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceSplitAtMutTailIterItem",
+        "dead-slice-split-at-mut-tail-iter",
+        "pub fn render_label",
+    );
+}
+
+#[test]
+fn prunes_vecdeque_as_slices_iter_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "vecdeque_as_slices_iter_prune",
+        "vecdeque_as_slices_iter",
+        &[
+            "VecDeque",
+            ".as_slices()",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecdequeAsSlicesIterItem",
+        "dead-vecdeque-as-slices-iter",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_vecdeque_as_mut_slices_iter_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "vecdeque_as_mut_slices_iter_prune",
+        "vecdeque_as_mut_slices_iter",
+        &[
+            "VecDeque",
+            ".as_mut_slices()",
+            ".iter_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadVecdequeAsMutSlicesIterItem",
+        "dead-vecdeque-as-mut-slices-iter",
+        "pub fn render_label",
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,
@@ -13191,6 +13389,41 @@ fn assert_iter_adapter_support_fixture(
         api_fn: api_fn.as_str(),
         model_fn: model_fn.as_str(),
         model_required: &model_required,
+        model_absent: &model_absent,
+    });
+}
+
+fn assert_tuple_adapter_support_fixture(
+    fixture_name: &str,
+    stem: &str,
+    required: &[&str],
+    dead_item: &str,
+    dead_token: &str,
+    absent_live_method: &str,
+) {
+    let root_fn = format!("selected_{stem}_report");
+    let api_pkg = format!("{stem}_api");
+    let model_pkg = format!("{stem}_model");
+    let api_fn = format!("selected_{stem}_report");
+    let model_fn = format!("selected_{stem}");
+    let dead_fn = format!("dead_{stem}");
+    let model_absent = [
+        "mod dead",
+        dead_item,
+        dead_fn.as_str(),
+        absent_live_method,
+        "dead_method",
+        dead_token,
+    ];
+
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name,
+        root_fn: root_fn.as_str(),
+        api_pkg: api_pkg.as_str(),
+        model_pkg: model_pkg.as_str(),
+        api_fn: api_fn.as_str(),
+        model_fn: model_fn.as_str(),
+        model_required: required,
         model_absent: &model_absent,
     });
 }

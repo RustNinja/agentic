@@ -6066,6 +6066,29 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn bind_tuple_adapter_type_arguments(&mut self, pattern: &Pat, expression: &Expr) -> bool {
+        let Pat::Tuple(tuple) = pattern else {
+            return false;
+        };
+        let Expr::MethodCall(call) = expression else {
+            return false;
+        };
+        if !matches!(
+            call.method.to_string().as_str(),
+            "as_slices" | "as_mut_slices" | "split_at" | "split_at_mut"
+        ) {
+            return false;
+        }
+        let type_arguments = self.expression_type_arguments(&call.receiver);
+        if type_arguments.is_empty() {
+            return false;
+        }
+        for elem in &tuple.elems {
+            self.bind_pattern_type_arguments(elem, &type_arguments);
+        }
+        true
+    }
+
     fn bind_single_payload_pattern(&mut self, pattern: &Pat, type_ref: &TypeRef) {
         if let Pat::TupleStruct(tuple) = pattern {
             if tuple.elems.len() == 1
@@ -6159,8 +6182,10 @@ impl<'a> DependencyVisitor<'a> {
                 if matches!(
                     call.method.to_string().as_str(),
                     "as_ref"
+                        | "as_slices"
                         | "as_slice"
                         | "as_mut"
+                        | "as_mut_slices"
                         | "as_mut_slice"
                         | "by_ref"
                         | "chain"
@@ -6205,7 +6230,13 @@ impl<'a> DependencyVisitor<'a> {
                         | "skip_while"
                         | "splice"
                         | "split"
+                        | "split_at"
+                        | "split_at_mut"
+                        | "split_first"
+                        | "split_first_mut"
                         | "split_inclusive"
+                        | "split_last"
+                        | "split_last_mut"
                         | "splitn"
                         | "split_off"
                         | "step_by"
@@ -7319,6 +7350,23 @@ impl<'a> DependencyVisitor<'a> {
                 self.bind_pattern_type(right_pat, &right_type);
                 true
             }
+            "split_first" | "split_last" | "split_first_mut" | "split_last_mut" => {
+                let Some(item_pat) = tuple.elems.first() else {
+                    return false;
+                };
+                let Some(item_type) = self
+                    .expression_type_arguments(&adapter.receiver)
+                    .first()
+                    .cloned()
+                else {
+                    return false;
+                };
+                self.bind_single_payload_pattern(item_pat, &item_type);
+                if let Some(tail_pat) = tuple.elems.get(1) {
+                    self.bind_pattern_type_arguments(tail_pat, std::slice::from_ref(&item_type));
+                }
+                true
+            }
             _ => false,
         }
     }
@@ -7552,6 +7600,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         }
         for (name, type_ref, candidates) in self.local_destructured_binding_types(local) {
             self.insert_variable_candidates(name, type_ref, candidates);
+        }
+        if let Some(init) = &local.init {
+            self.bind_tuple_adapter_type_arguments(&local.pat, &init.expr);
         }
         if let Some((name, type_ref, candidates)) = self.local_binding_type(local) {
             if binding_name_and_type(&local.pat)
