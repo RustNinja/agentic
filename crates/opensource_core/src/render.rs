@@ -10,9 +10,11 @@ use quote::ToTokens;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
 use syn::visit::{self, Visit};
+use syn::visit_mut::{self, VisitMut};
 use syn::{
-    parse_quote, Expr, Field, Fields, ForeignItem, GenericArgument, ImplItem, Item, ItemMod, Lit,
-    Meta, Pat, PathArguments, TraitItem, Type, UseTree, Variant,
+    parse_quote, Block, Expr, ExprStruct, Field, FieldValue, Fields, ForeignItem, GenericArgument,
+    ImplItem, Item, ItemMod, Lit, Member, Meta, Pat, PathArguments, TraitItem, Type, UseTree,
+    Variant,
 };
 use toml::{value::Table, Value};
 
@@ -9870,6 +9872,15 @@ fn transform_items(
                     if !preserve_uniffi_surface {
                         strip_uniffi_attrs(&mut function.attrs);
                     }
+                    prune_rendered_struct_literal_fields(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        None,
+                        &mut function.block,
+                    );
                     allow_dead_code_if_not_public(&function.vis, &mut function.attrs);
                     Item::Fn(function)
                 })
@@ -10118,6 +10129,15 @@ fn transform_items(
                             if !preserve_uniffi_surface {
                                 strip_uniffi_attrs(&mut method.attrs);
                             }
+                            prune_rendered_struct_literal_fields(
+                                project,
+                                reduced,
+                                render_plan,
+                                package,
+                                module_path,
+                                Some(&type_path),
+                                &mut method.block,
+                            );
                             allow_dead_code_if_not_public(&method.vis, &mut method.attrs);
                             kept_impl_items.push(ImplItem::Fn(method));
                             kept_method = true;
@@ -13864,6 +13884,129 @@ fn prune_private_struct_fields(
         .collect();
 }
 
+fn prune_rendered_struct_literal_fields(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    current_type_path: Option<&[String]>,
+    block: &mut Block,
+) {
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+    let mut pruner = StructLiteralFieldPruner {
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        aliases,
+        current_type_path: current_type_path.map(<[String]>::to_vec),
+    };
+    pruner.visit_block_mut(block);
+}
+
+struct StructLiteralFieldPruner<'a> {
+    project: &'a Project,
+    reduced: &'a ReducedProject,
+    render_plan: &'a RenderPlan,
+    package: &'a str,
+    module_path: &'a [String],
+    aliases: std::collections::HashMap<String, Vec<String>>,
+    current_type_path: Option<Vec<String>>,
+}
+
+impl VisitMut for StructLiteralFieldPruner<'_> {
+    fn visit_expr_struct_mut(&mut self, expr: &mut ExprStruct) {
+        for field in &mut expr.fields {
+            visit_mut::visit_expr_mut(self, &mut field.expr);
+        }
+        if let Some(rest) = &mut expr.rest {
+            visit_mut::visit_expr_mut(self, rest);
+        }
+
+        let Some((item_id, item_struct)) = self.resolve_struct_literal_item(expr) else {
+            return;
+        };
+        if root_item_should_render(self.reduced, &item_id) {
+            return;
+        }
+        let struct_module_path = item_id.module_path.clone();
+
+        expr.fields = expr
+            .fields
+            .iter()
+            .filter(|field| {
+                self.struct_literal_field_should_remain(&struct_module_path, item_struct, field)
+            })
+            .cloned()
+            .collect();
+    }
+}
+
+impl<'a> StructLiteralFieldPruner<'a> {
+    fn resolve_struct_literal_item(
+        &self,
+        expr: &ExprStruct,
+    ) -> Option<(ItemId, &'a syn::ItemStruct)> {
+        let type_path = if path_is_self(&expr.path) {
+            self.current_type_path.clone()?
+        } else {
+            let path = &expr.path;
+            let ty: Type = parse_quote!(#path);
+            resolved_local_type_path(
+                self.project,
+                self.package,
+                self.module_path,
+                &ty,
+                &self.aliases,
+            )?
+        };
+        let (name, module_path) = type_path.split_last()?;
+        let item_id = ItemId {
+            package: self.package.to_string(),
+            module_path: module_path.to_vec(),
+            name: name.clone(),
+            kind: ItemKind::Struct,
+        };
+        let record = self.project.items.get(&item_id)?;
+        let Item::Struct(item_struct) = &record.item else {
+            return None;
+        };
+        Some((item_id, item_struct))
+    }
+
+    fn struct_literal_field_should_remain(
+        &self,
+        struct_module_path: &[String],
+        item_struct: &syn::ItemStruct,
+        field_value: &FieldValue,
+    ) -> bool {
+        let Some(field_name) = member_name(&field_value.member) else {
+            return true;
+        };
+        let Some(field) = named_struct_field(item_struct, &field_name) else {
+            return true;
+        };
+        if !struct_literal_initializer_can_be_pruned(&field_value.expr) {
+            return true;
+        }
+        struct_field_should_remain(
+            self.project,
+            self.reduced,
+            Some(self.render_plan),
+            self.package,
+            struct_module_path,
+            item_struct,
+            field,
+        )
+    }
+}
+
 fn struct_field_should_remain(
     project: &Project,
     reduced: &ReducedProject,
@@ -13894,31 +14037,36 @@ fn struct_field_should_remain(
     if field_attrs_require_field(field) {
         return true;
     }
+    if struct_attrs_require_field_surface(item_struct)
+        || (struct_type_is_referenced_by_reachable_signature(
+            project,
+            reduced,
+            package,
+            module_path,
+            item_struct,
+        ) && field_type_requires_signature_surface_retention(
+            project,
+            package,
+            module_path,
+            field,
+        ))
+    {
+        return true;
+    }
     let Some(name) = field.ident.as_ref() else {
         return true;
     };
     let name = name.to_string();
-    if let Some(render_plan) = render_plan {
-        render_plan.package_callable_mentions_ident(package, &name)
-            || retained_impl_items_mention_struct_field(
-                project,
-                reduced,
-                package,
-                module_path,
-                item_struct,
-                &name,
-            )
-    } else {
-        reachable_callables_mention_ident(project, reduced, package, &name)
-            || retained_impl_items_mention_struct_field(
-                project,
-                reduced,
-                package,
-                module_path,
-                item_struct,
-                &name,
-            )
-    }
+    reachable_callables_need_struct_field(project, reduced, render_plan, package, &name)
+        || retained_impl_items_mention_struct_field(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            item_struct,
+            &name,
+        )
 }
 
 fn field_provides_required_struct_type_param_usage(
@@ -13991,36 +14139,42 @@ fn struct_field_should_remain_without_type_param_guard(
     if field_attrs_require_field(field) {
         return true;
     }
+    if struct_attrs_require_field_surface(item_struct)
+        || (struct_type_is_referenced_by_reachable_signature(
+            project,
+            reduced,
+            package,
+            module_path,
+            item_struct,
+        ) && field_type_requires_signature_surface_retention(
+            project,
+            package,
+            module_path,
+            field,
+        ))
+    {
+        return true;
+    }
     let Some(name) = field.ident.as_ref() else {
         return true;
     };
     let name = name.to_string();
-    if let Some(render_plan) = render_plan {
-        render_plan.package_callable_mentions_ident(package, &name)
-            || retained_impl_items_mention_struct_field(
-                project,
-                reduced,
-                package,
-                module_path,
-                item_struct,
-                &name,
-            )
-    } else {
-        reachable_callables_mention_ident(project, reduced, package, &name)
-            || retained_impl_items_mention_struct_field(
-                project,
-                reduced,
-                package,
-                module_path,
-                item_struct,
-                &name,
-            )
-    }
+    reachable_callables_need_struct_field(project, reduced, render_plan, package, &name)
+        || retained_impl_items_mention_struct_field(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            item_struct,
+            &name,
+        )
 }
 
 fn retained_impl_items_mention_struct_field(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     module_path: &[String],
     item_struct: &syn::ItemStruct,
@@ -14052,21 +14206,173 @@ fn retained_impl_items_mention_struct_field(
             impl_item_should_render_for_field_scan(
                 project,
                 reduced,
+                render_plan,
                 package,
                 module_path,
                 item_impl,
                 impl_item,
                 &type_path,
                 &aliases,
-            ) && token_stream_mentions_ident(&impl_item.to_token_stream(), field_name)
+            ) && impl_item_needs_struct_field(impl_item, field_name, item_impl.trait_.is_some())
         })
     })
+}
+
+fn reachable_callables_need_struct_field(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
+    package: &str,
+    field_name: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .filter(|callable| {
+            render_plan.is_none_or(|render_plan| render_plan.callable_should_render(callable))
+        })
+        .any(|callable| {
+            project
+                .functions
+                .get(callable)
+                .is_some_and(|record| function_needs_struct_field(&record.item, field_name))
+                || project
+                    .methods
+                    .get(callable)
+                    .is_some_and(|record| method_needs_struct_field(&record.item, field_name))
+        })
+}
+
+fn function_needs_struct_field(function: &syn::ItemFn, field_name: &str) -> bool {
+    block_needs_struct_field(&function.block, field_name)
+}
+
+fn method_needs_struct_field(method: &syn::ImplItemFn, field_name: &str) -> bool {
+    block_needs_struct_field(&method.block, field_name)
+}
+
+fn impl_item_needs_struct_field(
+    impl_item: &ImplItem,
+    field_name: &str,
+    count_pure_struct_initializers: bool,
+) -> bool {
+    let ImplItem::Fn(method) = impl_item else {
+        return token_stream_mentions_ident(&impl_item.to_token_stream(), field_name);
+    };
+    method_needs_struct_field_with_options(method, field_name, count_pure_struct_initializers)
+}
+
+fn block_needs_struct_field(block: &Block, field_name: &str) -> bool {
+    block_needs_struct_field_with_options(block, field_name, false)
+}
+
+fn method_needs_struct_field_with_options(
+    method: &syn::ImplItemFn,
+    field_name: &str,
+    count_pure_struct_initializers: bool,
+) -> bool {
+    block_needs_struct_field_with_options(&method.block, field_name, count_pure_struct_initializers)
+}
+
+fn block_needs_struct_field_with_options(
+    block: &Block,
+    field_name: &str,
+    count_pure_struct_initializers: bool,
+) -> bool {
+    let mut visitor = StructFieldUseVisitor {
+        field_name,
+        count_pure_struct_initializers,
+        needs_field: false,
+    };
+    visitor.visit_block(block);
+    visitor.needs_field
+}
+
+struct StructFieldUseVisitor<'a> {
+    field_name: &'a str,
+    count_pure_struct_initializers: bool,
+    needs_field: bool,
+}
+
+impl Visit<'_> for StructFieldUseVisitor<'_> {
+    fn visit_expr_field(&mut self, field: &syn::ExprField) {
+        if member_name(&field.member).as_deref() == Some(self.field_name) {
+            self.needs_field = true;
+        }
+        visit::visit_expr_field(self, field);
+    }
+
+    fn visit_pat_struct(&mut self, pattern: &syn::PatStruct) {
+        if pattern
+            .fields
+            .iter()
+            .any(|field| member_name(&field.member).as_deref() == Some(self.field_name))
+        {
+            self.needs_field = true;
+        }
+        visit::visit_pat_struct(self, pattern);
+    }
+
+    fn visit_expr_struct(&mut self, expr: &ExprStruct) {
+        for field in &expr.fields {
+            if member_name(&field.member).as_deref() == Some(self.field_name)
+                && (self.count_pure_struct_initializers
+                    || !struct_literal_initializer_can_be_pruned(&field.expr))
+            {
+                self.needs_field = true;
+            }
+            self.visit_expr(&field.expr);
+        }
+        if let Some(rest) = &expr.rest {
+            self.visit_expr(rest);
+        }
+    }
+
+    fn visit_macro(&mut self, mac: &syn::Macro) {
+        if token_stream_mentions_ident(&mac.tokens, self.field_name) {
+            self.needs_field = true;
+        }
+        visit::visit_macro(self, mac);
+    }
+}
+
+fn named_struct_field<'a>(item_struct: &'a syn::ItemStruct, name: &str) -> Option<&'a Field> {
+    let Fields::Named(fields) = &item_struct.fields else {
+        return None;
+    };
+    fields
+        .named
+        .iter()
+        .find(|field| field.ident.as_ref().is_some_and(|ident| ident == name))
+}
+
+fn member_name(member: &Member) -> Option<String> {
+    match member {
+        Member::Named(ident) => Some(ident.to_string()),
+        Member::Unnamed(_) => None,
+    }
+}
+
+fn path_is_self(path: &syn::Path) -> bool {
+    path.segments.len() == 1 && path.segments[0].ident == "Self"
+}
+
+fn struct_literal_initializer_can_be_pruned(expr: &Expr) -> bool {
+    match expr {
+        Expr::Path(path) => path.qself.is_none() && path.path.is_ident("None"),
+        Expr::Lit(_) => true,
+        Expr::Array(array) => array.elems.is_empty(),
+        Expr::Tuple(tuple) => tuple.elems.is_empty(),
+        _ => false,
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
 fn impl_item_should_render_for_field_scan(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     module_path: &[String],
     item_impl: &syn::ItemImpl,
@@ -14109,6 +14415,9 @@ fn impl_item_should_render_for_field_scan(
             trait_input_type_paths,
             method: method.sig.ident.to_string(),
         };
+        if render_plan.is_some_and(|render_plan| render_plan.callable_should_render(&id)) {
+            return true;
+        }
         return reduced.reachable.contains(&id)
             || retained_impl_surfaces_call_inherent_associated_function(
                 project,
@@ -14127,10 +14436,126 @@ fn field_attrs_require_field(field: &Field) -> bool {
         if path.is_ident("cfg") {
             return !is_cfg_test_attr(attr);
         }
+        if path.is_ident("derive") {
+            return false;
+        }
         !(path.is_ident("allow")
             || path.is_ident("deny")
             || path.is_ident("doc")
             || path.is_ident("deprecated"))
+    })
+}
+
+fn struct_attrs_require_field_surface(item_struct: &syn::ItemStruct) -> bool {
+    item_struct.attrs.iter().any(|attr| {
+        let path = attr.path();
+        if path.is_ident("cfg") {
+            return !is_cfg_test_attr(attr);
+        }
+        if path.is_ident("derive") {
+            return false;
+        }
+        !(path.is_ident("allow")
+            || path.is_ident("deny")
+            || path.is_ident("doc")
+            || path.is_ident("deprecated"))
+    })
+}
+
+fn struct_type_is_referenced_by_reachable_signature(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    item_struct: &syn::ItemStruct,
+) -> bool {
+    if !matches!(item_struct.vis, syn::Visibility::Public(_)) {
+        return false;
+    }
+    let struct_name = item_struct.ident.to_string();
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && signature_returns_ident(&record.item.sig, &struct_name)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && signature_returns_ident(&record.item.sig, &struct_name)
+            })
+        })
+}
+
+fn signature_returns_ident(signature: &syn::Signature, ident: &str) -> bool {
+    let syn::ReturnType::Type(_, ty) = &signature.output else {
+        return false;
+    };
+    token_stream_mentions_ident(&ty.to_token_stream(), ident)
+}
+
+fn field_type_requires_signature_surface_retention(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    field: &Field,
+) -> bool {
+    type_contains_dyn_trait(&field.ty)
+        || field_type_mentions_bounded_local_generic(project, package, module_path, &field.ty)
+}
+
+fn type_contains_dyn_trait(ty: &Type) -> bool {
+    match ty {
+        Type::TraitObject(_) => true,
+        Type::Array(array) => type_contains_dyn_trait(&array.elem),
+        Type::Group(group) => type_contains_dyn_trait(&group.elem),
+        Type::Paren(paren) => type_contains_dyn_trait(&paren.elem),
+        Type::Path(type_path) => type_path.path.segments.iter().any(|segment| {
+            if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                arguments.args.iter().any(|argument| {
+                    matches!(argument, GenericArgument::Type(ty) if type_contains_dyn_trait(ty))
+                })
+            } else {
+                false
+            }
+        }),
+        Type::Ptr(ptr) => type_contains_dyn_trait(&ptr.elem),
+        Type::Reference(reference) => type_contains_dyn_trait(&reference.elem),
+        Type::Slice(slice) => type_contains_dyn_trait(&slice.elem),
+        Type::Tuple(tuple) => tuple.elems.iter().any(type_contains_dyn_trait),
+        _ => false,
+    }
+}
+
+fn field_type_mentions_bounded_local_generic(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    ty: &Type,
+) -> bool {
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+    let mut type_paths = Vec::new();
+    collect_type_paths(module_path, ty, &aliases, &mut type_paths);
+    type_paths.into_iter().any(|path| {
+        let canonical = canonical_type_path(project, package, module_path, path);
+        let Some(item_id) = find_type_like_item(project, package, &canonical) else {
+            return false;
+        };
+        let Some(record) = project.items.get(&item_id) else {
+            return false;
+        };
+        let Item::Struct(item_struct) = &record.item else {
+            return false;
+        };
+        item_struct
+            .generics
+            .type_params()
+            .any(|param| !param.bounds.is_empty())
     })
 }
 

@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+hashmap_iter_filter_map_match_api = { path = "../external/hashmap_iter_filter_map_match_api" }

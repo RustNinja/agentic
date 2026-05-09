@@ -4772,6 +4772,214 @@ fn prunes_iterator_filter_map_option_identity_support_chain_with_default_analyze
 }
 
 #[test]
+fn prunes_iterator_filter_map_match_result_ok_question_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_filter_map_match_result_ok_question_prune",
+        "iterator_filter_map_match_result_ok_question",
+        &[
+            ".filter_map(|request| match request.method()",
+            ".ok()?",
+            ".render_label()",
+            "pub fn try_parse",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFilterMapMatchResultOkQuestionItem",
+        "dead-iterator-filter-map-match-result-ok-question",
+        "pub fn unused_label",
+        &["dead_error_method"],
+    );
+}
+
+#[test]
+fn prunes_iterator_filter_map_match_option_question_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_filter_map_match_option_question_prune",
+        "iterator_filter_map_match_option_question",
+        &[
+            ".filter_map(|request| match request.method()",
+            "lookup_payload(request.raw())?",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFilterMapMatchOptionQuestionItem",
+        "dead-iterator-filter-map-match-option-question",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_find_map_method_ref_option_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_find_map_method_ref_option_prune",
+        "iterator_find_map_method_ref_option",
+        &[
+            ".find_map(IteratorFindMapMethodRefOptionPayload::maybe_label)",
+            "pub fn maybe_label",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFindMapMethodRefOptionItem",
+        "dead-iterator-find-map-method-ref-option",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_hashmap_values_find_map_method_ref_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashmap_values_find_map_method_ref_prune",
+        "hashmap_values_find_map_method_ref",
+        &[
+            "use std::collections::HashMap;",
+            ".values()",
+            ".find_map(HashmapValuesFindMapMethodRefPayload::maybe_label)",
+            "pub fn maybe_label",
+        ],
+        "DeadHashmapValuesFindMapMethodRefItem",
+        "dead-hashmap-values-find-map-method-ref",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_btreemap_values_find_map_method_ref_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreemap_values_find_map_method_ref_prune",
+        "btreemap_values_find_map_method_ref",
+        &[
+            "use std::collections::BTreeMap;",
+            ".values()",
+            ".find_map(BtreemapValuesFindMapMethodRefPayload::maybe_label)",
+            "pub fn maybe_label",
+        ],
+        "DeadBtreemapValuesFindMapMethodRefItem",
+        "dead-btreemap-values-find-map-method-ref",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_find_map_enum_match_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_find_map_enum_match_prune",
+        "iterator_find_map_enum_match",
+        &[
+            ".find_map(|event| match event",
+            "IteratorFindMapEnumMatchEvent::Live(payload)",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFindMapEnumMatchItem",
+        "dead-iterator-find-map-enum-match",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_filter_map_borrowed_field_match_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_filter_map_borrowed_field_match_prune",
+        "iterator_filter_map_borrowed_field_match",
+        &[
+            "match &entry.path",
+            "Some(payload) => Some(payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFilterMapBorrowedFieldMatchItem",
+        "dead-iterator-filter-map-borrowed-field-match",
+        "pub fn unused_label",
+        &["ShadowPayload"],
+    );
+}
+
+#[test]
+fn prunes_iterator_filter_map_let_else_option_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_filter_map_let_else_option_prune",
+        "iterator_filter_map_let_else_option",
+        &[
+            "let Some(payload) = entry.path.as_ref() else",
+            "Some(payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFilterMapLetElseOptionItem",
+        "dead-iterator-filter-map-let-else-option",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_flat_map_match_enum_vec_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_flat_map_match_enum_vec_prune",
+        "iterator_flat_map_match_enum_vec",
+        &[
+            ".flat_map(|command| match command",
+            "vec![payload]",
+            ".map(|payload| payload.render_label())",
+        ],
+        "DeadIteratorFlatMapMatchEnumVecItem",
+        "dead-iterator-flat-map-match-enum-vec",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_find_map_nested_ok_question_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_find_map_nested_ok_question_prune",
+        "iterator_find_map_nested_ok_question",
+        &[
+            ".find_map(|part| {",
+            ".ok()?;",
+            "Some(payload.render_label())",
+        ],
+        "DeadIteratorFindMapNestedOkQuestionItem",
+        "dead-iterator-find-map-nested-ok-question",
+        "pub fn unused_label",
+        &["dead_error_method"],
+    );
+}
+
+#[test]
+fn prunes_hashmap_iter_filter_map_match_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashmap_iter_filter_map_match_prune",
+        "hashmap_iter_filter_map_match",
+        &[
+            "use std::collections::HashMap;",
+            ".filter_map(|(key, payload)| match key.as_str()",
+            "Some(payload.render_label())",
+        ],
+        "DeadHashmapIterFilterMapMatchItem",
+        "dead-hashmap-iter-filter-map-match",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
+fn prunes_iterator_filter_map_method_ref_option_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_filter_map_method_ref_option_prune",
+        "iterator_filter_map_method_ref_option",
+        &[
+            ".filter_map(IteratorFilterMapMethodRefOptionPayload::maybe_label)",
+            "pub fn maybe_label",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFilterMapMethodRefOptionItem",
+        "dead-iterator-filter-map-method-ref-option",
+        "pub fn unused_label",
+        &[],
+    );
+}
+
+#[test]
 fn prunes_iterator_for_loop_flatten_option_refs_support_chain_with_default_analyzer() {
     assert_extended_tuple_adapter_support_fixture(
         "iterator_for_loop_flatten_option_refs_prune",

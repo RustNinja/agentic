@@ -1,0 +1,7 @@
+[package]
+name = "iterator_flat_map_match_enum_vec_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_flat_map_match_enum_vec_model = { path = "../iterator_flat_map_match_enum_vec_model" }
