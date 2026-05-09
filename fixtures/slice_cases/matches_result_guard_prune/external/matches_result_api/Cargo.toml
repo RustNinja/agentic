@@ -1,0 +1,7 @@
+[package]
+name = "matches_result_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+matches_result_model = { path = "../matches_result_model" }

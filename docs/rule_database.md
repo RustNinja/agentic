@@ -240,6 +240,11 @@ file.
 | `fixture.while_let_payload_prune.support_chain.001` | covered | A checked-in support fixture slices through `while let Some(...)` iterator payload bindings while pruning dead loop support |
 | `fixture.for_loop_payload_prune.support_chain.001` | covered | A checked-in support fixture slices through `for` loop iterable payload bindings while pruning dead loop support |
 | `fixture.matches_guard_prune.support_chain.001` | covered | A checked-in support fixture slices through `matches!` guard payload bindings and downstream map payloads while pruning dead guard support |
+| `fixture.option_let_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `let Some(...) else` option payload bindings while pruning dead option support |
+| `fixture.result_let_else_prune.support_chain.001` | covered | A checked-in support fixture slices through `let Ok(...) else` result payload bindings while pruning dead result support |
+| `fixture.nested_option_result_match_prune.support_chain.001` | covered | A checked-in support fixture slices through nested `Option<Result<...>>` match payload bindings while pruning dead nested support |
+| `fixture.nested_option_result_if_let_prune.support_chain.001` | covered | A checked-in support fixture slices through nested `if let Some(Ok(...))` and `Some(Err(...))` payload bindings while pruning dead nested support |
+| `fixture.matches_result_guard_prune.support_chain.001` | covered | A checked-in support fixture slices through `matches!` result guard payload bindings while pruning dead result guard support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

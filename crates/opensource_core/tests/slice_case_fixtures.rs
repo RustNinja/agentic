@@ -5909,6 +5909,150 @@ fn prunes_matches_guard_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_let_else_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_let_else_prune",
+        root_fn: "selected_option_let_report",
+        api_pkg: "option_let_api",
+        model_pkg: "option_let_model",
+        api_fn: "selected_option_let_report",
+        model_fn: "selected_option_let",
+        model_required: &[
+            "OptionLetPayload",
+            "let Some(payload) = option_let_payload(raw)",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionLetItem",
+            "dead_option_let",
+            "dead_method",
+            "dead_live_option_let",
+            "dead-option-let",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_let_else_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_let_else_prune",
+        root_fn: "selected_result_let_report",
+        api_pkg: "result_let_api",
+        model_pkg: "result_let_model",
+        api_fn: "selected_result_let_report",
+        model_fn: "selected_result_let",
+        model_required: &[
+            "ResultLetPayload",
+            "ResultLetError",
+            "let Ok(payload) = result_let_payload(raw)",
+            "ResultLetError::new(raw).render_error()",
+            "payload.render_label()",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultLetItem",
+            "dead_result_let",
+            "dead_method",
+            "dead_live_result_let",
+            "dead-result-let",
+        ],
+    });
+}
+
+#[test]
+fn prunes_nested_option_result_match_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "nested_option_result_match_prune",
+        root_fn: "selected_nested_match_report",
+        api_pkg: "nested_match_api",
+        model_pkg: "nested_match_model",
+        api_fn: "selected_nested_match_report",
+        model_fn: "selected_nested_match",
+        model_required: &[
+            "NestedMatchPayload",
+            "NestedMatchError",
+            "Option<Result<NestedMatchPayload, NestedMatchError>>",
+            "Some(Ok(payload)) => payload.render_label()",
+            "Some(Err(err)) => err.render_error()",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadNestedMatchItem",
+            "dead_nested_match",
+            "dead_method",
+            "dead_live_nested_match",
+            "dead-nested-match",
+        ],
+    });
+}
+
+#[test]
+fn prunes_nested_option_result_if_let_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "nested_option_result_if_let_prune",
+        root_fn: "selected_nested_if_report",
+        api_pkg: "nested_if_api",
+        model_pkg: "nested_if_model",
+        api_fn: "selected_nested_if_report",
+        model_fn: "selected_nested_if",
+        model_required: &[
+            "NestedIfPayload",
+            "NestedIfError",
+            "Option<Result<NestedIfPayload, NestedIfError>>",
+            "if let Some(Ok(payload)) = nested_if_payload(raw)",
+            "payload.render_label()",
+            "err.render_error()",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadNestedIfItem",
+            "dead_nested_if",
+            "dead_method",
+            "dead_live_nested_if",
+            "dead-nested-if",
+        ],
+    });
+}
+
+#[test]
+fn prunes_matches_result_guard_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "matches_result_guard_prune",
+        root_fn: "selected_matches_result_report",
+        api_pkg: "matches_result_api",
+        model_pkg: "matches_result_model",
+        api_fn: "selected_matches_result_report",
+        model_fn: "selected_matches_result",
+        model_required: &[
+            "MatchesResultPayload",
+            "MatchesResultError",
+            "matches!(result.as_ref(), Ok(payload) if payload.accepts())",
+            ".map(|payload| payload.render_label())",
+            "err.render_error()",
+            "pub fn accepts",
+            "pub fn render_error",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMatchesResultItem",
+            "dead_matches_result",
+            "dead_method",
+            "dead_live_matches_result",
+            "dead-matches-result",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

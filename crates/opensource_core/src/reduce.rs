@@ -4675,6 +4675,11 @@ impl<'a> DependencyVisitor<'a> {
                     self.collect_pattern_type_bindings(pattern, ty, resolver, bindings);
                 }
             }
+            (Pat::TupleStruct(pattern), Type::Path(type_path)) => {
+                for (pattern, ty) in generic_tuple_variant_field_types(pattern, &type_path.path) {
+                    self.collect_pattern_type_bindings(pattern, ty, resolver, bindings);
+                }
+            }
             (Pat::Struct(pattern), _) => {
                 let Some(type_ref) = resolver.resolve_receiver_type(ty) else {
                     return;
@@ -6907,6 +6912,15 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             if let Some(match_type) = &match_type {
                 self.add_pattern_bindings_for_type(&arm.pat, match_type);
             }
+            let mut generic_bindings = Vec::new();
+            self.collect_pattern_bindings_from_expr(
+                &arm.pat,
+                &expr_match.expr,
+                &mut generic_bindings,
+            );
+            for (name, type_ref, candidates) in generic_bindings {
+                self.insert_variable_candidates(name, type_ref, candidates);
+            }
             self.push_local_value_scope();
             self.bind_local_value_names(&arm.pat);
             self.visit_pat(&arm.pat);
@@ -6939,6 +6953,15 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 .or_else(|| self.infer_expr_type(&expr_let.expr))
             {
                 self.add_pattern_bindings_for_type(&expr_let.pat, &type_ref);
+            }
+            let mut generic_bindings = Vec::new();
+            self.collect_pattern_bindings_from_expr(
+                &expr_let.pat,
+                &expr_let.expr,
+                &mut generic_bindings,
+            );
+            for (name, type_ref, candidates) in generic_bindings {
+                self.insert_variable_candidates(name, type_ref, candidates);
             }
             self.visit_expr(&expr_let.expr);
             self.push_local_value_scope();
@@ -6978,6 +7001,15 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 .or_else(|| self.infer_expr_type(&expr_let.expr))
             {
                 self.add_pattern_bindings_for_type(&expr_let.pat, &type_ref);
+            }
+            let mut generic_bindings = Vec::new();
+            self.collect_pattern_bindings_from_expr(
+                &expr_let.pat,
+                &expr_let.expr,
+                &mut generic_bindings,
+            );
+            for (name, type_ref, candidates) in generic_bindings {
+                self.insert_variable_candidates(name, type_ref, candidates);
             }
             self.visit_expr(&expr_let.expr);
             self.push_local_value_scope();
@@ -7697,6 +7729,63 @@ fn macro_pattern_binding_ident(ident: &str) -> bool {
                 | "self"
                 | "true"
         )
+}
+
+fn generic_tuple_variant_field_types<'a>(
+    pattern: &'a PatTupleStruct,
+    ty: &'a Path,
+) -> Vec<(&'a Pat, &'a Type)> {
+    let Some(variant) = pattern
+        .path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+    else {
+        return Vec::new();
+    };
+    let Some(container) = ty.segments.last() else {
+        return Vec::new();
+    };
+    let PathArguments::AngleBracketed(arguments) = &container.arguments else {
+        return Vec::new();
+    };
+    match (container.ident.to_string().as_str(), variant.as_str()) {
+        ("Option", "Some") => pattern
+            .elems
+            .first()
+            .zip(generic_type_argument(arguments, 0))
+            .into_iter()
+            .collect(),
+        ("Result", "Ok") => pattern
+            .elems
+            .first()
+            .zip(generic_type_argument(arguments, 0))
+            .into_iter()
+            .collect(),
+        ("Result", "Err") => pattern
+            .elems
+            .first()
+            .zip(generic_type_argument(arguments, 1))
+            .into_iter()
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn generic_type_argument<'a>(
+    arguments: &'a syn::AngleBracketedGenericArguments,
+    target_index: usize,
+) -> Option<&'a Type> {
+    arguments
+        .args
+        .iter()
+        .filter_map(|argument| {
+            let GenericArgument::Type(ty) = argument else {
+                return None;
+            };
+            Some(ty)
+        })
+        .nth(target_index)
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]

@@ -1,0 +1,7 @@
+[package]
+name = "result_let_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+result_let_model = { path = "../result_let_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "nested_if_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nested_if_model = { path = "../nested_if_model" }
