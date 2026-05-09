@@ -1,0 +1,7 @@
+[package]
+name = "option_unwrap_direct_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_unwrap_direct_model = { path = "../option_unwrap_direct_model" }

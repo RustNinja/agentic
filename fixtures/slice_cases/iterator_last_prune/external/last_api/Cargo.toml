@@ -1,0 +1,7 @@
+[package]
+name = "last_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+last_model = { path = "../last_model" }

@@ -6921,6 +6921,272 @@ fn prunes_result_expect_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_unwrap_direct_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_unwrap_prune",
+        root_fn: "selected_option_unwrap_direct_report",
+        api_pkg: "option_unwrap_direct_api",
+        model_pkg: "option_unwrap_direct_model",
+        api_fn: "selected_option_unwrap_direct_report",
+        model_fn: "selected_option_unwrap_direct",
+        model_required: &[
+            "OptionUnwrapDirectPayload",
+            ".unwrap().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionUnwrapDirectItem",
+            "dead_option_unwrap_direct",
+            "dead_method",
+            "dead_live_option_unwrap_direct",
+            "dead-option-unwrap-direct",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_unwrap_or_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_unwrap_or_prune",
+        root_fn: "selected_option_unwrap_or_value_report",
+        api_pkg: "option_unwrap_or_value_api",
+        model_pkg: "option_unwrap_or_value_model",
+        api_fn: "selected_option_unwrap_or_value_report",
+        model_fn: "selected_option_unwrap_or_value",
+        model_required: &[
+            "OptionUnwrapOrValuePayload",
+            ".unwrap_or(OptionUnwrapOrValuePayload::fallback(raw))",
+            ".render_label()",
+            "pub fn fallback",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionUnwrapOrValueItem",
+            "dead_option_unwrap_or_value",
+            "dead_method",
+            "dead_live_option_unwrap_or_value",
+            "dead-option-unwrap-or-value",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_unwrap_direct_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_unwrap_prune",
+        root_fn: "selected_result_unwrap_direct_report",
+        api_pkg: "result_unwrap_direct_api",
+        model_pkg: "result_unwrap_direct_model",
+        api_fn: "selected_result_unwrap_direct_report",
+        model_fn: "selected_result_unwrap_direct",
+        model_required: &[
+            "ResultUnwrapDirectPayload",
+            "ResultUnwrapDirectError",
+            ".unwrap().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultUnwrapDirectItem",
+            "dead_result_unwrap_direct",
+            "dead_method",
+            "dead_live_result_unwrap_direct",
+            "dead-result-unwrap-direct",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_unwrap_or_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_unwrap_or_prune",
+        root_fn: "selected_result_unwrap_or_value_report",
+        api_pkg: "result_unwrap_or_value_api",
+        model_pkg: "result_unwrap_or_value_model",
+        api_fn: "selected_result_unwrap_or_value_report",
+        model_fn: "selected_result_unwrap_or_value",
+        model_required: &[
+            "ResultUnwrapOrValuePayload",
+            "ResultUnwrapOrValueError",
+            ".unwrap_or(ResultUnwrapOrValuePayload::fallback(raw))",
+            ".render_label()",
+            "pub fn fallback",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultUnwrapOrValueItem",
+            "dead_result_unwrap_or_value",
+            "dead_method",
+            "dead_live_result_unwrap_or_value",
+            "dead-result-unwrap-or-value",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_last_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_last_prune",
+        root_fn: "selected_last_report",
+        api_pkg: "last_api",
+        model_pkg: "last_model",
+        api_fn: "selected_last_report",
+        model_fn: "selected_last",
+        model_required: &[
+            "LastPayload",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadLastItem",
+            "dead_last",
+            "dead_method",
+            "dead_live_last",
+            "dead-last",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_nth_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_nth_prune",
+        root_fn: "selected_nth_report",
+        api_pkg: "nth_api",
+        model_pkg: "nth_model",
+        api_fn: "selected_nth_report",
+        model_fn: "selected_nth",
+        model_required: &[
+            "NthPayload",
+            ".nth(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadNthItem",
+            "dead_nth",
+            "dead_method",
+            "dead_live_nth",
+            "dead-nth",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_rev_last_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_rev_last_prune",
+        root_fn: "selected_rev_last_report",
+        api_pkg: "rev_last_api",
+        model_pkg: "rev_last_model",
+        api_fn: "selected_rev_last_report",
+        model_fn: "selected_rev_last",
+        model_required: &[
+            "RevLastPayload",
+            ".rev()",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRevLastItem",
+            "dead_rev_last",
+            "dead_method",
+            "dead_live_rev_last",
+            "dead-rev-last",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_peekable_nth_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_peekable_nth_prune",
+        root_fn: "selected_peekable_nth_report",
+        api_pkg: "peekable_nth_api",
+        model_pkg: "peekable_nth_model",
+        api_fn: "selected_peekable_nth_report",
+        model_fn: "selected_peekable_nth",
+        model_required: &[
+            "PeekableNthPayload",
+            ".peekable()",
+            ".nth(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadPeekableNthItem",
+            "dead_peekable_nth",
+            "dead_method",
+            "dead_live_peekable_nth",
+            "dead-peekable-nth",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_fuse_last_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_fuse_last_prune",
+        root_fn: "selected_fuse_last_report",
+        api_pkg: "fuse_last_api",
+        model_pkg: "fuse_last_model",
+        api_fn: "selected_fuse_last_report",
+        model_fn: "selected_fuse_last",
+        model_required: &[
+            "FuseLastPayload",
+            ".fuse()",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadFuseLastItem",
+            "dead_fuse_last",
+            "dead_method",
+            "dead_live_fuse_last",
+            "dead-fuse-last",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_cycle_nth_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_cycle_nth_prune",
+        root_fn: "selected_cycle_nth_report",
+        api_pkg: "cycle_nth_api",
+        model_pkg: "cycle_nth_model",
+        api_fn: "selected_cycle_nth_report",
+        model_fn: "selected_cycle_nth",
+        model_required: &[
+            "CycleNthPayload",
+            ".cycle()",
+            ".nth(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadCycleNthItem",
+            "dead_cycle_nth",
+            "dead_method",
+            "dead_live_cycle_nth",
+            "dead-cycle-nth",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

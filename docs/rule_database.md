@@ -277,6 +277,16 @@ file.
 | `fixture.bool_then_some_prune.support_chain.001` | covered | A checked-in support fixture slices through `bool::then_some(T).map(...)` payload closures while pruning dead boolean-gated support |
 | `fixture.option_expect_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::expect(...).method()` receiver typing while pruning dead option-expect support |
 | `fixture.result_expect_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::expect(...).method()` OK receiver typing while pruning dead result-expect support |
+| `fixture.option_unwrap_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::unwrap().method()` receiver typing while pruning dead option-unwrap support |
+| `fixture.option_unwrap_or_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::unwrap_or(T).method()` fallback receiver typing while pruning dead unwrap-or support |
+| `fixture.result_unwrap_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::unwrap().method()` OK receiver typing while pruning dead result-unwrap support |
+| `fixture.result_unwrap_or_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::unwrap_or(T).method()` fallback receiver typing while pruning dead result unwrap-or support |
+| `fixture.iterator_last_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `last().map(...)` terminal payload typing while pruning dead last support |
+| `fixture.iterator_nth_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `nth(...).map(...)` terminal payload typing while pruning dead nth support |
+| `fixture.iterator_rev_last_prune.support_chain.001` | covered | A checked-in support fixture slices through `rev().last().map(...)` payload pass-through while pruning dead reverse-last support |
+| `fixture.iterator_peekable_nth_prune.support_chain.001` | covered | A checked-in support fixture slices through `peekable().nth(...).map(...)` payload pass-through while pruning dead peekable support |
+| `fixture.iterator_fuse_last_prune.support_chain.001` | covered | A checked-in support fixture slices through `fuse().last().map(...)` payload pass-through while pruning dead fuse support |
+| `fixture.iterator_cycle_nth_prune.support_chain.001` | covered | A checked-in support fixture slices through `cycle().nth(...).map(...)` payload pass-through while pruning dead cycle support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

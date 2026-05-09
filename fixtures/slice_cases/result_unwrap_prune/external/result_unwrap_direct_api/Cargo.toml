@@ -1,0 +1,7 @@
+[package]
+name = "result_unwrap_direct_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+result_unwrap_direct_model = { path = "../result_unwrap_direct_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "cycle_nth_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cycle_nth_model = { path = "../cycle_nth_model" }

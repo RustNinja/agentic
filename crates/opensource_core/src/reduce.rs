@@ -6197,6 +6197,11 @@ impl<'a> DependencyVisitor<'a> {
                         return Some(ok_type.clone());
                     }
                 }
+                if matches!(call.method.to_string().as_str(), "last" | "next" | "nth") {
+                    if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
+                        return Some(ok_type.clone());
+                    }
+                }
                 if call.method == "ok" {
                     return self.expression_result_ok_type(&call.receiver);
                 }
