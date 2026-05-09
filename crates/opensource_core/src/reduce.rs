@@ -6148,6 +6148,16 @@ impl<'a> DependencyVisitor<'a> {
                 }
                 if matches!(
                     call.method.to_string().as_str(),
+                    "iter" | "iter_mut" | "into_iter"
+                ) {
+                    if let Some(ok_type) = self.expression_result_ok_type(&call.receiver) {
+                        if self.expression_result_error_type(&call.receiver).is_some() {
+                            return vec![ok_type];
+                        }
+                    }
+                }
+                if matches!(
+                    call.method.to_string().as_str(),
                     "as_ref"
                         | "as_slice"
                         | "as_mut"

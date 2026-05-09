@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_pop_first_pair_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_pop_first_pair_model = { path = "../btreemap_pop_first_pair_model" }

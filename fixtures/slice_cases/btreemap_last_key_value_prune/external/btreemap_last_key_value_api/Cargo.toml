@@ -1,0 +1,7 @@
+[package]
+name = "btreemap_last_key_value_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+btreemap_last_key_value_model = { path = "../btreemap_last_key_value_model" }

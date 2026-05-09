@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+option_as_mut_slice_iter_mut_api = { path = "../external/option_as_mut_slice_iter_mut_api" }

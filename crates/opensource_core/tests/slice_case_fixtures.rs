@@ -12196,6 +12196,319 @@ fn prunes_control_flow_break_match_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_iter_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_iter_map_prune",
+        root_fn: "selected_option_iter_map_report",
+        api_pkg: "option_iter_map_api",
+        model_pkg: "option_iter_map_model",
+        api_fn: "selected_option_iter_map_report",
+        model_fn: "selected_option_iter_map",
+        model_required: &[
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionIterMapItem",
+            "dead_option_iter_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-option-iter-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_iter_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_iter_mut_map_prune",
+        root_fn: "selected_option_iter_mut_map_report",
+        api_pkg: "option_iter_mut_map_api",
+        model_pkg: "option_iter_mut_map_model",
+        api_fn: "selected_option_iter_mut_map_report",
+        model_fn: "selected_option_iter_mut_map",
+        model_required: &[
+            ".iter_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionIterMutMapItem",
+            "dead_option_iter_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-option-iter-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_iter_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_iter_map_prune",
+        root_fn: "selected_result_iter_map_report",
+        api_pkg: "result_iter_map_api",
+        model_pkg: "result_iter_map_model",
+        api_fn: "selected_result_iter_map_report",
+        model_fn: "selected_result_iter_map",
+        model_required: &[
+            "ResultIterMapError",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+            "pub fn render_error",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultIterMapItem",
+            "dead_result_iter_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_error_method",
+            "dead-result-iter-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_iter_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_iter_mut_map_prune",
+        root_fn: "selected_result_iter_mut_map_report",
+        api_pkg: "result_iter_mut_map_api",
+        model_pkg: "result_iter_mut_map_model",
+        api_fn: "selected_result_iter_mut_map_report",
+        model_fn: "selected_result_iter_mut_map",
+        model_required: &[
+            "ResultIterMutMapError",
+            ".iter_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+            "pub fn render_error",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultIterMutMapItem",
+            "dead_result_iter_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead_error_method",
+            "dead-result-iter-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_as_slice_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_as_slice_iter_prune",
+        root_fn: "selected_option_as_slice_iter_report",
+        api_pkg: "option_as_slice_iter_api",
+        model_pkg: "option_as_slice_iter_model",
+        api_fn: "selected_option_as_slice_iter_report",
+        model_fn: "selected_option_as_slice_iter",
+        model_required: &[
+            ".as_slice()",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionAsSliceIterItem",
+            "dead_option_as_slice_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-option-as-slice-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_as_mut_slice_iter_mut_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_as_mut_slice_iter_mut_prune",
+        root_fn: "selected_option_as_mut_slice_iter_mut_report",
+        api_pkg: "option_as_mut_slice_iter_mut_api",
+        model_pkg: "option_as_mut_slice_iter_mut_model",
+        api_fn: "selected_option_as_mut_slice_iter_mut_report",
+        model_fn: "selected_option_as_mut_slice_iter_mut",
+        model_required: &[
+            ".as_mut_slice()",
+            ".iter_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionAsMutSliceIterMutItem",
+            "dead_option_as_mut_slice_iter_mut",
+            "pub fn render_label",
+            "dead_method",
+            "dead-option-as-mut-slice-iter-mut",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_replace_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_replace_map_prune",
+        root_fn: "selected_option_replace_map_report",
+        api_pkg: "option_replace_map_api",
+        model_pkg: "option_replace_map_model",
+        api_fn: "selected_option_replace_map_report",
+        model_fn: "selected_option_replace_map",
+        model_required: &[
+            ".replace(",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionReplaceMapItem",
+            "dead_option_replace_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-option-replace-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_first_key_value_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_first_key_value_prune",
+        root_fn: "selected_btreemap_first_key_value_report",
+        api_pkg: "btreemap_first_key_value_api",
+        model_pkg: "btreemap_first_key_value_model",
+        api_fn: "selected_btreemap_first_key_value_report",
+        model_fn: "selected_btreemap_first_key_value",
+        model_required: &[
+            "BTreeMap",
+            ".first_key_value()",
+            "pub fn render_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapFirstKeyValueItem",
+            "dead_btreemap_first_key_value",
+            "dead_key_method",
+            "dead_method",
+            "dead-btreemap-first-key-value",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_last_key_value_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_last_key_value_prune",
+        root_fn: "selected_btreemap_last_key_value_report",
+        api_pkg: "btreemap_last_key_value_api",
+        model_pkg: "btreemap_last_key_value_model",
+        api_fn: "selected_btreemap_last_key_value_report",
+        model_fn: "selected_btreemap_last_key_value",
+        model_required: &[
+            "BTreeMap",
+            ".last_key_value()",
+            "pub fn render_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapLastKeyValueItem",
+            "dead_btreemap_last_key_value",
+            "dead_key_method",
+            "dead_method",
+            "dead-btreemap-last-key-value",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_pop_first_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_pop_first_pair_prune",
+        root_fn: "selected_btreemap_pop_first_pair_report",
+        api_pkg: "btreemap_pop_first_pair_api",
+        model_pkg: "btreemap_pop_first_pair_model",
+        api_fn: "selected_btreemap_pop_first_pair_report",
+        model_fn: "selected_btreemap_pop_first_pair",
+        model_required: &[
+            "BTreeMap",
+            ".pop_first()",
+            "pub fn render_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapPopFirstPairItem",
+            "dead_btreemap_pop_first_pair",
+            "dead_key_method",
+            "dead_method",
+            "dead-btreemap-pop-first-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_btreemap_pop_last_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "btreemap_pop_last_pair_prune",
+        root_fn: "selected_btreemap_pop_last_pair_report",
+        api_pkg: "btreemap_pop_last_pair_api",
+        model_pkg: "btreemap_pop_last_pair_model",
+        api_fn: "selected_btreemap_pop_last_pair_report",
+        model_fn: "selected_btreemap_pop_last_pair",
+        model_required: &[
+            "BTreeMap",
+            ".pop_last()",
+            "pub fn render_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBtreemapPopLastPairItem",
+            "dead_btreemap_pop_last_pair",
+            "dead_key_method",
+            "dead_method",
+            "dead-btreemap-pop-last-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_array_from_fn_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "array_from_fn_iter_prune",
+        root_fn: "selected_array_from_fn_iter_report",
+        api_pkg: "array_from_fn_iter_api",
+        model_pkg: "array_from_fn_iter_model",
+        api_fn: "selected_array_from_fn_iter_report",
+        model_fn: "selected_array_from_fn_iter",
+        model_required: &[
+            "std::array::from_fn",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadArrayFromFnIterItem",
+            "dead_array_from_fn_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-array-from-fn-iter",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,
