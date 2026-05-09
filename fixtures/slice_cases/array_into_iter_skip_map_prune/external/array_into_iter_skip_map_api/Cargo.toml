@@ -1,0 +1,7 @@
+[package]
+name = "array_into_iter_skip_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+array_into_iter_skip_map_model = { path = "../array_into_iter_skip_map_model" }

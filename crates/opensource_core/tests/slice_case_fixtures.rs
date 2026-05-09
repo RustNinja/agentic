@@ -13525,6 +13525,210 @@ fn prunes_iterator_unzip_pair_map_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_iterator_skip_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_skip_map_prune",
+        "iterator_skip_map",
+        &[
+            ".skip(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorSkipMapItem",
+        "dead-iterator-skip-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_iterator_take_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_take_map_prune",
+        "iterator_take_map",
+        &[
+            ".take(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorTakeMapItem",
+        "dead-iterator-take-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_iterator_step_by_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_step_by_map_prune",
+        "iterator_step_by_map",
+        &[
+            ".step_by(2)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorStepByMapItem",
+        "dead-iterator-step-by-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_iterator_filter_predicate_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_filter_predicate_map_prune",
+        "iterator_filter_predicate_map",
+        &[
+            ".filter(|payload| payload.is_live())",
+            "pub fn is_live",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorFilterPredicateMapItem",
+        "dead-iterator-filter-predicate-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_iterator_inspect_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_inspect_map_prune",
+        "iterator_inspect_map",
+        &[
+            ".inspect(|payload| payload.touch())",
+            "pub fn touch",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorInspectMapItem",
+        "dead-iterator-inspect-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_iterator_by_ref_take_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_by_ref_take_map_prune",
+        "iterator_by_ref_take_map",
+        &[
+            ".by_ref()",
+            ".take(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorByRefTakeMapItem",
+        "dead-iterator-by-ref-take-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_iterator_copied_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "iterator_copied_map_prune",
+        "iterator_copied_map",
+        &[
+            "#[derive(Clone, Copy)]",
+            ".copied()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIteratorCopiedMapItem",
+        "dead-iterator-copied-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_slice_iter_copied_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "slice_iter_copied_map_prune",
+        "slice_iter_copied_map",
+        &[
+            "#[derive(Clone, Copy)]",
+            "let slice = &items[..];",
+            ".copied()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadSliceIterCopiedMapItem",
+        "dead-slice-iter-copied-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_result_iter_copied_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "result_iter_copied_map_prune",
+        "result_iter_copied_map",
+        &[
+            "#[derive(Clone, Copy)]",
+            "Result<ResultIterCopiedMapPayload, ResultIterCopiedMapError>",
+            ".iter()",
+            ".copied()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadResultIterCopiedMapItem",
+        "dead-result-iter-copied-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_option_iter_cloned_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "option_iter_cloned_map_prune",
+        "option_iter_cloned_map",
+        &[
+            ".iter()",
+            ".cloned()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadOptionIterClonedMapItem",
+        "dead-option-iter-cloned-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_vec_into_iter_take_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "vec_into_iter_take_map_prune",
+        "vec_into_iter_take_map",
+        &[
+            ".into_iter()",
+            ".take(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecIntoIterTakeMapItem",
+        "dead-vec-into-iter-take-map",
+        "pub fn bump_and_render",
+    );
+}
+
+#[test]
+fn prunes_array_into_iter_skip_map_support_chain_with_default_analyzer() {
+    assert_tuple_adapter_support_fixture(
+        "array_into_iter_skip_map_prune",
+        "array_into_iter_skip_map",
+        &[
+            ".into_iter()",
+            ".skip(1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadArrayIntoIterSkipMapItem",
+        "dead-array-into-iter-skip-map",
+        "pub fn bump_and_render",
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,
