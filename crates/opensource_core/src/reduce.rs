@@ -6101,6 +6101,8 @@ impl<'a> DependencyVisitor<'a> {
                         | "as_mut"
                         | "by_ref"
                         | "chain"
+                        | "chunks"
+                        | "chunks_exact"
                         | "clone"
                         | "cloned"
                         | "copied"
@@ -6128,9 +6130,17 @@ impl<'a> DependencyVisitor<'a> {
                         | "range_mut"
                         | "reduce"
                         | "rev"
+                        | "rchunks"
+                        | "rchunks_exact"
+                        | "rsplit"
+                        | "rsplitn"
                         | "skip_while"
+                        | "split"
+                        | "split_inclusive"
+                        | "splitn"
                         | "step_by"
                         | "take_while"
+                        | "windows"
                 ) {
                     return self.expression_type_arguments(&call.receiver);
                 }
@@ -6808,9 +6818,14 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn visit_single_payload_closure_method_call(&mut self, call: &ExprMethodCall) -> bool {
-        if call.args.len() != 1 {
+        let closure_arg_index = match call.method.to_string().as_str() {
+            "splitn" | "rsplitn" if call.args.len() == 2 => 1,
+            _ if call.args.len() == 1 => 0,
+            _ => return false,
+        };
+        let Some(Expr::Closure(closure)) = call.args.iter().nth(closure_arg_index) else {
             return false;
-        }
+        };
         if !self.resolved_methods_for_call(call).is_empty() {
             return false;
         }
@@ -6818,14 +6833,16 @@ impl<'a> DependencyVisitor<'a> {
             return false;
         };
         let payload_type_arguments = self.expression_type_arguments(&call.receiver);
-        let Some(Expr::Closure(closure)) = call.args.first() else {
-            return false;
-        };
         let Some(payload_pat) = closure.inputs.first() else {
             return false;
         };
 
         self.visit_expr(&call.receiver);
+        for (index, argument) in call.args.iter().enumerate() {
+            if index != closure_arg_index {
+                self.visit_expr(argument);
+            }
+        }
         let variables = self.variables.clone();
         let variable_candidates = self.variable_candidates.clone();
         let variable_type_arguments = self.variable_type_arguments.clone();
@@ -7076,8 +7093,9 @@ impl<'a> DependencyVisitor<'a> {
             "and_modify" => self.expression_entry_value_type(&call.receiver),
             "map" | "and_then" | "filter" | "filter_map" | "flat_map" | "find" | "find_map"
             | "for_each" | "inspect" | "is_some_and" | "is_ok_and" | "any" | "all" | "position"
-            | "rposition" | "partition" | "retain" | "skip_while" | "sort_by_key"
-            | "max_by_key" | "min_by_key" | "take_while" | "map_while" | "try_for_each" => self
+            | "rposition" | "partition" | "retain" | "skip_while" | "sort_by_key" | "split"
+            | "split_inclusive" | "splitn" | "rsplit" | "rsplitn" | "max_by_key" | "min_by_key"
+            | "take_while" | "map_while" | "try_for_each" => self
                 .expression_result_ok_type(&call.receiver)
                 .or_else(|| type_arguments.first().cloned())
                 .or_else(|| self.receiver_type(&call.receiver)),

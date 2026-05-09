@@ -9155,6 +9155,366 @@ fn prunes_vecdeque_into_iter_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_slice_chunks_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_chunks_prune",
+        root_fn: "selected_slice_chunks_report",
+        api_pkg: "slice_chunks_api",
+        model_pkg: "slice_chunks_model",
+        api_fn: "selected_slice_chunks_report",
+        model_fn: "selected_slice_chunks",
+        model_required: &[
+            "SliceChunksItem",
+            "Vec<SliceChunksItem>",
+            ".chunks(2)",
+            ".first()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceChunksItem",
+            "dead_slice_chunks",
+            "pub fn is_break",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_chunks",
+            "dead-slice-chunks",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_chunks_exact_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_chunks_exact_prune",
+        root_fn: "selected_slice_chunks_exact_report",
+        api_pkg: "slice_chunks_exact_api",
+        model_pkg: "slice_chunks_exact_model",
+        api_fn: "selected_slice_chunks_exact_report",
+        model_fn: "selected_slice_chunks_exact",
+        model_required: &[
+            "SliceChunksExactItem",
+            "Vec<SliceChunksExactItem>",
+            ".chunks_exact(2)",
+            ".iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceChunksExactItem",
+            "dead_slice_chunks_exact",
+            "pub fn is_break",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_chunks_exact",
+            "dead-slice-chunks-exact",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_rchunks_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_rchunks_prune",
+        root_fn: "selected_slice_rchunks_report",
+        api_pkg: "slice_rchunks_api",
+        model_pkg: "slice_rchunks_model",
+        api_fn: "selected_slice_rchunks_report",
+        model_fn: "selected_slice_rchunks",
+        model_required: &[
+            "SliceRchunksItem",
+            "Vec<SliceRchunksItem>",
+            ".rchunks(2)",
+            ".last()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceRchunksItem",
+            "dead_slice_rchunks",
+            "pub fn is_break",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_rchunks",
+            "dead-slice-rchunks",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_rchunks_exact_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_rchunks_exact_prune",
+        root_fn: "selected_slice_rchunks_exact_report",
+        api_pkg: "slice_rchunks_exact_api",
+        model_pkg: "slice_rchunks_exact_model",
+        api_fn: "selected_slice_rchunks_exact_report",
+        model_fn: "selected_slice_rchunks_exact",
+        model_required: &[
+            "SliceRchunksExactItem",
+            "Vec<SliceRchunksExactItem>",
+            ".rchunks_exact(2)",
+            ".iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceRchunksExactItem",
+            "dead_slice_rchunks_exact",
+            "pub fn is_break",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_rchunks_exact",
+            "dead-slice-rchunks-exact",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_windows_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_windows_prune",
+        root_fn: "selected_slice_windows_report",
+        api_pkg: "slice_windows_api",
+        model_pkg: "slice_windows_model",
+        api_fn: "selected_slice_windows_report",
+        model_fn: "selected_slice_windows",
+        model_required: &[
+            "SliceWindowsItem",
+            "Vec<SliceWindowsItem>",
+            ".windows(2)",
+            ".iter()",
+            ".map(|item| item.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceWindowsItem",
+            "dead_slice_windows",
+            "pub fn is_break",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_windows",
+            "dead-slice-windows",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_split_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_split_prune",
+        root_fn: "selected_slice_split_report",
+        api_pkg: "slice_split_api",
+        model_pkg: "slice_split_model",
+        api_fn: "selected_slice_split_report",
+        model_fn: "selected_slice_split",
+        model_required: &[
+            "SliceSplitItem",
+            "Vec<SliceSplitItem>",
+            ".split(|item| item.is_break())",
+            ".first()",
+            ".map(|item| item.render_label())",
+            "pub fn is_break",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitItem",
+            "dead_slice_split",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_split",
+            "dead-slice-split",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_split_inclusive_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_split_inclusive_prune",
+        root_fn: "selected_slice_split_inclusive_report",
+        api_pkg: "slice_split_inclusive_api",
+        model_pkg: "slice_split_inclusive_model",
+        api_fn: "selected_slice_split_inclusive_report",
+        model_fn: "selected_slice_split_inclusive",
+        model_required: &[
+            "SliceSplitInclusiveItem",
+            "Vec<SliceSplitInclusiveItem>",
+            ".split_inclusive(|item| item.is_break())",
+            ".last()",
+            ".map(|item| item.render_label())",
+            "pub fn is_break",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitInclusiveItem",
+            "dead_slice_split_inclusive",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_split_inclusive",
+            "dead-slice-split-inclusive",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_rsplit_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_rsplit_prune",
+        root_fn: "selected_slice_rsplit_report",
+        api_pkg: "slice_rsplit_api",
+        model_pkg: "slice_rsplit_model",
+        api_fn: "selected_slice_rsplit_report",
+        model_fn: "selected_slice_rsplit",
+        model_required: &[
+            "SliceRsplitItem",
+            "Vec<SliceRsplitItem>",
+            ".rsplit(|item| item.is_break())",
+            ".first()",
+            ".map(|item| item.render_label())",
+            "pub fn is_break",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceRsplitItem",
+            "dead_slice_rsplit",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_rsplit",
+            "dead-slice-rsplit",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_splitn_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_splitn_prune",
+        root_fn: "selected_slice_splitn_report",
+        api_pkg: "slice_splitn_api",
+        model_pkg: "slice_splitn_model",
+        api_fn: "selected_slice_splitn_report",
+        model_fn: "selected_slice_splitn",
+        model_required: &[
+            "SliceSplitnItem",
+            "Vec<SliceSplitnItem>",
+            ".splitn(2, |item| item.is_break())",
+            ".iter()",
+            ".map(|item| item.render_label())",
+            "pub fn is_break",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitnItem",
+            "dead_slice_splitn",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_splitn",
+            "dead-slice-splitn",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_rsplitn_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_rsplitn_prune",
+        root_fn: "selected_slice_rsplitn_report",
+        api_pkg: "slice_rsplitn_api",
+        model_pkg: "slice_rsplitn_model",
+        api_fn: "selected_slice_rsplitn_report",
+        model_fn: "selected_slice_rsplitn",
+        model_required: &[
+            "SliceRsplitnItem",
+            "Vec<SliceRsplitnItem>",
+            ".rsplitn(2, |item| item.is_break())",
+            ".iter()",
+            ".map(|item| item.render_label())",
+            "pub fn is_break",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceRsplitnItem",
+            "dead_slice_rsplitn",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_slice_rsplitn",
+            "dead-slice-rsplitn",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_iter_mut_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_iter_mut_prune",
+        root_fn: "selected_slice_iter_mut_report",
+        api_pkg: "slice_iter_mut_api",
+        model_pkg: "slice_iter_mut_model",
+        api_fn: "selected_slice_iter_mut_report",
+        model_fn: "selected_slice_iter_mut",
+        model_required: &[
+            "SliceIterMutItem",
+            "Vec<SliceIterMutItem>",
+            ".iter_mut()",
+            ".map(|item| item.bump().render_label())",
+            "pub fn bump",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceIterMutItem",
+            "dead_slice_iter_mut",
+            "pub fn is_break",
+            "dead_method",
+            "dead_live_slice_iter_mut",
+            "dead-slice-iter-mut",
+        ],
+    });
+}
+
+#[test]
+fn prunes_array_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "array_iter_prune",
+        root_fn: "selected_array_iter_report",
+        api_pkg: "array_iter_api",
+        model_pkg: "array_iter_model",
+        api_fn: "selected_array_iter_report",
+        model_fn: "selected_array_iter",
+        model_required: &[
+            "ArrayIterItem",
+            "[ArrayIterItem; 2]",
+            ".iter()",
+            ".find(|item| item.is_live())",
+            ".map(|item| item.render_label())",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadArrayIterItem",
+            "dead_array_iter",
+            "pub fn is_break",
+            "pub fn bump",
+            "dead_method",
+            "dead_live_array_iter",
+            "dead-array-iter",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,
