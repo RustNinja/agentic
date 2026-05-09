@@ -6656,6 +6656,271 @@ fn prunes_iterator_max_by_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_iterator_min_by_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_min_by_prune",
+        root_fn: "selected_min_by_report",
+        api_pkg: "min_by_api",
+        model_pkg: "min_by_model",
+        api_fn: "selected_min_by_report",
+        model_fn: "selected_min_by",
+        model_required: &[
+            "MinByPayload",
+            ".min_by(|left, right| left.rank().cmp(&right.rank()))",
+            ".map(|payload| payload.render_label())",
+            "pub fn rank",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMinByItem",
+            "dead_min_by",
+            "dead_method",
+            "dead_live_min_by",
+            "dead-min-by",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_max_by_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_max_by_key_prune",
+        root_fn: "selected_max_by_key_report",
+        api_pkg: "max_by_key_api",
+        model_pkg: "max_by_key_model",
+        api_fn: "selected_max_by_key_report",
+        model_fn: "selected_max_by_key",
+        model_required: &[
+            "MaxByKeyPayload",
+            ".max_by_key(|payload| payload.rank())",
+            ".map(|payload| payload.render_label())",
+            "pub fn rank",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMaxByKeyItem",
+            "dead_max_by_key",
+            "dead_method",
+            "dead_live_max_by_key",
+            "dead-max-by-key",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_min_by_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_min_by_key_prune",
+        root_fn: "selected_min_by_key_report",
+        api_pkg: "min_by_key_api",
+        model_pkg: "min_by_key_model",
+        api_fn: "selected_min_by_key_report",
+        model_fn: "selected_min_by_key",
+        model_required: &[
+            "MinByKeyPayload",
+            ".min_by_key(|payload| payload.rank())",
+            ".map(|payload| payload.render_label())",
+            "pub fn rank",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadMinByKeyItem",
+            "dead_min_by_key",
+            "dead_method",
+            "dead_live_min_by_key",
+            "dead-min-by-key",
+        ],
+    });
+}
+
+#[test]
+fn prunes_iterator_rposition_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "iterator_rposition_prune",
+        root_fn: "selected_rposition_report",
+        api_pkg: "rposition_api",
+        model_pkg: "rposition_model",
+        api_fn: "selected_rposition_report",
+        model_fn: "selected_rposition",
+        model_required: &[
+            "RPositionPayload",
+            ".rposition(|payload| payload.accepts())",
+            "RPositionPayload::new(&index.to_string()).render_label()",
+            "pub fn accepts",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRPositionItem",
+            "dead_rposition",
+            "dead_method",
+            "dead_live_rposition",
+            "dead-rposition",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_xor_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_xor_prune",
+        root_fn: "selected_option_xor_report",
+        api_pkg: "option_xor_api",
+        model_pkg: "option_xor_model",
+        api_fn: "selected_option_xor_report",
+        model_fn: "selected_option_xor",
+        model_required: &[
+            "OptionXorPayload",
+            ".xor(option_xor_right(raw))",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionXorItem",
+            "dead_option_xor",
+            "dead_method",
+            "dead_live_option_xor",
+            "dead-option-xor",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_flatten_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_flatten_prune",
+        root_fn: "selected_option_flatten_report",
+        api_pkg: "option_flatten_api",
+        model_pkg: "option_flatten_model",
+        api_fn: "selected_option_flatten_report",
+        model_fn: "selected_option_flatten",
+        model_required: &[
+            "OptionFlattenPayload",
+            ".flatten()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionFlattenItem",
+            "dead_option_flatten",
+            "dead_method",
+            "dead_live_option_flatten",
+            "dead-option-flatten",
+        ],
+    });
+}
+
+#[test]
+fn prunes_bool_then_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "bool_then_prune",
+        root_fn: "selected_bool_then_report",
+        api_pkg: "bool_then_api",
+        model_pkg: "bool_then_model",
+        api_fn: "selected_bool_then_report",
+        model_fn: "selected_bool_then",
+        model_required: &[
+            "BoolThenPayload",
+            ".then(|| BoolThenPayload::new(raw))",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBoolThenItem",
+            "dead_bool_then",
+            "dead_method",
+            "dead_live_bool_then",
+            "dead-bool-then",
+        ],
+    });
+}
+
+#[test]
+fn prunes_bool_then_some_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "bool_then_some_prune",
+        root_fn: "selected_bool_then_some_report",
+        api_pkg: "bool_then_some_api",
+        model_pkg: "bool_then_some_model",
+        api_fn: "selected_bool_then_some_report",
+        model_fn: "selected_bool_then_some",
+        model_required: &[
+            "BoolThenSomePayload",
+            ".then_some(BoolThenSomePayload::new(raw))",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBoolThenSomeItem",
+            "dead_bool_then_some",
+            "dead_method",
+            "dead_live_bool_then_some",
+            "dead-bool-then-some",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_expect_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_expect_prune",
+        root_fn: "selected_option_expect_report",
+        api_pkg: "option_expect_api",
+        model_pkg: "option_expect_model",
+        api_fn: "selected_option_expect_report",
+        model_fn: "selected_option_expect",
+        model_required: &[
+            "OptionExpectPayload",
+            ".expect(\"fixture payload should exist\")",
+            ".render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionExpectItem",
+            "dead_option_expect",
+            "dead_method",
+            "dead_live_option_expect",
+            "dead-option-expect",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_expect_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_expect_prune",
+        root_fn: "selected_result_expect_report",
+        api_pkg: "result_expect_api",
+        model_pkg: "result_expect_model",
+        api_fn: "selected_result_expect_report",
+        model_fn: "selected_result_expect",
+        model_required: &[
+            "ResultExpectPayload",
+            "ResultExpectError",
+            ".expect(\"fixture payload should exist\")",
+            ".render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultExpectItem",
+            "dead_result_expect",
+            "dead_method",
+            "dead_live_result_expect",
+            "dead-result-expect",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

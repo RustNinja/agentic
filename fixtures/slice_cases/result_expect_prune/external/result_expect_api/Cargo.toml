@@ -1,0 +1,7 @@
+[package]
+name = "result_expect_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+result_expect_model = { path = "../result_expect_model" }

@@ -267,6 +267,16 @@ file.
 | `fixture.iterator_all_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `all` predicate closures while pruning dead predicate support |
 | `fixture.iterator_find_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `find` predicate closures plus returned option mapping while pruning dead find support |
 | `fixture.iterator_max_by_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `max_by` two-item comparators plus returned option mapping while pruning dead comparator support |
+| `fixture.iterator_min_by_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `min_by` two-item comparators plus returned option mapping while pruning dead comparator support |
+| `fixture.iterator_max_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `max_by_key` key closures plus returned option mapping while pruning dead key support |
+| `fixture.iterator_min_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `min_by_key` key closures plus returned option mapping while pruning dead key support |
+| `fixture.iterator_rposition_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator `rposition` predicate closures while pruning dead reverse-position support |
+| `fixture.option_xor_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::xor(...).map(...)` payload closures while pruning dead xor support |
+| `fixture.option_flatten_prune.support_chain.001` | covered | A checked-in support fixture slices through nested `Option<Option<T>>::flatten().map(...)` payload closures while pruning dead nested-option support |
+| `fixture.bool_then_prune.support_chain.001` | covered | A checked-in support fixture slices through `bool::then(|| T).map(...)` payload closures while pruning dead boolean-gated support |
+| `fixture.bool_then_some_prune.support_chain.001` | covered | A checked-in support fixture slices through `bool::then_some(T).map(...)` payload closures while pruning dead boolean-gated support |
+| `fixture.option_expect_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::expect(...).method()` receiver typing while pruning dead option-expect support |
+| `fixture.result_expect_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::expect(...).method()` OK receiver typing while pruning dead result-expect support |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

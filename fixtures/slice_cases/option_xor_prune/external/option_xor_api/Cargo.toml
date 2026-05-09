@@ -1,0 +1,7 @@
+[package]
+name = "option_xor_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_xor_model = { path = "../option_xor_model" }

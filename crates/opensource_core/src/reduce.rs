@@ -4926,7 +4926,7 @@ impl<'a> DependencyVisitor<'a> {
         }
         if matches!(
             call.method.to_string().as_str(),
-            "unwrap_or" | "unwrap_or_else"
+            "expect" | "unwrap" | "unwrap_or" | "unwrap_or_else"
         ) {
             return self.expression_result_ok_type(&call.receiver).or_else(|| {
                 self.expression_type_arguments(&call.receiver)
@@ -6064,13 +6064,16 @@ impl<'a> DependencyVisitor<'a> {
                         | "cycle"
                         | "filter"
                         | "find"
+                        | "flatten"
                         | "fuse"
                         | "inspect"
                         | "into_iter"
                         | "iter"
                         | "iter_mut"
                         | "max_by"
+                        | "max_by_key"
                         | "min_by"
+                        | "min_by_key"
                         | "ok_or"
                         | "ok_or_else"
                         | "or"
@@ -6096,6 +6099,29 @@ impl<'a> DependencyVisitor<'a> {
                             .collect(),
                         _ => Vec::new(),
                     };
+                }
+                if matches!(call.method.to_string().as_str(), "then" | "then_some") {
+                    return call
+                        .args
+                        .first()
+                        .and_then(|argument| match argument {
+                            Expr::Closure(closure) if call.method == "then" => {
+                                self.infer_expr_type(&closure.body)
+                            }
+                            _ if call.method == "then_some" => self.infer_expr_type(argument),
+                            _ => None,
+                        })
+                        .into_iter()
+                        .collect();
+                }
+                if call.method == "xor" {
+                    let mut type_arguments = self.expression_type_arguments(&call.receiver);
+                    if let Some(argument) = call.args.first() {
+                        type_arguments.extend(self.expression_type_arguments(argument));
+                    }
+                    type_arguments.sort();
+                    type_arguments.dedup();
+                    return type_arguments;
                 }
                 if call.method == "zip" {
                     let mut type_arguments = self.expression_type_arguments(&call.receiver);
@@ -6160,7 +6186,7 @@ impl<'a> DependencyVisitor<'a> {
             Expr::MethodCall(call) => {
                 if matches!(
                     call.method.to_string().as_str(),
-                    "max_by" | "min_by" | "reduce"
+                    "max_by" | "max_by_key" | "min_by" | "min_by_key" | "reduce"
                 ) {
                     if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
                         return Some(ok_type.clone());
@@ -6905,8 +6931,8 @@ impl<'a> DependencyVisitor<'a> {
         match method.as_str() {
             "map" | "and_then" | "filter" | "filter_map" | "flat_map" | "find" | "find_map"
             | "for_each" | "inspect" | "is_some_and" | "is_ok_and" | "any" | "all" | "position"
-            | "partition" | "retain" | "skip_while" | "sort_by_key" | "take_while"
-            | "map_while" | "try_for_each" => self
+            | "rposition" | "partition" | "retain" | "skip_while" | "sort_by_key"
+            | "max_by_key" | "min_by_key" | "take_while" | "map_while" | "try_for_each" => self
                 .expression_result_ok_type(&call.receiver)
                 .or_else(|| type_arguments.first().cloned())
                 .or_else(|| self.receiver_type(&call.receiver)),
