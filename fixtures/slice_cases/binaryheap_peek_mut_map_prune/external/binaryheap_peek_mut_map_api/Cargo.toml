@@ -1,0 +1,7 @@
+[package]
+name = "binaryheap_peek_mut_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binaryheap_peek_mut_map_model = { path = "../binaryheap_peek_mut_map_model" }

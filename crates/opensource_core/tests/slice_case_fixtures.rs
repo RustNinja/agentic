@@ -14576,6 +14576,346 @@ fn prunes_iter_repeat_with_take_map_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_str_chars_filter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_chars_filter_map_prune",
+        "str_chars_filter_map",
+        &[".chars()", ".filter_map(|ch|", "pub fn render_label"],
+        "DeadStrCharsFilterMapItem",
+        "dead-str-chars-filter-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_str_bytes_filter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_bytes_filter_map_prune",
+        "str_bytes_filter_map",
+        &[".bytes()", ".filter_map(|byte|", "pub fn render_label"],
+        "DeadStrBytesFilterMapItem",
+        "dead-str-bytes-filter-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_str_split_inclusive_filter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_split_inclusive_filter_map_prune",
+        "str_split_inclusive_filter_map",
+        &[
+            ".split_inclusive(';')",
+            ".filter_map(|part|",
+            "pub fn render_label",
+        ],
+        "DeadStrSplitInclusiveFilterMapItem",
+        "dead-str-split-inclusive-filter-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_str_rsplitn_find_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_rsplitn_find_map_prune",
+        "str_rsplitn_find_map",
+        &[
+            ".rsplitn(3, ':')",
+            ".find_map(|part|",
+            "pub fn render_label",
+        ],
+        "DeadStrRsplitnFindMapItem",
+        "dead-str-rsplitn-find-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_str_trim_matches_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_trim_matches_map_prune",
+        "str_trim_matches_map",
+        &["trim_matches('/')", ".map(|part|", "pub fn render_label"],
+        "DeadStrTrimMatchesMapItem",
+        "dead-str-trim-matches-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_str_strip_suffix_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_strip_suffix_map_prune",
+        "str_strip_suffix_map",
+        &[
+            ".strip_suffix(\".json\")",
+            ".map(|part|",
+            "pub fn render_label",
+        ],
+        "DeadStrStripSuffixMapItem",
+        "dead-str-strip-suffix-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_path_parent_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "path_parent_map_prune",
+        "path_parent_map",
+        &[
+            "Path::new(raw)",
+            ".parent()",
+            ".and_then(|path| path.to_str())",
+            "pub fn render_label",
+        ],
+        "DeadPathParentMapItem",
+        "dead-path-parent-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_path_ancestors_find_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "path_ancestors_find_map_prune",
+        "path_ancestors_find_map",
+        &[
+            ".ancestors()",
+            ".find_map(|path|",
+            "file_name()",
+            "pub fn render_label",
+        ],
+        "DeadPathAncestorsFindMapItem",
+        "dead-path-ancestors-find-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_path_extension_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "path_extension_map_prune",
+        "path_extension_map",
+        &[
+            ".extension()",
+            ".and_then(OsStr::to_str)",
+            "pub fn render_label",
+        ],
+        "DeadPathExtensionMapItem",
+        "dead-path-extension-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_path_file_stem_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "path_file_stem_map_prune",
+        "path_file_stem_map",
+        &[
+            ".file_stem()",
+            ".and_then(OsStr::to_str)",
+            "pub fn render_label",
+        ],
+        "DeadPathFileStemMapItem",
+        "dead-path-file-stem-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_path_strip_prefix_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "path_strip_prefix_map_prune",
+        "path_strip_prefix_map",
+        &[
+            ".strip_prefix(\"/tmp\")",
+            ".ok()",
+            ".and_then(|path| path.to_str())",
+            "pub fn render_label",
+        ],
+        "DeadPathStripPrefixMapItem",
+        "dead-path-strip-prefix-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_hashmap_values_filter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashmap_values_filter_map_prune",
+        "hashmap_values_filter_map",
+        &[
+            "HashMap::new()",
+            ".values()",
+            ".filter_map(|payload|",
+            "pub fn render_label",
+        ],
+        "DeadHashmapValuesFilterMapItem",
+        "dead-hashmap-values-filter-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_hashmap_keys_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashmap_keys_map_prune",
+        "hashmap_keys_map",
+        &[
+            "HashMap::new()",
+            ".keys()",
+            ".map(|key|",
+            "pub fn render_label",
+        ],
+        "DeadHashmapKeysMapItem",
+        "dead-hashmap-keys-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_btreemap_values_filter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreemap_values_filter_map_prune",
+        "btreemap_values_filter_map",
+        &[
+            "BTreeMap::new()",
+            ".values()",
+            ".filter_map(|payload|",
+            "pub fn render_label",
+        ],
+        "DeadBtreemapValuesFilterMapItem",
+        "dead-btreemap-values-filter-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_btreemap_keys_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreemap_keys_map_prune",
+        "btreemap_keys_map",
+        &[
+            "BTreeMap::new()",
+            ".keys()",
+            ".map(|key|",
+            "pub fn render_label",
+        ],
+        "DeadBtreemapKeysMapItem",
+        "dead-btreemap-keys-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_btreeset_first_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreeset_first_map_prune",
+        "btreeset_first_map",
+        &[
+            "BTreeSet::new()",
+            ".first()",
+            ".map(|value|",
+            "pub fn render_label",
+        ],
+        "DeadBtreesetFirstMapItem",
+        "dead-btreeset-first-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_btreeset_last_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreeset_last_map_prune",
+        "btreeset_last_map",
+        &[
+            "BTreeSet::new()",
+            ".last()",
+            ".map(|value|",
+            "pub fn render_label",
+        ],
+        "DeadBtreesetLastMapItem",
+        "dead-btreeset-last-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_binaryheap_peek_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "binaryheap_peek_mut_map_prune",
+        "binaryheap_peek_mut_map",
+        &[
+            "BinaryHeap::from",
+            ".peek_mut()",
+            ".map(|mut value|",
+            "pub fn render_label",
+        ],
+        "DeadBinaryheapPeekMutMapItem",
+        "dead-binaryheap-peek-mut-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_vecdeque_range_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vecdeque_range_map_prune",
+        "vecdeque_range_map",
+        &[
+            "VecDeque::from",
+            ".range(0..1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecdequeRangeMapItem",
+        "dead-vecdeque-range-map",
+        "pub fn unused_label",
+        &["pub fn bump_and_render"],
+    );
+}
+
+#[test]
+fn prunes_linkedlist_iter_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "linkedlist_iter_mut_map_prune",
+        "linkedlist_iter_mut_map",
+        &[
+            "LinkedList::new()",
+            ".iter_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadLinkedlistIterMutMapItem",
+        "dead-linkedlist-iter-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,
