@@ -369,6 +369,16 @@ file.
 | `fixture.slice_rsplitn_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::rsplitn(count, predicate).map(...)`, retaining the second-argument predicate closure and nested group payload methods while pruning dead slice support |
 | `fixture.slice_iter_mut_prune.support_chain.001` | covered | A checked-in support fixture slices through mutable slice iteration via `iter_mut().map(...)`, retaining only live mutating receiver methods |
 | `fixture.array_iter_prune.support_chain.001` | covered | A checked-in support fixture slices through fixed-array `iter().find(...).map(...)` payload typing while pruning dead array support |
+| `fixture.vec_retain_mut_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::retain_mut(...)`, retaining only live mutating predicate methods and downstream render methods |
+| `fixture.vec_dedup_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::dedup_by_key(...)`, retaining only live key extraction and render methods |
+| `fixture.vec_sort_by_cached_key_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::sort_by_cached_key(...)`, retaining only live cached-key and render methods |
+| `fixture.vec_sort_unstable_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec<T>::sort_unstable_by_key(...)`, retaining only live key extraction and render methods |
+| `fixture.slice_binary_search_by_prune.support_chain.001` | covered | A checked-in support fixture slices through `binary_search_by(...)`, retaining only live comparator-key, sort-key, and render methods |
+| `fixture.slice_binary_search_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through `binary_search_by_key(key, closure)`, retaining only the second-argument key closure and render methods |
+| `fixture.slice_partition_point_prune.support_chain.001` | covered | A checked-in support fixture slices through `partition_point(...)`, retaining only live predicate key and render methods |
+| `fixture.slice_sort_unstable_by_prune.support_chain.001` | covered | A checked-in support fixture slices through two-argument `sort_unstable_by(...)` comparator closures while pruning unused key and mutation helpers |
+| `fixture.slice_select_nth_unstable_by_prune.support_chain.001` | covered | A checked-in support fixture slices through `select_nth_unstable_by(index, comparator)`, retaining only the second-argument comparator and live render methods |
+| `fixture.slice_select_nth_unstable_by_key_prune.support_chain.001` | covered | A checked-in support fixture slices through `select_nth_unstable_by_key(index, key)`, retaining only the second-argument key closure and live render methods |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

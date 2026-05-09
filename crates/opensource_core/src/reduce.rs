@@ -6771,12 +6771,21 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn visit_two_payload_closure_method_call(&mut self, call: &ExprMethodCall) -> bool {
-        if call.args.len() != 1 {
-            return false;
-        }
+        let method = call.method.to_string();
+        let closure_arg_index = match method.as_str() {
+            "select_nth_unstable_by" if call.args.len() == 2 => 1,
+            _ if call.args.len() == 1 => 0,
+            _ => return false,
+        };
         if !matches!(
-            call.method.to_string().as_str(),
-            "dedup_by" | "max_by" | "min_by" | "reduce" | "sort_by"
+            method.as_str(),
+            "dedup_by"
+                | "max_by"
+                | "min_by"
+                | "reduce"
+                | "select_nth_unstable_by"
+                | "sort_by"
+                | "sort_unstable_by"
         ) {
             return false;
         }
@@ -6790,11 +6799,16 @@ impl<'a> DependencyVisitor<'a> {
         else {
             return false;
         };
-        let Some(Expr::Closure(closure)) = call.args.first() else {
+        let Some(Expr::Closure(closure)) = call.args.iter().nth(closure_arg_index) else {
             return false;
         };
 
         self.visit_expr(&call.receiver);
+        for (index, argument) in call.args.iter().enumerate() {
+            if index != closure_arg_index {
+                self.visit_expr(argument);
+            }
+        }
         let variables = self.variables.clone();
         let variable_candidates = self.variable_candidates.clone();
         let variable_type_arguments = self.variable_type_arguments.clone();
@@ -6819,6 +6833,7 @@ impl<'a> DependencyVisitor<'a> {
 
     fn visit_single_payload_closure_method_call(&mut self, call: &ExprMethodCall) -> bool {
         let closure_arg_index = match call.method.to_string().as_str() {
+            "binary_search_by_key" | "select_nth_unstable_by_key" if call.args.len() == 2 => 1,
             "splitn" | "rsplitn" if call.args.len() == 2 => 1,
             _ if call.args.len() == 1 => 0,
             _ => return false,
@@ -7091,11 +7106,43 @@ impl<'a> DependencyVisitor<'a> {
         let type_arguments = self.expression_type_arguments(&call.receiver);
         match method.as_str() {
             "and_modify" => self.expression_entry_value_type(&call.receiver),
-            "map" | "and_then" | "filter" | "filter_map" | "flat_map" | "find" | "find_map"
-            | "for_each" | "inspect" | "is_some_and" | "is_ok_and" | "any" | "all" | "position"
-            | "rposition" | "partition" | "retain" | "skip_while" | "sort_by_key" | "split"
-            | "split_inclusive" | "splitn" | "rsplit" | "rsplitn" | "max_by_key" | "min_by_key"
-            | "take_while" | "map_while" | "try_for_each" => self
+            "map"
+            | "and_then"
+            | "filter"
+            | "filter_map"
+            | "flat_map"
+            | "find"
+            | "find_map"
+            | "for_each"
+            | "inspect"
+            | "is_some_and"
+            | "is_ok_and"
+            | "any"
+            | "all"
+            | "position"
+            | "rposition"
+            | "partition"
+            | "partition_point"
+            | "retain"
+            | "retain_mut"
+            | "skip_while"
+            | "sort_by_cached_key"
+            | "sort_by_key"
+            | "sort_unstable_by_key"
+            | "split"
+            | "split_inclusive"
+            | "splitn"
+            | "rsplit"
+            | "rsplitn"
+            | "max_by_key"
+            | "min_by_key"
+            | "dedup_by_key"
+            | "binary_search_by"
+            | "binary_search_by_key"
+            | "select_nth_unstable_by_key"
+            | "take_while"
+            | "map_while"
+            | "try_for_each" => self
                 .expression_result_ok_type(&call.receiver)
                 .or_else(|| type_arguments.first().cloned())
                 .or_else(|| self.receiver_type(&call.receiver)),

@@ -1,0 +1,4 @@
+[package]
+name = "vec_sort_by_cached_key_model"
+version = "0.1.0"
+edition = "2021"

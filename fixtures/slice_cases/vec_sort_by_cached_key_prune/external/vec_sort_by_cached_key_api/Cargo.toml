@@ -1,0 +1,7 @@
+[package]
+name = "vec_sort_by_cached_key_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_sort_by_cached_key_model = { path = "../vec_sort_by_cached_key_model" }

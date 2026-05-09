@@ -9515,6 +9515,326 @@ fn prunes_array_iter_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_vec_retain_mut_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_retain_mut_prune",
+        root_fn: "selected_vec_retain_mut_report",
+        api_pkg: "vec_retain_mut_api",
+        model_pkg: "vec_retain_mut_model",
+        api_fn: "selected_vec_retain_mut_report",
+        model_fn: "selected_vec_retain_mut",
+        model_required: &[
+            "VecRetainMutItem",
+            "Vec<VecRetainMutItem>",
+            ".retain_mut(|item| item.bump().is_live())",
+            ".map(|item| item.render_label())",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecRetainMutItem",
+            "dead_vec_retain_mut",
+            "pub fn sort_key",
+            "pub fn compare(&self",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vec-retain-mut",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_dedup_by_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_dedup_by_key_prune",
+        root_fn: "selected_vec_dedup_by_key_report",
+        api_pkg: "vec_dedup_by_key_api",
+        model_pkg: "vec_dedup_by_key_model",
+        api_fn: "selected_vec_dedup_by_key_report",
+        model_fn: "selected_vec_dedup_by_key",
+        model_required: &[
+            "VecDedupByKeyItem",
+            "Vec<VecDedupByKeyItem>",
+            ".dedup_by_key(|item| item.sort_key())",
+            ".map(|item| item.render_label())",
+            "pub fn sort_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecDedupByKeyItem",
+            "dead_vec_dedup_by_key",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn compare(&self",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vec-dedup-by-key",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_sort_by_cached_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_sort_by_cached_key_prune",
+        root_fn: "selected_vec_sort_by_cached_key_report",
+        api_pkg: "vec_sort_by_cached_key_api",
+        model_pkg: "vec_sort_by_cached_key_model",
+        api_fn: "selected_vec_sort_by_cached_key_report",
+        model_fn: "selected_vec_sort_by_cached_key",
+        model_required: &[
+            "VecSortByCachedKeyItem",
+            "Vec<VecSortByCachedKeyItem>",
+            ".sort_by_cached_key(|item| item.sort_key())",
+            ".map(|item| item.render_label())",
+            "pub fn sort_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecSortByCachedKeyItem",
+            "dead_vec_sort_by_cached_key",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn compare(&self",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vec-sort-by-cached-key",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_sort_unstable_by_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_sort_unstable_by_key_prune",
+        root_fn: "selected_vec_sort_unstable_by_key_report",
+        api_pkg: "vec_sort_unstable_by_key_api",
+        model_pkg: "vec_sort_unstable_by_key_model",
+        api_fn: "selected_vec_sort_unstable_by_key_report",
+        model_fn: "selected_vec_sort_unstable_by_key",
+        model_required: &[
+            "VecSortUnstableByKeyItem",
+            "Vec<VecSortUnstableByKeyItem>",
+            ".sort_unstable_by_key(|item| item.sort_key())",
+            ".map(|item| item.render_label())",
+            "pub fn sort_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecSortUnstableByKeyItem",
+            "dead_vec_sort_unstable_by_key",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn compare(&self",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-vec-sort-unstable-by-key",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_binary_search_by_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_binary_search_by_prune",
+        root_fn: "selected_slice_binary_search_by_report",
+        api_pkg: "slice_binary_search_by_api",
+        model_pkg: "slice_binary_search_by_model",
+        api_fn: "selected_slice_binary_search_by_report",
+        model_fn: "selected_slice_binary_search_by",
+        model_required: &[
+            "SliceBinarySearchByItem",
+            "Vec<SliceBinarySearchByItem>",
+            ".binary_search_by(|item| item.compare_key(raw))",
+            ".map(|item| item.render_label())",
+            "pub fn sort_key",
+            "pub fn compare_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceBinarySearchByItem",
+            "dead_slice_binary_search_by",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn compare(&self",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-slice-binary-search-by",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_binary_search_by_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_binary_search_by_key_prune",
+        root_fn: "selected_slice_binary_search_by_key_report",
+        api_pkg: "slice_binary_search_by_key_api",
+        model_pkg: "slice_binary_search_by_key_model",
+        api_fn: "selected_slice_binary_search_by_key_report",
+        model_fn: "selected_slice_binary_search_by_key",
+        model_required: &[
+            "SliceBinarySearchByKeyItem",
+            "Vec<SliceBinarySearchByKeyItem>",
+            ".binary_search_by_key(&needle, |item| item.sort_key())",
+            ".map(|item| item.render_label())",
+            "pub fn sort_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceBinarySearchByKeyItem",
+            "dead_slice_binary_search_by_key",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn compare(&self",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-slice-binary-search-by-key",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_partition_point_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_partition_point_prune",
+        root_fn: "selected_slice_partition_point_report",
+        api_pkg: "slice_partition_point_api",
+        model_pkg: "slice_partition_point_model",
+        api_fn: "selected_slice_partition_point_report",
+        model_fn: "selected_slice_partition_point",
+        model_required: &[
+            "SlicePartitionPointItem",
+            "Vec<SlicePartitionPointItem>",
+            ".partition_point(|item| item.sort_key() <= raw.len())",
+            ".map(|item| item.render_label())",
+            "pub fn sort_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSlicePartitionPointItem",
+            "dead_slice_partition_point",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn compare(&self",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-slice-partition-point",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_sort_unstable_by_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_sort_unstable_by_prune",
+        root_fn: "selected_slice_sort_unstable_by_report",
+        api_pkg: "slice_sort_unstable_by_api",
+        model_pkg: "slice_sort_unstable_by_model",
+        api_fn: "selected_slice_sort_unstable_by_report",
+        model_fn: "selected_slice_sort_unstable_by",
+        model_required: &[
+            "SliceSortUnstableByItem",
+            "Vec<SliceSortUnstableByItem>",
+            ".sort_unstable_by(|left, right| left.compare(right))",
+            ".map(|item| item.render_label())",
+            "pub fn compare",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSortUnstableByItem",
+            "dead_slice_sort_unstable_by",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn sort_key",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-slice-sort-unstable-by",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_select_nth_unstable_by_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_select_nth_unstable_by_prune",
+        root_fn: "selected_slice_select_nth_unstable_by_report",
+        api_pkg: "slice_select_nth_unstable_by_api",
+        model_pkg: "slice_select_nth_unstable_by_model",
+        api_fn: "selected_slice_select_nth_unstable_by_report",
+        model_fn: "selected_slice_select_nth_unstable_by",
+        model_required: &[
+            "SliceSelectNthUnstableByItem",
+            "Vec<SliceSelectNthUnstableByItem>",
+            ".select_nth_unstable_by(1, |left, right| left.compare(right))",
+            ".map(|item| item.render_label())",
+            "pub fn compare",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSelectNthUnstableByItem",
+            "dead_slice_select_nth_unstable_by",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn sort_key",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-slice-select-nth-unstable-by",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_select_nth_unstable_by_key_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_select_nth_unstable_by_key_prune",
+        root_fn: "selected_slice_select_nth_unstable_by_key_report",
+        api_pkg: "slice_select_nth_unstable_by_key_api",
+        model_pkg: "slice_select_nth_unstable_by_key_model",
+        api_fn: "selected_slice_select_nth_unstable_by_key_report",
+        model_fn: "selected_slice_select_nth_unstable_by_key",
+        model_required: &[
+            "SliceSelectNthUnstableByKeyItem",
+            "Vec<SliceSelectNthUnstableByKeyItem>",
+            ".select_nth_unstable_by_key(1, |item| item.sort_key())",
+            ".map(|item| item.render_label())",
+            "pub fn sort_key",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSelectNthUnstableByKeyItem",
+            "dead_slice_select_nth_unstable_by_key",
+            "pub fn bump",
+            "pub fn is_live",
+            "pub fn compare(&self",
+            "pub fn compare_key",
+            "pub fn unused_helper",
+            "dead_method",
+            "dead-slice-select-nth-unstable-by-key",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

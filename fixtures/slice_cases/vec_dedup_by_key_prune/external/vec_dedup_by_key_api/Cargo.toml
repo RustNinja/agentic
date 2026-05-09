@@ -1,0 +1,7 @@
+[package]
+name = "vec_dedup_by_key_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_dedup_by_key_model = { path = "../vec_dedup_by_key_model" }

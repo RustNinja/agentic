@@ -1,0 +1,7 @@
+[package]
+name = "vec_retain_mut_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_retain_mut_model = { path = "../vec_retain_mut_model" }

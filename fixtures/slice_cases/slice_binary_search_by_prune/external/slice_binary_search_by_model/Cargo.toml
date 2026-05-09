@@ -1,0 +1,4 @@
+[package]
+name = "slice_binary_search_by_model"
+version = "0.1.0"
+edition = "2021"

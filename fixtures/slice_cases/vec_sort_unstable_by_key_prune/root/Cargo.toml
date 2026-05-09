@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+vec_sort_unstable_by_key_api = { path = "../external/vec_sort_unstable_by_key_api" }
