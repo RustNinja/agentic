@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+vec_box_iter_as_ref_api = { path = "../external/vec_box_iter_as_ref_api" }

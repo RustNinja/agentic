@@ -1,0 +1,7 @@
+[package]
+name = "box_as_ref_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+box_as_ref_model = { path = "../box_as_ref_model" }

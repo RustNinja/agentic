@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+rc_as_ref_api = { path = "../external/rc_as_ref_api" }

@@ -10787,6 +10787,242 @@ fn prunes_collect_annotated_option_vec_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_option_as_deref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_as_deref_map_prune",
+        root_fn: "selected_option_as_deref_map_report",
+        api_pkg: "option_as_deref_api",
+        model_pkg: "option_as_deref_model",
+        api_fn: "selected_option_as_deref_map_report",
+        model_fn: "selected_option_as_deref_map",
+        model_required: &[".as_deref()", "pub fn render_label"],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionAsDerefMapItem",
+            "dead_option_as_deref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-option-as-deref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_as_deref_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_as_deref_mut_map_prune",
+        root_fn: "selected_option_as_deref_mut_map_report",
+        api_pkg: "option_as_deref_mut_api",
+        model_pkg: "option_as_deref_mut_model",
+        api_fn: "selected_option_as_deref_mut_map_report",
+        model_fn: "selected_option_as_deref_mut_map",
+        model_required: &[".as_deref_mut()", "pub fn bump_and_render"],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionAsDerefMutMapItem",
+            "dead_option_as_deref_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-option-as-deref-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_as_ref_map_prune",
+        root_fn: "selected_result_as_ref_map_report",
+        api_pkg: "result_as_ref_api",
+        model_pkg: "result_as_ref_model",
+        api_fn: "selected_result_as_ref_map_report",
+        model_fn: "selected_result_as_ref_map",
+        model_required: &[".as_ref()", "pub fn render_label", "pub fn render_error"],
+        model_absent: &[
+            "mod dead",
+            "DeadResultAsRefMapItem",
+            "dead_result_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_error_method",
+            "dead-result-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_as_deref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_as_deref_map_prune",
+        root_fn: "selected_result_as_deref_map_report",
+        api_pkg: "result_as_deref_api",
+        model_pkg: "result_as_deref_model",
+        api_fn: "selected_result_as_deref_map_report",
+        model_fn: "selected_result_as_deref_map",
+        model_required: &[".as_deref()", "pub fn render_label", "pub fn render_error"],
+        model_absent: &[
+            "mod dead",
+            "DeadResultAsDerefMapItem",
+            "dead_result_as_deref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead_error_method",
+            "dead-result-as-deref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_result_as_deref_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "result_as_deref_mut_map_prune",
+        root_fn: "selected_result_as_deref_mut_map_report",
+        api_pkg: "result_as_deref_mut_api",
+        model_pkg: "result_as_deref_mut_model",
+        api_fn: "selected_result_as_deref_mut_map_report",
+        model_fn: "selected_result_as_deref_mut_map",
+        model_required: &[
+            ".as_deref_mut()",
+            "pub fn bump_and_render",
+            "pub fn render_error",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadResultAsDerefMutMapItem",
+            "dead_result_as_deref_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead_error_method",
+            "dead-result-as-deref-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_box_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "box_as_ref_map_prune",
+        root_fn: "selected_box_as_ref_map_report",
+        api_pkg: "box_as_ref_api",
+        model_pkg: "box_as_ref_model",
+        api_fn: "selected_box_as_ref_map_report",
+        model_fn: "selected_box_as_ref_map",
+        model_required: &[
+            "Box::new",
+            ".as_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadBoxAsRefMapItem",
+            "dead_box_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-box-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_arc_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "arc_as_ref_map_prune",
+        root_fn: "selected_arc_as_ref_map_report",
+        api_pkg: "arc_as_ref_api",
+        model_pkg: "arc_as_ref_model",
+        api_fn: "selected_arc_as_ref_map_report",
+        model_fn: "selected_arc_as_ref_map",
+        model_required: &[
+            "use std::sync::Arc;",
+            "Arc::new",
+            ".as_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadArcAsRefMapItem",
+            "dead_arc_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-arc-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_rc_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "rc_as_ref_map_prune",
+        root_fn: "selected_rc_as_ref_map_report",
+        api_pkg: "rc_as_ref_api",
+        model_pkg: "rc_as_ref_model",
+        api_fn: "selected_rc_as_ref_map_report",
+        model_fn: "selected_rc_as_ref_map",
+        model_required: &[
+            "use std::rc::Rc;",
+            "Rc::new",
+            ".as_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadRcAsRefMapItem",
+            "dead_rc_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-rc-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vec_box_iter_as_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vec_box_iter_as_ref_map_prune",
+        root_fn: "selected_vec_box_iter_as_ref_map_report",
+        api_pkg: "vec_box_iter_as_ref_api",
+        model_pkg: "vec_box_iter_as_ref_model",
+        api_fn: "selected_vec_box_iter_as_ref_map_report",
+        model_fn: "selected_vec_box_iter_as_ref_map",
+        model_required: &[
+            "Vec<Box<VecBoxIterAsRefMapPayload>>",
+            ".iter()",
+            ".as_ref().render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecBoxIterAsRefMapItem",
+            "dead_vec_box_iter_as_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-vec-box-iter-as-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_copied_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_copied_map_prune",
+        root_fn: "selected_option_copied_map_report",
+        api_pkg: "option_copied_api",
+        model_pkg: "option_copied_model",
+        api_fn: "selected_option_copied_map_report",
+        model_fn: "selected_option_copied_map",
+        model_required: &[".copied()", "pub fn render_label"],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionCopiedMapItem",
+            "dead_option_copied_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-option-copied-map",
+        ],
+    });
+}
+
 struct SupportSliceFixture<'a> {
     fixture_name: &'a str,
     root_fn: &'a str,

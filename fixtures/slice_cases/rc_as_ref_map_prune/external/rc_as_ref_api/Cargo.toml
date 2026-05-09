@@ -1,0 +1,7 @@
+[package]
+name = "rc_as_ref_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+rc_as_ref_model = { path = "../rc_as_ref_model" }
