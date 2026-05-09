@@ -1,0 +1,7 @@
+[package]
+name = "linkedlist_front_mut_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+linkedlist_front_mut_map_model = { path = "../linkedlist_front_mut_map_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "vecdeque_get_mut_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vecdeque_get_mut_map_model = { path = "../vecdeque_get_mut_map_model" }

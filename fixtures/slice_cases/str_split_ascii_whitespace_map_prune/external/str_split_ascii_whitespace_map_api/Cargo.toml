@@ -1,0 +1,7 @@
+[package]
+name = "str_split_ascii_whitespace_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+str_split_ascii_whitespace_map_model = { path = "../str_split_ascii_whitespace_map_model" }

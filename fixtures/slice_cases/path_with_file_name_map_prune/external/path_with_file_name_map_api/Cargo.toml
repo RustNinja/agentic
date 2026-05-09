@@ -1,0 +1,7 @@
+[package]
+name = "path_with_file_name_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+path_with_file_name_map_model = { path = "../path_with_file_name_map_model" }
