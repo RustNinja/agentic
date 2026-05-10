@@ -74,6 +74,10 @@ raises errors when generated public facades resolve through local or support
 package reexport chains to symbols classified as `prunable` or missing from the
 used/unknown decision map, so stale public aliases cannot hide outside the
 source-item audit.
+The fixture hard audit resolves generated package roots from every rendered
+`Cargo.toml`, including nested `support/<package>` copies, before scanning Rust
+source. This keeps copied support packages under the same used/unknown and
+public-reexport checks as root workspace packages.
 
 These are tracked limitations, not silently claimed support:
 

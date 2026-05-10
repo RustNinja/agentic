@@ -2069,8 +2069,7 @@ fn collect_generated_public_reexports(
     packages: &BTreeSet<String>,
 ) -> GeneratedPublicReexportSymbols {
     let mut symbols = GeneratedPublicReexportSymbols::default();
-    for package in packages {
-        let source_root = output_root.join(package).join("src");
+    for (package, source_root) in generated_package_source_roots(output_root, packages) {
         if !source_root.exists() {
             continue;
         }
@@ -2086,7 +2085,7 @@ fn collect_generated_public_reexports(
                 continue;
             };
             collect_generated_public_reexport_items(
-                package,
+                &package,
                 &module_path,
                 &syntax.items,
                 &mut symbols,
@@ -2094,6 +2093,66 @@ fn collect_generated_public_reexports(
         }
     }
     symbols
+}
+
+fn generated_package_source_roots(
+    output_root: &Path,
+    packages: &BTreeSet<String>,
+) -> BTreeMap<String, PathBuf> {
+    let mut manifests = Vec::new();
+    collect_generated_package_manifests(output_root, &mut manifests);
+    let mut roots = BTreeMap::new();
+    for manifest in manifests {
+        let Ok(source) = fs::read_to_string(&manifest) else {
+            continue;
+        };
+        let Ok(value) = source.parse::<toml::Value>() else {
+            continue;
+        };
+        let Some(name) = value
+            .get("package")
+            .and_then(|package| package.get("name"))
+            .and_then(toml::Value::as_str)
+        else {
+            continue;
+        };
+        if !packages.contains(name) {
+            continue;
+        }
+        let Some(package_root) = manifest.parent() else {
+            continue;
+        };
+        roots
+            .entry(name.to_string())
+            .or_insert_with(|| package_root.join("src"));
+    }
+    for package in packages {
+        roots
+            .entry(package.clone())
+            .or_insert_with(|| output_root.join(package).join("src"));
+    }
+    roots
+}
+
+fn collect_generated_package_manifests(root: &Path, manifests: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| matches!(name, ".git" | ".hg" | ".svn" | "target"))
+        {
+            continue;
+        }
+        if path.is_dir() {
+            collect_generated_package_manifests(&path, manifests);
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml") {
+            manifests.push(path);
+        }
+    }
 }
 
 fn collect_generated_public_reexport_items(
@@ -8309,15 +8368,16 @@ mod tests {
     use super::non_benign_unresolved_count;
     use super::{
         add_public_reexport_proof_hazards, add_semantic_inventory_hazard, default_feature_closure,
-        generate, generate_with_analyzer_feedback, production_hazard_with_details,
-        production_readiness_status, semantic_hazard_metrics, semantic_unresolved_details,
-        unknown_surface_category, usage_classification_report, usage_evidence_reason,
-        usage_guarded_render_reduction, write_generate_report, AnalyzerMode, AnalyzerReport,
-        CallableId, CheckDiagnostic, GenerateOptions, ItemId, ProductionHazardDetail,
-        PublicReexportProofEntry, PublicReexportProofReport, PublicReexportProofSummary,
-        SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
-        SemanticReport, SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic,
-        SemanticUnresolvedKind, SemanticUsageReport, UsageDecision,
+        generate, generate_with_analyzer_feedback, generated_package_source_roots,
+        production_hazard_with_details, production_readiness_status, public_reexport_proof_report,
+        semantic_hazard_metrics, semantic_unresolved_details, unknown_surface_category,
+        usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
+        write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
+        GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
+        PublicReexportProofReport, PublicReexportProofSummary, SemanticFileReport,
+        SemanticHazardScope, SemanticOwnerId, SemanticReductionHints, SemanticReport,
+        SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic, SemanticUnresolvedKind,
+        SemanticUsageReport, UsageDecision, UsageDecisionIndex,
     };
     use super::{manifest, parse, reduce, render};
 
@@ -9956,6 +10016,117 @@ theme = []
             .iter()
             .any(|hazard| hazard.code == "public_reexport_proof_incomplete"
                 && hazard.severity == "warning"));
+    }
+
+    #[test]
+    fn generated_package_source_roots_include_nested_support_packages() {
+        let output = temp_output("generated-package-source-roots");
+        write(
+            output.join("Cargo.toml"),
+            r#"[workspace]
+members = ["root", "support/external-helper"]
+"#,
+        );
+        write(
+            output.join("root/Cargo.toml"),
+            r#"[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(output.join("root/src/lib.rs"), "pub fn live() {}\n");
+        write(
+            output.join("support/external-helper/Cargo.toml"),
+            r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("support/external-helper/src/lib.rs"),
+            "pub fn helper() {}\n",
+        );
+        let packages = BTreeSet::from(["external-helper".to_string(), "root".to_string()]);
+
+        let roots = generated_package_source_roots(&output, &packages);
+
+        assert_eq!(roots.get("root"), Some(&output.join("root/src")));
+        assert_eq!(
+            roots.get("external-helper"),
+            Some(&output.join("support/external-helper/src"))
+        );
+    }
+
+    #[test]
+    fn public_reexport_proof_scans_nested_support_package_sources() {
+        let output = temp_output("support-public-reexport-proof");
+        write(
+            output.join("Cargo.toml"),
+            r#"[workspace]
+members = ["support/external_helper"]
+"#,
+        );
+        write(
+            output.join("support/external_helper/Cargo.toml"),
+            r#"[package]
+name = "external_helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("support/external_helper/src/lib.rs"),
+            r#"mod live;
+mod dead;
+
+pub use live::Retained;
+pub use dead::Dead;
+"#,
+        );
+        write(
+            output.join("support/external_helper/src/live.rs"),
+            "pub struct Retained;\n",
+        );
+        write(
+            output.join("support/external_helper/src/dead.rs"),
+            "pub struct Dead;\n",
+        );
+        let retained = ItemId {
+            package: "external_helper".to_string(),
+            module_path: vec!["live".to_string()],
+            name: "Retained".to_string(),
+            kind: ItemKind::Struct,
+        };
+        let prunable = ItemId {
+            package: "external_helper".to_string(),
+            module_path: vec!["dead".to_string()],
+            name: "Dead".to_string(),
+            kind: ItemKind::Struct,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["external_helper".to_string()]),
+            used_items: BTreeSet::from([retained]),
+            prunable_items: BTreeSet::from([prunable]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = public_reexport_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "failed", "{proof:#?}");
+        assert_eq!(proof.summary.public_reexports, 2, "{proof:#?}");
+        assert_eq!(proof.summary.retained_targets, 1, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_targets, 1, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.package == "external_helper"
+                && entry.visible == "Dead"
+                && entry.classification == "prunable"
+                && entry
+                    .resolved_targets
+                    .iter()
+                    .any(|target| target == "external_helper::dead::Dead")
+        }));
     }
 
     #[test]

@@ -22250,23 +22250,28 @@ fn assert_cargo_check(
         String::from_utf8_lossy(&output.stderr),
         root_source,
     );
-    assert_package_inventory_contract(workspace, report);
-    assert_usage_contract(workspace, report);
+    let package_roots = assert_package_inventory_contract(workspace, report);
+    assert_usage_contract(&package_roots, report);
 }
 
-fn assert_package_inventory_contract(workspace: &Path, report: &GenerateReport) {
+fn assert_package_inventory_contract(
+    workspace: &Path,
+    report: &GenerateReport,
+) -> BTreeMap<String, PathBuf> {
     let expected = report.packages.iter().cloned().collect::<BTreeSet<_>>();
-    let actual = collect_rendered_package_names(workspace);
+    let package_roots = collect_rendered_package_roots(workspace);
+    let actual = package_roots.keys().cloned().collect::<BTreeSet<_>>();
     assert_eq!(
         actual, expected,
         "generated workspace package manifests must match reported retained packages"
     );
+    package_roots
 }
 
-fn collect_rendered_package_names(workspace: &Path) -> BTreeSet<String> {
+fn collect_rendered_package_roots(workspace: &Path) -> BTreeMap<String, PathBuf> {
     let mut manifests = Vec::new();
     collect_cargo_manifests(workspace, &mut manifests);
-    let mut packages = BTreeSet::new();
+    let mut packages = BTreeMap::new();
     for manifest in manifests {
         let source = read(&manifest);
         let value = source.parse::<toml::Value>().unwrap_or_else(|err| {
@@ -22281,8 +22286,12 @@ fn collect_rendered_package_names(workspace: &Path) -> BTreeSet<String> {
         let Some(name) = package.get("name").and_then(toml::Value::as_str) else {
             continue;
         };
+        let package_root = manifest
+            .parent()
+            .expect("generated manifest should have a parent")
+            .to_path_buf();
         assert!(
-            packages.insert(name.to_string()),
+            packages.insert(name.to_string(), package_root).is_none(),
             "generated workspace should not contain duplicate package name {name:?}; duplicate at {}",
             manifest.display()
         );
@@ -22477,7 +22486,7 @@ fn assert_production_hazard(report: &GenerateReport, code: &str, severity: &str)
     );
 }
 
-fn assert_usage_contract(workspace: &Path, report: &GenerateReport) {
+fn assert_usage_contract(package_roots: &BTreeMap<String, PathBuf>, report: &GenerateReport) {
     let reachable_callables = report
         .reachable
         .iter()
@@ -22585,7 +22594,7 @@ fn assert_usage_contract(workspace: &Path, report: &GenerateReport) {
         "public usage.unused must contain only the removable prunable items"
     );
 
-    let rendered = collect_rendered_symbols(workspace, &report.packages);
+    let rendered = collect_rendered_symbols(package_roots, &report.packages);
     let unclassified_rendered_callables = rendered
         .callables
         .difference(&retained_callables)
@@ -22673,10 +22682,16 @@ struct RaHardFixture {
     hazards: &'static [(&'static str, &'static str)],
 }
 
-fn collect_rendered_symbols(workspace: &Path, packages: &[String]) -> RenderedSymbols {
+fn collect_rendered_symbols(
+    package_roots: &BTreeMap<String, PathBuf>,
+    packages: &[String],
+) -> RenderedSymbols {
     let mut symbols = RenderedSymbols::default();
     for package in packages {
-        let source_root = workspace.join(package).join("src");
+        let source_root = package_roots
+            .get(package)
+            .unwrap_or_else(|| panic!("reported package {package:?} should have a manifest"))
+            .join("src");
         if !source_root.exists() {
             continue;
         }

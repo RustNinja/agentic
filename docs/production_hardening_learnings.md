@@ -1316,3 +1316,11 @@ public facade points at a prunable or unclassified local target. The
 `returned_object_prune` fixture asserts this through a real support-package
 facade from `returned_api` into `returned_model`, so the contract is no longer
 test-only infrastructure.
+
+The next hard-audit tightening closed a support-package blind spot. The fixture
+validator and production public-reexport proof now resolve package source roots
+from generated `Cargo.toml` manifests instead of assuming every retained
+package lives at `<output>/<package>/src`. Nested copied packages such as
+`support/external_helper` are now scanned for rendered symbols and public
+facades, so copied sub-dependencies must satisfy the same used/unknown contract
+as normal workspace packages.
