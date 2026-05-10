@@ -68,12 +68,16 @@ dead functions, items, modules, tests, and local crates are absent.
 
 ## Current Boundaries
 
-The generation report now exposes the same public-reexport proof that the
-fixture harness uses through `usage.public_reexports`. Production readiness
-raises errors when generated public facades resolve through local or support
-package reexport chains to symbols classified as `prunable` or missing from the
-used/unknown decision map, so stale public aliases cannot hide outside the
-source-item audit.
+The generation report now exposes the same rendered-source proofs that the
+fixture harness uses through `usage.rendered_symbols` and
+`usage.public_reexports`. Production readiness raises errors when generated
+source still declares callables/items classified as `prunable`, when rendered
+callables/items are missing from the used/unknown decision map, or when generated
+public facades resolve through local or support package reexport chains to
+symbols classified as `prunable` or unclassified. Exported proc-macro entry
+points are treated as scoped `blocked_by_unknown` symbols instead of ordinary
+dead code, so retained macro packages remain fail-closed without globally
+blocking unrelated pruning.
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust
 source. This keeps copied support packages under the same used/unknown and

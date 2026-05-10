@@ -168,6 +168,7 @@ pub struct UsageClassificationReport {
     pub status: String,
     pub summary: UsageClassificationSummary,
     pub semantic_proof: SemanticUsageProofReport,
+    pub rendered_symbols: RenderedSymbolProofReport,
     pub public_reexports: PublicReexportProofReport,
     pub used: UsageClassifiedItems,
     pub unused_candidate: UsageClassifiedItems,
@@ -234,6 +235,45 @@ pub struct PublicReexportProofEntry {
     pub visible: String,
     pub target: String,
     pub resolved_targets: Vec<String>,
+    pub classification: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderedSymbolProofReport {
+    pub status: String,
+    pub summary: RenderedSymbolProofSummary,
+    pub entries: Vec<RenderedSymbolProofEntry>,
+}
+
+impl Default for RenderedSymbolProofReport {
+    fn default() -> Self {
+        Self {
+            status: "not_checked".to_string(),
+            summary: RenderedSymbolProofSummary::default(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RenderedSymbolProofSummary {
+    pub rendered_callables: usize,
+    pub rendered_items: usize,
+    pub retained_callables: usize,
+    pub retained_items: usize,
+    pub macro_blocked_callables: usize,
+    pub surface_blocked_callables: usize,
+    pub prunable_callables: usize,
+    pub prunable_items: usize,
+    pub unclassified_callables: usize,
+    pub unclassified_items: usize,
+    pub source_parse_failures: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct RenderedSymbolProofEntry {
+    pub kind: String,
+    pub id: String,
     pub classification: String,
 }
 
@@ -807,6 +847,8 @@ fn generate_loaded(
     let source_map = source_map_report(project, &render_reduced);
     let macro_surfaces = macro_surface_report(project, &render_reduced);
     let semantic_proof = semantic_usage_proof_report(&analyzer, &usage_decisions);
+    let rendered_symbol_proof =
+        rendered_symbol_proof_report(&options.output_root, &usage_decisions);
     let public_reexport_proof =
         public_reexport_proof_report(&options.output_root, &usage_decisions);
     let production = production_readiness_report(
@@ -815,6 +857,7 @@ fn generate_loaded(
         &render_reduced,
         &options.output_root,
         Some(&semantic_proof),
+        Some(&rendered_symbol_proof),
         Some(&public_reexport_proof),
     );
     let usage = usage_classification_report(
@@ -823,6 +866,7 @@ fn generate_loaded(
         &analyzer,
         &usage_decisions,
         &production,
+        rendered_symbol_proof,
         public_reexport_proof,
     );
 
@@ -1807,6 +1851,7 @@ fn usage_classification_report(
     analyzer: &AnalyzerReport,
     decisions: &UsageDecisionIndex,
     production: &ProductionReadinessReport,
+    rendered_symbols: RenderedSymbolProofReport,
     public_reexports: PublicReexportProofReport,
 ) -> UsageClassificationReport {
     let mut used_callables = decisions.used_callables();
@@ -1904,6 +1949,7 @@ fn usage_classification_report(
             dependency_risk_unknown_surfaces,
         },
         semantic_proof,
+        rendered_symbols,
         public_reexports,
         used: UsageClassifiedItems {
             callables: used_callables,
@@ -1928,6 +1974,626 @@ fn usage_classification_report(
         unknown,
         evidence,
     }
+}
+
+#[derive(Default)]
+struct GeneratedRenderedSymbols {
+    callables: BTreeSet<String>,
+    items: BTreeSet<String>,
+    macro_blocked_callables: BTreeSet<String>,
+    surface_blocked_callables: BTreeSet<String>,
+    trait_required_methods: BTreeMap<String, BTreeSet<String>>,
+    source_parse_failures: usize,
+}
+
+fn rendered_symbol_proof_report(
+    output_root: &Path,
+    decisions: &UsageDecisionIndex,
+) -> RenderedSymbolProofReport {
+    let rendered = collect_generated_rendered_symbols(output_root, &decisions.retained_packages);
+    let retained_callables = decisions
+        .used_callables
+        .union(&decisions.blocked_by_unknown_callables)
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let retained_items = decisions
+        .used_items
+        .union(&decisions.blocked_by_unknown_items)
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let prunable_callables = decisions
+        .prunable_callables
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let prunable_items = decisions
+        .prunable_items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let mut summary = RenderedSymbolProofSummary {
+        rendered_callables: rendered.callables.len(),
+        rendered_items: rendered.items.len(),
+        source_parse_failures: rendered.source_parse_failures,
+        ..RenderedSymbolProofSummary::default()
+    };
+    let mut entries = Vec::new();
+
+    for callable in &rendered.callables {
+        let classification = if retained_callables.contains(callable) {
+            summary.retained_callables += 1;
+            "retained"
+        } else if rendered.macro_blocked_callables.contains(callable) {
+            summary.macro_blocked_callables += 1;
+            "blocked_by_unknown"
+        } else if rendered.surface_blocked_callables.contains(callable) {
+            summary.surface_blocked_callables += 1;
+            "blocked_by_unknown"
+        } else if prunable_callables.contains(callable) {
+            summary.prunable_callables += 1;
+            "prunable"
+        } else {
+            summary.unclassified_callables += 1;
+            "unclassified"
+        };
+        entries.push(RenderedSymbolProofEntry {
+            kind: "callable".to_string(),
+            id: callable.clone(),
+            classification: classification.to_string(),
+        });
+    }
+
+    for item in &rendered.items {
+        let classification = if retained_items.contains(item) {
+            summary.retained_items += 1;
+            "retained"
+        } else if prunable_items.contains(item) {
+            summary.prunable_items += 1;
+            "prunable"
+        } else {
+            summary.unclassified_items += 1;
+            "unclassified"
+        };
+        entries.push(RenderedSymbolProofEntry {
+            kind: "item".to_string(),
+            id: item.clone(),
+            classification: classification.to_string(),
+        });
+    }
+
+    let status = if summary.source_parse_failures > 0 {
+        "incomplete".to_string()
+    } else if summary.prunable_callables > 0
+        || summary.prunable_items > 0
+        || summary.unclassified_callables > 0
+        || summary.unclassified_items > 0
+    {
+        "failed".to_string()
+    } else {
+        "proven".to_string()
+    };
+
+    RenderedSymbolProofReport {
+        status,
+        summary,
+        entries,
+    }
+}
+
+fn collect_generated_rendered_symbols(
+    output_root: &Path,
+    packages: &BTreeSet<String>,
+) -> GeneratedRenderedSymbols {
+    let mut symbols = GeneratedRenderedSymbols::default();
+    for (package, source_root) in generated_package_source_roots(output_root, packages) {
+        if !source_root.exists() {
+            continue;
+        }
+        for file in generated_rust_files_under(&source_root) {
+            let module_path = generated_module_path_from_source_file(&source_root, &file);
+            let Ok(source) = fs::read_to_string(&file) else {
+                symbols.source_parse_failures += 1;
+                continue;
+            };
+            let Ok(syntax) = syn::parse_file(&source) else {
+                symbols.source_parse_failures += 1;
+                continue;
+            };
+            let aliases = generated_rendered_aliases_from_items(&syntax.items, None);
+            collect_generated_rendered_trait_requirements(
+                &package,
+                &module_path,
+                &syntax.items,
+                &aliases,
+                &mut symbols,
+            );
+            collect_generated_rendered_items(
+                &package,
+                &module_path,
+                &syntax.items,
+                &aliases,
+                &mut symbols,
+            );
+        }
+    }
+    symbols
+}
+
+fn collect_generated_rendered_items(
+    package: &str,
+    module_path: &[String],
+    items: &[syn::Item],
+    aliases: &BTreeMap<String, Vec<String>>,
+    symbols: &mut GeneratedRenderedSymbols,
+) {
+    for item in items {
+        match item {
+            syn::Item::Fn(function) => {
+                let callable = generated_rendered_symbol_path(
+                    package,
+                    module_path,
+                    &function.sig.ident.to_string(),
+                );
+                if generated_rendered_fn_is_proc_macro_export(function) {
+                    symbols.macro_blocked_callables.insert(callable.clone());
+                }
+                symbols.callables.insert(callable);
+            }
+            syn::Item::Struct(item) => {
+                symbols.items.insert(generated_rendered_item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Struct",
+                ));
+            }
+            syn::Item::Enum(item) => {
+                symbols.items.insert(generated_rendered_item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Enum",
+                ));
+            }
+            syn::Item::Union(item) => {
+                symbols.items.insert(generated_rendered_item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Union",
+                ));
+            }
+            syn::Item::Type(item) => {
+                symbols.items.insert(generated_rendered_item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Type",
+                ));
+            }
+            syn::Item::Trait(item) => {
+                symbols.items.insert(generated_rendered_item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Trait",
+                ));
+            }
+            syn::Item::Const(item) => {
+                symbols.items.insert(generated_rendered_item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Const",
+                ));
+            }
+            syn::Item::Static(item) => {
+                symbols.items.insert(generated_rendered_item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Static",
+                ));
+            }
+            syn::Item::Macro(item) => {
+                if let Some(ident) = &item.ident {
+                    symbols.items.insert(generated_rendered_item_symbol_path(
+                        package,
+                        module_path,
+                        &ident.to_string(),
+                        "Macro",
+                    ));
+                }
+            }
+            syn::Item::Mod(item) => {
+                if let Some((_, nested)) = &item.content {
+                    let mut nested_module_path = module_path.to_vec();
+                    nested_module_path.push(item.ident.to_string());
+                    let nested_aliases = generated_rendered_aliases_from_items(nested, None);
+                    collect_generated_rendered_items(
+                        package,
+                        &nested_module_path,
+                        nested,
+                        &nested_aliases,
+                        symbols,
+                    );
+                }
+            }
+            syn::Item::Impl(item) => {
+                if let Some(type_path) =
+                    generated_rendered_impl_type_path(module_path, &item.self_ty, aliases)
+                {
+                    let trait_path = item.trait_.as_ref().map(|(_, path, _)| {
+                        generated_rendered_normalized_path(module_path, path, aliases)
+                    });
+                    let required_trait_methods = trait_path.as_ref().and_then(|trait_path| {
+                        let trait_symbol = generated_rendered_segments_path(package, trait_path);
+                        symbols.trait_required_methods.get(&trait_symbol)
+                    });
+                    let trait_input_type_paths = item
+                        .trait_
+                        .as_ref()
+                        .map(|(_, path, _)| {
+                            generated_rendered_trait_input_type_paths(module_path, path, aliases)
+                        })
+                        .unwrap_or_default();
+                    for impl_item in &item.items {
+                        if let syn::ImplItem::Fn(method) = impl_item {
+                            let method_name = method.sig.ident.to_string();
+                            let callable = generated_rendered_method_symbol_path(
+                                package,
+                                &type_path,
+                                trait_path.as_deref(),
+                                &trait_input_type_paths,
+                                &method_name,
+                            );
+                            if required_trait_methods
+                                .is_some_and(|methods| methods.contains(&method_name))
+                            {
+                                symbols.surface_blocked_callables.insert(callable.clone());
+                            }
+                            symbols.callables.insert(callable);
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_generated_rendered_trait_requirements(
+    package: &str,
+    module_path: &[String],
+    items: &[syn::Item],
+    _aliases: &BTreeMap<String, Vec<String>>,
+    symbols: &mut GeneratedRenderedSymbols,
+) {
+    for item in items {
+        match item {
+            syn::Item::Trait(item) => {
+                let trait_symbol =
+                    generated_rendered_symbol_path(package, module_path, &item.ident.to_string());
+                let required_methods = item
+                    .items
+                    .iter()
+                    .filter_map(|trait_item| match trait_item {
+                        syn::TraitItem::Fn(method) if method.default.is_none() => {
+                            Some(method.sig.ident.to_string())
+                        }
+                        _ => None,
+                    })
+                    .collect::<BTreeSet<_>>();
+                if !required_methods.is_empty() {
+                    symbols
+                        .trait_required_methods
+                        .insert(trait_symbol, required_methods);
+                }
+            }
+            syn::Item::Mod(item) => {
+                if let Some((_, nested)) = &item.content {
+                    let mut nested_module_path = module_path.to_vec();
+                    nested_module_path.push(item.ident.to_string());
+                    let nested_aliases = generated_rendered_aliases_from_items(nested, None);
+                    collect_generated_rendered_trait_requirements(
+                        package,
+                        &nested_module_path,
+                        nested,
+                        &nested_aliases,
+                        symbols,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn generated_rendered_fn_is_proc_macro_export(function: &syn::ItemFn) -> bool {
+    function.attrs.iter().any(|attr| {
+        attr.path().is_ident("proc_macro")
+            || attr.path().is_ident("proc_macro_attribute")
+            || attr.path().is_ident("proc_macro_derive")
+    })
+}
+
+fn generated_rendered_aliases_from_items(
+    items: &[syn::Item],
+    parent: Option<&BTreeMap<String, Vec<String>>>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut aliases = parent.cloned().unwrap_or_default();
+    for item in items {
+        if let syn::Item::Use(item_use) = item {
+            collect_generated_rendered_use_tree(&item_use.tree, Vec::new(), &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn collect_generated_rendered_use_tree(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    aliases: &mut BTreeMap<String, Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_generated_rendered_use_tree(&path.tree, prefix, aliases);
+        }
+        UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            let mut target = prefix;
+            target.push(ident.clone());
+            aliases.insert(ident, target);
+        }
+        UseTree::Rename(rename) => {
+            let mut target = prefix;
+            target.push(rename.ident.to_string());
+            aliases.insert(rename.rename.to_string(), target);
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_generated_rendered_use_tree(nested, prefix.clone(), aliases);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn generated_rendered_impl_type_path(
+    module_path: &[String],
+    ty: &syn::Type,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    generated_rendered_normalized_type_path(module_path, ty, aliases)
+}
+
+fn generated_rendered_normalized_path(
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let segments = generated_rendered_apply_alias(
+        path.segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    generated_rendered_normalize_segments(module_path, segments).unwrap_or_default()
+}
+
+fn generated_rendered_normalized_type_path(
+    module_path: &[String],
+    ty: &syn::Type,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    let syn::Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segments = generated_rendered_apply_alias(
+        type_path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    generated_rendered_normalize_segments(module_path, segments)
+}
+
+fn generated_rendered_normalize_segments(
+    module_path: &[String],
+    segments: Vec<String>,
+) -> Option<Vec<String>> {
+    let Some(first) = segments.first() else {
+        return None;
+    };
+    if first == "crate" {
+        return Some(segments[1..].to_vec());
+    }
+    if first == "self" {
+        let mut path = module_path.to_vec();
+        path.extend_from_slice(&segments[1..]);
+        return Some(path);
+    }
+    if first == "super" {
+        let mut path = module_path.to_vec();
+        path.pop();
+        path.extend_from_slice(&segments[1..]);
+        return Some(path);
+    }
+
+    let mut path = module_path.to_vec();
+    path.extend(segments);
+    Some(path)
+}
+
+fn generated_rendered_apply_alias(
+    mut segments: Vec<String>,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let Some(first) = segments.first() else {
+        return segments;
+    };
+    let Some(target) = aliases.get(first) else {
+        return segments;
+    };
+    let mut resolved = target.clone();
+    resolved.extend(segments.drain(1..));
+    resolved
+}
+
+fn generated_rendered_trait_input_type_paths(
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Vec<Vec<String>> {
+    let mut type_paths = Vec::new();
+    for segment in &path.segments {
+        if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
+            for argument in &arguments.args {
+                if let syn::GenericArgument::Type(ty) = argument {
+                    collect_generated_rendered_type_paths(
+                        module_path,
+                        ty,
+                        aliases,
+                        &mut type_paths,
+                    );
+                }
+            }
+        }
+    }
+    type_paths.sort();
+    type_paths.dedup();
+    type_paths
+}
+
+fn collect_generated_rendered_type_paths(
+    module_path: &[String],
+    ty: &syn::Type,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_paths: &mut Vec<Vec<String>>,
+) {
+    match ty {
+        syn::Type::Path(type_path) => {
+            if let Some(path) = generated_rendered_normalized_type_path(module_path, ty, aliases) {
+                type_paths.push(path);
+            }
+            for segment in &type_path.path.segments {
+                if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let syn::GenericArgument::Type(ty) = argument {
+                            collect_generated_rendered_type_paths(
+                                module_path,
+                                ty,
+                                aliases,
+                                type_paths,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        syn::Type::Reference(reference) => {
+            collect_generated_rendered_type_paths(
+                module_path,
+                &reference.elem,
+                aliases,
+                type_paths,
+            );
+        }
+        _ => {}
+    }
+}
+
+fn generated_rendered_symbol_path(package: &str, module_path: &[String], name: &str) -> String {
+    let mut path = package.to_string();
+    for segment in module_path {
+        path.push_str("::");
+        path.push_str(segment);
+    }
+    path.push_str("::");
+    path.push_str(name);
+    path
+}
+
+fn generated_rendered_segments_path(package: &str, segments: &[String]) -> String {
+    let mut path = package.to_string();
+    for segment in segments {
+        path.push_str("::");
+        path.push_str(segment);
+    }
+    path
+}
+
+fn generated_rendered_method_symbol_path(
+    package: &str,
+    type_path: &[String],
+    trait_path: Option<&[String]>,
+    trait_input_type_paths: &[Vec<String>],
+    method: &str,
+) -> String {
+    if let Some(trait_path) = trait_path {
+        let mut path = format!("{package}::<");
+        push_generated_rendered_segments(&mut path, type_path);
+        path.push_str(" as ");
+        push_generated_rendered_segments(&mut path, trait_path);
+        if !trait_input_type_paths.is_empty() {
+            path.push('<');
+            for (index, input_path) in trait_input_type_paths.iter().enumerate() {
+                if index > 0 {
+                    path.push_str(", ");
+                }
+                push_generated_rendered_segments(&mut path, input_path);
+            }
+            path.push('>');
+        }
+        path.push_str(">::");
+        path.push_str(method);
+        path
+    } else {
+        generated_rendered_method_path(package, type_path, method)
+    }
+}
+
+fn push_generated_rendered_segments(output: &mut String, segments: &[String]) {
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            output.push_str("::");
+        }
+        output.push_str(segment);
+    }
+}
+
+fn generated_rendered_method_path(package: &str, type_path: &[String], method: &str) -> String {
+    let mut path = package.to_string();
+    for segment in type_path {
+        path.push_str("::");
+        path.push_str(segment);
+    }
+    path.push_str("::");
+    path.push_str(method);
+    path
+}
+
+fn generated_rendered_item_symbol_path(
+    package: &str,
+    module_path: &[String],
+    name: &str,
+    kind: &str,
+) -> String {
+    format!(
+        "{}({kind})",
+        generated_rendered_symbol_path(package, module_path, name)
+    )
 }
 
 #[derive(Clone, Debug)]
@@ -2515,6 +3181,60 @@ fn generated_use_is_public_api_reexport(visibility: &syn::Visibility) -> bool {
     matches!(visibility, syn::Visibility::Public(_))
 }
 
+fn add_rendered_symbol_proof_hazards(
+    proof: &RenderedSymbolProofReport,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    if proof.summary.prunable_callables > 0 || proof.summary.prunable_items > 0 {
+        hazards.push(production_hazard_with_details(
+            "rendered_prunable_symbols",
+            "error",
+            "generated source still declares callables or items classified as prunable",
+            rendered_symbol_proof_details(proof, "prunable"),
+        ));
+    }
+    if proof.summary.unclassified_callables > 0 || proof.summary.unclassified_items > 0 {
+        hazards.push(production_hazard_with_details(
+            "rendered_unclassified_symbols",
+            "error",
+            "generated source declares callables or items missing used/unknown classification",
+            rendered_symbol_proof_details(proof, "unclassified"),
+        ));
+    }
+    if proof.summary.source_parse_failures > 0 {
+        hazards.push(production_hazard(
+            "rendered_symbol_proof_incomplete",
+            "warning",
+            "generated source-symbol proof skipped source files that did not parse",
+        ));
+    }
+}
+
+fn rendered_symbol_proof_details(
+    proof: &RenderedSymbolProofReport,
+    classification: &str,
+) -> Vec<ProductionHazardDetail> {
+    proof
+        .entries
+        .iter()
+        .filter(|entry| entry.classification == classification)
+        .map(|entry| ProductionHazardDetail {
+            subject: format!("{}={}", entry.kind, entry.id),
+            package: rendered_symbol_package(&entry.id),
+            module_path: None,
+            file: None,
+            start_line: None,
+            cfg: None,
+            blocked_idents: vec![entry.id.clone()],
+            suggested_cargo_args: Vec::new(),
+        })
+        .collect()
+}
+
+fn rendered_symbol_package(id: &str) -> Option<String> {
+    id.split("::").next().map(str::to_string)
+}
+
 fn add_public_reexport_proof_hazards(
     proof: &PublicReexportProofReport,
     hazards: &mut Vec<ProductionHazardReport>,
@@ -2926,6 +3646,7 @@ fn production_readiness_report(
     reduced: &ReducedProject,
     output_root: &Path,
     semantic_proof: Option<&SemanticUsageProofReport>,
+    rendered_symbol_proof: Option<&RenderedSymbolProofReport>,
     public_reexport_proof: Option<&PublicReexportProofReport>,
 ) -> ProductionReadinessReport {
     production_readiness_report_inner(
@@ -2934,6 +3655,7 @@ fn production_readiness_report(
         reduced,
         Some(output_root),
         semantic_proof,
+        rendered_symbol_proof,
         public_reexport_proof,
     )
 }
@@ -2943,7 +3665,7 @@ fn pre_render_production_readiness_report(
     project: &Project,
     reduced: &ReducedProject,
 ) -> ProductionReadinessReport {
-    production_readiness_report_inner(analyzer, project, reduced, None, None, None)
+    production_readiness_report_inner(analyzer, project, reduced, None, None, None, None)
 }
 
 fn production_readiness_report_inner(
@@ -2952,6 +3674,7 @@ fn production_readiness_report_inner(
     reduced: &ReducedProject,
     output_root: Option<&Path>,
     semantic_proof: Option<&SemanticUsageProofReport>,
+    rendered_symbol_proof: Option<&RenderedSymbolProofReport>,
     public_reexport_proof: Option<&PublicReexportProofReport>,
 ) -> ProductionReadinessReport {
     let mut hazards = Vec::new();
@@ -2959,6 +3682,9 @@ fn production_readiness_report_inner(
     add_workspace_production_hazards(project, reduced, &mut hazards);
     if let Some(output_root) = output_root {
         add_generated_support_package_production_hazards(output_root, &mut hazards);
+    }
+    if let Some(rendered_symbol_proof) = rendered_symbol_proof {
+        add_rendered_symbol_proof_hazards(rendered_symbol_proof, &mut hazards);
     }
     if let Some(public_reexport_proof) = public_reexport_proof {
         add_public_reexport_proof_hazards(public_reexport_proof, &mut hazards);
@@ -7556,6 +8282,7 @@ struct UsageClassificationReportJson {
     status: String,
     summary: UsageClassificationSummaryJson,
     semantic_proof: SemanticUsageProofReportJson,
+    rendered_symbols: RenderedSymbolProofReportJson,
     public_reexports: PublicReexportProofReportJson,
     decision_map: UsageDecisionMapJson,
     used: UsageClassifiedItemsJson,
@@ -7573,6 +8300,7 @@ impl UsageClassificationReportJson {
             status: report.status.clone(),
             summary: UsageClassificationSummaryJson::from_report(&report.summary),
             semantic_proof: SemanticUsageProofReportJson::from_report(&report.semantic_proof),
+            rendered_symbols: RenderedSymbolProofReportJson::from_report(&report.rendered_symbols),
             public_reexports: PublicReexportProofReportJson::from_report(&report.public_reexports),
             decision_map: UsageDecisionMapJson::from_report(report),
             used: UsageClassifiedItemsJson::from_report(&report.used),
@@ -7586,6 +8314,77 @@ impl UsageClassificationReportJson {
                 .map(UsageUnknownSurfaceJson::from_report)
                 .collect(),
             evidence: UsageClassificationEvidenceJson::from_report(&report.evidence),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RenderedSymbolProofReportJson {
+    status: String,
+    summary: RenderedSymbolProofSummaryJson,
+    entries: Vec<RenderedSymbolProofEntryJson>,
+}
+
+impl RenderedSymbolProofReportJson {
+    fn from_report(report: &RenderedSymbolProofReport) -> Self {
+        Self {
+            status: report.status.clone(),
+            summary: RenderedSymbolProofSummaryJson::from_report(&report.summary),
+            entries: report
+                .entries
+                .iter()
+                .map(RenderedSymbolProofEntryJson::from_report)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RenderedSymbolProofSummaryJson {
+    rendered_callables: usize,
+    rendered_items: usize,
+    retained_callables: usize,
+    retained_items: usize,
+    macro_blocked_callables: usize,
+    surface_blocked_callables: usize,
+    prunable_callables: usize,
+    prunable_items: usize,
+    unclassified_callables: usize,
+    unclassified_items: usize,
+    source_parse_failures: usize,
+}
+
+impl RenderedSymbolProofSummaryJson {
+    fn from_report(summary: &RenderedSymbolProofSummary) -> Self {
+        Self {
+            rendered_callables: summary.rendered_callables,
+            rendered_items: summary.rendered_items,
+            retained_callables: summary.retained_callables,
+            retained_items: summary.retained_items,
+            macro_blocked_callables: summary.macro_blocked_callables,
+            surface_blocked_callables: summary.surface_blocked_callables,
+            prunable_callables: summary.prunable_callables,
+            prunable_items: summary.prunable_items,
+            unclassified_callables: summary.unclassified_callables,
+            unclassified_items: summary.unclassified_items,
+            source_parse_failures: summary.source_parse_failures,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RenderedSymbolProofEntryJson {
+    kind: String,
+    id: String,
+    classification: String,
+}
+
+impl RenderedSymbolProofEntryJson {
+    fn from_report(entry: &RenderedSymbolProofEntry) -> Self {
+        Self {
+            kind: entry.kind.clone(),
+            id: entry.id.clone(),
+            classification: entry.classification.clone(),
         }
     }
 }
@@ -8367,17 +9166,19 @@ mod tests {
     use super::model::ItemKind;
     use super::non_benign_unresolved_count;
     use super::{
-        add_public_reexport_proof_hazards, add_semantic_inventory_hazard, default_feature_closure,
-        generate, generate_with_analyzer_feedback, generated_package_source_roots,
+        add_public_reexport_proof_hazards, add_rendered_symbol_proof_hazards,
+        add_semantic_inventory_hazard, default_feature_closure, generate,
+        generate_with_analyzer_feedback, generated_package_source_roots,
         production_hazard_with_details, production_readiness_status, public_reexport_proof_report,
-        semantic_hazard_metrics, semantic_unresolved_details, unknown_surface_category,
-        usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
-        write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
-        GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
-        PublicReexportProofReport, PublicReexportProofSummary, SemanticFileReport,
-        SemanticHazardScope, SemanticOwnerId, SemanticReductionHints, SemanticReport,
-        SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic, SemanticUnresolvedKind,
-        SemanticUsageReport, UsageDecision, UsageDecisionIndex,
+        rendered_symbol_proof_report, semantic_hazard_metrics, semantic_unresolved_details,
+        unknown_surface_category, usage_classification_report, usage_evidence_reason,
+        usage_guarded_render_reduction, write_generate_report, AnalyzerMode, AnalyzerReport,
+        CallableId, CheckDiagnostic, GenerateOptions, ItemId, ProductionHazardDetail,
+        PublicReexportProofEntry, PublicReexportProofReport, PublicReexportProofSummary,
+        RenderedSymbolProofEntry, RenderedSymbolProofReport, RenderedSymbolProofSummary,
+        SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
+        SemanticReport, SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic,
+        SemanticUnresolvedKind, SemanticUsageReport, UsageDecision, UsageDecisionIndex,
     };
     use super::{manifest, parse, reduce, render};
 
@@ -8778,6 +9579,7 @@ fn private_leaf() -> i32 {
             &analyzer,
             &usage_decisions,
             &blocker,
+            RenderedSymbolProofReport::default(),
             PublicReexportProofReport::default(),
         );
 
@@ -9169,6 +9971,7 @@ pub fn mapped_dead_code() -> i32 {
             &analyzer,
             &usage_decisions,
             &production,
+            RenderedSymbolProofReport::default(),
             PublicReexportProofReport::default(),
         );
 
@@ -9304,6 +10107,7 @@ pub fn clean_dead_code() -> i32 {
             &analyzer,
             &usage_decisions,
             &production,
+            RenderedSymbolProofReport::default(),
             PublicReexportProofReport::default(),
         );
         assert!(!usage.blocked_by_unknown.callables.contains(&unknown_helper));
@@ -9540,6 +10344,7 @@ pub fn clean_dead_code() -> i32 {
             &analyzer,
             &usage_decisions,
             &production,
+            RenderedSymbolProofReport::default(),
             PublicReexportProofReport::default(),
         );
 
@@ -9668,6 +10473,7 @@ pub fn clean_dead_code() -> i32 {
             &analyzer,
             &usage_decisions,
             &production,
+            RenderedSymbolProofReport::default(),
             PublicReexportProofReport::default(),
         );
 
@@ -9845,6 +10651,23 @@ theme = []
             report.usage.semantic_proof.status
         );
         assert_eq!(
+            value["usage"]["rendered_symbols"]["status"],
+            report.usage.rendered_symbols.status
+        );
+        assert_eq!(
+            value["usage"]["rendered_symbols"]["summary"]["prunable_callables"],
+            report.usage.rendered_symbols.summary.prunable_callables
+        );
+        assert_eq!(
+            value["usage"]["rendered_symbols"]["summary"]["macro_blocked_callables"],
+            report
+                .usage
+                .rendered_symbols
+                .summary
+                .macro_blocked_callables
+        );
+        assert!(value["usage"]["rendered_symbols"]["entries"].is_array());
+        assert_eq!(
             value["usage"]["public_reexports"]["status"],
             report.usage.public_reexports.status
         );
@@ -9957,6 +10780,114 @@ theme = []
             .unwrap()
             .iter()
             .any(|detail| detail == "prunable=true"));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_hazards_block_prunable_and_unclassified_symbols() {
+        let report = RenderedSymbolProofReport {
+            status: "failed".to_string(),
+            summary: RenderedSymbolProofSummary {
+                prunable_callables: 1,
+                prunable_items: 1,
+                unclassified_callables: 1,
+                unclassified_items: 1,
+                source_parse_failures: 1,
+                ..RenderedSymbolProofSummary::default()
+            },
+            entries: vec![
+                RenderedSymbolProofEntry {
+                    kind: "callable".to_string(),
+                    id: "facade::dead_fn".to_string(),
+                    classification: "prunable".to_string(),
+                },
+                RenderedSymbolProofEntry {
+                    kind: "item".to_string(),
+                    id: "facade::DeadType(Struct)".to_string(),
+                    classification: "prunable".to_string(),
+                },
+                RenderedSymbolProofEntry {
+                    kind: "callable".to_string(),
+                    id: "facade::escaped_fn".to_string(),
+                    classification: "unclassified".to_string(),
+                },
+                RenderedSymbolProofEntry {
+                    kind: "item".to_string(),
+                    id: "facade::EscapedType(Struct)".to_string(),
+                    classification: "unclassified".to_string(),
+                },
+            ],
+        };
+        let mut hazards = Vec::new();
+
+        add_rendered_symbol_proof_hazards(&report, &mut hazards);
+
+        assert!(hazards.iter().any(|hazard| {
+            hazard.code == "rendered_prunable_symbols"
+                && hazard.severity == "error"
+                && hazard.details.iter().any(|detail| {
+                    detail.package.as_deref() == Some("facade")
+                        && detail
+                            .blocked_idents
+                            .iter()
+                            .any(|ident| ident == "facade::dead_fn")
+                })
+        }));
+        assert!(hazards.iter().any(|hazard| {
+            hazard.code == "rendered_unclassified_symbols"
+                && hazard.severity == "error"
+                && hazard.details.iter().any(|detail| {
+                    detail
+                        .blocked_idents
+                        .iter()
+                        .any(|ident| ident == "facade::EscapedType(Struct)")
+                })
+        }));
+        assert!(hazards
+            .iter()
+            .any(|hazard| hazard.code == "rendered_symbol_proof_incomplete"
+                && hazard.severity == "warning"));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_treats_proc_macro_exports_as_scoped_unknowns() {
+        let output = temp_output("rendered-symbol-proc-macro");
+        write(
+            output.join("support/proc_helpers/Cargo.toml"),
+            r#"[package]
+name = "proc_helpers"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+"#,
+        );
+        write(
+            output.join("support/proc_helpers/src/lib.rs"),
+            r#"use proc_macro::TokenStream;
+
+#[proc_macro_attribute]
+pub fn live_attr(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+"#,
+        );
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["proc_helpers".to_string()]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = rendered_symbol_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "proven", "{proof:#?}");
+        assert_eq!(proof.summary.rendered_callables, 1, "{proof:#?}");
+        assert_eq!(proof.summary.macro_blocked_callables, 1, "{proof:#?}");
+        assert_eq!(proof.summary.unclassified_callables, 0, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "callable"
+                && entry.id == "proc_helpers::live_attr"
+                && entry.classification == "blocked_by_unknown"
+        }));
     }
 
     #[test]

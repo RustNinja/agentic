@@ -1324,3 +1324,24 @@ package lives at `<output>/<package>/src`. Nested copied packages such as
 `support/external_helper` are now scanned for rendered symbols and public
 facades, so copied sub-dependencies must satisfy the same used/unknown contract
 as normal workspace packages.
+
+The rendered source-symbol audit is now a production report gate, not only a
+fixture assertion. `usage.rendered_symbols` records every generated callable and
+item in retained packages, compares it against the used/blocked/prunable
+decision index, and raises hard production hazards for rendered prunable or
+unclassified local symbols. Exported proc-macro functions annotated with
+`#[proc_macro]`, `#[proc_macro_attribute]`, or `#[proc_macro_derive]` are
+classified as scoped `blocked_by_unknown`, because their true call sites are
+macro expansion surfaces rather than normal Rust references. This keeps retained
+proc-macro packages conservative while still proving that ordinary support
+package functions and items do not leak as redundant code.
+
+The first rule-database run against that production gate exposed two proof
+normalization bugs. Inline child modules must not inherit parent `use` aliases
+when the rendered scanner reconstructs impl receiver paths, otherwise local
+types such as `jni::JNIEnv` can be reported as `jni::jni::JNIEnv`. Required
+trait impl methods are also rendered surface obligations: if the retained source
+still contains `impl Trait for Type`, the methods required by that trait are
+classified as scoped `blocked_by_unknown` in the rendered-symbol proof even when
+no selected root calls them directly. Optional/default trait methods still remain
+eligible for normal pruning proof.
