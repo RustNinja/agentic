@@ -1,0 +1,7 @@
+[package]
+name = "iterator_peekable_next_if_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_peekable_next_if_model = { path = "../iterator_peekable_next_if_model" }

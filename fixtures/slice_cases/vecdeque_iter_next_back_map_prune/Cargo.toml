@@ -1,0 +1,3 @@
+[workspace]
+members = ["root", "external/vecdeque_iter_next_back_map_api", "external/vecdeque_iter_next_back_map_model"]
+resolver = "2"

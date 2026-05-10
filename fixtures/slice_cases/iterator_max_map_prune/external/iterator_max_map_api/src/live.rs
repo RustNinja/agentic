@@ -1,0 +1,7 @@
+pub fn selected_iterator_max_map_report(raw: &str) -> String {
+    iterator_max_map_model::selected_iterator_max_map(raw)
+}
+
+pub fn dead_live_iterator_max_map_report(raw: &str) -> String {
+    format!("dead-live-iterator-max-map-report:{raw}")
+}

@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+iterator_peekable_peek_mut_api = { path = "../external/iterator_peekable_peek_mut_api" }

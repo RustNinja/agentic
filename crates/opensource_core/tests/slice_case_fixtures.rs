@@ -19056,6 +19056,295 @@ fn prunes_slice_chunks_mut_for_pattern_support_chain_with_default_analyzer() {
         &["pub fn unused_label"],
     );
 }
+#[test]
+fn prunes_iterator_rfold_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_rfold_prune",
+        "iterator_rfold",
+        &[
+            ".rfold(",
+            "|mut acc, payload|",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadIteratorRfoldItem",
+        "dead-iterator-rfold",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_try_rfold_result_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_try_rfold_result_prune",
+        "iterator_try_rfold_result",
+        &[
+            ".try_rfold(",
+            "|mut acc, payload|",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadIteratorTryRfoldResultItem",
+        "dead-iterator-try-rfold-result",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_rfind_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_rfind_prune",
+        "iterator_rfind",
+        &[
+            ".rfind(|payload| payload.is_match())",
+            "payload.render_label()",
+            "pub fn is_match",
+            "pub fn render_label",
+        ],
+        "DeadIteratorRfindItem",
+        "dead-iterator-rfind",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_position_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_position_prune",
+        "iterator_position",
+        &[".position(|payload| payload.is_match())", "pub fn is_match"],
+        "DeadIteratorPositionItem",
+        "dead-iterator-position",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_next_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_next_back_map_prune",
+        "iterator_next_back_map",
+        &[
+            ".next_back()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadIteratorNextBackMapItem",
+        "dead-iterator-next-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_nth_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_nth_back_map_prune",
+        "iterator_nth_back_map",
+        &[
+            ".nth_back(0)",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadIteratorNthBackMapItem",
+        "dead-iterator-nth-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_max_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_max_map_prune",
+        "iterator_max_map",
+        &[".max()", "payload.render_label()", "pub fn render_label"],
+        "DeadIteratorMaxMapItem",
+        "dead-iterator-max-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_min_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_min_map_prune",
+        "iterator_min_map",
+        &[".min()", "payload.render_label()", "pub fn render_label"],
+        "DeadIteratorMinMapItem",
+        "dead-iterator-min-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_peekable_next_if_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_peekable_next_if_prune",
+        "iterator_peekable_next_if",
+        &[
+            ".peekable()",
+            ".next_if(|payload| payload.is_match())",
+            "payload.render_label()",
+            "pub fn is_match",
+            "pub fn render_label",
+        ],
+        "DeadIteratorPeekableNextIfItem",
+        "dead-iterator-peekable-next-if",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iterator_peekable_peek_mut_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iterator_peekable_peek_mut_prune",
+        "iterator_peekable_peek_mut",
+        &[
+            ".iter_mut().peekable()",
+            ".peek_mut()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadIteratorPeekablePeekMutItem",
+        "dead-iterator-peekable-peek-mut",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_iter_next_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_iter_next_back_map_prune",
+        "vec_iter_next_back_map",
+        &[
+            ".next_back()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadVecIterNextBackMapItem",
+        "dead-vec-iter-next-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vecdeque_iter_next_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vecdeque_iter_next_back_map_prune",
+        "vecdeque_iter_next_back_map",
+        &[
+            "VecDeque::new()",
+            ".next_back()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadVecdequeIterNextBackMapItem",
+        "dead-vecdeque-iter-next-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_btreemap_values_next_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreemap_values_next_back_map_prune",
+        "btreemap_values_next_back_map",
+        &[
+            "BTreeMap::new()",
+            ".values()",
+            ".next_back()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadBtreemapValuesNextBackMapItem",
+        "dead-btreemap-values-next-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_rchunks_for_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_rchunks_for_pattern_prune",
+        "slice_rchunks_for_pattern",
+        &[
+            "for chunk in items.rchunks(2)",
+            "let [payload, ..] = chunk",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadSliceRchunksForPatternItem",
+        "dead-slice-rchunks-for-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_rchunks_mut_for_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_rchunks_mut_for_pattern_prune",
+        "slice_rchunks_mut_for_pattern",
+        &[
+            "for chunk in items.rchunks_mut(2)",
+            "let [payload, ..] = chunk",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceRchunksMutForPatternItem",
+        "dead-slice-rchunks-mut-for-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_chunks_exact_mut_for_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_chunks_exact_mut_for_pattern_prune",
+        "slice_chunks_exact_mut_for_pattern",
+        &[
+            "for chunk in items.chunks_exact_mut(2)",
+            "let [payload, _tail] = chunk",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceChunksExactMutForPatternItem",
+        "dead-slice-chunks-exact-mut-for-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_rchunks_exact_mut_for_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_rchunks_exact_mut_for_pattern_prune",
+        "slice_rchunks_exact_mut_for_pattern",
+        &[
+            "for chunk in items.rchunks_exact_mut(2)",
+            "let [payload, _tail] = chunk",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceRchunksExactMutForPatternItem",
+        "dead-slice-rchunks-exact-mut-for-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
 
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,

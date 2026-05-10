@@ -1,0 +1,3 @@
+[workspace]
+members = ["root", "external/iterator_min_map_api", "external/iterator_min_map_model"]
+resolver = "2"

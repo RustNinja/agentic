@@ -1,0 +1,7 @@
+[package]
+name = "iterator_position_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_position_model = { path = "../iterator_position_model" }

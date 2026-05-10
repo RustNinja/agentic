@@ -1061,3 +1061,21 @@ only when a concrete reducer/render/validation bug appears.
 | `fixture.typed_slice_enum_struct_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice enum struct pattern payload recovery while pruning dead support package items |
 | `fixture.slice_chunks_for_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice chunks for pattern payload recovery while pruning dead support package items |
 | `fixture.slice_chunks_mut_for_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice chunks mut for pattern payload recovery while pruning dead support package items |
+
+| `fixture.iterator_rfold_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator rfold payload recovery while pruning dead support package items |
+| `fixture.iterator_try_rfold_result_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator try rfold result payload recovery while pruning dead support package items |
+| `fixture.iterator_rfind_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator rfind payload recovery while pruning dead support package items |
+| `fixture.iterator_position_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator position payload recovery while pruning dead support package items |
+| `fixture.iterator_next_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator next back map payload recovery while pruning dead support package items |
+| `fixture.iterator_nth_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator nth back map payload recovery while pruning dead support package items |
+| `fixture.iterator_max_map_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator max map payload recovery while pruning dead support package items |
+| `fixture.iterator_min_map_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator min map payload recovery while pruning dead support package items |
+| `fixture.iterator_peekable_next_if_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator peekable next if payload recovery while pruning dead support package items |
+| `fixture.iterator_peekable_peek_mut_prune.support_chain.001` | covered | A checked-in support fixture slices through iterator peekable peek mut payload recovery while pruning dead support package items |
+| `fixture.vec_iter_next_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through vec iter next back map payload recovery while pruning dead support package items |
+| `fixture.vecdeque_iter_next_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through vecdeque iter next back map payload recovery while pruning dead support package items |
+| `fixture.btreemap_values_next_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through btreemap values next back map payload recovery while pruning dead support package items |
+| `fixture.slice_rchunks_for_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice rchunks for pattern payload recovery while pruning dead support package items |
+| `fixture.slice_rchunks_mut_for_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice rchunks mut for pattern payload recovery while pruning dead support package items |
+| `fixture.slice_chunks_exact_mut_for_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice chunks exact mut for pattern payload recovery while pruning dead support package items |
+| `fixture.slice_rchunks_exact_mut_for_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice rchunks exact mut for pattern payload recovery while pruning dead support package items |

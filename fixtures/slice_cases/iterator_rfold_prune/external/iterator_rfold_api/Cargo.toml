@@ -1,0 +1,7 @@
+[package]
+name = "iterator_rfold_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_rfold_model = { path = "../iterator_rfold_model" }

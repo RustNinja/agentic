@@ -1,0 +1,7 @@
+[package]
+name = "vec_iter_next_back_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_iter_next_back_map_model = { path = "../vec_iter_next_back_map_model" }

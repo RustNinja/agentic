@@ -6383,13 +6383,20 @@ impl<'a> DependencyVisitor<'a> {
                         | "make_contiguous"
                         | "max_by"
                         | "max_by_key"
+                        | "max"
                         | "min_by"
                         | "min_by_key"
+                        | "min"
+                        | "next_back"
+                        | "next_if"
+                        | "next_if_eq"
+                        | "nth_back"
                         | "ok_or"
                         | "ok_or_else"
                         | "or"
                         | "or_else"
                         | "peekable"
+                        | "peek_mut"
                         | "range"
                         | "range_mut"
                         | "reduce"
@@ -6540,13 +6547,16 @@ impl<'a> DependencyVisitor<'a> {
                 }
                 if matches!(
                     call.method.to_string().as_str(),
-                    "max_by" | "max_by_key" | "min_by" | "min_by_key" | "reduce"
+                    "max_by" | "max_by_key" | "min_by" | "min_by_key" | "reduce" | "max" | "min"
                 ) {
                     if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
                         return Some(ok_type.clone());
                     }
                 }
-                if call.method == "find" {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "find" | "rfind" | "next_if" | "next_if_eq" | "peek_mut"
+                ) {
                     if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
                         return Some(ok_type.clone());
                     }
@@ -6608,7 +6618,10 @@ impl<'a> DependencyVisitor<'a> {
                         return Some(ok_type);
                     }
                 }
-                if matches!(call.method.to_string().as_str(), "last" | "next" | "nth") {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "last" | "next" | "next_back" | "nth" | "nth_back"
+                ) {
                     if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
                         return Some(ok_type.clone());
                     }
@@ -6619,7 +6632,7 @@ impl<'a> DependencyVisitor<'a> {
                 if call.method == "err" {
                     return self.expression_result_error_type(&call.receiver);
                 }
-                if call.method == "try_fold" {
+                if matches!(call.method.to_string().as_str(), "try_fold" | "try_rfold") {
                     if let Some(ok_type) = call
                         .args
                         .first()
@@ -7092,7 +7105,10 @@ impl<'a> DependencyVisitor<'a> {
     }
 
     fn visit_fold_method_call(&mut self, call: &ExprMethodCall) -> bool {
-        if !matches!(call.method.to_string().as_str(), "fold" | "try_fold") || call.args.len() != 2
+        if !matches!(
+            call.method.to_string().as_str(),
+            "fold" | "try_fold" | "rfold" | "try_rfold"
+        ) || call.args.len() != 2
         {
             return false;
         }
@@ -7597,6 +7613,7 @@ impl<'a> DependencyVisitor<'a> {
             | "filter_map"
             | "flat_map"
             | "find"
+            | "rfind"
             | "find_map"
             | "for_each"
             | "inspect"
@@ -7628,6 +7645,7 @@ impl<'a> DependencyVisitor<'a> {
             | "binary_search_by_key"
             | "select_nth_unstable_by_key"
             | "take_while"
+            | "next_if"
             | "map_while"
             | "try_for_each" => self
                 .expression_result_ok_type(&call.receiver)

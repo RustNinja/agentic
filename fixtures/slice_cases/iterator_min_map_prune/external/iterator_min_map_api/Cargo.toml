@@ -1,0 +1,7 @@
+[package]
+name = "iterator_min_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iterator_min_map_model = { path = "../iterator_min_map_model" }
