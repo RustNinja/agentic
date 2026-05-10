@@ -1,0 +1,9 @@
+[package]
+name = "codex-mobile-client"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+session-api = { path = "../external/session-api" }
+

@@ -410,6 +410,161 @@ fn prunes_litter_conversation_render_support_packages_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_litter_mobile_session_support_packages_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_mobile_session_prune");
+    let output = temp_path("slice-case-litter-mobile-session-prune-output");
+    let target_dir = temp_path("slice-case-litter-mobile-session-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_mobile_session_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        [
+            "codex-mobile-client",
+            "session-api",
+            "session-core",
+            "session-protocol"
+        ]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string()
+                == "codex-mobile-client::ffi::session::connect_session_status"),
+        "mobile session root should be recorded: {:?}",
+        report.roots
+    );
+
+    let mobile_root = read(output.join("codex-mobile-client/src/lib.rs"));
+    let ffi_root = read(output.join("codex-mobile-client/src/ffi/mod.rs"));
+    let session_source = read(output.join("codex-mobile-client/src/ffi/session.rs"));
+    let api_root = read(output.join("session-api/src/lib.rs"));
+    let api_live = read(output.join("session-api/src/live.rs"));
+    let core_root = read(output.join("session-core/src/lib.rs"));
+    let core_live = read(output.join("session-core/src/live.rs"));
+    let protocol_root = read(output.join("session-protocol/src/lib.rs"));
+    let protocol_live = read(output.join("session-protocol/src/live.rs"));
+
+    assert!(mobile_root.contains("pub mod ffi"), "{mobile_root}");
+    assert_absent(
+        "codex-mobile-client/src/lib.rs",
+        &mobile_root,
+        &["settings", "dead_mobile_entry"],
+    );
+    assert!(ffi_root.contains("pub mod session"), "{ffi_root}");
+    assert_absent(
+        "codex-mobile-client/src/ffi/mod.rs",
+        &ffi_root,
+        &["voice_handoff"],
+    );
+    assert!(
+        session_source.contains("pub fn connect_session_status"),
+        "{session_source}"
+    );
+    assert_absent(
+        "codex-mobile-client/src/ffi/session.rs",
+        &session_source,
+        &["dead_session_status", "dead_summary"],
+    );
+    assert!(!output.join("codex-mobile-client/src/settings.rs").exists());
+    assert!(!output
+        .join("codex-mobile-client/src/ffi/voice_handoff.rs")
+        .exists());
+
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("SessionHandle"), "{api_root}");
+    assert_absent(
+        "session-api/src/lib.rs",
+        &api_root,
+        &["mod dead", "DeadSessionHandle", "dead_api_report"],
+    );
+    for token in [
+        "pub struct SessionRequest",
+        "pub struct SessionHandle",
+        "pub struct SessionStatusDto",
+        "pub fn connect",
+        "pub fn status",
+        "pub fn from_status",
+    ] {
+        assert!(api_live.contains(token), "missing {token:?}\n{api_live}");
+    }
+    assert_absent(
+        "session-api/src/live.rs",
+        &api_live,
+        &[
+            "dead_exported_status",
+            "dead_connect",
+            "DeadSessionApi",
+            "dead_live_api",
+            "dead_render",
+        ],
+    );
+    assert!(!output.join("session-api/src/dead.rs").exists());
+
+    assert!(core_root.contains("mod live"), "{core_root}");
+    assert!(core_root.contains("SessionEngine"), "{core_root}");
+    assert_absent(
+        "session-core/src/lib.rs",
+        &core_root,
+        &["mod dead", "DeadSessionEngine", "dead_core_report"],
+    );
+    for token in [
+        "pub struct SessionEngine",
+        "pub struct SessionStatus",
+        "pub fn connect",
+        "pub fn status",
+        "pub fn new",
+        "pub fn label",
+        "pub fn kind",
+        "fn normalize_label",
+    ] {
+        assert!(core_live.contains(token), "missing {token:?}\n{core_live}");
+    }
+    assert_absent(
+        "session-core/src/live.rs",
+        &core_live,
+        &["dead_debug", "dead_label", "dead_live_core"],
+    );
+    assert!(!output.join("session-core/src/dead.rs").exists());
+
+    assert!(protocol_root.contains("mod live"), "{protocol_root}");
+    assert!(protocol_root.contains("WireSession"), "{protocol_root}");
+    assert_absent(
+        "session-protocol/src/lib.rs",
+        &protocol_root,
+        &["mod dead", "DeadWireSession", "dead_protocol_report"],
+    );
+    for token in [
+        "pub enum WireStatusKind",
+        "pub struct WireSession",
+        "pub fn from_status",
+        "pub fn label",
+        "pub fn kind",
+    ] {
+        assert!(
+            protocol_live.contains(token),
+            "missing {token:?}\n{protocol_live}"
+        );
+    }
+    assert_absent(
+        "session-protocol/src/live.rs",
+        &protocol_live,
+        &["dead_summary", "dead_live_protocol"],
+    );
+    assert!(!output.join("session-protocol/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &mobile_root, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
     let cases = [
@@ -434,6 +589,21 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 ("semantic_unresolved_method_calls", "warning"),
                 ("semantic_unresolved_paths", "warning"),
                 ("syntactic_method_fallbacks", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "litter_mobile_session_prune",
+            packages: &[
+                "codex-mobile-client",
+                "session-api",
+                "session-core",
+                "session-protocol",
+            ],
+            hazards: &[
+                ("conditional_compilation_attrs", "warning"),
+                ("custom_derive_macros", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+                ("semantic_unresolved_paths", "warning"),
             ],
         },
         RaHardFixture {

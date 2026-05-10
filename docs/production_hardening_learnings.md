@@ -1183,3 +1183,12 @@ the live iterator/filter/render closure. Under RA it proves 20 retained-package
 callables and 7 retained-package items are prunable with zero unproven symbols,
 then still reports only scoped unresolved/fallback warnings. The full checked
 slice-case suite now covers 767 generated workspaces.
+
+The next Litter-shaped fixture covers a `codex-mobile-client` FFI session root
+with UniFFI-style `cfg_attr(..., derive(...))` records/objects, an exported
+object impl, core session state, and protocol wire DTO/status types. It prunes
+dead voice-handoff/settings UI modules, dead support modules, dead exported
+methods, and dead DTO helpers. Under RA it proves 23 retained-package callables
+and 9 retained-package items are prunable with zero unproven symbols, while
+leaving only scoped cfg/derive and semantic unresolved warnings. The full
+checked slice-case suite now covers 768 generated workspaces.

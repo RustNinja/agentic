@@ -1,0 +1,9 @@
+[package]
+name = "session-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+session-core = { path = "../session-core" }
+session-protocol = { path = "../session-protocol" }
+
