@@ -1288,3 +1288,13 @@ fail the test. This closes a package-level escape hatch where an extra copied
 support crate could exist outside the report and avoid the used/unknown source
 audit. Focused checks on trim-unused, Litter serde, and Litter reconnect
 callback fixtures passed with the stricter package inventory contract.
+
+The same hard audit now treats public reexport leaves as part of the rendered
+surface. For every generated `pub use` leaf that resolves to a known local
+callable, item, or module path, the fixture harness checks that the target is
+classified as retained `used` or `blocked_by_unknown`, not `prunable`. External
+or unresolved reexports stay outside this proof instead of becoming false
+positives. This closes another escape hatch where source declarations could be
+removed correctly but a stale public facade alias still advertised a pruned
+local target. The full slice-case suite passed across all 774 generated
+workspaces with the stricter reexport contract.

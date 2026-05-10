@@ -9,6 +9,28 @@ use std::{
 use opensource_core::{generate_with_analyzer, AnalyzerMode, GenerateOptions, GenerateReport};
 
 #[test]
+#[should_panic(expected = "generated source exposes public reexports")]
+fn public_reexport_contract_rejects_prunable_local_targets() {
+    let mut rendered = RenderedSymbols::default();
+    rendered.module_paths.insert(Vec::new());
+    rendered.module_paths.insert(vec!["facade".to_string()]);
+    rendered.public_reexports.insert(RenderedPublicReexport {
+        package: "root".to_string(),
+        module_path: Vec::new(),
+        visible: "Dead".to_string(),
+        target: vec!["facade".to_string(), "Dead".to_string()],
+    });
+
+    assert_public_reexport_contract(
+        &rendered,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &BTreeSet::from(["root::facade::Dead(Struct)".to_string()]),
+    );
+}
+
+#[test]
 fn trims_unused_checked_fixture_workspace_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/trim_unused");
     let output = temp_path("slice-case-trim-unused-output");
@@ -22553,6 +22575,13 @@ fn assert_usage_contract(workspace: &Path, report: &GenerateReport) {
             .intersection(&prunable_items)
             .collect::<Vec<_>>()
     );
+    assert_public_reexport_contract(
+        &rendered,
+        &retained_callables,
+        &retained_items,
+        &prunable_callables,
+        &prunable_items,
+    );
 
     let retained_trait_default_methods = retained_trait_default_methods(&rendered, &blocked_items);
     let unproven_trait_default_methods = rendered
@@ -22571,9 +22600,19 @@ fn assert_usage_contract(workspace: &Path, report: &GenerateReport) {
 struct RenderedSymbols {
     callables: BTreeSet<String>,
     items: BTreeSet<String>,
+    module_paths: BTreeSet<Vec<String>>,
+    public_reexports: BTreeSet<RenderedPublicReexport>,
     trait_default_methods: BTreeSet<RenderedTraitDefaultMethod>,
     direct_call_references: BTreeSet<String>,
     trait_default_method_references: BTreeMap<RenderedTraitDefaultMethod, BTreeSet<String>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct RenderedPublicReexport {
+    package: String,
+    module_path: Vec<String>,
+    visible: String,
+    target: Vec<String>,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
@@ -22598,6 +22637,7 @@ fn collect_rendered_symbols(workspace: &Path, packages: &[String]) -> RenderedSy
         }
         for file in rust_files_under(&source_root) {
             let module_path = module_path_from_source_file(&source_root, &file);
+            insert_module_path_with_parents(&mut symbols.module_paths, &module_path);
             let source = read(&file);
             let syntax = syn::parse_file(&source).unwrap_or_else(|err| {
                 panic!("generated source should parse: {}\n{err}", file.display())
@@ -22717,12 +22757,24 @@ fn collect_rendered_items(
                 if let Some((_, nested)) = &item.content {
                     let mut nested_module_path = module_path.to_vec();
                     nested_module_path.push(name);
+                    insert_module_path_with_parents(&mut symbols.module_paths, &nested_module_path);
                     let nested_aliases = rendered_aliases_from_items(nested, Some(aliases));
                     collect_rendered_items(
                         package,
                         &nested_module_path,
                         nested,
                         &nested_aliases,
+                        symbols,
+                    );
+                }
+            }
+            syn::Item::Use(item) => {
+                if is_public_visibility(&item.vis) {
+                    collect_rendered_public_reexports(
+                        package,
+                        module_path,
+                        &item.tree,
+                        Vec::new(),
                         symbols,
                     );
                 }
@@ -22804,6 +22856,214 @@ fn collect_rendered_use_tree(
         }
         syn::UseTree::Glob(_) => {}
     }
+}
+
+fn collect_rendered_public_reexports(
+    package: &str,
+    module_path: &[String],
+    tree: &syn::UseTree,
+    mut prefix: Vec<String>,
+    symbols: &mut RenderedSymbols,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_rendered_public_reexports(package, module_path, &path.tree, prefix, symbols);
+        }
+        syn::UseTree::Name(name) => {
+            if let Some((visible, target)) = rendered_reexport_leaf(prefix, name.ident.to_string())
+            {
+                symbols.public_reexports.insert(RenderedPublicReexport {
+                    package: package.to_string(),
+                    module_path: module_path.to_vec(),
+                    visible,
+                    target,
+                });
+            }
+        }
+        syn::UseTree::Rename(rename) => {
+            if let Some((_, target)) = rendered_reexport_leaf(prefix, rename.ident.to_string()) {
+                symbols.public_reexports.insert(RenderedPublicReexport {
+                    package: package.to_string(),
+                    module_path: module_path.to_vec(),
+                    visible: rename.rename.to_string(),
+                    target,
+                });
+            }
+        }
+        syn::UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_rendered_public_reexports(
+                    package,
+                    module_path,
+                    nested,
+                    prefix.clone(),
+                    symbols,
+                );
+            }
+        }
+        syn::UseTree::Glob(_) => {}
+    }
+}
+
+fn rendered_reexport_leaf(mut prefix: Vec<String>, ident: String) -> Option<(String, Vec<String>)> {
+    if ident == "self" {
+        let visible = prefix.last()?.clone();
+        Some((visible, prefix))
+    } else {
+        prefix.push(ident.clone());
+        Some((ident, prefix))
+    }
+}
+
+fn is_public_visibility(visibility: &syn::Visibility) -> bool {
+    matches!(visibility, syn::Visibility::Public(_))
+}
+
+fn insert_module_path_with_parents(modules: &mut BTreeSet<Vec<String>>, module_path: &[String]) {
+    modules.insert(Vec::new());
+    for index in 1..=module_path.len() {
+        modules.insert(module_path[..index].to_vec());
+    }
+}
+
+fn assert_public_reexport_contract(
+    rendered: &RenderedSymbols,
+    retained_callables: &BTreeSet<String>,
+    retained_items: &BTreeSet<String>,
+    prunable_callables: &BTreeSet<String>,
+    prunable_items: &BTreeSet<String>,
+) {
+    let retained_symbols = symbol_base_paths(retained_callables, retained_items);
+    let prunable_symbols = symbol_base_paths(prunable_callables, prunable_items);
+    let known_symbols = retained_symbols
+        .union(&prunable_symbols)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let mut stale_reexports = Vec::new();
+
+    for reexport in &rendered.public_reexports {
+        let candidates =
+            public_reexport_local_candidates(reexport, &rendered.module_paths, &known_symbols);
+        if candidates
+            .iter()
+            .any(|candidate| retained_symbols.contains(candidate))
+        {
+            continue;
+        }
+
+        let prunable_hits = candidates
+            .iter()
+            .filter(|candidate| prunable_symbols.contains(*candidate))
+            .cloned()
+            .collect::<Vec<_>>();
+        if !prunable_hits.is_empty() {
+            stale_reexports.push((reexport.clone(), prunable_hits));
+        }
+    }
+
+    assert!(
+        stale_reexports.is_empty(),
+        "generated source exposes public reexports to prunable local targets: {:?}",
+        stale_reexports
+    );
+}
+
+fn symbol_base_paths(callables: &BTreeSet<String>, items: &BTreeSet<String>) -> BTreeSet<String> {
+    let mut paths = callables.clone();
+    paths.extend(items.iter().map(|item| item_base_path(item)));
+    paths
+}
+
+fn item_base_path(item: &str) -> String {
+    item.rfind('(')
+        .map(|index| item[..index].to_string())
+        .unwrap_or_else(|| item.to_string())
+}
+
+fn public_reexport_local_candidates(
+    reexport: &RenderedPublicReexport,
+    module_paths: &BTreeSet<Vec<String>>,
+    known_symbols: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    if let Some(local_segments) =
+        normalize_public_reexport_target(&reexport.module_path, &reexport.target)
+    {
+        if local_reexport_candidate_is_known(
+            &reexport.package,
+            &local_segments,
+            module_paths,
+            known_symbols,
+        ) {
+            candidates.insert(qualified_symbol_path(&reexport.package, &local_segments));
+        }
+    }
+
+    if reexport
+        .target
+        .first()
+        .is_some_and(|segment| segment != "crate" && segment != "self" && segment != "super")
+        && local_reexport_candidate_is_known(
+            &reexport.package,
+            &reexport.target,
+            module_paths,
+            known_symbols,
+        )
+    {
+        candidates.insert(qualified_symbol_path(&reexport.package, &reexport.target));
+    }
+
+    candidates
+}
+
+fn local_reexport_candidate_is_known(
+    package: &str,
+    segments: &[String],
+    module_paths: &BTreeSet<Vec<String>>,
+    known_symbols: &BTreeSet<String>,
+) -> bool {
+    if segments.is_empty() {
+        return false;
+    }
+    let symbol = qualified_symbol_path(package, segments);
+    if known_symbols.contains(&symbol) || module_paths.contains(segments) {
+        return true;
+    }
+    let parent = &segments[..segments.len() - 1];
+    module_paths.contains(parent)
+}
+
+fn normalize_public_reexport_target(
+    module_path: &[String],
+    target: &[String],
+) -> Option<Vec<String>> {
+    let first = target.first()?;
+    if first == "crate" {
+        return Some(target[1..].to_vec());
+    }
+
+    let mut normalized = module_path.to_vec();
+    let mut index = 0;
+    if first == "self" {
+        index = 1;
+    } else {
+        while target.get(index).is_some_and(|segment| segment == "super") {
+            normalized.pop();
+            index += 1;
+        }
+    }
+    normalized.extend_from_slice(&target[index..]);
+    Some(normalized)
+}
+
+fn qualified_symbol_path(package: &str, segments: &[String]) -> String {
+    let mut path = package.to_string();
+    for segment in segments {
+        path.push_str("::");
+        path.push_str(segment);
+    }
+    path
 }
 
 fn retained_trait_default_methods(
