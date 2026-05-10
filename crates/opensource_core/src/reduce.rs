@@ -6230,7 +6230,17 @@ impl<'a> DependencyVisitor<'a> {
         };
         if !matches!(
             call.method.to_string().as_str(),
-            "as_slices" | "as_mut_slices" | "split_at" | "split_at_mut" | "unzip"
+            "as_chunks"
+                | "as_chunks_mut"
+                | "as_rchunks"
+                | "as_rchunks_mut"
+                | "as_slices"
+                | "as_mut_slices"
+                | "split_at"
+                | "split_at_checked"
+                | "split_at_mut"
+                | "split_at_mut_checked"
+                | "unzip"
         ) {
             return false;
         }
@@ -6345,6 +6355,12 @@ impl<'a> DependencyVisitor<'a> {
                 if matches!(
                     call.method.to_string().as_str(),
                     "as_ref"
+                        | "as_chunks"
+                        | "as_chunks_mut"
+                        | "as_pin_ref"
+                        | "as_pin_mut"
+                        | "as_rchunks"
+                        | "as_rchunks_mut"
                         | "as_slices"
                         | "as_slice"
                         | "as_mut"
@@ -6366,6 +6382,8 @@ impl<'a> DependencyVisitor<'a> {
                         | "drain"
                         | "filter"
                         | "find"
+                        | "first_chunk"
+                        | "first_chunk_mut"
                         | "flatten"
                         | "fuse"
                         | "get_mut"
@@ -6380,6 +6398,8 @@ impl<'a> DependencyVisitor<'a> {
                         | "iter"
                         | "iter_mut"
                         | "leak"
+                        | "last_chunk"
+                        | "last_chunk_mut"
                         | "make_contiguous"
                         | "max_by"
                         | "max_by_key"
@@ -6412,11 +6432,17 @@ impl<'a> DependencyVisitor<'a> {
                         | "splice"
                         | "split"
                         | "split_at"
+                        | "split_at_checked"
                         | "split_at_mut"
+                        | "split_at_mut_checked"
                         | "split_first"
+                        | "split_first_chunk"
+                        | "split_first_chunk_mut"
                         | "split_first_mut"
                         | "split_inclusive"
                         | "split_last"
+                        | "split_last_chunk"
+                        | "split_last_chunk_mut"
                         | "split_last_mut"
                         | "splitn"
                         | "split_off"
@@ -6555,7 +6581,23 @@ impl<'a> DependencyVisitor<'a> {
                 }
                 if matches!(
                     call.method.to_string().as_str(),
-                    "find" | "rfind" | "next_if" | "next_if_eq" | "peek_mut"
+                    "as_pin_ref"
+                        | "as_pin_mut"
+                        | "find"
+                        | "first_chunk"
+                        | "first_chunk_mut"
+                        | "last_chunk"
+                        | "last_chunk_mut"
+                        | "rfind"
+                        | "next_if"
+                        | "next_if_eq"
+                        | "peek_mut"
+                        | "split_at_checked"
+                        | "split_at_mut_checked"
+                        | "split_first_chunk"
+                        | "split_first_chunk_mut"
+                        | "split_last_chunk"
+                        | "split_last_chunk_mut"
                 ) {
                     if let Some(ok_type) = self.expression_type_arguments(&call.receiver).first() {
                         return Some(ok_type.clone());
@@ -6807,7 +6849,7 @@ impl<'a> DependencyVisitor<'a> {
                         return Some(error_type);
                     }
                 }
-                if call.method == "try_fold" {
+                if matches!(call.method.to_string().as_str(), "try_fold" | "try_rfold") {
                     if let Some(error_type) = self.fold_closure_error_type(call) {
                         return Some(error_type);
                     }
@@ -7595,6 +7637,23 @@ impl<'a> DependencyVisitor<'a> {
                 self.bind_single_payload_pattern(item_pat, &item_type);
                 if let Some(tail_pat) = tuple.elems.get(1) {
                     self.bind_pattern_type_arguments(tail_pat, std::slice::from_ref(&item_type));
+                }
+                true
+            }
+            "split_first_chunk"
+            | "split_last_chunk"
+            | "split_first_chunk_mut"
+            | "split_last_chunk_mut" => {
+                let Some(item_type) = self
+                    .expression_type_arguments(&adapter.receiver)
+                    .first()
+                    .cloned()
+                else {
+                    return false;
+                };
+                for element in &tuple.elems {
+                    self.bind_single_payload_pattern(element, &item_type);
+                    self.bind_pattern_type_arguments(element, std::slice::from_ref(&item_type));
                 }
                 true
             }

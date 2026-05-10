@@ -1,0 +1,4 @@
+[package]
+name = "slice_last_chunk_map_model"
+version = "0.1.0"
+edition = "2021"

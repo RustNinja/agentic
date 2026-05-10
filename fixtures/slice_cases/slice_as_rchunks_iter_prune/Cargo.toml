@@ -1,0 +1,3 @@
+[workspace]
+members = ["root", "external/slice_as_rchunks_iter_api", "external/slice_as_rchunks_iter_model"]
+resolver = "2"

@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+slice_split_last_chunk_mut_map_api = { path = "../external/slice_split_last_chunk_mut_map_api" }

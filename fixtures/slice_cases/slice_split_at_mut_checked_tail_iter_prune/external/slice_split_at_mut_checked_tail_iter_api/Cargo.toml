@@ -1,0 +1,7 @@
+[package]
+name = "slice_split_at_mut_checked_tail_iter_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slice_split_at_mut_checked_tail_iter_model = { path = "../slice_split_at_mut_checked_tail_iter_model" }

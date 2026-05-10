@@ -1,0 +1,7 @@
+[package]
+name = "option_as_pin_ref_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_as_pin_ref_map_model = { path = "../option_as_pin_ref_map_model" }

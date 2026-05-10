@@ -19346,6 +19346,446 @@ fn prunes_slice_rchunks_exact_mut_for_pattern_support_chain_with_default_analyze
     );
 }
 
+#[test]
+fn prunes_slice_first_chunk_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_first_chunk_map_prune",
+        root_fn: "selected_slice_first_chunk_map_report",
+        api_pkg: "slice_first_chunk_map_api",
+        model_pkg: "slice_first_chunk_map_model",
+        api_fn: "selected_slice_first_chunk_map_report",
+        model_fn: "selected_slice_first_chunk_map",
+        model_required: &[
+            ".first_chunk::<2>()",
+            ".map(|[head, _tail]| head.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceFirstChunkMapItem",
+            "dead_slice_first_chunk_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-slice-first-chunk-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_first_chunk_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_first_chunk_mut_map_prune",
+        root_fn: "selected_slice_first_chunk_mut_map_report",
+        api_pkg: "slice_first_chunk_mut_map_api",
+        model_pkg: "slice_first_chunk_mut_map_model",
+        api_fn: "selected_slice_first_chunk_mut_map_report",
+        model_fn: "selected_slice_first_chunk_mut_map",
+        model_required: &[
+            ".first_chunk_mut::<2>()",
+            ".map(|[head, _tail]| head.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceFirstChunkMutMapItem",
+            "dead_slice_first_chunk_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-slice-first-chunk-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_last_chunk_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_last_chunk_map_prune",
+        root_fn: "selected_slice_last_chunk_map_report",
+        api_pkg: "slice_last_chunk_map_api",
+        model_pkg: "slice_last_chunk_map_model",
+        api_fn: "selected_slice_last_chunk_map_report",
+        model_fn: "selected_slice_last_chunk_map",
+        model_required: &[
+            ".last_chunk::<2>()",
+            ".map(|[head, _tail]| head.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceLastChunkMapItem",
+            "dead_slice_last_chunk_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-slice-last-chunk-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_last_chunk_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_last_chunk_mut_map_prune",
+        root_fn: "selected_slice_last_chunk_mut_map_report",
+        api_pkg: "slice_last_chunk_mut_map_api",
+        model_pkg: "slice_last_chunk_mut_map_model",
+        api_fn: "selected_slice_last_chunk_mut_map_report",
+        model_fn: "selected_slice_last_chunk_mut_map",
+        model_required: &[
+            ".last_chunk_mut::<2>()",
+            ".map(|[head, _tail]| head.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceLastChunkMutMapItem",
+            "dead_slice_last_chunk_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-slice-last-chunk-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_split_first_chunk_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_split_first_chunk_map_prune",
+        root_fn: "selected_slice_split_first_chunk_map_report",
+        api_pkg: "slice_split_first_chunk_map_api",
+        model_pkg: "slice_split_first_chunk_map_model",
+        api_fn: "selected_slice_split_first_chunk_map_report",
+        model_fn: "selected_slice_split_first_chunk_map",
+        model_required: &[
+            ".split_first_chunk::<2>()",
+            "head.render_label()",
+            "tail.len()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitFirstChunkMapItem",
+            "dead_slice_split_first_chunk_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-slice-split-first-chunk-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_split_first_chunk_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_split_first_chunk_mut_map_prune",
+        root_fn: "selected_slice_split_first_chunk_mut_map_report",
+        api_pkg: "slice_split_first_chunk_mut_map_api",
+        model_pkg: "slice_split_first_chunk_mut_map_model",
+        api_fn: "selected_slice_split_first_chunk_mut_map_report",
+        model_fn: "selected_slice_split_first_chunk_mut_map",
+        model_required: &[
+            ".split_first_chunk_mut::<2>()",
+            "head.bump_and_render()",
+            "tail.len()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitFirstChunkMutMapItem",
+            "dead_slice_split_first_chunk_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-slice-split-first-chunk-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_split_last_chunk_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_split_last_chunk_map_prune",
+        root_fn: "selected_slice_split_last_chunk_map_report",
+        api_pkg: "slice_split_last_chunk_map_api",
+        model_pkg: "slice_split_last_chunk_map_model",
+        api_fn: "selected_slice_split_last_chunk_map_report",
+        model_fn: "selected_slice_split_last_chunk_map",
+        model_required: &[
+            ".split_last_chunk::<2>()",
+            "tail.render_label()",
+            "head.len()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitLastChunkMapItem",
+            "dead_slice_split_last_chunk_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-slice-split-last-chunk-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_split_last_chunk_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_split_last_chunk_mut_map_prune",
+        root_fn: "selected_slice_split_last_chunk_mut_map_report",
+        api_pkg: "slice_split_last_chunk_mut_map_api",
+        model_pkg: "slice_split_last_chunk_mut_map_model",
+        api_fn: "selected_slice_split_last_chunk_mut_map_report",
+        model_fn: "selected_slice_split_last_chunk_mut_map",
+        model_required: &[
+            ".split_last_chunk_mut::<2>()",
+            "tail.bump_and_render()",
+            "head.len()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitLastChunkMutMapItem",
+            "dead_slice_split_last_chunk_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-slice-split-last-chunk-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_as_chunks_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_as_chunks_iter_prune",
+        root_fn: "selected_slice_as_chunks_iter_report",
+        api_pkg: "slice_as_chunks_iter_api",
+        model_pkg: "slice_as_chunks_iter_model",
+        api_fn: "selected_slice_as_chunks_iter_report",
+        model_fn: "selected_slice_as_chunks_iter",
+        model_required: &[
+            ".as_chunks::<2>()",
+            ".iter()",
+            ".map(|[head, _tail]| head.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceAsChunksIterItem",
+            "dead_slice_as_chunks_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-slice-as-chunks-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_as_chunks_mut_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_as_chunks_mut_iter_prune",
+        root_fn: "selected_slice_as_chunks_mut_iter_report",
+        api_pkg: "slice_as_chunks_mut_iter_api",
+        model_pkg: "slice_as_chunks_mut_iter_model",
+        api_fn: "selected_slice_as_chunks_mut_iter_report",
+        model_fn: "selected_slice_as_chunks_mut_iter",
+        model_required: &[
+            ".as_chunks_mut::<2>()",
+            ".iter_mut()",
+            ".map(|[head, _tail]| head.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceAsChunksMutIterItem",
+            "dead_slice_as_chunks_mut_iter",
+            "pub fn render_label",
+            "dead_method",
+            "dead-slice-as-chunks-mut-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_as_rchunks_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_as_rchunks_iter_prune",
+        root_fn: "selected_slice_as_rchunks_iter_report",
+        api_pkg: "slice_as_rchunks_iter_api",
+        model_pkg: "slice_as_rchunks_iter_model",
+        api_fn: "selected_slice_as_rchunks_iter_report",
+        model_fn: "selected_slice_as_rchunks_iter",
+        model_required: &[
+            ".as_rchunks::<2>()",
+            ".iter()",
+            ".map(|[head, _tail]| head.render_label())",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceAsRchunksIterItem",
+            "dead_slice_as_rchunks_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-slice-as-rchunks-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_as_rchunks_mut_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_as_rchunks_mut_iter_prune",
+        root_fn: "selected_slice_as_rchunks_mut_iter_report",
+        api_pkg: "slice_as_rchunks_mut_iter_api",
+        model_pkg: "slice_as_rchunks_mut_iter_model",
+        api_fn: "selected_slice_as_rchunks_mut_iter_report",
+        model_fn: "selected_slice_as_rchunks_mut_iter",
+        model_required: &[
+            ".as_rchunks_mut::<2>()",
+            ".iter_mut()",
+            ".map(|[head, _tail]| head.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceAsRchunksMutIterItem",
+            "dead_slice_as_rchunks_mut_iter",
+            "pub fn render_label",
+            "dead_method",
+            "dead-slice-as-rchunks-mut-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_split_at_checked_tail_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_split_at_checked_tail_iter_prune",
+        root_fn: "selected_slice_split_at_checked_tail_iter_report",
+        api_pkg: "slice_split_at_checked_tail_iter_api",
+        model_pkg: "slice_split_at_checked_tail_iter_model",
+        api_fn: "selected_slice_split_at_checked_tail_iter_report",
+        model_fn: "selected_slice_split_at_checked_tail_iter",
+        model_required: &[
+            ".split_at_checked(1)",
+            "tail.iter()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitAtCheckedTailIterItem",
+            "dead_slice_split_at_checked_tail_iter",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-slice-split-at-checked-tail-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_slice_split_at_mut_checked_tail_iter_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "slice_split_at_mut_checked_tail_iter_prune",
+        root_fn: "selected_slice_split_at_mut_checked_tail_iter_report",
+        api_pkg: "slice_split_at_mut_checked_tail_iter_api",
+        model_pkg: "slice_split_at_mut_checked_tail_iter_model",
+        api_fn: "selected_slice_split_at_mut_checked_tail_iter_report",
+        model_fn: "selected_slice_split_at_mut_checked_tail_iter",
+        model_required: &[
+            ".split_at_mut_checked(1)",
+            "tail.iter_mut()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadSliceSplitAtMutCheckedTailIterItem",
+            "dead_slice_split_at_mut_checked_tail_iter",
+            "pub fn render_label",
+            "dead_method",
+            "dead-slice-split-at-mut-checked-tail-iter",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_as_pin_ref_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_as_pin_ref_map_prune",
+        root_fn: "selected_option_as_pin_ref_map_report",
+        api_pkg: "option_as_pin_ref_map_api",
+        model_pkg: "option_as_pin_ref_map_model",
+        api_fn: "selected_option_as_pin_ref_map_report",
+        model_fn: "selected_option_as_pin_ref_map",
+        model_required: &[
+            "use std::pin::Pin;",
+            "Pin::new(&slot)",
+            ".as_pin_ref()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionAsPinRefMapItem",
+            "dead_option_as_pin_ref_map",
+            "pub fn bump_and_render",
+            "dead_method",
+            "dead-option-as-pin-ref-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_option_as_pin_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "option_as_pin_mut_map_prune",
+        root_fn: "selected_option_as_pin_mut_map_report",
+        api_pkg: "option_as_pin_mut_map_api",
+        model_pkg: "option_as_pin_mut_map_model",
+        api_fn: "selected_option_as_pin_mut_map_report",
+        model_fn: "selected_option_as_pin_mut_map",
+        model_required: &[
+            "use std::pin::Pin;",
+            "Pin::new(&mut slot)",
+            ".as_pin_mut()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadOptionAsPinMutMapItem",
+            "dead_option_as_pin_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-option-as-pin-mut-map",
+        ],
+    });
+}
+
+#[test]
+fn prunes_vecdeque_range_mut_map_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "vecdeque_range_mut_map_prune",
+        root_fn: "selected_vecdeque_range_mut_map_report",
+        api_pkg: "vecdeque_range_mut_map_api",
+        model_pkg: "vecdeque_range_mut_map_model",
+        api_fn: "selected_vecdeque_range_mut_map_report",
+        model_fn: "selected_vecdeque_range_mut_map",
+        model_required: &[
+            "use std::collections::VecDeque;",
+            ".range_mut(0..2)",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadVecdequeRangeMutMapItem",
+            "dead_vecdeque_range_mut_map",
+            "pub fn render_label",
+            "dead_method",
+            "dead-vecdeque-range-mut-map",
+        ],
+    });
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,

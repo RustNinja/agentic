@@ -1,0 +1,7 @@
+[package]
+name = "slice_as_rchunks_iter_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slice_as_rchunks_iter_model = { path = "../slice_as_rchunks_iter_model" }
