@@ -259,14 +259,18 @@ impl Default for RenderedSymbolProofReport {
 pub struct RenderedSymbolProofSummary {
     pub rendered_callables: usize,
     pub rendered_items: usize,
+    pub rendered_trait_default_methods: usize,
     pub retained_callables: usize,
     pub retained_items: usize,
+    pub retained_trait_default_methods: usize,
     pub macro_blocked_callables: usize,
     pub surface_blocked_callables: usize,
+    pub blocked_trait_default_methods: usize,
     pub prunable_callables: usize,
     pub prunable_items: usize,
     pub unclassified_callables: usize,
     pub unclassified_items: usize,
+    pub unproven_trait_default_methods: usize,
     pub source_parse_failures: usize,
 }
 
@@ -1976,6 +1980,12 @@ fn usage_classification_report(
     }
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct GeneratedRenderedTraitDefaultMethod {
+    trait_item: String,
+    method: String,
+}
+
 #[derive(Default)]
 struct GeneratedRenderedSymbols {
     callables: BTreeSet<String>,
@@ -1983,6 +1993,10 @@ struct GeneratedRenderedSymbols {
     macro_blocked_callables: BTreeSet<String>,
     surface_blocked_callables: BTreeSet<String>,
     trait_required_methods: BTreeMap<String, BTreeSet<String>>,
+    trait_default_methods: BTreeSet<GeneratedRenderedTraitDefaultMethod>,
+    direct_call_references: BTreeSet<String>,
+    trait_default_method_references:
+        BTreeMap<GeneratedRenderedTraitDefaultMethod, BTreeSet<String>>,
     source_parse_failures: usize,
 }
 
@@ -2001,6 +2015,11 @@ fn rendered_symbol_proof_report(
         .union(&decisions.blocked_by_unknown_items)
         .map(ToString::to_string)
         .collect::<BTreeSet<_>>();
+    let blocked_items = decisions
+        .blocked_by_unknown_items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
     let prunable_callables = decisions
         .prunable_callables
         .iter()
@@ -2014,6 +2033,7 @@ fn rendered_symbol_proof_report(
     let mut summary = RenderedSymbolProofSummary {
         rendered_callables: rendered.callables.len(),
         rendered_items: rendered.items.len(),
+        rendered_trait_default_methods: rendered.trait_default_methods.len(),
         source_parse_failures: rendered.source_parse_failures,
         ..RenderedSymbolProofSummary::default()
     };
@@ -2061,12 +2081,33 @@ fn rendered_symbol_proof_report(
         });
     }
 
+    let retained_trait_default_methods =
+        generated_retained_trait_default_methods(&rendered, &blocked_items);
+    for method in &rendered.trait_default_methods {
+        let classification = if !retained_trait_default_methods.contains(method) {
+            summary.unproven_trait_default_methods += 1;
+            "unproven"
+        } else if blocked_items.contains(&method.trait_item) {
+            summary.blocked_trait_default_methods += 1;
+            "blocked_by_unknown"
+        } else {
+            summary.retained_trait_default_methods += 1;
+            "retained"
+        };
+        entries.push(RenderedSymbolProofEntry {
+            kind: "trait_default_method".to_string(),
+            id: generated_rendered_trait_default_method_id(method),
+            classification: classification.to_string(),
+        });
+    }
+
     let status = if summary.source_parse_failures > 0 {
         "incomplete".to_string()
     } else if summary.prunable_callables > 0
         || summary.prunable_items > 0
         || summary.unclassified_callables > 0
         || summary.unclassified_items > 0
+        || summary.unproven_trait_default_methods > 0
     {
         "failed".to_string()
     } else {
@@ -2138,6 +2179,9 @@ fn collect_generated_rendered_items(
                     symbols.macro_blocked_callables.insert(callable.clone());
                 }
                 symbols.callables.insert(callable);
+                symbols
+                    .direct_call_references
+                    .extend(generated_rendered_call_references_in_block(&function.block));
             }
             syn::Item::Struct(item) => {
                 symbols.items.insert(generated_rendered_item_symbol_path(
@@ -2172,12 +2216,30 @@ fn collect_generated_rendered_items(
                 ));
             }
             syn::Item::Trait(item) => {
-                symbols.items.insert(generated_rendered_item_symbol_path(
+                let trait_item = generated_rendered_item_symbol_path(
                     package,
                     module_path,
                     &item.ident.to_string(),
                     "Trait",
-                ));
+                );
+                symbols.items.insert(trait_item.clone());
+                for trait_item_fn in &item.items {
+                    let syn::TraitItem::Fn(method) = trait_item_fn else {
+                        continue;
+                    };
+                    let Some(block) = &method.default else {
+                        continue;
+                    };
+                    let default_method = GeneratedRenderedTraitDefaultMethod {
+                        trait_item: trait_item.clone(),
+                        method: method.sig.ident.to_string(),
+                    };
+                    symbols.trait_default_methods.insert(default_method.clone());
+                    symbols.trait_default_method_references.insert(
+                        default_method,
+                        generated_rendered_call_references_in_block(block),
+                    );
+                }
             }
             syn::Item::Const(item) => {
                 symbols.items.insert(generated_rendered_item_symbol_path(
@@ -2253,6 +2315,9 @@ fn collect_generated_rendered_items(
                                 symbols.surface_blocked_callables.insert(callable.clone());
                             }
                             symbols.callables.insert(callable);
+                            symbols
+                                .direct_call_references
+                                .extend(generated_rendered_call_references_in_block(&method.block));
                         }
                     }
                 }
@@ -2315,6 +2380,60 @@ fn generated_rendered_fn_is_proc_macro_export(function: &syn::ItemFn) -> bool {
             || attr.path().is_ident("proc_macro_attribute")
             || attr.path().is_ident("proc_macro_derive")
     })
+}
+
+fn generated_retained_trait_default_methods(
+    rendered: &GeneratedRenderedSymbols,
+    blocked_items: &BTreeSet<String>,
+) -> BTreeSet<GeneratedRenderedTraitDefaultMethod> {
+    let mut retained = BTreeSet::new();
+    let mut referenced_methods = rendered.direct_call_references.clone();
+
+    loop {
+        let before = retained.len();
+        for method in &rendered.trait_default_methods {
+            if blocked_items.contains(&method.trait_item)
+                || referenced_methods.contains(&method.method)
+            {
+                retained.insert(method.clone());
+                if let Some(references) = rendered.trait_default_method_references.get(method) {
+                    referenced_methods.extend(references.iter().cloned());
+                }
+            }
+        }
+        if retained.len() == before {
+            break;
+        }
+    }
+
+    retained
+}
+
+fn generated_rendered_call_references_in_block(block: &syn::Block) -> BTreeSet<String> {
+    let mut collector = GeneratedRenderedCallReferenceCollector::default();
+    Visit::visit_block(&mut collector, block);
+    collector.references
+}
+
+#[derive(Default)]
+struct GeneratedRenderedCallReferenceCollector {
+    references: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for GeneratedRenderedCallReferenceCollector {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.references.insert(node.method.to_string());
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            if let Some(segment) = path.path.segments.last() {
+                self.references.insert(segment.ident.to_string());
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
+    }
 }
 
 fn generated_rendered_aliases_from_items(
@@ -2532,6 +2651,12 @@ fn generated_rendered_segments_path(package: &str, segments: &[String]) -> Strin
         path.push_str(segment);
     }
     path
+}
+
+fn generated_rendered_trait_default_method_id(
+    method: &GeneratedRenderedTraitDefaultMethod,
+) -> String {
+    format!("{}::{}", method.trait_item, method.method)
 }
 
 fn generated_rendered_method_symbol_path(
@@ -3199,6 +3324,14 @@ fn add_rendered_symbol_proof_hazards(
             "error",
             "generated source declares callables or items missing used/unknown classification",
             rendered_symbol_proof_details(proof, "unclassified"),
+        ));
+    }
+    if proof.summary.unproven_trait_default_methods > 0 {
+        hazards.push(production_hazard_with_details(
+            "rendered_unproven_trait_default_methods",
+            "error",
+            "generated source retained trait default methods without used/unknown proof",
+            rendered_symbol_proof_details(proof, "unproven"),
         ));
     }
     if proof.summary.source_parse_failures > 0 {
@@ -8343,14 +8476,18 @@ impl RenderedSymbolProofReportJson {
 struct RenderedSymbolProofSummaryJson {
     rendered_callables: usize,
     rendered_items: usize,
+    rendered_trait_default_methods: usize,
     retained_callables: usize,
     retained_items: usize,
+    retained_trait_default_methods: usize,
     macro_blocked_callables: usize,
     surface_blocked_callables: usize,
+    blocked_trait_default_methods: usize,
     prunable_callables: usize,
     prunable_items: usize,
     unclassified_callables: usize,
     unclassified_items: usize,
+    unproven_trait_default_methods: usize,
     source_parse_failures: usize,
 }
 
@@ -8359,14 +8496,18 @@ impl RenderedSymbolProofSummaryJson {
         Self {
             rendered_callables: summary.rendered_callables,
             rendered_items: summary.rendered_items,
+            rendered_trait_default_methods: summary.rendered_trait_default_methods,
             retained_callables: summary.retained_callables,
             retained_items: summary.retained_items,
+            retained_trait_default_methods: summary.retained_trait_default_methods,
             macro_blocked_callables: summary.macro_blocked_callables,
             surface_blocked_callables: summary.surface_blocked_callables,
+            blocked_trait_default_methods: summary.blocked_trait_default_methods,
             prunable_callables: summary.prunable_callables,
             prunable_items: summary.prunable_items,
             unclassified_callables: summary.unclassified_callables,
             unclassified_items: summary.unclassified_items,
+            unproven_trait_default_methods: summary.unproven_trait_default_methods,
             source_parse_failures: summary.source_parse_failures,
         }
     }
@@ -10666,6 +10807,14 @@ theme = []
                 .summary
                 .macro_blocked_callables
         );
+        assert_eq!(
+            value["usage"]["rendered_symbols"]["summary"]["unproven_trait_default_methods"],
+            report
+                .usage
+                .rendered_symbols
+                .summary
+                .unproven_trait_default_methods
+        );
         assert!(value["usage"]["rendered_symbols"]["entries"].is_array());
         assert_eq!(
             value["usage"]["public_reexports"]["status"],
@@ -10791,6 +10940,7 @@ theme = []
                 prunable_items: 1,
                 unclassified_callables: 1,
                 unclassified_items: 1,
+                unproven_trait_default_methods: 1,
                 source_parse_failures: 1,
                 ..RenderedSymbolProofSummary::default()
             },
@@ -10814,6 +10964,11 @@ theme = []
                     kind: "item".to_string(),
                     id: "facade::EscapedType(Struct)".to_string(),
                     classification: "unclassified".to_string(),
+                },
+                RenderedSymbolProofEntry {
+                    kind: "trait_default_method".to_string(),
+                    id: "facade::EscapedTrait(Trait)::dead_default".to_string(),
+                    classification: "unproven".to_string(),
                 },
             ],
         };
@@ -10840,6 +10995,16 @@ theme = []
                         .blocked_idents
                         .iter()
                         .any(|ident| ident == "facade::EscapedType(Struct)")
+                })
+        }));
+        assert!(hazards.iter().any(|hazard| {
+            hazard.code == "rendered_unproven_trait_default_methods"
+                && hazard.severity == "error"
+                && hazard.details.iter().any(|detail| {
+                    detail
+                        .blocked_idents
+                        .iter()
+                        .any(|ident| ident == "facade::EscapedTrait(Trait)::dead_default")
                 })
         }));
         assert!(hazards
@@ -10886,6 +11051,111 @@ pub fn live_attr(_attr: TokenStream, item: TokenStream) -> TokenStream {
         assert!(proof.entries.iter().any(|entry| {
             entry.kind == "callable"
                 && entry.id == "proc_helpers::live_attr"
+                && entry.classification == "blocked_by_unknown"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_blocks_unproven_trait_default_methods() {
+        let output = temp_output("rendered-symbol-trait-default");
+        write(
+            output.join("trait_defaults/Cargo.toml"),
+            r#"[package]
+name = "trait_defaults"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("trait_defaults/src/lib.rs"),
+            r#"pub trait Reader {
+    fn read(&self) -> u32;
+
+    fn dead_default(&self) -> u32 {
+        0
+    }
+}
+"#,
+        );
+        let trait_item = ItemId {
+            package: "trait_defaults".to_string(),
+            module_path: Vec::new(),
+            name: "Reader".to_string(),
+            kind: ItemKind::Trait,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["trait_defaults".to_string()]),
+            used_items: BTreeSet::from([trait_item]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = rendered_symbol_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "failed", "{proof:#?}");
+        assert_eq!(
+            proof.summary.rendered_trait_default_methods, 1,
+            "{proof:#?}"
+        );
+        assert_eq!(
+            proof.summary.unproven_trait_default_methods, 1,
+            "{proof:#?}"
+        );
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "trait_default_method"
+                && entry.id == "trait_defaults::Reader(Trait)::dead_default"
+                && entry.classification == "unproven"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_allows_unknown_blocked_trait_default_methods() {
+        let output = temp_output("rendered-symbol-blocked-trait-default");
+        write(
+            output.join("trait_defaults/Cargo.toml"),
+            r#"[package]
+name = "trait_defaults"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("trait_defaults/src/lib.rs"),
+            r#"pub trait Reader {
+    fn read(&self) -> u32;
+
+    fn dead_default(&self) -> u32 {
+        0
+    }
+}
+"#,
+        );
+        let trait_item = ItemId {
+            package: "trait_defaults".to_string(),
+            module_path: Vec::new(),
+            name: "Reader".to_string(),
+            kind: ItemKind::Trait,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["trait_defaults".to_string()]),
+            blocked_by_unknown_items: BTreeSet::from([trait_item]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = rendered_symbol_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "proven", "{proof:#?}");
+        assert_eq!(
+            proof.summary.rendered_trait_default_methods, 1,
+            "{proof:#?}"
+        );
+        assert_eq!(proof.summary.blocked_trait_default_methods, 1, "{proof:#?}");
+        assert_eq!(
+            proof.summary.unproven_trait_default_methods, 0,
+            "{proof:#?}"
+        );
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "trait_default_method"
+                && entry.id == "trait_defaults::Reader(Trait)::dead_default"
                 && entry.classification == "blocked_by_unknown"
         }));
     }

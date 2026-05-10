@@ -77,7 +77,10 @@ public facades resolve through local or support package reexport chains to
 symbols classified as `prunable` or unclassified. Exported proc-macro entry
 points are treated as scoped `blocked_by_unknown` symbols instead of ordinary
 dead code, so retained macro packages remain fail-closed without globally
-blocking unrelated pruning.
+blocking unrelated pruning. Retained trait default method bodies are also part
+of this rendered-source proof: production rejects default methods that are not
+reachable from retained call sites/default-method chains and not protected by a
+blocked trait surface.
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust
 source. This keeps copied support packages under the same used/unknown and

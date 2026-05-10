@@ -1345,3 +1345,12 @@ still contains `impl Trait for Type`, the methods required by that trait are
 classified as scoped `blocked_by_unknown` in the rendered-symbol proof even when
 no selected root calls them directly. Optional/default trait methods still remain
 eligible for normal pruning proof.
+
+The trait-default-method hard audit has also moved into production reports.
+`usage.rendered_symbols` now counts rendered default methods, tracks direct call
+references plus references made from other retained default methods, and emits a
+hard `rendered_unproven_trait_default_methods` hazard if a generated trait keeps
+an unreferenced default body without the trait itself being
+`blocked_by_unknown`. This closes another support-package redundancy class where
+a retained trait item could hide dead executable code inside its body while the
+top-level item proof still looked clean.
