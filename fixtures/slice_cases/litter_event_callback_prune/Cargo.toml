@@ -1,0 +1,4 @@
+[workspace]
+members = ["codex-mobile-client"]
+resolver = "2"
+

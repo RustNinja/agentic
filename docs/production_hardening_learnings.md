@@ -1202,3 +1202,14 @@ maps all 31 callables and 14 items, proves 16 retained-package callables and 5
 retained-package items are prunable with zero unproven symbols, and reports
 only scoped unresolved method/path warnings. The full checked slice-case suite
 now covers 769 generated workspaces.
+
+The event callback fixture adds a Litter-shaped mobile FFI root that registers
+a callback handle, stores an `Arc<dyn EventCallback + Send + Sync>` in a core
+event bus, emits an event envelope, and converts it into protocol DTO records.
+It keeps the dynamic-dispatch and cfg/derive surfaces as scoped production
+warnings, but still prunes dead diagnostics/voice modules, dead support
+modules, dead callback helpers, and dead protocol DTO helpers. Under RA it maps
+all 48 callables and 24 items, proves 23 retained-package callables and 9
+retained-package items are prunable with zero unproven symbols, and leaves only
+scoped cfg, derive, trait-object, fallback, and unresolved semantic warnings.
+The full checked slice-case suite now covers 770 generated workspaces.

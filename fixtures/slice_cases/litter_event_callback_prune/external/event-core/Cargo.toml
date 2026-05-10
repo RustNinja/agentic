@@ -1,0 +1,8 @@
+[package]
+name = "event-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+event-protocol = { path = "../event-protocol" }
+

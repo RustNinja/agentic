@@ -682,6 +682,173 @@ fn prunes_litter_bridge_ipc_support_packages_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_litter_event_callback_support_packages_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_event_callback_prune");
+    let output = temp_path("slice-case-litter-event-callback-prune-output");
+    let target_dir = temp_path("slice-case-litter-event-callback-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_event_callback_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        [
+            "codex-mobile-client",
+            "event-api",
+            "event-core",
+            "event-protocol"
+        ]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string()
+                == "codex-mobile-client::ffi::events::register_event_callback"),
+        "event callback root should be recorded: {:?}",
+        report.roots
+    );
+    assert_production_hazard(&report, "trait_object_surfaces", "warning");
+
+    let mobile_root = read(output.join("codex-mobile-client/src/lib.rs"));
+    let ffi_root = read(output.join("codex-mobile-client/src/ffi/mod.rs"));
+    let events_source = read(output.join("codex-mobile-client/src/ffi/events.rs"));
+    let api_root = read(output.join("event-api/src/lib.rs"));
+    let api_live = read(output.join("event-api/src/live.rs"));
+    let core_root = read(output.join("event-core/src/lib.rs"));
+    let core_live = read(output.join("event-core/src/live.rs"));
+    let protocol_root = read(output.join("event-protocol/src/lib.rs"));
+    let protocol_live = read(output.join("event-protocol/src/live.rs"));
+
+    assert!(mobile_root.contains("pub mod ffi"), "{mobile_root}");
+    assert_absent(
+        "codex-mobile-client/src/lib.rs",
+        &mobile_root,
+        &["diagnostics", "dead_mobile_event_entry"],
+    );
+    assert!(ffi_root.contains("pub mod events"), "{ffi_root}");
+    assert_absent("codex-mobile-client/src/ffi/mod.rs", &ffi_root, &["voice"]);
+    assert!(
+        events_source.contains("pub fn register_event_callback"),
+        "{events_source}"
+    );
+    assert_absent(
+        "codex-mobile-client/src/ffi/events.rs",
+        &events_source,
+        &["dead_event_callback", "dead_summary"],
+    );
+    assert!(!output
+        .join("codex-mobile-client/src/diagnostics.rs")
+        .exists());
+    assert!(!output.join("codex-mobile-client/src/ffi/voice.rs").exists());
+
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("EventCallbackHandle"), "{api_root}");
+    assert_absent(
+        "event-api/src/lib.rs",
+        &api_root,
+        &["mod dead", "DeadEventApi", "dead_event_api_report"],
+    );
+    for token in [
+        "pub struct EventRegistration",
+        "pub struct EventCallbackHandle",
+        "pub struct EventSnapshotDto",
+        "pub fn register",
+        "pub fn emit_preview",
+        "pub fn from_wire",
+        "struct DefaultCallback",
+        "impl EventCallback for DefaultCallback",
+    ] {
+        assert!(api_live.contains(token), "missing {token:?}\n{api_live}");
+    }
+    assert_absent(
+        "event-api/src/live.rs",
+        &api_live,
+        &[
+            "dead_exported_preview",
+            "dead_register",
+            "DeadEventApi",
+            "dead_live_event_api",
+            "dead_render",
+        ],
+    );
+    assert!(!output.join("event-api/src/dead.rs").exists());
+
+    assert!(core_root.contains("mod live"), "{core_root}");
+    assert!(core_root.contains("EventBus"), "{core_root}");
+    assert_absent(
+        "event-core/src/lib.rs",
+        &core_root,
+        &["mod dead", "DeadEventBus", "dead_event_core_report"],
+    );
+    for token in [
+        "pub enum EventKind",
+        "pub struct EventEnvelope",
+        "pub trait EventCallback",
+        "pub struct EventBus",
+        "pub fn new",
+        "pub fn set_callback",
+        "pub fn emit",
+        "fn classify_payload",
+        "fn normalize_label",
+        "fn normalize_payload",
+    ] {
+        assert!(core_live.contains(token), "missing {token:?}\n{core_live}");
+    }
+    assert!(core_live.contains("dyn EventCallback"), "{core_live}");
+    assert_absent(
+        "event-core/src/live.rs",
+        &core_live,
+        &[
+            "dead_render",
+            "dead_trait_method",
+            "dead_debug",
+            "dead_live_event_core",
+        ],
+    );
+    assert!(!output.join("event-core/src/dead.rs").exists());
+
+    assert!(protocol_root.contains("mod live"), "{protocol_root}");
+    assert!(protocol_root.contains("WireEvent"), "{protocol_root}");
+    assert_absent(
+        "event-protocol/src/lib.rs",
+        &protocol_root,
+        &["mod dead", "DeadWireEvent", "dead_event_protocol_report"],
+    );
+    for token in [
+        "pub enum WireEventKind",
+        "pub struct WireEvent",
+        "pub fn connected",
+        "pub fn message",
+        "pub fn closed",
+        "pub fn missing",
+        "pub fn label",
+        "pub fn body",
+        "pub fn kind",
+        "fn new",
+    ] {
+        assert!(
+            protocol_live.contains(token),
+            "missing {token:?}\n{protocol_live}"
+        );
+    }
+    assert_absent(
+        "event-protocol/src/live.rs",
+        &protocol_live,
+        &["dead_summary", "dead_live_event_protocol"],
+    );
+    assert!(!output.join("event-protocol/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &mobile_root, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
     let cases = [
@@ -729,6 +896,24 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             hazards: &[
                 ("semantic_unresolved_method_calls", "warning"),
                 ("semantic_unresolved_paths", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "litter_event_callback_prune",
+            packages: &[
+                "codex-mobile-client",
+                "event-api",
+                "event-core",
+                "event-protocol",
+            ],
+            hazards: &[
+                ("conditional_compilation_attrs", "warning"),
+                ("custom_derive_macros", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+                ("semantic_unresolved_paths", "warning"),
+                ("syntactic_method_fallback_cap", "warning"),
+                ("syntactic_method_fallbacks", "warning"),
+                ("trait_object_surfaces", "warning"),
             ],
         },
         RaHardFixture {
