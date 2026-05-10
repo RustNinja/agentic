@@ -1061,6 +1061,7 @@ only when a concrete reducer/render/validation bug appears.
 | `rule.macro.pub_crate_helper_reexport.001` | covered | Restricted macro helper reexports are retained only when rendered modules import the local macro through the defining module path |
 | `fixture.litter.reconnect_callback.001` | covered | A Litter-shaped reconnect callback fixture slices through `Arc<RwLock<Option<Arc<dyn RequestHandler>>>>` and `dyn Fn() -> Pin<Box<dyn Future<...>>>` connector surfaces while pruning dead support controller code |
 | `fixture.validation.rendered_classified.001` | covered | The slice-case harness fails when generated source declares a callable or item that is not classified as used or blocked_by_unknown |
+| `fixture.validation.package_inventory.001` | covered | The slice-case harness fails when generated package manifests differ from `GenerateReport.packages` or duplicate a package name, so extra copied support crates cannot escape the used/unknown source audit |
 
 | `fixture.typed_array_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed array pattern payload recovery while pruning dead support package items |
 | `fixture.typed_array_ref_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed array ref pattern payload recovery while pruning dead support package items |

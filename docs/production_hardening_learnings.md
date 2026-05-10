@@ -1280,3 +1280,11 @@ hazards because the derive/helper surfaces are dependency-proven known
 contracts. It passes both the default slice path and the RA high-risk matrix
 with zero expected RA hazards, while the full checked slice-case suite now
 covers 774 generated workspaces.
+
+The slice-case hard audit now validates package inventory before source-symbol
+classification. Every generated `Cargo.toml` with a `[package]` section must
+match `GenerateReport.packages` exactly, and duplicate generated package names
+fail the test. This closes a package-level escape hatch where an extra copied
+support crate could exist outside the report and avoid the used/unknown source
+audit. Focused checks on trim-unused, Litter serde, and Litter reconnect
+callback fixtures passed with the stricter package inventory contract.

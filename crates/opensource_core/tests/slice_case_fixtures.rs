@@ -22183,7 +22183,61 @@ fn assert_cargo_check(
         String::from_utf8_lossy(&output.stderr),
         root_source,
     );
+    assert_package_inventory_contract(workspace, report);
     assert_usage_contract(workspace, report);
+}
+
+fn assert_package_inventory_contract(workspace: &Path, report: &GenerateReport) {
+    let expected = report.packages.iter().cloned().collect::<BTreeSet<_>>();
+    let actual = collect_rendered_package_names(workspace);
+    assert_eq!(
+        actual, expected,
+        "generated workspace package manifests must match reported retained packages"
+    );
+}
+
+fn collect_rendered_package_names(workspace: &Path) -> BTreeSet<String> {
+    let mut manifests = Vec::new();
+    collect_cargo_manifests(workspace, &mut manifests);
+    let mut packages = BTreeSet::new();
+    for manifest in manifests {
+        let source = read(&manifest);
+        let value = source.parse::<toml::Value>().unwrap_or_else(|err| {
+            panic!(
+                "generated manifest should parse: {}\n{err}",
+                manifest.display()
+            )
+        });
+        let Some(package) = value.get("package") else {
+            continue;
+        };
+        let Some(name) = package.get("name").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        assert!(
+            packages.insert(name.to_string()),
+            "generated workspace should not contain duplicate package name {name:?}; duplicate at {}",
+            manifest.display()
+        );
+    }
+    packages
+}
+
+fn collect_cargo_manifests(root: &Path, manifests: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(root).unwrap_or_else(|err| {
+        panic!(
+            "generated workspace directory should be readable: {}\n{err}",
+            root.display()
+        )
+    }) {
+        let entry = entry.expect("generated workspace directory entry should be readable");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_cargo_manifests(&path, manifests);
+        } else if path.file_name().and_then(|name| name.to_str()) == Some("Cargo.toml") {
+            manifests.push(path);
+        }
+    }
 }
 
 #[cfg(feature = "ra-hir")]
