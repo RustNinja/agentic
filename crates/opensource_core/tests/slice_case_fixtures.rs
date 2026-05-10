@@ -1,5 +1,5 @@
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -21124,12 +21124,33 @@ fn assert_usage_contract(workspace: &Path, report: &GenerateReport) {
             .intersection(&prunable_items)
             .collect::<Vec<_>>()
     );
+
+    let retained_trait_default_methods = retained_trait_default_methods(&rendered, &blocked_items);
+    let unproven_trait_default_methods = rendered
+        .trait_default_methods
+        .difference(&retained_trait_default_methods)
+        .collect::<Vec<_>>();
+    assert!(
+        unproven_trait_default_methods.is_empty(),
+        "generated source retained trait default methods that are not referenced by retained code \
+         and not blocked_by_unknown: {:?}",
+        unproven_trait_default_methods
+    );
 }
 
 #[derive(Default)]
 struct RenderedSymbols {
     callables: BTreeSet<String>,
     items: BTreeSet<String>,
+    trait_default_methods: BTreeSet<RenderedTraitDefaultMethod>,
+    direct_call_references: BTreeSet<String>,
+    trait_default_method_references: BTreeMap<RenderedTraitDefaultMethod, BTreeSet<String>>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct RenderedTraitDefaultMethod {
+    trait_item: String,
+    method: String,
 }
 
 fn collect_rendered_symbols(workspace: &Path, packages: &[String]) -> RenderedSymbols {
@@ -21165,6 +21186,9 @@ fn collect_rendered_items(
                     module_path,
                     &function.sig.ident.to_string(),
                 ));
+                symbols
+                    .direct_call_references
+                    .extend(call_references_in_block(&function.block));
             }
             syn::Item::Struct(item) => {
                 symbols.items.insert(item_symbol_path(
@@ -21199,12 +21223,30 @@ fn collect_rendered_items(
                 ));
             }
             syn::Item::Trait(item) => {
+                let trait_item =
+                    item_symbol_path(package, module_path, &item.ident.to_string(), "Trait");
                 symbols.items.insert(item_symbol_path(
                     package,
                     module_path,
                     &item.ident.to_string(),
                     "Trait",
                 ));
+                for trait_item_fn in &item.items {
+                    let syn::TraitItem::Fn(method) = trait_item_fn else {
+                        continue;
+                    };
+                    let Some(block) = &method.default else {
+                        continue;
+                    };
+                    let default_method = RenderedTraitDefaultMethod {
+                        trait_item: trait_item.clone(),
+                        method: method.sig.ident.to_string(),
+                    };
+                    symbols.trait_default_methods.insert(default_method.clone());
+                    symbols
+                        .trait_default_method_references
+                        .insert(default_method, call_references_in_block(block));
+                }
             }
             syn::Item::Const(item) => {
                 symbols.items.insert(item_symbol_path(
@@ -21249,12 +21291,69 @@ fn collect_rendered_items(
                                 &type_path,
                                 &method.sig.ident.to_string(),
                             ));
+                            symbols
+                                .direct_call_references
+                                .extend(call_references_in_block(&method.block));
                         }
                     }
                 }
             }
             _ => {}
         }
+    }
+}
+
+fn retained_trait_default_methods(
+    rendered: &RenderedSymbols,
+    blocked_items: &BTreeSet<String>,
+) -> BTreeSet<RenderedTraitDefaultMethod> {
+    let mut retained = BTreeSet::new();
+    let mut referenced_methods = rendered.direct_call_references.clone();
+
+    loop {
+        let before = retained.len();
+        for method in &rendered.trait_default_methods {
+            if blocked_items.contains(&method.trait_item)
+                || referenced_methods.contains(&method.method)
+            {
+                retained.insert(method.clone());
+                if let Some(references) = rendered.trait_default_method_references.get(method) {
+                    referenced_methods.extend(references.iter().cloned());
+                }
+            }
+        }
+        if retained.len() == before {
+            break;
+        }
+    }
+
+    retained
+}
+
+fn call_references_in_block(block: &syn::Block) -> BTreeSet<String> {
+    let mut collector = CallReferenceCollector::default();
+    syn::visit::Visit::visit_block(&mut collector, block);
+    collector.references
+}
+
+#[derive(Default)]
+struct CallReferenceCollector {
+    references: BTreeSet<String>,
+}
+
+impl<'ast> syn::visit::Visit<'ast> for CallReferenceCollector {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        self.references.insert(node.method.to_string());
+        syn::visit::visit_expr_method_call(self, node);
+    }
+
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let syn::Expr::Path(path) = node.func.as_ref() {
+            if let Some(segment) = path.path.segments.last() {
+                self.references.insert(segment.ident.to_string());
+            }
+        }
+        syn::visit::visit_expr_call(self, node);
     }
 }
 

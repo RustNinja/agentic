@@ -1130,3 +1130,12 @@ and render helper. The fix is generic: rendered impl methods no longer force
 the entire trait surface to render; the existing trait-item predicate decides
 which required, referenced, or macro-protected items remain. The full
 slice-case suite now covers this contract across 766 fast fixtures.
+
+The fixture harness now also audits trait default methods as part of the generic
+used/unknown/unused contract. After every generated slice cargo-checks, the
+harness scans rendered Rust and fails if a retained trait default method is not
+reachable from retained call sites or from another reachable default method, and
+is not protected by a `blocked_by_unknown` trait item. This turns the
+`dead_default` class of redundancy into a global fixture failure instead of a
+one-off string assertion, while still allowing valid default-method flows such
+as generic bounds and UFCS dispatch.
