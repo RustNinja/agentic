@@ -973,6 +973,91 @@ fn prunes_litter_out_dir_codegen_support_packages_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_litter_reconnect_grouped_import_support_package_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_reconnect_import_prune");
+    let output = temp_path("slice-case-litter-reconnect-import-prune-output");
+    let target_dir = temp_path("slice-case-litter-reconnect-import-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_reconnect_import_prune fixture should slice");
+
+    assert_eq!(report.packages, ["codex-client", "codex-ipc"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "codex-ipc::reconnect_summary"),
+        "reconnect root should be recorded: {:?}",
+        report.roots
+    );
+
+    let ipc_root = read(output.join("codex-ipc/src/lib.rs"));
+    let client_root = read(output.join("codex-client/src/lib.rs"));
+    let client_live = read(output.join("codex-client/src/live.rs"));
+
+    assert!(ipc_root.contains("pub fn reconnect_summary"), "{ipc_root}");
+    assert!(
+        ipc_root.contains("codex_client::build_reconnect"),
+        "{ipc_root}"
+    );
+    assert_absent(
+        "codex-ipc/src/lib.rs",
+        &ipc_root,
+        &["dead_reconnect_summary", "dead_reconnect"],
+    );
+
+    assert!(client_root.contains("mod live"), "{client_root}");
+    assert!(
+        client_root.contains("pub use live::{build_reconnect, ReconnectState}"),
+        "{client_root}"
+    );
+    assert_absent(
+        "codex-client/src/lib.rs",
+        &client_root,
+        &["mod dead", "DeadReconnectState", "dead_reconnect"],
+    );
+    assert!(!output.join("codex-client/src/dead.rs").exists());
+
+    for token in [
+        "pub struct ReconnectState",
+        "id: String",
+        "pub fn new",
+        "pub fn summary",
+        "pub fn build_reconnect",
+        "fn normalize_reconnect_id",
+    ] {
+        assert!(
+            client_live.contains(token),
+            "missing {token:?}\n{client_live}"
+        );
+    }
+    assert_absent(
+        "codex-client/src/live.rs",
+        &client_live,
+        &[
+            "use std::",
+            "PathBuf",
+            "Arc",
+            "Duration",
+            "Cow",
+            "socket_path",
+            "retry_after",
+            "fallback_label",
+            "dead_details",
+            "dead_live_reconnect",
+        ],
+    );
+
+    assert_cargo_check(&output, &target_dir, &ipc_root, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
     let cases = [
@@ -1050,6 +1135,11 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 ("semantic_unresolved_paths", "warning"),
                 ("syntactic_method_fallback_cap", "warning"),
             ],
+        },
+        RaHardFixture {
+            fixture: "litter_reconnect_import_prune",
+            packages: &["codex-client", "codex-ipc"],
+            hazards: &[("semantic_unresolved_method_calls", "warning")],
         },
         RaHardFixture {
             fixture: "macro_receiver_prune",
@@ -22233,7 +22323,8 @@ fn collect_rendered_symbols(workspace: &Path, packages: &[String]) -> RenderedSy
             let syntax = syn::parse_file(&source).unwrap_or_else(|err| {
                 panic!("generated source should parse: {}\n{err}", file.display())
             });
-            collect_rendered_items(package, &module_path, &syntax.items, &mut symbols);
+            let aliases = rendered_aliases_from_items(&syntax.items, None);
+            collect_rendered_items(package, &module_path, &syntax.items, &aliases, &mut symbols);
         }
     }
     symbols
@@ -22243,6 +22334,7 @@ fn collect_rendered_items(
     package: &str,
     module_path: &[String],
     items: &[syn::Item],
+    aliases: &BTreeMap<String, Vec<String>>,
     symbols: &mut RenderedSymbols,
 ) {
     for item in items {
@@ -22346,16 +22438,38 @@ fn collect_rendered_items(
                 if let Some((_, nested)) = &item.content {
                     let mut nested_module_path = module_path.to_vec();
                     nested_module_path.push(name);
-                    collect_rendered_items(package, &nested_module_path, nested, symbols);
+                    let nested_aliases = rendered_aliases_from_items(nested, Some(aliases));
+                    collect_rendered_items(
+                        package,
+                        &nested_module_path,
+                        nested,
+                        &nested_aliases,
+                        symbols,
+                    );
                 }
             }
             syn::Item::Impl(item) => {
-                if let Some(type_path) = impl_type_path(module_path, &item.self_ty) {
+                if let Some(type_path) =
+                    rendered_impl_type_path(module_path, &item.self_ty, aliases)
+                {
+                    let trait_path = item
+                        .trait_
+                        .as_ref()
+                        .map(|(_, path, _)| rendered_normalized_path(module_path, path, aliases));
+                    let trait_input_type_paths = item
+                        .trait_
+                        .as_ref()
+                        .map(|(_, path, _)| {
+                            rendered_trait_input_type_paths(module_path, path, aliases)
+                        })
+                        .unwrap_or_default();
                     for impl_item in &item.items {
                         if let syn::ImplItem::Fn(method) = impl_item {
-                            symbols.callables.insert(method_symbol_path(
+                            symbols.callables.insert(rendered_method_symbol_path(
                                 package,
                                 &type_path,
+                                trait_path.as_deref(),
+                                &trait_input_type_paths,
                                 &method.sig.ident.to_string(),
                             ));
                             symbols
@@ -22367,6 +22481,49 @@ fn collect_rendered_items(
             }
             _ => {}
         }
+    }
+}
+
+fn rendered_aliases_from_items(
+    items: &[syn::Item],
+    parent: Option<&BTreeMap<String, Vec<String>>>,
+) -> BTreeMap<String, Vec<String>> {
+    let mut aliases = parent.cloned().unwrap_or_default();
+    for item in items {
+        if let syn::Item::Use(item_use) = item {
+            collect_rendered_use_tree(&item_use.tree, Vec::new(), &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn collect_rendered_use_tree(
+    tree: &syn::UseTree,
+    mut prefix: Vec<String>,
+    aliases: &mut BTreeMap<String, Vec<String>>,
+) {
+    match tree {
+        syn::UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_rendered_use_tree(&path.tree, prefix, aliases);
+        }
+        syn::UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            let mut target = prefix;
+            target.push(ident.clone());
+            aliases.insert(ident, target);
+        }
+        syn::UseTree::Rename(rename) => {
+            let mut target = prefix;
+            target.push(rename.ident.to_string());
+            aliases.insert(rename.rename.to_string(), target);
+        }
+        syn::UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_rendered_use_tree(nested, prefix.clone(), aliases);
+            }
+        }
+        syn::UseTree::Glob(_) => {}
     }
 }
 
@@ -22474,29 +22631,142 @@ fn module_path_from_source_file(source_root: &Path, file: &Path) -> Vec<String> 
     }
 }
 
-fn impl_type_path(module_path: &[String], ty: &syn::Type) -> Option<Vec<String>> {
+fn rendered_impl_type_path(
+    module_path: &[String],
+    ty: &syn::Type,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
     let syn::Type::Path(path) = ty else {
         return None;
     };
     if path.qself.is_some() {
         return None;
     }
-    let mut segments = path
-        .path
-        .segments
-        .iter()
-        .map(|segment| segment.ident.to_string())
-        .filter(|segment| segment != "crate" && segment != "self")
-        .collect::<Vec<_>>();
-    if segments.is_empty() {
+    rendered_normalized_type_path(module_path, ty, aliases)
+}
+
+fn rendered_normalized_path(
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let segments = rendered_apply_alias(
+        path.segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    rendered_normalize_segments(module_path, segments).unwrap_or_default()
+}
+
+fn rendered_normalized_type_path(
+    module_path: &[String],
+    ty: &syn::Type,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Option<Vec<String>> {
+    let syn::Type::Path(type_path) = ty else {
         return None;
+    };
+    let segments = rendered_apply_alias(
+        type_path
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    rendered_normalize_segments(module_path, segments)
+}
+
+fn rendered_normalize_segments(
+    module_path: &[String],
+    segments: Vec<String>,
+) -> Option<Vec<String>> {
+    let Some(first) = segments.first() else {
+        return None;
+    };
+    if first == "crate" {
+        return Some(segments[1..].to_vec());
     }
-    if segments.len() == 1 {
-        let mut type_path = module_path.to_vec();
-        type_path.append(&mut segments);
-        Some(type_path)
-    } else {
-        Some(segments)
+    if first == "self" {
+        let mut path = module_path.to_vec();
+        path.extend_from_slice(&segments[1..]);
+        return Some(path);
+    }
+    if first == "super" {
+        let mut path = module_path.to_vec();
+        path.pop();
+        path.extend_from_slice(&segments[1..]);
+        return Some(path);
+    }
+
+    let mut path = module_path.to_vec();
+    path.extend(segments);
+    Some(path)
+}
+
+fn rendered_apply_alias(
+    mut segments: Vec<String>,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Vec<String> {
+    let Some(first) = segments.first() else {
+        return segments;
+    };
+    let Some(target) = aliases.get(first) else {
+        return segments;
+    };
+    let mut resolved = target.clone();
+    resolved.extend(segments.drain(1..));
+    resolved
+}
+
+fn rendered_trait_input_type_paths(
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &BTreeMap<String, Vec<String>>,
+) -> Vec<Vec<String>> {
+    let mut type_paths = Vec::new();
+    for segment in &path.segments {
+        if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
+            for argument in &arguments.args {
+                if let syn::GenericArgument::Type(ty) = argument {
+                    collect_rendered_type_paths(module_path, ty, aliases, &mut type_paths);
+                }
+            }
+        }
+    }
+    type_paths.sort();
+    type_paths.dedup();
+    type_paths
+}
+
+fn collect_rendered_type_paths(
+    module_path: &[String],
+    ty: &syn::Type,
+    aliases: &BTreeMap<String, Vec<String>>,
+    type_paths: &mut Vec<Vec<String>>,
+) {
+    match ty {
+        syn::Type::Path(type_path) => {
+            if let Some(path) = rendered_normalized_type_path(module_path, ty, aliases) {
+                type_paths.push(path);
+            }
+            for segment in &type_path.path.segments {
+                if let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments {
+                    for argument in &arguments.args {
+                        if let syn::GenericArgument::Type(ty) = argument {
+                            collect_rendered_type_paths(module_path, ty, aliases, type_paths);
+                        }
+                    }
+                }
+            }
+        }
+        syn::Type::Reference(reference) => {
+            collect_rendered_type_paths(module_path, &reference.elem, aliases, type_paths);
+        }
+        _ => {}
     }
 }
 
@@ -22509,6 +22779,45 @@ fn symbol_path(package: &str, module_path: &[String], name: &str) -> String {
     path.push_str("::");
     path.push_str(name);
     path
+}
+
+fn rendered_method_symbol_path(
+    package: &str,
+    type_path: &[String],
+    trait_path: Option<&[String]>,
+    trait_input_type_paths: &[Vec<String>],
+    method: &str,
+) -> String {
+    if let Some(trait_path) = trait_path {
+        let mut path = format!("{package}::<");
+        push_segments(&mut path, type_path);
+        path.push_str(" as ");
+        push_segments(&mut path, trait_path);
+        if !trait_input_type_paths.is_empty() {
+            path.push('<');
+            for (index, input_path) in trait_input_type_paths.iter().enumerate() {
+                if index > 0 {
+                    path.push_str(", ");
+                }
+                push_segments(&mut path, input_path);
+            }
+            path.push('>');
+        }
+        path.push_str(">::");
+        path.push_str(method);
+        path
+    } else {
+        method_symbol_path(package, type_path, method)
+    }
+}
+
+fn push_segments(output: &mut String, segments: &[String]) {
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            output.push_str("::");
+        }
+        output.push_str(segment);
+    }
 }
 
 fn method_symbol_path(package: &str, type_path: &[String], method: &str) -> String {

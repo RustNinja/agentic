@@ -59,6 +59,7 @@ file.
 | `fixture.litter.bridge_ipc_method.001` | covered | Litter-shaped bridge IPC roots retain only live wire-frame decode, method dispatch, session state, response, and error-conversion surfaces across protocol/core support packages while pruning dead ssh, support modules, dead methods, and dead response helpers |
 | `fixture.litter.event_callback_dyn.001` | covered | Litter-shaped mobile event callback roots retain only live UniFFI-style registration records, callback handle methods, stored dyn callback surfaces, event envelope helpers, and protocol DTO constructors while pruning dead voice/diagnostics modules, dead support modules, and dead callback/DTO helpers |
 | `fixture.litter.out_dir_codegen.001` | covered | Litter-shaped OUT_DIR codegen roots retain build-generated return helper surfaces and scoped generated receiver methods while reporting retained build-script/OUT_DIR hazards and pruning dead UI, core, and protocol-codegen siblings |
+| `fixture.litter.reconnect_grouped_import.001` | covered | Litter-shaped reconnect support-package roots prune private unused client fields initialized with pure std constructors, remove now-unused grouped `std::{...}` import leaves, and prove the generated dependency package still cargo-checks with denied unused imports |
 | `dyn.owned.registry.001` | covered | Stored `Box<dyn Trait>` and callback aliases are hard production hazards |
 | `dyn.pruned_private_field.001` | covered | Dynamic hazards on private struct fields that are pruned from the rendered slice do not block production readiness |
 | `struct.private_generic_field_usage.001` | covered | Private generic fields are pruned when other retained fields already keep the struct type parameter used |
@@ -1054,6 +1055,9 @@ only when a concrete reducer/render/validation bug appears.
 | `fixture.iter_empty_chain_once_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::iter::empty::<T>().chain(once(T)) payload mapping while pruning dead support package items |
 | `fixture.slice_chunk_by_flatten_map_prune.support_chain.001` | covered | A checked-in support fixture slices through slice::chunk_by grouping and flattened payload mapping while pruning dead support package items |
 | `fixture.slice_chunk_by_mut_flatten_map_prune.support_chain.001` | covered | A checked-in support fixture slices through slice::chunk_by_mut grouping and flattened mutable payload mapping while pruning dead support package items |
+| `rule.reexport.public_grouped_target_body.001` | covered | Public grouped reexports keep live leaves without treating the target module's own body as evidence that dead sibling leaves are used |
+| `rule.reexport.public_glob_removed_source.001` | covered | Public glob reexports from removed modules are pruned even when retained code mentions the same leaf through a different explicit module path |
+| `rule.macro.pub_crate_helper_reexport.001` | covered | Restricted macro helper reexports are retained only when rendered modules import the local macro through the defining module path |
 
 | `fixture.typed_array_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed array pattern payload recovery while pruning dead support package items |
 | `fixture.typed_array_ref_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed array ref pattern payload recovery while pruning dead support package items |

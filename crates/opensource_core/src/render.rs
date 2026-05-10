@@ -6559,7 +6559,7 @@ fn retained_surface_idents_by_package(
 fn referenced_public_reexport_target_items(
     project: &Project,
     reduced: &ReducedProject,
-    mentions: &ReachableTokenIdentIndex,
+    _mentions: &ReachableTokenIdentIndex,
 ) -> BTreeSet<ItemId> {
     let mut target_items = BTreeSet::new();
     for package in &reduced.packages {
@@ -6577,16 +6577,6 @@ fn referenced_public_reexport_target_items(
                 let mut visible_targets = Vec::new();
                 collect_use_tree_visible_targets(&item_use.tree, Vec::new(), &mut visible_targets);
                 for (visible_name, target) in visible_targets {
-                    if !mentions.package_mentions_ident(package, &visible_name)
-                        && !public_reexport_name_is_referenced_by_reduced_package(
-                            project,
-                            reduced,
-                            package,
-                            &visible_name,
-                        )
-                    {
-                        continue;
-                    }
                     let Some((target_package, target_path)) =
                         resolve_use_target_path(project, package, &module_path, &target)
                     else {
@@ -6596,7 +6586,16 @@ fn referenced_public_reexport_target_items(
                         continue;
                     }
                     if let Some(item) = find_use_item(project, &target_package, &target_path) {
-                        target_items.insert(item);
+                        if public_reexport_target_item_is_referenced(
+                            project,
+                            reduced,
+                            package,
+                            &module_path,
+                            &visible_name,
+                            &item,
+                        ) {
+                            target_items.insert(item);
+                        }
                         continue;
                     }
                     if let Some((alias_package, alias_path)) =
@@ -6605,7 +6604,16 @@ fn referenced_public_reexport_target_items(
                         if reduced.packages.contains(&alias_package) {
                             if let Some(item) = find_use_item(project, &alias_package, &alias_path)
                             {
-                                target_items.insert(item);
+                                if public_reexport_target_item_is_referenced(
+                                    project,
+                                    reduced,
+                                    package,
+                                    &module_path,
+                                    &visible_name,
+                                    &item,
+                                ) {
+                                    target_items.insert(item);
+                                }
                             }
                         }
                     }
@@ -6614,6 +6622,86 @@ fn referenced_public_reexport_target_items(
         }
     }
     target_items
+}
+
+fn public_reexport_target_item_is_referenced(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    visible_name: &str,
+    target_item: &ItemId,
+) -> bool {
+    root_item_should_render(reduced, target_item)
+        || public_reexport_name_is_referenced_by_reduced_package(
+            project,
+            reduced,
+            package,
+            visible_name,
+        )
+        || reduced_package_mentions_public_reexport_target(
+            project,
+            reduced,
+            package,
+            module_path,
+            visible_name,
+            target_item,
+        )
+}
+
+fn reduced_package_mentions_public_reexport_target(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    visible_name: &str,
+    target_item: &ItemId,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_public_reexport_target(
+                    &record.item.to_token_stream(),
+                    module_path,
+                    visible_name,
+                )
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_public_reexport_target(
+                    &record.item.to_token_stream(),
+                    module_path,
+                    visible_name,
+                )
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| {
+                item.package == package && *item != target_item && item.kind != ItemKind::Mod
+            })
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_public_reexport_target(
+                        &record.item.to_token_stream(),
+                        module_path,
+                        visible_name,
+                    )
+                })
+            })
+}
+
+fn token_stream_mentions_public_reexport_target(
+    tokens: &TokenStream,
+    module_path: &[String],
+    visible_name: &str,
+) -> bool {
+    if module_path.is_empty() {
+        return token_stream_mentions_unqualified_ident(tokens, visible_name);
+    }
+    token_stream_mentions_module_path_ident(tokens, module_path, visible_name)
 }
 
 fn collect_use_tree_visible_targets(
@@ -9832,10 +9920,35 @@ fn transform_items(
         let item = match item {
             _ if item_is_test(item) && !retain_test_items => None,
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
-            Item::Use(item_use) if local_macro_self_reexport_should_prune(items, item_use) => None,
+            Item::Use(item_use)
+                if local_macro_self_reexport_should_prune(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    items,
+                    item_use,
+                ) =>
+            {
+                None
+            }
+            Item::Use(item_use)
+                if local_macro_self_reexport_should_remain(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    items,
+                    item_use,
+                ) =>
+            {
+                Some(Item::Use(item_use.clone()))
+            }
             Item::Use(item_use) => {
                 let mut item_use = item_use.clone();
-                let is_public_use = use_is_public_api_reexport(&item_use.vis);
+                let is_public_use = use_is_reexport(&item_use.vis);
                 let tree = prune_use_tree(
                     project,
                     reduced,
@@ -13949,7 +14062,10 @@ impl<'a> StructLiteralFieldPruner<'a> {
         let Some(field) = named_struct_field(item_struct, &field_name) else {
             return true;
         };
-        if !struct_literal_initializer_can_be_pruned(&field_value.expr) {
+        if !struct_literal_initializer_can_be_pruned_with_aliases(
+            &field_value.expr,
+            Some(&self.aliases),
+        ) {
             return true;
         }
         struct_field_should_remain(
@@ -14170,7 +14286,12 @@ fn retained_impl_items_mention_struct_field(
                 impl_item,
                 &type_path,
                 &aliases,
-            ) && impl_item_needs_struct_field(impl_item, field_name, item_impl.trait_.is_some())
+            ) && impl_item_needs_struct_field(
+                impl_item,
+                field_name,
+                item_impl.trait_.is_some(),
+                &aliases,
+            )
         })
     })
 }
@@ -14190,55 +14311,78 @@ fn reachable_callables_need_struct_field(
             render_plan.is_none_or(|render_plan| render_plan.callable_should_render(callable))
         })
         .any(|callable| {
-            project
-                .functions
-                .get(callable)
-                .is_some_and(|record| function_needs_struct_field(&record.item, field_name))
-                || project
-                    .methods
-                    .get(callable)
-                    .is_some_and(|record| method_needs_struct_field(&record.item, field_name))
+            project.functions.get(callable).is_some_and(|record| {
+                function_needs_struct_field(&record.item, &record.aliases, field_name)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                method_needs_struct_field(&record.item, &record.aliases, field_name)
+            })
         })
 }
 
-fn function_needs_struct_field(function: &syn::ItemFn, field_name: &str) -> bool {
-    block_needs_struct_field(&function.block, field_name)
+fn function_needs_struct_field(
+    function: &syn::ItemFn,
+    aliases: &HashMap<String, Vec<String>>,
+    field_name: &str,
+) -> bool {
+    block_needs_struct_field(&function.block, aliases, field_name)
 }
 
-fn method_needs_struct_field(method: &syn::ImplItemFn, field_name: &str) -> bool {
-    block_needs_struct_field(&method.block, field_name)
+fn method_needs_struct_field(
+    method: &syn::ImplItemFn,
+    aliases: &HashMap<String, Vec<String>>,
+    field_name: &str,
+) -> bool {
+    block_needs_struct_field(&method.block, aliases, field_name)
 }
 
 fn impl_item_needs_struct_field(
     impl_item: &ImplItem,
     field_name: &str,
     count_pure_struct_initializers: bool,
+    aliases: &HashMap<String, Vec<String>>,
 ) -> bool {
     let ImplItem::Fn(method) = impl_item else {
         return token_stream_mentions_ident(&impl_item.to_token_stream(), field_name);
     };
-    method_needs_struct_field_with_options(method, field_name, count_pure_struct_initializers)
+    method_needs_struct_field_with_options(
+        method,
+        aliases,
+        field_name,
+        count_pure_struct_initializers,
+    )
 }
 
-fn block_needs_struct_field(block: &Block, field_name: &str) -> bool {
-    block_needs_struct_field_with_options(block, field_name, false)
+fn block_needs_struct_field(
+    block: &Block,
+    aliases: &HashMap<String, Vec<String>>,
+    field_name: &str,
+) -> bool {
+    block_needs_struct_field_with_options(block, aliases, field_name, false)
 }
 
 fn method_needs_struct_field_with_options(
     method: &syn::ImplItemFn,
+    aliases: &HashMap<String, Vec<String>>,
     field_name: &str,
     count_pure_struct_initializers: bool,
 ) -> bool {
-    block_needs_struct_field_with_options(&method.block, field_name, count_pure_struct_initializers)
+    block_needs_struct_field_with_options(
+        &method.block,
+        aliases,
+        field_name,
+        count_pure_struct_initializers,
+    )
 }
 
 fn block_needs_struct_field_with_options(
     block: &Block,
+    aliases: &HashMap<String, Vec<String>>,
     field_name: &str,
     count_pure_struct_initializers: bool,
 ) -> bool {
     let mut visitor = StructFieldUseVisitor {
         field_name,
+        aliases,
         count_pure_struct_initializers,
         needs_field: false,
     };
@@ -14248,6 +14392,7 @@ fn block_needs_struct_field_with_options(
 
 struct StructFieldUseVisitor<'a> {
     field_name: &'a str,
+    aliases: &'a HashMap<String, Vec<String>>,
     count_pure_struct_initializers: bool,
     needs_field: bool,
 }
@@ -14275,7 +14420,10 @@ impl Visit<'_> for StructFieldUseVisitor<'_> {
         for field in &expr.fields {
             if member_name(&field.member).as_deref() == Some(self.field_name)
                 && (self.count_pure_struct_initializers
-                    || !struct_literal_initializer_can_be_pruned(&field.expr))
+                    || !struct_literal_initializer_can_be_pruned_with_aliases(
+                        &field.expr,
+                        Some(self.aliases),
+                    ))
             {
                 self.needs_field = true;
             }
@@ -14315,14 +14463,62 @@ fn path_is_self(path: &syn::Path) -> bool {
     path.segments.len() == 1 && path.segments[0].ident == "Self"
 }
 
-fn struct_literal_initializer_can_be_pruned(expr: &Expr) -> bool {
+fn struct_literal_initializer_can_be_pruned_with_aliases(
+    expr: &Expr,
+    aliases: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
     match expr {
         Expr::Path(path) => path.qself.is_none() && path.path.is_ident("None"),
         Expr::Lit(_) => true,
         Expr::Array(array) => array.elems.is_empty(),
         Expr::Tuple(tuple) => tuple.elems.is_empty(),
+        Expr::Call(call) => {
+            let Expr::Path(function) = call.func.as_ref() else {
+                return false;
+            };
+            function.qself.is_none()
+                && pure_std_struct_literal_initializer_path(&function.path, aliases)
+                && call
+                    .args
+                    .iter()
+                    .all(|arg| struct_literal_initializer_can_be_pruned_with_aliases(arg, aliases))
+        }
         _ => false,
     }
+}
+
+fn pure_std_struct_literal_initializer_path(
+    path: &syn::Path,
+    aliases: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let segments = aliases
+        .map(|aliases| apply_alias(segments.clone(), aliases))
+        .unwrap_or(segments);
+    let Some(last) = segments.last() else {
+        return false;
+    };
+    (path_segments_match(&segments, &["std", "borrow", "Cow"])
+        || path_segments_match(&segments, &["alloc", "borrow", "Cow"]))
+        && matches!(last.as_str(), "Borrowed" | "Owned")
+        || (path_segments_match(&segments, &["std", "time", "Duration"])
+            || path_segments_match(&segments, &["core", "time", "Duration"]))
+            && matches!(
+                last.as_str(),
+                "from_secs" | "from_millis" | "from_micros" | "from_nanos"
+            )
+}
+
+fn path_segments_match(segments: &[String], prefix: &[&str]) -> bool {
+    segments.len() == prefix.len() + 1
+        && segments
+            .iter()
+            .zip(prefix.iter())
+            .all(|(left, right)| left == right)
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -14579,14 +14775,22 @@ fn use_mentions_opensourced(tree: &UseTree) -> bool {
     }
 }
 
-fn local_macro_self_reexport_should_prune(items: &[Item], item_use: &syn::ItemUse) -> bool {
+fn local_macro_self_reexport_should_prune(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+    item_use: &syn::ItemUse,
+) -> bool {
     if use_is_public_api_reexport(&item_use.vis) {
         return false;
     }
     let Some(name) = single_use_name(&item_use.tree) else {
         return false;
     };
-    items.iter().any(|item| {
+    let macro_is_local = items.iter().any(|item| {
         matches!(
             item,
             Item::Macro(item_macro)
@@ -14595,7 +14799,100 @@ fn local_macro_self_reexport_should_prune(items: &[Item], item_use: &syn::ItemUs
                     .as_ref()
                     .is_some_and(|ident| ident == name)
         )
-    })
+    });
+    macro_is_local
+        && !local_macro_self_reexport_is_used_by_rendered_module(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            &name.to_string(),
+        )
+}
+
+fn local_macro_self_reexport_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+    item_use: &syn::ItemUse,
+) -> bool {
+    if use_is_public_api_reexport(&item_use.vis) {
+        return false;
+    }
+    let Some(name) = single_use_name(&item_use.tree) else {
+        return false;
+    };
+    let macro_is_local = items.iter().any(|item| {
+        matches!(
+            item,
+            Item::Macro(item_macro)
+                if item_macro
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == name)
+        )
+    });
+    macro_is_local
+        && local_macro_self_reexport_is_used_by_rendered_module(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            &name.to_string(),
+        )
+}
+
+fn local_macro_self_reexport_is_used_by_rendered_module(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    name: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                token_stream_mentions_module_path_ident(
+                    &record.item.to_token_stream(),
+                    module_path,
+                    name,
+                )
+            }) || project.methods.get(callable).is_some_and(|record| {
+                token_stream_mentions_module_path_ident(
+                    &record.item.to_token_stream(),
+                    module_path,
+                    name,
+                )
+            })
+        })
+        || project_module_paths(project, package)
+            .into_iter()
+            .any(|candidate| {
+                candidate != module_path
+                    && module_should_render(project, reduced, render_plan, package, &candidate)
+                    && module_items_for_path(project, package, &candidate).is_some_and(|items| {
+                        items.iter().any(|item| {
+                            let Item::Use(item_use) = item else {
+                                return false;
+                            };
+                            use_tree_mentions_module_path_ident(
+                                &item_use.tree,
+                                Vec::new(),
+                                module_path,
+                                name,
+                            )
+                        })
+                    })
+            })
 }
 
 fn single_use_name(tree: &UseTree) -> Option<&syn::Ident> {
@@ -15624,9 +15921,31 @@ fn reachable_module_uses_imported_ident(
         .any(|callable| {
             project.functions.get(callable).is_some_and(|record| {
                 record.module_path == module_path
-                    && function_uses_imported_ident(&record.item, ident)
+                    && function_uses_imported_ident(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        &record.item,
+                        ident,
+                    )
             }) || project.methods.get(callable).is_some_and(|record| {
-                record.module_path == module_path && method_uses_imported_ident(&record.item, ident)
+                let current_type_path = match callable {
+                    CallableId::Method { type_path, .. } => Some(type_path.as_slice()),
+                    CallableId::Free { .. } => None,
+                };
+                record.module_path == module_path
+                    && method_uses_imported_ident(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        current_type_path,
+                        &record.item,
+                        ident,
+                    )
             })
         })
     {
@@ -15672,19 +15991,56 @@ fn reachable_module_non_callable_mentions_imported_ident(
         || retained_macro_invocations_mention_ident(project, reduced, package, module_path, ident)
 }
 
-fn function_uses_imported_ident(function: &syn::ItemFn, ident: &str) -> bool {
+fn function_uses_imported_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    function: &syn::ItemFn,
+    ident: &str,
+) -> bool {
+    let mut block = function.block.clone();
+    prune_rendered_struct_literal_fields(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        None,
+        &mut block,
+    );
     let mut visitor = ImportUsageVisitor::new(ident);
     visitor.push_scope();
     visitor.visit_signature(&function.sig);
-    visitor.visit_block(&function.block);
+    visitor.visit_block(&block);
     visitor.found
 }
 
-fn method_uses_imported_ident(function: &syn::ImplItemFn, ident: &str) -> bool {
+fn method_uses_imported_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    current_type_path: Option<&[String]>,
+    function: &syn::ImplItemFn,
+    ident: &str,
+) -> bool {
+    let mut block = function.block.clone();
+    prune_rendered_struct_literal_fields(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        current_type_path,
+        &mut block,
+    );
     let mut visitor = ImportUsageVisitor::new(ident);
     visitor.push_scope();
     visitor.visit_signature(&function.sig);
-    visitor.visit_block(&function.block);
+    visitor.visit_block(&block);
     visitor.found
 }
 
@@ -16367,7 +16723,9 @@ fn reachable_package_mentions_unqualified_ident(
         || reduced
             .reachable_items
             .iter()
-            .filter(|item| item.package == package && item.name != ident)
+            .filter(|item| {
+                item.package == package && item.name != ident && item.kind != ItemKind::Mod
+            })
             .any(|item| {
                 project.items.get(item).is_some_and(|record| {
                     token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)

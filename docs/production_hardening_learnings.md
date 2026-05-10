@@ -1226,3 +1226,30 @@ build-script and OUT_DIR errors, proves 14 retained-package callables and 6
 items prunable with zero unproven symbols, and keeps only six scoped
 generated-code callables blocked by unknown. The full checked slice-case suite
 now covers 771 generated workspaces.
+
+The Litter-shaped reconnect grouped-import fixture tightened the sub-dependency
+contract from "builds" to "contains only rendered used/unknown surfaces." It
+found two generic issues. First, the fixture validator did not compare rendered
+trait impl methods using the same `<Type as Trait>::method` spelling that
+`CallableId` reports, so retained prunable trait impl methods could evade the
+hard validation loop. The validator now canonicalizes rendered aliases and
+trait impl method IDs before checking that no `usage.prunable` callable remains
+in generated source. Second, private fields initialized by side-effect-free
+std/core/alloc constructors such as `Duration::from_secs(...)` and
+`Cow::Borrowed(...)` stayed in a support package solely because the initializer
+was not recognized as prunable; their grouped `use std::{...}` leaves then
+remained too. The renderer now threads module aliases into field-use scanning,
+prunes those pure std constructor initializers when the field is otherwise
+unused, and runs import liveness over the pruned block view. The full checked
+slice-case suite now covers 772 generated workspaces.
+
+The same validation pass turned the focused rule database fully green again
+after exposing stale reexport pruning gaps. Public reexport target retention now
+ignores the body of the module that defines the target, so a dead sibling such
+as `DeadType` inside `mod api` no longer proves `pub use api::DeadType` is
+live. Root glob reexports similarly ignore inline/file module bodies when
+checking whether an exposed leaf is used, preventing dangling
+`pub use removed_mod::*` leaves when retained code references the same type
+through a different module path. Restricted macro helper reexports remain
+generic: `pub(crate) use helper_macro` is kept only when a rendered module or
+reachable callable imports/calls that macro through the defining module path.
