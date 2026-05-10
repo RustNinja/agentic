@@ -789,6 +789,29 @@ file.
 | `fixture.vec_into_boxed_slice_into_vec_map_prune.support_chain.001` | covered | A checked-in support fixture slices through boxed-slice into_vec owned payload iteration |
 | `fixture.boxed_slice_iter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through boxed slice borrowed iteration |
 | `fixture.vec_from_array_into_iter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Vec::from(array).into_iter payload mapping |
+| `fixture.arc_into_inner_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Arc::into_inner Option payload recovery while pruning dead support package items |
+| `fixture.rc_into_inner_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Rc::into_inner Option payload recovery while pruning dead support package items |
+| `fixture.arc_try_unwrap_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Arc::try_unwrap(...).unwrap() owned payload recovery while pruning dead support package items |
+| `fixture.rc_try_unwrap_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Rc::try_unwrap(...).unwrap() owned payload recovery while pruning dead support package items |
+| `fixture.mutex_try_lock_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Mutex::try_lock fallible guard payload mapping while pruning dead support package items |
+| `fixture.mutex_try_lock_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Mutex::try_lock().unwrap() guard payload rendering while pruning dead support package items |
+| `fixture.rwlock_try_read_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RwLock::try_read fallible guard payload mapping while pruning dead support package items |
+| `fixture.rwlock_try_write_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RwLock::try_write mutable guard payload mapping while pruning dead support package items |
+| `fixture.rwlock_try_read_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RwLock::try_read().unwrap() guard payload rendering while pruning dead support package items |
+| `fixture.rwlock_try_write_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RwLock::try_write().unwrap() mutable guard payload rendering while pruning dead support package items |
+| `fixture.refcell_try_borrow_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RefCell::try_borrow fallible guard payload mapping while pruning dead support package items |
+| `fixture.refcell_try_borrow_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RefCell::try_borrow_mut mutable guard payload mapping while pruning dead support package items |
+| `fixture.refcell_try_borrow_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RefCell::try_borrow().unwrap() guard payload rendering while pruning dead support package items |
+| `fixture.refcell_try_borrow_mut_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RefCell::try_borrow_mut().unwrap() mutable guard payload rendering while pruning dead support package items |
+| `fixture.cell_take_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Cell::take owned payload recovery while pruning dead support package items |
+| `fixture.refcell_take_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RefCell::take owned payload recovery while pruning dead support package items |
+| `fixture.mutex_into_inner_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Mutex::into_inner(...).unwrap() payload recovery while pruning dead support package items |
+| `fixture.rwlock_into_inner_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RwLock::into_inner(...).unwrap() payload recovery while pruning dead support package items |
+| `fixture.once_lock_into_inner_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through OnceLock::into_inner().unwrap() payload recovery while pruning dead support package items |
+| `fixture.vecdeque_make_contiguous_first_map_prune.support_chain.001` | covered | A checked-in support fixture slices through VecDeque::make_contiguous first payload mapping while pruning dead support package items |
+| `fixture.vecdeque_make_contiguous_last_map_prune.support_chain.001` | covered | A checked-in support fixture slices through VecDeque::make_contiguous last payload mapping while pruning dead support package items |
+| `fixture.vecdeque_make_contiguous_first_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through VecDeque::make_contiguous first_mut payload mapping while pruning dead support package items |
+| `fixture.vecdeque_make_contiguous_last_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through VecDeque::make_contiguous last_mut payload mapping while pruning dead support package items |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

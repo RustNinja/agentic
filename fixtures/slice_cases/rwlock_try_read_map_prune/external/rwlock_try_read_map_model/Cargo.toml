@@ -1,0 +1,4 @@
+[package]
+name = "rwlock_try_read_map_model"
+version = "0.1.0"
+edition = "2021"

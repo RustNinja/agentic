@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+mutex_try_lock_unwrap_map_api = { path = "../external/mutex_try_lock_unwrap_map_api" }

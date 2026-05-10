@@ -1,0 +1,7 @@
+[package]
+name = "refcell_try_borrow_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refcell_try_borrow_map_model = { path = "../refcell_try_borrow_map_model" }

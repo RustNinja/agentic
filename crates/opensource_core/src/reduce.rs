@@ -4953,6 +4953,9 @@ impl<'a> DependencyVisitor<'a> {
         if matches!(call.method.to_string().as_str(), "remove" | "swap_remove") {
             return self.single_expression_type_argument(&call.receiver);
         }
+        if call.method == "take" && call.args.is_empty() {
+            return self.single_expression_type_argument(&call.receiver);
+        }
         if matches!(
             call.method.to_string().as_str(),
             "or_insert" | "or_insert_with" | "or_insert_with_key" | "or_default"
@@ -4976,6 +4979,15 @@ impl<'a> DependencyVisitor<'a> {
         }
         if call.method == "lock" && call.args.is_empty() {
             return self.receiver_type(&call.receiver);
+        }
+        if matches!(
+            call.method.to_string().as_str(),
+            "try_borrow" | "try_borrow_mut" | "try_lock" | "try_read" | "try_write"
+        ) && call.args.is_empty()
+        {
+            return self
+                .single_expression_type_argument(&call.receiver)
+                .or_else(|| self.receiver_type(&call.receiver));
         }
         if matches!(
             call.method.to_string().as_str(),
@@ -6290,6 +6302,11 @@ impl<'a> DependencyVisitor<'a> {
                         | "take"
                         | "take_while"
                         | "union"
+                        | "try_borrow"
+                        | "try_borrow_mut"
+                        | "try_lock"
+                        | "try_read"
+                        | "try_write"
                         | "transpose"
                         | "unzip"
                         | "unwrap_or"
@@ -6424,6 +6441,18 @@ impl<'a> DependencyVisitor<'a> {
                     }
                 }
                 if call.method == "get_mut" && call.args.is_empty() {
+                    if let Some(ok_type) = self
+                        .single_expression_type_argument(&call.receiver)
+                        .or_else(|| self.receiver_type(&call.receiver))
+                    {
+                        return Some(ok_type);
+                    }
+                }
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "try_borrow" | "try_borrow_mut" | "try_lock" | "try_read" | "try_write"
+                ) && call.args.is_empty()
+                {
                     if let Some(ok_type) = self
                         .single_expression_type_argument(&call.receiver)
                         .or_else(|| self.receiver_type(&call.receiver))
@@ -11187,7 +11216,7 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
         ([wrapper], "into_inner")
             if matches!(
                 wrapper.as_str(),
-                "Cell" | "RefCell" | "Mutex" | "RwLock" | "OnceLock"
+                "Arc" | "Rc" | "Cell" | "RefCell" | "Mutex" | "RwLock" | "OnceLock"
             ) =>
         {
             Some(function.clone())
@@ -11195,7 +11224,9 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
         ([root, module, wrapper], "into_inner")
             if matches!(
                 (root.as_str(), module.as_str(), wrapper.as_str()),
-                ("std" | "core", "cell", "Cell")
+                ("std" | "alloc", "sync", "Arc")
+                    | ("std" | "alloc", "rc", "Rc")
+                    | ("std" | "core", "cell", "Cell")
                     | ("std" | "core", "cell", "RefCell")
                     | ("std", "sync", "Mutex")
                     | ("std", "sync", "RwLock")
@@ -11329,7 +11360,18 @@ fn single_segment_type_name(path: &Path) -> Option<String> {
 fn transparent_receiver_wrapper(name: &str) -> bool {
     matches!(
         name,
-        "Box" | "Rc" | "Arc" | "Cow" | "Pin" | "Ref" | "RefMut" | "Mutex" | "RwLock"
+        "Arc"
+            | "Box"
+            | "Cell"
+            | "Cow"
+            | "Mutex"
+            | "OnceLock"
+            | "Pin"
+            | "Rc"
+            | "Ref"
+            | "RefCell"
+            | "RefMut"
+            | "RwLock"
     )
 }
 
