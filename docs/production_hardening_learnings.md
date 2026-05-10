@@ -1192,3 +1192,13 @@ methods, and dead DTO helpers. Under RA it proves 23 retained-package callables
 and 9 retained-package items are prunable with zero unproven symbols, while
 leaving only scoped cfg/derive and semantic unresolved warnings. The full
 checked slice-case suite now covers 768 generated workspaces.
+
+The bridge IPC fixture adds a Litter-shaped `codex-bridge::ipc::handle_frame`
+root that decodes a wire frame, resolves a string method enum, dispatches
+through a core session helper, and returns a protocol response. It prunes dead
+ssh entrypoints, dead support modules, dead protocol response helpers, and
+unused support methods across `bridge-core` and `bridge-protocol`. Under RA it
+maps all 31 callables and 14 items, proves 16 retained-package callables and 5
+retained-package items are prunable with zero unproven symbols, and reports
+only scoped unresolved method/path warnings. The full checked slice-case suite
+now covers 769 generated workspaces.

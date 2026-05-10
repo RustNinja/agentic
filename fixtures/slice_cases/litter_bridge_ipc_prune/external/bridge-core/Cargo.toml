@@ -1,0 +1,8 @@
+[package]
+name = "bridge-core"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+bridge-protocol = { path = "../bridge-protocol" }
+

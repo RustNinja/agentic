@@ -1,0 +1,10 @@
+[package]
+name = "codex-bridge"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+bridge-core = { path = "../external/bridge-core" }
+bridge-protocol = { path = "../external/bridge-protocol" }
+

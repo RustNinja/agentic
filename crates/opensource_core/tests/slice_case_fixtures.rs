@@ -565,6 +565,123 @@ fn prunes_litter_mobile_session_support_packages_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_litter_bridge_ipc_support_packages_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_bridge_ipc_prune");
+    let output = temp_path("slice-case-litter-bridge-ipc-prune-output");
+    let target_dir = temp_path("slice-case-litter-bridge-ipc-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_bridge_ipc_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["bridge-core", "bridge-protocol", "codex-bridge"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "codex-bridge::ipc::handle_frame"),
+        "bridge ipc root should be recorded: {:?}",
+        report.roots
+    );
+
+    let bridge_root = read(output.join("codex-bridge/src/lib.rs"));
+    let ipc_source = read(output.join("codex-bridge/src/ipc.rs"));
+    let core_root = read(output.join("bridge-core/src/lib.rs"));
+    let core_live = read(output.join("bridge-core/src/live.rs"));
+    let protocol_root = read(output.join("bridge-protocol/src/lib.rs"));
+    let protocol_live = read(output.join("bridge-protocol/src/live.rs"));
+
+    assert!(bridge_root.contains("pub mod ipc"), "{bridge_root}");
+    assert_absent(
+        "codex-bridge/src/lib.rs",
+        &bridge_root,
+        &["pub mod ssh", "dead_bridge_entry"],
+    );
+    assert!(ipc_source.contains("pub fn handle_frame"), "{ipc_source}");
+    assert_absent(
+        "codex-bridge/src/ipc.rs",
+        &ipc_source,
+        &["dead_handle_frame", "BridgeError::dead"],
+    );
+    assert!(!output.join("codex-bridge/src/ssh.rs").exists());
+
+    assert!(core_root.contains("mod live"), "{core_root}");
+    assert!(core_root.contains("BridgeSession"), "{core_root}");
+    assert_absent(
+        "bridge-core/src/lib.rs",
+        &core_root,
+        &["mod dead", "DeadBridgeSession", "dead_core_report"],
+    );
+    for token in [
+        "pub enum SessionState",
+        "pub struct BridgeSession",
+        "pub fn new",
+        "pub fn id",
+        "pub fn state",
+        "pub fn dispatch_method",
+        "fn normalize_id",
+        "fn normalize_payload",
+        "fn state_label",
+    ] {
+        assert!(core_live.contains(token), "missing {token:?}\n{core_live}");
+    }
+    assert_absent(
+        "bridge-core/src/live.rs",
+        &core_live,
+        &["dead_debug", "dead_live_dispatch"],
+    );
+    assert!(!output.join("bridge-core/src/dead.rs").exists());
+
+    assert!(protocol_root.contains("mod live"), "{protocol_root}");
+    assert!(protocol_root.contains("WireFrame"), "{protocol_root}");
+    assert_absent(
+        "bridge-protocol/src/lib.rs",
+        &protocol_root,
+        &["mod dead", "DeadWireFrame", "dead_protocol_report"],
+    );
+    for token in [
+        "pub enum Method",
+        "pub struct WireFrame",
+        "pub struct ResponseFrame",
+        "pub enum BridgeError",
+        "pub fn from_wire",
+        "pub fn decode",
+        "pub fn method",
+        "pub fn session_id",
+        "pub fn payload",
+        "pub fn ok",
+        "pub fn core",
+    ] {
+        assert!(
+            protocol_live.contains(token),
+            "missing {token:?}\n{protocol_live}"
+        );
+    }
+    assert_absent(
+        "bridge-protocol/src/live.rs",
+        &protocol_live,
+        &[
+            "dead_name",
+            "dead_wire_debug",
+            "dead_response",
+            "pub fn dead(",
+            "dead_live_protocol",
+        ],
+    );
+    assert!(!output.join("bridge-protocol/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &bridge_root, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
     let cases = [
@@ -602,6 +719,14 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             hazards: &[
                 ("conditional_compilation_attrs", "warning"),
                 ("custom_derive_macros", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+                ("semantic_unresolved_paths", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "litter_bridge_ipc_prune",
+            packages: &["bridge-core", "bridge-protocol", "codex-bridge"],
+            hazards: &[
                 ("semantic_unresolved_method_calls", "warning"),
                 ("semantic_unresolved_paths", "warning"),
             ],
