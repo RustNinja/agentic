@@ -1139,3 +1139,15 @@ is not protected by a `blocked_by_unknown` trait item. This turns the
 `dead_default` class of redundancy into a global fixture failure instead of a
 one-off string assertion, while still allowing valid default-method flows such
 as generic bounds and UFCS dispatch.
+
+Generated slice-case workspaces are now checked with `unused_imports` denied.
+This directly targets the stale `use path::{x, y}` class of failures without
+turning deliberate enum-shape fallout, cfg review surfaces, or public unknown
+API remnants into unrelated hard errors. Unused `use` remnants can no longer
+hide behind a successful `cargo check --quiet`.
+
+The first failure from that stricter import check was a retained private
+`pub(crate) use render_record;` next to a local `macro_rules! render_record`
+definition. The renderer now prunes same-module, non-public macro self-reexports
+before normal use-tree pruning. The macro definition and invocation still remain,
+but the generated support package no longer carries an unused import.

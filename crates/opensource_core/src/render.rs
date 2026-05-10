@@ -9832,6 +9832,7 @@ fn transform_items(
         let item = match item {
             _ if item_is_test(item) && !retain_test_items => None,
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
+            Item::Use(item_use) if local_macro_self_reexport_should_prune(items, item_use) => None,
             Item::Use(item_use) => {
                 let mut item_use = item_use.clone();
                 let is_public_use = use_is_public_api_reexport(&item_use.vis);
@@ -14575,6 +14576,32 @@ fn use_mentions_opensourced(tree: &UseTree) -> bool {
         UseTree::Rename(rename) => rename.ident == "opensourced",
         UseTree::Group(group) => group.items.iter().any(use_mentions_opensourced),
         UseTree::Glob(_) => false,
+    }
+}
+
+fn local_macro_self_reexport_should_prune(items: &[Item], item_use: &syn::ItemUse) -> bool {
+    if use_is_public_api_reexport(&item_use.vis) {
+        return false;
+    }
+    let Some(name) = single_use_name(&item_use.tree) else {
+        return false;
+    };
+    items.iter().any(|item| {
+        matches!(
+            item,
+            Item::Macro(item_macro)
+                if item_macro
+                    .ident
+                    .as_ref()
+                    .is_some_and(|ident| ident == name)
+        )
+    })
+}
+
+fn single_use_name(tree: &UseTree) -> Option<&syn::Ident> {
+    match tree {
+        UseTree::Name(name) => Some(&name.ident),
+        _ => None,
     }
 }
 

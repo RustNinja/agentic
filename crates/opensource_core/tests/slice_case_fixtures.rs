@@ -1833,7 +1833,11 @@ fn prunes_macro_receiver_support_chain_with_default_analyzer() {
         &["mod dead", "DeadMacroRecord", "dead_macro"],
     );
     assert!(support_live.contains("macro_rules! render_record"));
-    assert!(support_live.contains("pub(crate) use render_record"));
+    assert_absent(
+        "macro_support/src/live.rs",
+        &support_live,
+        &["pub(crate) use render_record"],
+    );
     assert!(support_live.contains("pub struct MacroRecord"));
     assert!(support_live.contains("pub fn normalize"));
     assert!(support_live.contains("pub struct NormalizedRecord"));
@@ -20974,6 +20978,7 @@ fn assert_cargo_check(
         .arg("--quiet")
         .current_dir(workspace)
         .env("CARGO_TARGET_DIR", target_dir)
+        .env("RUSTFLAGS", fixture_rustflags_with_denied_unused_imports())
         .output()
         .expect("cargo check should start");
     assert!(
@@ -20985,6 +20990,27 @@ fn assert_cargo_check(
         root_source,
     );
     assert_usage_contract(workspace, report);
+}
+
+fn fixture_rustflags_with_denied_unused_imports() -> String {
+    match std::env::var("RUSTFLAGS") {
+        Ok(flags) if !rustflags_deny_lint(&flags, "unused-imports") => {
+            format!("{flags} -D unused-imports")
+        }
+        Ok(flags) => flags,
+        Err(_) => "-D unused-imports".to_string(),
+    }
+}
+
+fn rustflags_deny_lint(flags: &str, lint: &str) -> bool {
+    let mut previous = "";
+    for flag in flags.split_whitespace() {
+        if flag == format!("-D{lint}") || (previous == "-D" && flag == lint) {
+            return true;
+        }
+        previous = flag;
+    }
+    false
 }
 
 fn assert_production_hazard(report: &GenerateReport, code: &str, severity: &str) {
