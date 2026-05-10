@@ -1,0 +1,7 @@
+[workspace]
+members = [
+    "codex-ipc",
+    "external/codex-state",
+]
+resolver = "2"
+

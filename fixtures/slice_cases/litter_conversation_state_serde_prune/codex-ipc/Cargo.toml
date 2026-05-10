@@ -1,0 +1,9 @@
+[package]
+name = "codex-ipc"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+codex-state = { path = "../external/codex-state" }
+opensourced = { path = "../../../../crates/opensourced" }
+

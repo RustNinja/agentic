@@ -1269,3 +1269,14 @@ surface, and selected reconnect controller while pruning dead controller,
 handler, response, and sibling module code. Under RA it reports only scoped
 method fallback and trait-object review warnings, and the full checked
 slice-case suite now covers 773 generated workspaces.
+
+The hard validation loop now also includes a Litter-shaped conversation-state
+fixture with real `serde`, `serde_json`, and `thiserror` dependencies. The
+selected `codex-ipc::conversation_preview` root parses a private serde DTO tree,
+uses a thiserror conversion enum in the public result surface, and prunes the
+dead sibling parsing module plus dead live helpers from the support package.
+This fixture is intentionally macro-heavy but should not create production
+hazards because the derive/helper surfaces are dependency-proven known
+contracts. It passes both the default slice path and the RA high-risk matrix
+with zero expected RA hazards, while the full checked slice-case suite now
+covers 774 generated workspaces.

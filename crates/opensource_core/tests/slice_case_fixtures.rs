@@ -410,6 +410,105 @@ fn prunes_litter_conversation_render_support_packages_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_litter_conversation_state_serde_support_package_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_conversation_state_serde_prune");
+    let output = temp_path("slice-case-litter-conversation-state-serde-prune-output");
+    let target_dir = temp_path("slice-case-litter-conversation-state-serde-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_conversation_state_serde_prune fixture should slice");
+
+    assert_eq!(report.packages, ["codex-ipc", "codex-state"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "codex-ipc::conversation_preview"),
+        "conversation preview root should be recorded: {:?}",
+        report.roots
+    );
+
+    let ipc_root = read(output.join("codex-ipc/src/lib.rs"));
+    let state_manifest = read(output.join("codex-state/Cargo.toml"));
+    let state_root = read(output.join("codex-state/src/lib.rs"));
+    let state_live = read(output.join("codex-state/src/live.rs"));
+
+    assert!(
+        ipc_root.contains("pub fn conversation_preview"),
+        "{ipc_root}"
+    );
+    assert_absent(
+        "codex-ipc/src/lib.rs",
+        &ipc_root,
+        &["dead_conversation_preview"],
+    );
+
+    for dependency in ["serde", "serde_json", "thiserror"] {
+        assert!(
+            state_manifest.contains(dependency),
+            "codex-state manifest should retain dependency {dependency:?}\n{state_manifest}"
+        );
+    }
+    assert!(state_root.contains("mod live"), "{state_root}");
+    assert!(
+        state_root.contains("pub use live::{conversation_preview, ConversationError}"),
+        "{state_root}"
+    );
+    assert_absent(
+        "codex-state/src/lib.rs",
+        &state_root,
+        &[
+            "mod dead",
+            "DeadConversationError",
+            "dead_conversation_preview",
+        ],
+    );
+    assert!(!output.join("codex-state/src/dead.rs").exists());
+
+    for token in [
+        "use serde::Deserialize",
+        "use thiserror::Error",
+        "#[derive(Debug, Error)]",
+        "#[error(\"deserialize conversation state: {0}\")]",
+        "Deserialize(#[from] serde_json::Error)",
+        "#[derive(Debug, Deserialize)]",
+        "#[serde(rename_all = \"camelCase\")]",
+        "struct DesktopConversationState",
+        "struct ThreadState",
+        "#[serde(tag = \"type\", rename_all = \"camelCase\")]",
+        "enum TurnState",
+        "UserMessage",
+        "AgentMessage",
+        "ToolResult",
+        "struct PendingApproval",
+        "pub fn conversation_preview",
+    ] {
+        assert!(
+            state_live.contains(token),
+            "missing {token:?}\n{state_live}"
+        );
+    }
+    assert_absent(
+        "codex-state/src/live.rs",
+        &state_live,
+        &[
+            "dead_conversation_preview",
+            "dead_live_helper",
+            "DeadConversationError",
+            "DeadConversationState",
+        ],
+    );
+
+    assert_cargo_check(&output, &target_dir, &ipc_root, &report);
+}
+
+#[test]
 fn prunes_litter_mobile_session_support_packages_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/litter_mobile_session_prune");
     let output = temp_path("slice-case-litter-mobile-session-prune-output");
@@ -1176,6 +1275,11 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 ("semantic_unresolved_paths", "warning"),
                 ("syntactic_method_fallbacks", "warning"),
             ],
+        },
+        RaHardFixture {
+            fixture: "litter_conversation_state_serde_prune",
+            packages: &["codex-ipc", "codex-state"],
+            hazards: &[],
         },
         RaHardFixture {
             fixture: "litter_mobile_session_prune",
