@@ -257,6 +257,80 @@ fn prunes_litter_theme_health_support_package_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_out_dir_generated_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/out_dir_generated_prune");
+    let output = temp_path("slice-case-out-dir-generated-prune-output");
+    let target_dir = temp_path("slice-case-out-dir-generated-prune-target");
+    seed_out_dir_generated_source(
+        "slice_case_generated.rs",
+        "pub fn generated_value() -> u32 { super::out_dir_generated_helper() }\n",
+    );
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("out_dir_generated_prune fixture should slice");
+
+    assert_eq!(report.packages, ["generated_support", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_generated_total"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+    assert_production_hazard(&report, "retained_build_scripts", "error");
+    assert_production_hazard(&report, "out_dir_source_include_macros", "error");
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let support_manifest = read(output.join("generated_support/Cargo.toml"));
+    let support_source = read(output.join("generated_support/src/lib.rs"));
+
+    assert!(
+        root_manifest.contains("../generated_support"),
+        "{root_manifest}"
+    );
+    assert!(
+        root_source.contains("pub fn selected_generated_total"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("generated_support::selected_generated_value"),
+        "{root_source}"
+    );
+    assert_absent(
+        "root/src/lib.rs",
+        &root_source,
+        &["dead_generated_total", "dead_generated_value"],
+    );
+
+    assert!(support_manifest.contains("build = \"build.rs\""));
+    assert!(output.join("generated_support/build.rs").exists());
+    assert!(support_source.contains("include!(concat!(env!(\"OUT_DIR\")"));
+    assert!(
+        support_source.contains("pub fn selected_generated_value"),
+        "{support_source}"
+    );
+    assert!(
+        support_source.contains("pub fn out_dir_generated_helper"),
+        "{support_source}"
+    );
+    assert_absent(
+        "generated_support/src/lib.rs",
+        &support_source,
+        &["dead_generated_value", "dead_out_dir_helper"],
+    );
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_alias_import_support_chain_to_used_closure_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/import_alias_prune");
     let output = temp_path("slice-case-import-alias-prune-output");
@@ -20747,6 +20821,18 @@ fn assert_cargo_check(
     assert_usage_contract(workspace, report);
 }
 
+fn assert_production_hazard(report: &GenerateReport, code: &str, severity: &str) {
+    assert!(
+        report
+            .production
+            .hazards
+            .iter()
+            .any(|hazard| hazard.code == code && hazard.severity == severity),
+        "expected production hazard {code:?} with severity {severity:?}: {:?}",
+        report.production.hazards
+    );
+}
+
 fn assert_usage_contract(workspace: &Path, report: &GenerateReport) {
     let reachable_callables = report
         .reachable
@@ -20989,16 +21075,14 @@ fn collect_rendered_items(
                 }
             }
             syn::Item::Impl(item) => {
-                if item.trait_.is_none() {
-                    if let Some(type_path) = impl_type_path(module_path, &item.self_ty) {
-                        for impl_item in &item.items {
-                            if let syn::ImplItem::Fn(method) = impl_item {
-                                symbols.callables.insert(method_symbol_path(
-                                    package,
-                                    &type_path,
-                                    &method.sig.ident.to_string(),
-                                ));
-                            }
+                if let Some(type_path) = impl_type_path(module_path, &item.self_ty) {
+                    for impl_item in &item.items {
+                        if let syn::ImplItem::Fn(method) = impl_item {
+                            symbols.callables.insert(method_symbol_path(
+                                package,
+                                &type_path,
+                                &method.sig.ident.to_string(),
+                            ));
                         }
                     }
                 }
@@ -21157,6 +21241,18 @@ fn temp_path(label: &str) -> PathBuf {
         fs::remove_dir_all(&path).expect("old temp directory should remove");
     }
     path
+}
+
+fn seed_out_dir_generated_source(file_name: &str, source: &str) {
+    let out_dir = std::env::var_os("OUT_DIR")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| {
+            let path = temp_path("slice-case-seeded-out-dir");
+            fs::create_dir_all(&path).expect("seeded OUT_DIR should be created");
+            std::env::set_var("OUT_DIR", &path);
+            path
+        });
+    fs::write(out_dir.join(file_name), source).expect("OUT_DIR generated source should be seeded");
 }
 
 fn read(path: impl AsRef<Path>) -> String {
