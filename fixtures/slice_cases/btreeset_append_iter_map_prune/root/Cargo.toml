@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+btreeset_append_iter_map_api = { path = "../external/btreeset_append_iter_map_api" }

@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+vec_shrink_to_fit_last_map_api = { path = "../external/vec_shrink_to_fit_last_map_api" }

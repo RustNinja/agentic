@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/str_chars_next_back_map_api", "external/str_chars_next_back_map_model"]

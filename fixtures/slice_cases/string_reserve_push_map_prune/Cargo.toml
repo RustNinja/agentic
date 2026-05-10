@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/string_reserve_push_map_api", "external/string_reserve_push_map_model"]

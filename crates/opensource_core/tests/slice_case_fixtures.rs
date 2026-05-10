@@ -16707,6 +16707,518 @@ fn prunes_binaryheap_append_peek_map_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_vec_reserve_push_get_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_reserve_push_get_map_prune",
+        "vec_reserve_push_get_map",
+        &[
+            "Vec::with_capacity(1)",
+            "values.reserve(1)",
+            "values.push(",
+            ".get(0)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecReservePushGetMapItem",
+        "dead-vec-reserve-push-get-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_shrink_to_fit_last_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_shrink_to_fit_last_map_prune",
+        "vec_shrink_to_fit_last_map",
+        &[
+            "vec![VecShrinkToFitLastMapPayload::new(raw)]",
+            "values.shrink_to_fit()",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecShrinkToFitLastMapItem",
+        "dead-vec-shrink-to-fit-last-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_truncate_get_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_truncate_get_map_prune",
+        "vec_truncate_get_map",
+        &[
+            "values.truncate(1)",
+            ".get(0)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecTruncateGetMapItem",
+        "dead-vec-truncate-get-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_split_off_last_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_split_off_last_map_prune",
+        "vec_split_off_last_map",
+        &[
+            "values.split_off(1)",
+            "tail.last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecSplitOffLastMapItem",
+        "dead-vec-split-off-last-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_sort_by_key_first_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_sort_by_key_first_map_prune",
+        "slice_sort_by_key_first_map",
+        &[
+            ".as_mut_slice().sort_by_key(|payload| payload.rank())",
+            "pub fn rank",
+            ".first()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadSliceSortByKeyFirstMapItem",
+        "dead-slice-sort-by-key-first-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_rotate_left_first_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_rotate_left_first_map_prune",
+        "slice_rotate_left_first_map",
+        &[
+            "values.rotate_left(1)",
+            ".first()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadSliceRotateLeftFirstMapItem",
+        "dead-slice-rotate-left-first-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_rotate_right_last_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_rotate_right_last_map_prune",
+        "slice_rotate_right_last_map",
+        &[
+            "values.rotate_right(1)",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadSliceRotateRightLastMapItem",
+        "dead-slice-rotate-right-last-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_string_reserve_push_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "string_reserve_push_map_prune",
+        "string_reserve_push_map",
+        &[
+            "String::with_capacity(raw.len() + 4)",
+            "value.reserve(4)",
+            "value.push_str(raw)",
+            "value.push('!')",
+            "StringReservePushMapPayload::new(&value)",
+            "pub fn render_label",
+        ],
+        "DeadStringReservePushMapItem",
+        "dead-string-reserve-push-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_string_shrink_to_fit_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "string_shrink_to_fit_map_prune",
+        "string_shrink_to_fit_map",
+        &[
+            "raw.to_string()",
+            "value.push_str(\"-tail\")",
+            "value.shrink_to_fit()",
+            "StringShrinkToFitMapPayload::new(&value)",
+            "pub fn render_label",
+        ],
+        "DeadStringShrinkToFitMapItem",
+        "dead-string-shrink-to-fit-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_str_as_bytes_first_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_as_bytes_first_map_prune",
+        "str_as_bytes_first_map",
+        &[
+            "raw.as_bytes()",
+            ".first()",
+            "StrAsBytesFirstMapPayload::new(&byte.to_string()).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadStrAsBytesFirstMapItem",
+        "dead-str-as-bytes-first-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_str_chars_next_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_chars_next_back_map_prune",
+        "str_chars_next_back_map",
+        &[
+            "raw.chars()",
+            ".next_back()",
+            "StrCharsNextBackMapPayload::new(&ch.to_string()).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadStrCharsNextBackMapItem",
+        "dead-str-chars-next-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_pathbuf_push_pop_push_to_str_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "pathbuf_push_pop_push_to_str_map_prune",
+        "pathbuf_push_pop_push_to_str_map",
+        &[
+            "PathBuf::from(raw)",
+            "path.push(\"child\")",
+            "path.pop()",
+            "path.push(\"live\")",
+            "path.to_str()",
+            "pub fn render_label",
+        ],
+        "DeadPathbufPushPopPushToStrMapItem",
+        "dead-pathbuf-push-pop-push-to-str-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_osstr_to_string_lossy_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "osstr_to_string_lossy_map_prune",
+        "osstr_to_string_lossy_map",
+        &[
+            "OsStr::new(raw).to_string_lossy()",
+            "OsstrToStringLossyMapPayload::new(&value)",
+            "pub fn render_label",
+        ],
+        "DeadOsstrToStringLossyMapItem",
+        "dead-osstr-to-string-lossy-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_cstr_to_str_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "cstr_to_str_map_prune",
+        "cstr_to_str_map",
+        &[
+            "CString::new(raw).unwrap_or_else",
+            ".as_c_str()",
+            ".to_str()",
+            ".ok()",
+            "CstrToStrMapPayload::new(text).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadCstrToStrMapItem",
+        "dead-cstr-to-str-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_hashmap_shrink_to_fit_values_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashmap_shrink_to_fit_values_map_prune",
+        "hashmap_shrink_to_fit_values_map",
+        &[
+            "HashMap::new()",
+            "values.shrink_to_fit()",
+            ".values()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadHashmapShrinkToFitValuesMapItem",
+        "dead-hashmap-shrink-to-fit-values-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_hashmap_keys_cloned_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashmap_keys_cloned_map_prune",
+        "hashmap_keys_cloned_map",
+        &[
+            "HashMap::new()",
+            ".keys()",
+            ".cloned()",
+            "HashmapKeysClonedMapPayload::new(&key).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadHashmapKeysClonedMapItem",
+        "dead-hashmap-keys-cloned-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_hashset_reserve_insert_iter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashset_reserve_insert_iter_map_prune",
+        "hashset_reserve_insert_iter_map",
+        &[
+            "HashSet::new()",
+            "values.reserve(1)",
+            "values.insert(raw.to_string())",
+            ".iter()",
+            "HashsetReserveInsertIterMapPayload::new(value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadHashsetReserveInsertIterMapItem",
+        "dead-hashset-reserve-insert-iter-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_hashset_extend_iter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashset_extend_iter_map_prune",
+        "hashset_extend_iter_map",
+        &[
+            "HashSet::new()",
+            "values.extend([raw.to_string()])",
+            ".iter()",
+            "HashsetExtendIterMapPayload::new(value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadHashsetExtendIterMapItem",
+        "dead-hashset-extend-iter-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_btreemap_append_values_last_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreemap_append_values_last_map_prune",
+        "btreemap_append_values_last_map",
+        &[
+            "BTreeMap::new()",
+            "values.append(&mut extras)",
+            ".values()",
+            ".last()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadBtreemapAppendValuesLastMapItem",
+        "dead-btreemap-append-values-last-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_btreemap_clear_insert_values_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreemap_clear_insert_values_map_prune",
+        "btreemap_clear_insert_values_map",
+        &[
+            "BTreeMap::new()",
+            "values.clear()",
+            "values.insert(1usize",
+            ".values()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadBtreemapClearInsertValuesMapItem",
+        "dead-btreemap-clear-insert-values-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_btreeset_append_iter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreeset_append_iter_map_prune",
+        "btreeset_append_iter_map",
+        &[
+            "BTreeSet::new()",
+            "values.append(&mut extras)",
+            ".iter()",
+            "BtreesetAppendIterMapPayload::new(value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadBtreesetAppendIterMapItem",
+        "dead-btreeset-append-iter-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_binaryheap_push_pop_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "binaryheap_push_pop_map_prune",
+        "binaryheap_push_pop_map",
+        &[
+            "BinaryHeap::new()",
+            "values.push(raw.to_string())",
+            ".pop()",
+            "BinaryheapPushPopMapPayload::new(&value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadBinaryheapPushPopMapItem",
+        "dead-binaryheap-push-pop-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_binaryheap_into_sorted_vec_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "binaryheap_into_sorted_vec_map_prune",
+        "binaryheap_into_sorted_vec_map",
+        &[
+            "BinaryHeap::from([raw.to_string()])",
+            ".into_sorted_vec()",
+            ".into_iter()",
+            "BinaryheapIntoSortedVecMapPayload::new(&value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadBinaryheapIntoSortedVecMapItem",
+        "dead-binaryheap-into-sorted-vec-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_linkedlist_push_back_front_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "linkedlist_push_back_front_map_prune",
+        "linkedlist_push_back_front_map",
+        &[
+            "LinkedList::new()",
+            "values.push_back(",
+            ".front()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadLinkedlistPushBackFrontMapItem",
+        "dead-linkedlist-push-back-front-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_linkedlist_append_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "linkedlist_append_back_map_prune",
+        "linkedlist_append_back_map",
+        &[
+            "LinkedList::new()",
+            "values.append(&mut extras)",
+            ".back()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadLinkedlistAppendBackMapItem",
+        "dead-linkedlist-append-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vecdeque_push_front_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vecdeque_push_front_back_map_prune",
+        "vecdeque_push_front_back_map",
+        &[
+            "VecDeque::new()",
+            "values.push_front(",
+            ".back()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecdequePushFrontBackMapItem",
+        "dead-vecdeque-push-front-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vecdeque_resize_with_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vecdeque_resize_with_back_map_prune",
+        "vecdeque_resize_with_back_map",
+        &[
+            "VecDeque::new()",
+            "values.resize_with(2, || VecdequeResizeWithBackMapPayload::new(raw))",
+            ".back()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecdequeResizeWithBackMapItem",
+        "dead-vecdeque-resize-with-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,

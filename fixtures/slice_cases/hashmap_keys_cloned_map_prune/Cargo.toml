@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/hashmap_keys_cloned_map_api", "external/hashmap_keys_cloned_map_model"]

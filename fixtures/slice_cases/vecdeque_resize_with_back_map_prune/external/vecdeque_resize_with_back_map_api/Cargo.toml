@@ -1,0 +1,7 @@
+[package]
+name = "vecdeque_resize_with_back_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vecdeque_resize_with_back_map_model = { path = "../vecdeque_resize_with_back_map_model" }

@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/pathbuf_push_pop_push_to_str_map_api", "external/pathbuf_push_pop_push_to_str_map_model"]

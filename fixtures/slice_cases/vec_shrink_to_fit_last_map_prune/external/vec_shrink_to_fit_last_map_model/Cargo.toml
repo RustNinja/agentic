@@ -1,0 +1,4 @@
+[package]
+name = "vec_shrink_to_fit_last_map_model"
+version = "0.1.0"
+edition = "2021"

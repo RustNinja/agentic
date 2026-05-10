@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/vec_shrink_to_fit_last_map_api", "external/vec_shrink_to_fit_last_map_model"]

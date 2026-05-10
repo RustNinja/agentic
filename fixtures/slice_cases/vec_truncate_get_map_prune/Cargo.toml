@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/vec_truncate_get_map_api", "external/vec_truncate_get_map_model"]

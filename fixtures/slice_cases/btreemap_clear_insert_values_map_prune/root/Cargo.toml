@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+btreemap_clear_insert_values_map_api = { path = "../external/btreemap_clear_insert_values_map_api" }

@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/slice_rotate_left_first_map_api", "external/slice_rotate_left_first_map_model"]

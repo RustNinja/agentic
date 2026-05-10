@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/osstr_to_string_lossy_map_api", "external/osstr_to_string_lossy_map_model"]

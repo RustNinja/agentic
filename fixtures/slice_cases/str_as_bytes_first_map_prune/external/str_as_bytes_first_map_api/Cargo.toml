@@ -1,0 +1,7 @@
+[package]
+name = "str_as_bytes_first_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+str_as_bytes_first_map_model = { path = "../str_as_bytes_first_map_model" }

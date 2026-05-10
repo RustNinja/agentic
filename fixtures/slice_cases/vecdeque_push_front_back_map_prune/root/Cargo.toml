@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+vecdeque_push_front_back_map_api = { path = "../external/vecdeque_push_front_back_map_api" }

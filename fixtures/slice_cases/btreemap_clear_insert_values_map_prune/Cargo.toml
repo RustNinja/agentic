@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/btreemap_clear_insert_values_map_api", "external/btreemap_clear_insert_values_map_model"]

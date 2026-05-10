@@ -1,0 +1,7 @@
+[package]
+name = "vec_reserve_push_get_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+vec_reserve_push_get_map_model = { path = "../vec_reserve_push_get_map_model" }

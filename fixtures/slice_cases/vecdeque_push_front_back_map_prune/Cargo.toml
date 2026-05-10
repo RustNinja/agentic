@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/vecdeque_push_front_back_map_api", "external/vecdeque_push_front_back_map_model"]

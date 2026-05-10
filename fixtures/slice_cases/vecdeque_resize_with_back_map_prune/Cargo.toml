@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/vecdeque_resize_with_back_map_api", "external/vecdeque_resize_with_back_map_model"]
