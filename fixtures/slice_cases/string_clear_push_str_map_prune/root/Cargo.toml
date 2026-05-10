@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+string_clear_push_str_map_api = { path = "../external/string_clear_push_str_map_api" }

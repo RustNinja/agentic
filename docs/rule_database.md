@@ -676,6 +676,26 @@ file.
 | `fixture.hashmap_drain_filter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap::drain().filter_map(...)`, retaining drained value payload rendering only |
 | `fixture.btreemap_split_off_keys_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap::split_off(...).keys().map(...)`, retaining split key payload rendering only |
 | `fixture.binaryheap_from_iter_peek_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap::from([...]).peek()`, retaining heap top payload rendering only |
+| `fixture.vec_dedup_by_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::dedup_by` followed by live payload rendering without retaining unrelated vector helpers |
+| `fixture.vec_sort_by_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::sort_by` comparator closures and keeps only rendered payload methods |
+| `fixture.vec_select_nth_unstable_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::select_nth_unstable_by`, retaining comparator field access and the selected payload renderer only |
+| `fixture.vec_split_at_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::split_at` tuple slice views and downstream payload rendering only |
+| `fixture.vec_split_at_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::split_at_mut` mutable slice views and keeps only mutable payload methods |
+| `fixture.vec_chunks_exact_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::chunks_exact` slice chunks and prunes dead chunk payload helpers |
+| `fixture.vec_windows_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::windows` slice views and keeps only live window payload rendering |
+| `fixture.vec_retain_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::retain` predicate field access and rendered payload closure only |
+| `fixture.string_split_off_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::split_off`, retaining only split tail payload rendering |
+| `fixture.string_truncate_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::truncate` mutation and keeps only the rendered string payload path |
+| `fixture.string_clear_push_str_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::clear` plus `push_str`, retaining only live string payload rendering |
+| `fixture.string_retain_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::retain` character predicates without retaining dead string helpers |
+| `fixture.str_trim_start_matches_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `str::trim_start_matches` adapters and live payload construction only |
+| `fixture.str_trim_end_matches_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `str::trim_end_matches` adapters and prunes dead sibling helpers |
+| `fixture.str_split_inclusive_rev_map_prune.support_chain.001` | covered | A checked-in support fixture slices through reversed `str::split_inclusive` adapters and constructor method references |
+| `fixture.str_rsplit_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `str::rsplit` segment iterators and keeps only live segment rendering |
+| `fixture.pathbuf_join_file_name_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::join` plus `file_name` extraction without retaining dead path helpers |
+| `fixture.pathbuf_with_extension_to_str_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::with_extension` owned transforms and live string payload rendering |
+| `fixture.hashmap_extend_values_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap::extend` plus value iteration and prunes dead map payload helpers |
+| `fixture.vecdeque_truncate_front_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque::truncate` followed by front payload rendering only |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

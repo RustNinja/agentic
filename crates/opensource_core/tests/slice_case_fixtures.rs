@@ -15985,6 +15985,360 @@ fn prunes_binaryheap_from_iter_peek_map_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_vec_dedup_by_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_dedup_by_map_prune",
+        "vec_dedup_by_map",
+        &[
+            "values.dedup_by(",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecDedupByMapItem",
+        "dead-vec-dedup-by-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_sort_by_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_sort_by_map_prune",
+        "vec_sort_by_map",
+        &[
+            "values.sort_by(",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecSortByMapItem",
+        "dead-vec-sort-by-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_select_nth_unstable_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_select_nth_unstable_map_prune",
+        "vec_select_nth_unstable_map",
+        &[
+            ".select_nth_unstable_by(",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadVecSelectNthUnstableMapItem",
+        "dead-vec-select-nth-unstable-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_split_at_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_split_at_map_prune",
+        "vec_split_at_map",
+        &[
+            ".split_at(1)",
+            "head.iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecSplitAtMapItem",
+        "dead-vec-split-at-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_split_at_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_split_at_mut_map_prune",
+        "vec_split_at_mut_map",
+        &[
+            ".split_at_mut(1)",
+            "head.iter_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadVecSplitAtMutMapItem",
+        "dead-vec-split-at-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_chunks_exact_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_chunks_exact_map_prune",
+        "vec_chunks_exact_map",
+        &[
+            ".chunks_exact(1)",
+            ".filter_map(|chunk| chunk.first())",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecChunksExactMapItem",
+        "dead-vec-chunks-exact-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_windows_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_windows_map_prune",
+        "vec_windows_map",
+        &[
+            ".windows(1)",
+            ".filter_map(|chunk| chunk.first())",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecWindowsMapItem",
+        "dead-vec-windows-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_retain_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_retain_map_prune",
+        "vec_retain_map",
+        &[
+            "values.retain(",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecRetainMapItem",
+        "dead-vec-retain-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_string_split_off_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "string_split_off_map_prune",
+        "string_split_off_map",
+        &[
+            "value.split_off(5)",
+            "StringSplitOffMapPayload::new(&tail)",
+            "pub fn render_label",
+        ],
+        "DeadStringSplitOffMapItem",
+        "dead-string-split-off-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_string_truncate_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "string_truncate_map_prune",
+        "string_truncate_map",
+        &[
+            "value.truncate(raw.len())",
+            "StringTruncateMapPayload::new(&value)",
+            "pub fn render_label",
+        ],
+        "DeadStringTruncateMapItem",
+        "dead-string-truncate-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_string_clear_push_str_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "string_clear_push_str_map_prune",
+        "string_clear_push_str_map",
+        &[
+            "value.clear()",
+            "value.push_str(raw)",
+            "StringClearPushStrMapPayload::new(&value)",
+            "pub fn render_label",
+        ],
+        "DeadStringClearPushStrMapItem",
+        "dead-string-clear-push-str-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_string_retain_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "string_retain_map_prune",
+        "string_retain_map",
+        &[
+            "value.retain(",
+            "StringRetainMapPayload::new(&value)",
+            "pub fn render_label",
+        ],
+        "DeadStringRetainMapItem",
+        "dead-string-retain-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_str_trim_start_matches_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_trim_start_matches_map_prune",
+        "str_trim_start_matches_map",
+        &[
+            "raw.trim_start_matches('a')",
+            "StrTrimStartMatchesMapPayload::new(segment)",
+            "pub fn render_label",
+        ],
+        "DeadStrTrimStartMatchesMapItem",
+        "dead-str-trim-start-matches-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_str_trim_end_matches_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_trim_end_matches_map_prune",
+        "str_trim_end_matches_map",
+        &[
+            "raw.trim_end_matches('z')",
+            "StrTrimEndMatchesMapPayload::new(segment)",
+            "pub fn render_label",
+        ],
+        "DeadStrTrimEndMatchesMapItem",
+        "dead-str-trim-end-matches-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_str_split_inclusive_rev_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_split_inclusive_rev_map_prune",
+        "str_split_inclusive_rev_map",
+        &[
+            "raw.split_inclusive(':')",
+            ".rev()",
+            ".map(StrSplitInclusiveRevMapPayload::new)",
+            "pub fn render_label",
+        ],
+        "DeadStrSplitInclusiveRevMapItem",
+        "dead-str-split-inclusive-rev-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_str_rsplit_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "str_rsplit_map_prune",
+        "str_rsplit_map",
+        &[
+            "raw.rsplit(':')",
+            ".map(StrRsplitMapPayload::new)",
+            "pub fn render_label",
+        ],
+        "DeadStrRsplitMapItem",
+        "dead-str-rsplit-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_pathbuf_join_file_name_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "pathbuf_join_file_name_map_prune",
+        "pathbuf_join_file_name_map",
+        &[
+            "PathBuf::from(raw).join(\"tail.txt\")",
+            "path.file_name()",
+            ".and_then(|name| name.to_str())",
+            "pub fn render_label",
+        ],
+        "DeadPathbufJoinFileNameMapItem",
+        "dead-pathbuf-join-file-name-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_pathbuf_with_extension_to_str_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "pathbuf_with_extension_to_str_map_prune",
+        "pathbuf_with_extension_to_str_map",
+        &[
+            "PathBuf::from(raw).with_extension(\"log\")",
+            "path.to_str()",
+            "pub fn render_label",
+        ],
+        "DeadPathbufWithExtensionToStrMapItem",
+        "dead-pathbuf-with-extension-to-str-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_hashmap_extend_values_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashmap_extend_values_map_prune",
+        "hashmap_extend_values_map",
+        &[
+            "HashMap::new()",
+            "values.extend(",
+            ".values()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadHashmapExtendValuesMapItem",
+        "dead-hashmap-extend-values-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vecdeque_truncate_front_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vecdeque_truncate_front_map_prune",
+        "vecdeque_truncate_front_map",
+        &[
+            "VecDeque::from",
+            "values.truncate(1)",
+            ".front()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecdequeTruncateFrontMapItem",
+        "dead-vecdeque-truncate-front-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,

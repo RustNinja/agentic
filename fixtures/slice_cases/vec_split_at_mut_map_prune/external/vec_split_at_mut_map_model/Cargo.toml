@@ -1,0 +1,4 @@
+[package]
+name = "vec_split_at_mut_map_model"
+version = "0.1.0"
+edition = "2021"

@@ -1,0 +1,7 @@
+[package]
+name = "str_rsplit_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+str_rsplit_map_model = { path = "../str_rsplit_map_model" }
