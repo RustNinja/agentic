@@ -6399,15 +6399,6 @@ fn collect_trait_surface_idents(
         collect_token_idents(&item_trait.to_token_stream(), idents);
         return;
     }
-    if trait_has_reachable_impl_methods(
-        reduced,
-        &item_id.package,
-        &item_id.module_path,
-        &item_id.name,
-    ) {
-        collect_token_idents(&item_trait.to_token_stream(), idents);
-        return;
-    }
     idents.insert(item_id.name.clone());
     idents.extend(item_id.module_path.iter().cloned());
     collect_token_idents(&item_trait.generics.to_token_stream(), idents);
@@ -10344,15 +10335,6 @@ fn prune_trait_items_if_only_type_surface(
     module_path: &[String],
     item_trait: &mut syn::ItemTrait,
 ) {
-    if trait_has_reachable_impl_methods(
-        reduced,
-        package,
-        module_path,
-        &item_trait.ident.to_string(),
-    ) {
-        return;
-    }
-
     let trait_name = item_trait.ident.to_string();
     item_trait.items = item_trait
         .items
@@ -10483,26 +10465,6 @@ fn rendered_impl_for_trait_surface_exists(
                     )
             })
         })
-}
-
-fn trait_has_reachable_impl_methods(
-    reduced: &ReducedProject,
-    package: &str,
-    module_path: &[String],
-    trait_name: &str,
-) -> bool {
-    let mut trait_path = module_path.to_vec();
-    trait_path.push(trait_name.to_string());
-    reduced.reachable.iter().any(|callable| {
-        matches!(
-            callable,
-            CallableId::Method {
-                package: callable_package,
-                trait_path: Some(callable_trait_path),
-                ..
-            } if callable_package == package && callable_trait_path == &trait_path
-        )
-    })
 }
 
 fn is_inert_type_surface_attr(attr: &syn::Attribute) -> bool {
@@ -12931,9 +12893,6 @@ fn reachable_item_mentions_ident(
         if root_item_should_render(reduced, item_id) {
             return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
         }
-        if trait_has_reachable_impl_methods(reduced, package, &item_id.module_path, &item_id.name) {
-            return token_stream_mentions_ident(&record.item.to_token_stream(), ident);
-        }
         return trait_type_surface_mentions_ident(
             project, reduced, package, item_id, item_trait, ident,
         );
@@ -12985,9 +12944,6 @@ fn reachable_item_mentions_unqualified_ident(
 ) -> bool {
     if let Item::Trait(item_trait) = &record.item {
         if root_item_should_render(reduced, item_id) {
-            return token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident);
-        }
-        if trait_has_reachable_impl_methods(reduced, package, &item_id.module_path, &item_id.name) {
             return token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident);
         }
         return trait_type_surface_mentions_unqualified_ident(

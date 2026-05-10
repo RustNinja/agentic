@@ -1,0 +1,9 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+dyn_api = { path = "../external/dyn_api" }
+

@@ -1119,3 +1119,14 @@ generated default-feature output still cargo-checks and prunes dead API/model
 modules, functions, and sibling methods. This keeps cfg/macro uncertainty as
 review evidence without letting it broad-copy unrelated support code. The full
 slice-case suite now covers this contract across 765 fast fixtures.
+
+The returned trait-object pass exposed a real over-retention bug in retained
+support traits. When a trait was kept only because a rendered impl method was
+reachable, the renderer kept the whole trait body, including unused default
+methods. `returned_dyn_trait_prune` now slices through a returned
+`Box<dyn Reader>` plus a dynamic `reader.read()` call and requires the generated
+support crate to keep only the required trait item, concrete impl, constructor,
+and render helper. The fix is generic: rendered impl methods no longer force
+the entire trait surface to render; the existing trait-item predicate decides
+which required, referenced, or macro-protected items remain. The full
+slice-case suite now covers this contract across 766 fast fixtures.
