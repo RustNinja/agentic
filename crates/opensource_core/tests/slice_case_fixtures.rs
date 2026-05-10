@@ -1585,7 +1585,7 @@ fn prunes_cfg_attr_uniffi_support_chain_with_default_analyzer() {
     )
     .expect("cfg_attr_uniffi_prune fixture should slice");
 
-    assert_eq!(report.packages, ["cfg_api", "cfg_model", "root"]);
+    assert_eq!(report.packages, ["cfg_api", "cfg_model", "root", "uniffi"]);
     assert!(
         report
             .roots
@@ -22595,13 +22595,22 @@ fn assert_usage_contract(package_roots: &BTreeMap<String, PathBuf>, report: &Gen
     );
 
     let rendered = collect_rendered_symbols(package_roots, &report.packages);
+    let retained_rendered_items = retained_items
+        .union(&rendered.structural_module_items)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let non_structural_rendered_items = rendered
+        .items
+        .difference(&rendered.structural_module_items)
+        .cloned()
+        .collect::<BTreeSet<_>>();
     let unclassified_rendered_callables = rendered
         .callables
         .difference(&retained_callables)
         .collect::<Vec<_>>();
     let unclassified_rendered_items = rendered
         .items
-        .difference(&retained_items)
+        .difference(&retained_rendered_items)
         .collect::<Vec<_>>();
     assert!(
         unclassified_rendered_callables.is_empty(),
@@ -22622,10 +22631,9 @@ fn assert_usage_contract(package_roots: &BTreeMap<String, PathBuf>, report: &Gen
             .collect::<Vec<_>>()
     );
     assert!(
-        rendered.items.is_disjoint(&prunable_items),
+        non_structural_rendered_items.is_disjoint(&prunable_items),
         "generated source still declares prunable items: {:?}",
-        rendered
-            .items
+        non_structural_rendered_items
             .intersection(&prunable_items)
             .collect::<Vec<_>>()
     );
@@ -22654,6 +22662,8 @@ fn assert_usage_contract(package_roots: &BTreeMap<String, PathBuf>, report: &Gen
 struct RenderedSymbols {
     callables: BTreeSet<String>,
     items: BTreeSet<String>,
+    module_items: BTreeSet<String>,
+    structural_module_items: BTreeSet<String>,
     module_paths: BTreeSet<Vec<String>>,
     public_reexports: BTreeSet<RenderedPublicReexport>,
     trait_default_methods: BTreeSet<RenderedTraitDefaultMethod>,
@@ -22719,6 +22729,7 @@ fn collect_rendered_items(
     for item in items {
         match item {
             syn::Item::Fn(function) => {
+                record_rendered_structural_modules(package, module_path, symbols);
                 symbols.callables.insert(symbol_path(
                     package,
                     module_path,
@@ -22735,6 +22746,7 @@ fn collect_rendered_items(
                     &item.ident.to_string(),
                     "Struct",
                 ));
+                record_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Enum(item) => {
                 symbols.items.insert(item_symbol_path(
@@ -22743,6 +22755,7 @@ fn collect_rendered_items(
                     &item.ident.to_string(),
                     "Enum",
                 ));
+                record_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Union(item) => {
                 symbols.items.insert(item_symbol_path(
@@ -22751,6 +22764,7 @@ fn collect_rendered_items(
                     &item.ident.to_string(),
                     "Union",
                 ));
+                record_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Type(item) => {
                 symbols.items.insert(item_symbol_path(
@@ -22759,8 +22773,10 @@ fn collect_rendered_items(
                     &item.ident.to_string(),
                     "Type",
                 ));
+                record_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Trait(item) => {
+                record_rendered_structural_modules(package, module_path, symbols);
                 let trait_item =
                     item_symbol_path(package, module_path, &item.ident.to_string(), "Trait");
                 symbols.items.insert(item_symbol_path(
@@ -22793,6 +22809,7 @@ fn collect_rendered_items(
                     &item.ident.to_string(),
                     "Const",
                 ));
+                record_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Static(item) => {
                 symbols.items.insert(item_symbol_path(
@@ -22801,6 +22818,7 @@ fn collect_rendered_items(
                     &item.ident.to_string(),
                     "Static",
                 ));
+                record_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Macro(item) => {
                 if let Some(ident) = &item.ident {
@@ -22810,10 +22828,17 @@ fn collect_rendered_items(
                         &ident.to_string(),
                         "Macro",
                     ));
+                    record_rendered_structural_modules(package, module_path, symbols);
+                }
+                if item_macro_is_source_include(item) {
+                    record_rendered_structural_modules(package, module_path, symbols);
                 }
             }
             syn::Item::Mod(item) => {
                 let name = item.ident.to_string();
+                let module_item = item_symbol_path(package, module_path, &name, "Mod");
+                symbols.items.insert(module_item.clone());
+                symbols.module_items.insert(module_item);
                 if let Some((_, nested)) = &item.content {
                     let mut nested_module_path = module_path.to_vec();
                     nested_module_path.push(name);
@@ -22830,6 +22855,7 @@ fn collect_rendered_items(
             }
             syn::Item::Use(item) => {
                 if is_public_visibility(&item.vis) {
+                    record_rendered_structural_modules(package, module_path, symbols);
                     collect_rendered_public_reexports(
                         package,
                         module_path,
@@ -22856,6 +22882,7 @@ fn collect_rendered_items(
                         .unwrap_or_default();
                     for impl_item in &item.items {
                         if let syn::ImplItem::Fn(method) = impl_item {
+                            record_rendered_structural_modules(package, module_path, symbols);
                             symbols.callables.insert(rendered_method_symbol_path(
                                 package,
                                 &type_path,
@@ -22873,6 +22900,26 @@ fn collect_rendered_items(
             _ => {}
         }
     }
+}
+
+fn record_rendered_structural_modules(
+    package: &str,
+    module_path: &[String],
+    symbols: &mut RenderedSymbols,
+) {
+    symbols
+        .structural_module_items
+        .extend(rendered_module_item_parents(package, module_path));
+}
+
+fn rendered_module_item_parents(package: &str, module_path: &[String]) -> BTreeSet<String> {
+    let mut modules = BTreeSet::new();
+    for index in 1..=module_path.len() {
+        let parent = &module_path[..index - 1];
+        let name = &module_path[index - 1];
+        modules.insert(item_symbol_path(package, parent, name, "Mod"));
+    }
+    modules
 }
 
 fn rendered_aliases_from_items(
@@ -22974,6 +23021,10 @@ fn rendered_reexport_leaf(mut prefix: Vec<String>, ident: String) -> Option<(Str
         prefix.push(ident.clone());
         Some((ident, prefix))
     }
+}
+
+fn item_macro_is_source_include(item: &syn::ItemMacro) -> bool {
+    item.mac.path.is_ident("include")
 }
 
 fn is_public_visibility(visibility: &syn::Visibility) -> bool {

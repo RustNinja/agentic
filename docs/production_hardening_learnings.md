@@ -1354,3 +1354,13 @@ an unreferenced default body without the trait itself being
 `blocked_by_unknown`. This closes another support-package redundancy class where
 a retained trait item could hide dead executable code inside its body while the
 top-level item proof still looked clean.
+
+Rendered module declarations are now part of the same production proof. The
+scanner records `mod name;` and inline `mod name { ... }` declarations as
+`ItemKind::Mod` entries. Structural module shells are allowed only when they are
+parents of rendered code, public facade reexports, or item-level `include!`
+source injection that is already reported as an unknown/generated-source hazard;
+otherwise a generated support package cannot keep a prunable module shell after
+its contents were removed. This is intentionally separate from public-reexport
+module-path tracking: module paths help resolve facades, while module items are
+now checked against the used/unknown/prunable decision index.

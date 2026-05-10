@@ -3,7 +3,9 @@ name = "cfg_model"
 version = "0.1.0"
 edition = "2021"
 
-[features]
-ffi = []
-bindings = []
+[dependencies]
+uniffi = { path = "../uniffi", optional = true }
 
+[features]
+ffi = ["dep:uniffi"]
+bindings = ["ffi"]

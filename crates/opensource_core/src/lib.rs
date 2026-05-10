@@ -1990,6 +1990,8 @@ struct GeneratedRenderedTraitDefaultMethod {
 struct GeneratedRenderedSymbols {
     callables: BTreeSet<String>,
     items: BTreeSet<String>,
+    module_items: BTreeSet<String>,
+    structural_module_items: BTreeSet<String>,
     macro_blocked_callables: BTreeSet<String>,
     surface_blocked_callables: BTreeSet<String>,
     trait_required_methods: BTreeMap<String, BTreeSet<String>>,
@@ -2065,6 +2067,11 @@ fn rendered_symbol_proof_report(
 
     for item in &rendered.items {
         let classification = if retained_items.contains(item) {
+            summary.retained_items += 1;
+            "retained"
+        } else if rendered.module_items.contains(item)
+            && rendered.structural_module_items.contains(item)
+        {
             summary.retained_items += 1;
             "retained"
         } else if prunable_items.contains(item) {
@@ -2170,6 +2177,7 @@ fn collect_generated_rendered_items(
     for item in items {
         match item {
             syn::Item::Fn(function) => {
+                record_generated_rendered_structural_modules(package, module_path, symbols);
                 let callable = generated_rendered_symbol_path(
                     package,
                     module_path,
@@ -2190,6 +2198,7 @@ fn collect_generated_rendered_items(
                     &item.ident.to_string(),
                     "Struct",
                 ));
+                record_generated_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Enum(item) => {
                 symbols.items.insert(generated_rendered_item_symbol_path(
@@ -2198,6 +2207,7 @@ fn collect_generated_rendered_items(
                     &item.ident.to_string(),
                     "Enum",
                 ));
+                record_generated_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Union(item) => {
                 symbols.items.insert(generated_rendered_item_symbol_path(
@@ -2206,6 +2216,7 @@ fn collect_generated_rendered_items(
                     &item.ident.to_string(),
                     "Union",
                 ));
+                record_generated_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Type(item) => {
                 symbols.items.insert(generated_rendered_item_symbol_path(
@@ -2214,8 +2225,10 @@ fn collect_generated_rendered_items(
                     &item.ident.to_string(),
                     "Type",
                 ));
+                record_generated_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Trait(item) => {
+                record_generated_rendered_structural_modules(package, module_path, symbols);
                 let trait_item = generated_rendered_item_symbol_path(
                     package,
                     module_path,
@@ -2248,6 +2261,7 @@ fn collect_generated_rendered_items(
                     &item.ident.to_string(),
                     "Const",
                 ));
+                record_generated_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Static(item) => {
                 symbols.items.insert(generated_rendered_item_symbol_path(
@@ -2256,6 +2270,7 @@ fn collect_generated_rendered_items(
                     &item.ident.to_string(),
                     "Static",
                 ));
+                record_generated_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Macro(item) => {
                 if let Some(ident) = &item.ident {
@@ -2265,9 +2280,21 @@ fn collect_generated_rendered_items(
                         &ident.to_string(),
                         "Macro",
                     ));
+                    record_generated_rendered_structural_modules(package, module_path, symbols);
+                }
+                if generated_rendered_item_macro_is_source_include(item) {
+                    record_generated_rendered_structural_modules(package, module_path, symbols);
                 }
             }
             syn::Item::Mod(item) => {
+                let module_item = generated_rendered_item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Mod",
+                );
+                symbols.items.insert(module_item.clone());
+                symbols.module_items.insert(module_item);
                 if let Some((_, nested)) = &item.content {
                     let mut nested_module_path = module_path.to_vec();
                     nested_module_path.push(item.ident.to_string());
@@ -2281,6 +2308,11 @@ fn collect_generated_rendered_items(
                     );
                 }
             }
+            syn::Item::Use(item) => {
+                if generated_use_is_public_api_reexport(&item.vis) {
+                    record_generated_rendered_structural_modules(package, module_path, symbols);
+                }
+            }
             syn::Item::Impl(item) => {
                 if let Some(type_path) =
                     generated_rendered_impl_type_path(module_path, &item.self_ty, aliases)
@@ -2288,10 +2320,14 @@ fn collect_generated_rendered_items(
                     let trait_path = item.trait_.as_ref().map(|(_, path, _)| {
                         generated_rendered_normalized_path(module_path, path, aliases)
                     });
-                    let required_trait_methods = trait_path.as_ref().and_then(|trait_path| {
-                        let trait_symbol = generated_rendered_segments_path(package, trait_path);
-                        symbols.trait_required_methods.get(&trait_symbol)
-                    });
+                    let required_trait_methods = trait_path
+                        .as_ref()
+                        .and_then(|trait_path| {
+                            let trait_symbol =
+                                generated_rendered_segments_path(package, trait_path);
+                            symbols.trait_required_methods.get(&trait_symbol)
+                        })
+                        .cloned();
                     let trait_input_type_paths = item
                         .trait_
                         .as_ref()
@@ -2301,6 +2337,11 @@ fn collect_generated_rendered_items(
                         .unwrap_or_default();
                     for impl_item in &item.items {
                         if let syn::ImplItem::Fn(method) = impl_item {
+                            record_generated_rendered_structural_modules(
+                                package,
+                                module_path,
+                                symbols,
+                            );
                             let method_name = method.sig.ident.to_string();
                             let callable = generated_rendered_method_symbol_path(
                                 package,
@@ -2310,6 +2351,7 @@ fn collect_generated_rendered_items(
                                 &method_name,
                             );
                             if required_trait_methods
+                                .as_ref()
                                 .is_some_and(|methods| methods.contains(&method_name))
                             {
                                 symbols.surface_blocked_callables.insert(callable.clone());
@@ -2325,6 +2367,31 @@ fn collect_generated_rendered_items(
             _ => {}
         }
     }
+}
+
+fn record_generated_rendered_structural_modules(
+    package: &str,
+    module_path: &[String],
+    symbols: &mut GeneratedRenderedSymbols,
+) {
+    symbols
+        .structural_module_items
+        .extend(generated_rendered_module_item_parents(package, module_path));
+}
+
+fn generated_rendered_module_item_parents(
+    package: &str,
+    module_path: &[String],
+) -> BTreeSet<String> {
+    let mut modules = BTreeSet::new();
+    for index in 1..=module_path.len() {
+        let parent = &module_path[..index - 1];
+        let name = &module_path[index - 1];
+        modules.insert(generated_rendered_item_symbol_path(
+            package, parent, name, "Mod",
+        ));
+    }
+    modules
 }
 
 fn collect_generated_rendered_trait_requirements(
@@ -2380,6 +2447,10 @@ fn generated_rendered_fn_is_proc_macro_export(function: &syn::ItemFn) -> bool {
             || attr.path().is_ident("proc_macro_attribute")
             || attr.path().is_ident("proc_macro_derive")
     })
+}
+
+fn generated_rendered_item_macro_is_source_include(item: &syn::ItemMacro) -> bool {
+    item.mac.path.is_ident("include")
 }
 
 fn generated_retained_trait_default_methods(
@@ -11157,6 +11228,130 @@ edition = "2021"
             entry.kind == "trait_default_method"
                 && entry.id == "trait_defaults::Reader(Trait)::dead_default"
                 && entry.classification == "blocked_by_unknown"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_blocks_prunable_module_declarations() {
+        let output = temp_output("rendered-symbol-prunable-module");
+        write(
+            output.join("module_case/Cargo.toml"),
+            r#"[package]
+name = "module_case"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(output.join("module_case/src/lib.rs"), "mod dead;\n");
+        write(output.join("module_case/src/dead.rs"), "");
+        let dead_module = ItemId {
+            package: "module_case".to_string(),
+            module_path: Vec::new(),
+            name: "dead".to_string(),
+            kind: ItemKind::Mod,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["module_case".to_string()]),
+            prunable_items: BTreeSet::from([dead_module]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = rendered_symbol_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "failed", "{proof:#?}");
+        assert_eq!(proof.summary.rendered_items, 1, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_items, 1, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "item"
+                && entry.id == "module_case::dead(Mod)"
+                && entry.classification == "prunable"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_allows_structural_module_declarations() {
+        let output = temp_output("rendered-symbol-structural-module");
+        write(
+            output.join("module_case/Cargo.toml"),
+            r#"[package]
+name = "module_case"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(output.join("module_case/src/lib.rs"), "mod live;\n");
+        write(output.join("module_case/src/live.rs"), "pub struct Live;\n");
+        let live_module = ItemId {
+            package: "module_case".to_string(),
+            module_path: Vec::new(),
+            name: "live".to_string(),
+            kind: ItemKind::Mod,
+        };
+        let live_struct = ItemId {
+            package: "module_case".to_string(),
+            module_path: vec!["live".to_string()],
+            name: "Live".to_string(),
+            kind: ItemKind::Struct,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["module_case".to_string()]),
+            used_items: BTreeSet::from([live_struct]),
+            prunable_items: BTreeSet::from([live_module]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = rendered_symbol_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "proven", "{proof:#?}");
+        assert_eq!(proof.summary.rendered_items, 2, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_items, 0, "{proof:#?}");
+        assert_eq!(proof.summary.retained_items, 2, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "item"
+                && entry.id == "module_case::live(Mod)"
+                && entry.classification == "retained"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_allows_source_include_module_declarations() {
+        let output = temp_output("rendered-symbol-source-include-module");
+        write(
+            output.join("module_case/Cargo.toml"),
+            r#"[package]
+name = "module_case"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("module_case/src/lib.rs"),
+            r#"mod generated {
+    include!(concat!(env!("OUT_DIR"), "/generated.rs"));
+}
+"#,
+        );
+        let generated_module = ItemId {
+            package: "module_case".to_string(),
+            module_path: Vec::new(),
+            name: "generated".to_string(),
+            kind: ItemKind::Mod,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["module_case".to_string()]),
+            prunable_items: BTreeSet::from([generated_module]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = rendered_symbol_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "proven", "{proof:#?}");
+        assert_eq!(proof.summary.rendered_items, 1, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_items, 0, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "item"
+                && entry.id == "module_case::generated(Mod)"
+                && entry.classification == "retained"
         }));
     }
 

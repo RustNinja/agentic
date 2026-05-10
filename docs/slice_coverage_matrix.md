@@ -80,7 +80,12 @@ dead code, so retained macro packages remain fail-closed without globally
 blocking unrelated pruning. Retained trait default method bodies are also part
 of this rendered-source proof: production rejects default methods that are not
 reachable from retained call sites/default-method chains and not protected by a
-blocked trait surface.
+blocked trait surface. Rendered `mod` declarations are audited as module items:
+structural parents of rendered code or public facade reexports are allowed, but
+stale file-backed or inline module shells cannot survive outside the used/unknown
+decision map. Modules whose body is an item-level `include!` remain as scoped
+unknown/generated-source surfaces and still produce the existing source-include
+production hazards.
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust
 source. This keeps copied support packages under the same used/unknown and
