@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/maybeuninit_write_map_api", "external/maybeuninit_write_map_model"]

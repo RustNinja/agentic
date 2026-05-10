@@ -1,0 +1,7 @@
+[package]
+name = "binaryheap_shrink_to_fit_peek_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+binaryheap_shrink_to_fit_peek_map_model = { path = "../binaryheap_shrink_to_fit_peek_map_model" }

@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/pin_into_inner_map_api", "external/pin_into_inner_map_model"]

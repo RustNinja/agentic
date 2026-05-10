@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/rc_get_mut_map_api", "external/rc_get_mut_map_model"]

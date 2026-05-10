@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+binaryheap_shrink_to_fit_peek_map_api = { path = "../external/binaryheap_shrink_to_fit_peek_map_api" }

@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/nonnull_as_mut_map_api", "external/nonnull_as_mut_map_model"]

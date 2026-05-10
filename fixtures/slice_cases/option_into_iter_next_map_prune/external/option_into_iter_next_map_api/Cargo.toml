@@ -1,0 +1,7 @@
+[package]
+name = "option_into_iter_next_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_into_iter_next_map_model = { path = "../option_into_iter_next_map_model" }

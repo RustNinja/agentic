@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/mutex_get_mut_map_api", "external/mutex_get_mut_map_model"]

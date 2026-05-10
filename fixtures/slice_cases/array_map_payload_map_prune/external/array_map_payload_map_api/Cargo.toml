@@ -1,0 +1,7 @@
+[package]
+name = "array_map_payload_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+array_map_payload_map_model = { path = "../array_map_payload_map_model" }

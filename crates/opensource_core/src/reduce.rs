@@ -5100,9 +5100,7 @@ impl<'a> DependencyVisitor<'a> {
             .map(|segment| segment.ident.to_string());
         let wrapper = segments.next()?;
         let function = segments.next()?;
-        if segments.next().is_some()
-            || function != "new"
-            || !matches!(wrapper.as_str(), "Arc" | "Box" | "Rc")
+        if segments.next().is_some() || function != "new" || !transparent_receiver_wrapper(&wrapper)
         {
             return None;
         }
@@ -5118,6 +5116,10 @@ impl<'a> DependencyVisitor<'a> {
         };
         match known_associated_return_function(&path.path)?.as_str() {
             "take" => call
+                .args
+                .first()
+                .and_then(|argument| self.first_arg_receiver_type(argument)),
+            "get_mut" => call
                 .args
                 .first()
                 .and_then(|argument| self.first_arg_receiver_type(argument)),
@@ -6395,6 +6397,11 @@ impl<'a> DependencyVisitor<'a> {
                 ) {
                     if let Some(value_type) = self.expression_map_value_type(&call.receiver) {
                         return Some(value_type);
+                    }
+                }
+                if call.method == "get_mut" && call.args.is_empty() {
+                    if let Some(ok_type) = self.receiver_type(&call.receiver) {
+                        return Some(ok_type);
                     }
                 }
                 if matches!(
@@ -11098,7 +11105,7 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
     let function = segments.last()?;
     if !matches!(
         function.as_str(),
-        "take" | "replace" | "into_inner" | "make_mut" | "pin" | "from"
+        "take" | "replace" | "get_mut" | "into_inner" | "make_mut" | "pin" | "from"
     ) {
         return None;
     }
@@ -11115,6 +11122,23 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
             if matches!(root.as_str(), "std" | "core")
                 && module == "mem"
                 && wrapper == "ManuallyDrop" =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "get_mut") if matches!(wrapper.as_str(), "Arc" | "Rc") => {
+            Some(function.clone())
+        }
+        ([root, module, wrapper], "get_mut")
+            if matches!(
+                (root.as_str(), module.as_str(), wrapper.as_str()),
+                ("std" | "alloc", "sync", "Arc") | ("std" | "alloc", "rc", "Rc")
+            ) =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "into_inner") if wrapper == "Pin" => Some(function.clone()),
+        ([root, module, wrapper], "into_inner")
+            if matches!(root.as_str(), "std" | "core") && module == "pin" && wrapper == "Pin" =>
         {
             Some(function.clone())
         }

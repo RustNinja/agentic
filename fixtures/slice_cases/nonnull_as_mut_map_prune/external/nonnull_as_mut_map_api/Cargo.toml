@@ -1,0 +1,7 @@
+[package]
+name = "nonnull_as_mut_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+nonnull_as_mut_map_model = { path = "../nonnull_as_mut_map_model" }

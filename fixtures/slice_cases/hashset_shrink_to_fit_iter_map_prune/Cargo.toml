@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/hashset_shrink_to_fit_iter_map_api", "external/hashset_shrink_to_fit_iter_map_model"]

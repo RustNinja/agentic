@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/once_lock_set_get_map_api", "external/once_lock_set_get_map_model"]

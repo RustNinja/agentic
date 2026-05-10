@@ -1,0 +1,4 @@
+[package]
+name = "hashset_shrink_to_fit_iter_map_model"
+version = "0.1.0"
+edition = "2021"

@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/lazy_lock_force_map_api", "external/lazy_lock_force_map_model"]

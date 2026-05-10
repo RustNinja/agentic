@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/pathbuf_as_path_file_name_map_api", "external/pathbuf_as_path_file_name_map_model"]

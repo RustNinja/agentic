@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/result_or_map_api", "external/result_or_map_model"]

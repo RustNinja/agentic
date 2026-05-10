@@ -1,0 +1,7 @@
+[package]
+name = "linkedlist_push_front_back_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+linkedlist_push_front_back_map_model = { path = "../linkedlist_push_front_back_map_model" }

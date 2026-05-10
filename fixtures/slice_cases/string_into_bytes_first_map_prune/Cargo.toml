@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/string_into_bytes_first_map_api", "external/string_into_bytes_first_map_model"]

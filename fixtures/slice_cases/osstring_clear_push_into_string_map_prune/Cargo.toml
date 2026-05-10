@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/osstring_clear_push_into_string_map_api", "external/osstring_clear_push_into_string_map_model"]

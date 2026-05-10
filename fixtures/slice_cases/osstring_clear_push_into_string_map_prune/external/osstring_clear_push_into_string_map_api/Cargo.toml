@@ -1,0 +1,7 @@
+[package]
+name = "osstring_clear_push_into_string_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+osstring_clear_push_into_string_map_model = { path = "../osstring_clear_push_into_string_map_model" }

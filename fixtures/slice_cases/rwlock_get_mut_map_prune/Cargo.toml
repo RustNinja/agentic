@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/rwlock_get_mut_map_api", "external/rwlock_get_mut_map_model"]

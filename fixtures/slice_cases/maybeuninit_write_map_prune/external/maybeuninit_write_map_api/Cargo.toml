@@ -1,0 +1,7 @@
+[package]
+name = "maybeuninit_write_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+maybeuninit_write_map_model = { path = "../maybeuninit_write_map_model" }

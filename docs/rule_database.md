@@ -743,6 +743,32 @@ file.
 | `fixture.linkedlist_append_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `LinkedList::append` and back payload rendering only |
 | `fixture.vecdeque_push_front_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque::push_front` plus back payload rendering only |
 | `fixture.vecdeque_resize_with_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque::resize_with` closure construction and live back payload rendering only |
+| `fixture.arc_get_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through unique `Arc::get_mut` mutable access and keeps only the live mutating payload method |
+| `fixture.rc_get_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through unique `Rc::get_mut` mutable access while pruning immutable/dead payload methods |
+| `fixture.mutex_get_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Mutex::get_mut` guard-free mutable access and retains only live payload mutation |
+| `fixture.rwlock_get_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `RwLock::get_mut` mutable access without retaining read-only sibling methods |
+| `fixture.refcell_get_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `RefCell::get_mut` and keeps only mutable payload dependencies |
+| `fixture.cell_set_get_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Cell::set/get` copy-state flows and live payload construction only |
+| `fixture.once_lock_set_get_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `OnceLock::set` plus `get` readback without retaining dead singleton helpers |
+| `fixture.lazy_lock_force_map_prune.support_chain.001` | covered | A checked-in support fixture slices through function-local `LazyLock` static initialization and live forced payload rendering |
+| `fixture.box_leak_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Box::leak` mutable references and keeps only live mutating payload methods |
+| `fixture.pin_into_inner_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Pin::into_inner` boxed payload recovery and live rendering only |
+| `fixture.maybeuninit_write_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `MaybeUninit::write` initialized references and live mutable payload methods |
+| `fixture.nonnull_as_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `NonNull::as_mut` pointer recovery and retains only live unsafe mutable payload use |
+| `fixture.result_or_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::or` payload propagation and live OK payload rendering only |
+| `fixture.option_into_iter_next_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Option::into_iter().next()` owned payload rendering only |
+| `fixture.result_into_iter_next_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Result::into_iter().next()` owned OK payload rendering without dead error helpers |
+| `fixture.array_map_payload_map_prune.support_chain.001` | covered | A checked-in support fixture slices through array `.map(...)` owned payload closures and prunes dead array helper methods |
+| `fixture.vecdeque_push_back_front_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque::push_back` plus front payload rendering only |
+| `fixture.linkedlist_push_front_back_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `LinkedList::push_front` plus back payload rendering only |
+| `fixture.binaryheap_shrink_to_fit_peek_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap::shrink_to_fit` plus peeked payload rendering only |
+| `fixture.btreeset_split_off_iter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeSet::split_off` and live tail iteration without retaining dead set helpers |
+| `fixture.hashset_shrink_to_fit_iter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashSet::shrink_to_fit` and live iterated payload rendering only |
+| `fixture.hashmap_clear_insert_get_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap::clear` plus replacement insert/get payload rendering only |
+| `fixture.pathbuf_as_path_file_name_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::as_path().file_name().to_str()` chained payload rendering |
+| `fixture.osstring_clear_push_into_string_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `OsString::clear`/`push` plus UTF-8 conversion and live payload rendering |
+| `fixture.cstring_as_bytes_first_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `CString::as_bytes().first()` byte payload conversion only |
+| `fixture.string_into_bytes_first_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::into_bytes` owned byte iteration and live payload construction only |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

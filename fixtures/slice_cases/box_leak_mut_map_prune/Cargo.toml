@@ -1,0 +1,2 @@
+[workspace]
+members = ["root", "external/box_leak_mut_map_api", "external/box_leak_mut_map_model"]

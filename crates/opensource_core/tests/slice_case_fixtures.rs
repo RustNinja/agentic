@@ -17219,6 +17219,510 @@ fn prunes_vecdeque_resize_with_back_map_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_arc_get_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "arc_get_mut_map_prune",
+        "arc_get_mut_map",
+        &[
+            "use std::sync::Arc;",
+            "Arc::new",
+            "Arc::get_mut(&mut payload)",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadArcGetMutMapItem",
+        "dead-arc-get-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_rc_get_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "rc_get_mut_map_prune",
+        "rc_get_mut_map",
+        &[
+            "use std::rc::Rc;",
+            "Rc::new",
+            "Rc::get_mut(&mut payload)",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadRcGetMutMapItem",
+        "dead-rc-get-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mutex_get_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mutex_get_mut_map_prune",
+        "mutex_get_mut_map",
+        &[
+            "use std::sync::Mutex;",
+            "Mutex::new",
+            ".get_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadMutexGetMutMapItem",
+        "dead-mutex-get-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_rwlock_get_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "rwlock_get_mut_map_prune",
+        "rwlock_get_mut_map",
+        &[
+            "use std::sync::RwLock;",
+            "RwLock::new",
+            ".get_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadRwlockGetMutMapItem",
+        "dead-rwlock-get-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_refcell_get_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "refcell_get_mut_map_prune",
+        "refcell_get_mut_map",
+        &[
+            "use std::cell::RefCell;",
+            "RefCell::new",
+            "payload.get_mut().bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadRefcellGetMutMapItem",
+        "dead-refcell-get-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_cell_set_get_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "cell_set_get_map_prune",
+        "cell_set_get_map",
+        &[
+            "use std::cell::Cell;",
+            "Cell::new(raw.len())",
+            "value.set(value.get() + 1)",
+            "CellSetGetMapPayload::new(&value.get().to_string()).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadCellSetGetMapItem",
+        "dead-cell-set-get-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_once_lock_set_get_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "once_lock_set_get_map_prune",
+        "once_lock_set_get_map",
+        &[
+            "use std::sync::OnceLock;",
+            "OnceLock::new",
+            "slot.set(OnceLockSetGetMapPayload::new(raw))",
+            "slot.get()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadOnceLockSetGetMapItem",
+        "dead-once-lock-set-get-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_lazy_lock_force_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "lazy_lock_force_map_prune",
+        "lazy_lock_force_map",
+        &[
+            "use std::sync::LazyLock;",
+            "static PAYLOAD: LazyLock<LazyLockForceMapPayload>",
+            "LazyLock::new(|| LazyLockForceMapPayload::new",
+            "\"lazy\"",
+            "PAYLOAD.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadLazyLockForceMapItem",
+        "dead-lazy-lock-force-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_box_leak_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "box_leak_mut_map_prune",
+        "box_leak_mut_map",
+        &[
+            "Box::leak(Box::new(BoxLeakMutMapPayload::new(raw)))",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadBoxLeakMutMapItem",
+        "dead-box-leak-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_pin_into_inner_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "pin_into_inner_map_prune",
+        "pin_into_inner_map",
+        &[
+            "use std::pin::Pin;",
+            "Box::pin(PinIntoInnerMapPayload::new(raw))",
+            "Pin::into_inner(pinned).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadPinIntoInnerMapItem",
+        "dead-pin-into-inner-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_maybeuninit_write_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "maybeuninit_write_map_prune",
+        "maybeuninit_write_map",
+        &[
+            "use std::mem::MaybeUninit;",
+            "MaybeUninit::uninit()",
+            "slot.write(MaybeuninitWriteMapPayload::new(raw))",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadMaybeuninitWriteMapItem",
+        "dead-maybeuninit-write-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_nonnull_as_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "nonnull_as_mut_map_prune",
+        "nonnull_as_mut_map",
+        &[
+            "use std::ptr::NonNull;",
+            "NonNull::from(leaked)",
+            "unsafe { ptr.as_mut().bump_and_render() }",
+            "pub fn bump_and_render",
+        ],
+        "DeadNonnullAsMutMapItem",
+        "dead-nonnull-as-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_result_or_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "result_or_map_prune",
+        "result_or_map",
+        &[
+            "let value: Result<ResultOrMapPayload, ResultOrMapPayload>",
+            ".or(",
+            "Ok::<",
+            "ResultOrMapPayload",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadResultOrMapItem",
+        "dead-result-or-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_option_into_iter_next_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "option_into_iter_next_map_prune",
+        "option_into_iter_next_map",
+        &[
+            "Some(OptionIntoIterNextMapPayload::new(raw))",
+            ".into_iter()",
+            ".next()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadOptionIntoIterNextMapItem",
+        "dead-option-into-iter-next-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_result_into_iter_next_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "result_into_iter_next_map_prune",
+        "result_into_iter_next_map",
+        &[
+            "Ok::<_, ()>(ResultIntoIterNextMapPayload::new(raw))",
+            ".into_iter()",
+            ".next()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadResultIntoIterNextMapItem",
+        "dead-result-into-iter-next-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_array_map_payload_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "array_map_payload_map_prune",
+        "array_map_payload_map",
+        &[
+            "ArrayMapPayloadMapPayload::new(raw)",
+            ".map(|payload| payload.render_label())",
+            ".join(\"|\")",
+            "pub fn render_label",
+        ],
+        "DeadArrayMapPayloadMapItem",
+        "dead-array-map-payload-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vecdeque_push_back_front_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vecdeque_push_back_front_map_prune",
+        "vecdeque_push_back_front_map",
+        &[
+            "use std::collections::VecDeque;",
+            "VecDeque::new()",
+            "values.push_back(",
+            ".front()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecdequePushBackFrontMapItem",
+        "dead-vecdeque-push-back-front-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_linkedlist_push_front_back_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "linkedlist_push_front_back_map_prune",
+        "linkedlist_push_front_back_map",
+        &[
+            "use std::collections::LinkedList;",
+            "LinkedList::new()",
+            "values.push_front(",
+            ".back()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadLinkedlistPushFrontBackMapItem",
+        "dead-linkedlist-push-front-back-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_binaryheap_shrink_to_fit_peek_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "binaryheap_shrink_to_fit_peek_map_prune",
+        "binaryheap_shrink_to_fit_peek_map",
+        &[
+            "use std::collections::BinaryHeap;",
+            "BinaryHeap::from([raw.to_string()])",
+            "values.shrink_to_fit()",
+            ".peek()",
+            "BinaryheapShrinkToFitPeekMapPayload::new(value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadBinaryheapShrinkToFitPeekMapItem",
+        "dead-binaryheap-shrink-to-fit-peek-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_btreeset_split_off_iter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "btreeset_split_off_iter_map_prune",
+        "btreeset_split_off_iter_map",
+        &[
+            "use std::collections::BTreeSet;",
+            "BTreeSet::new()",
+            "values.split_off(raw)",
+            "tail.iter()",
+            "BtreesetSplitOffIterMapPayload::new(value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadBtreesetSplitOffIterMapItem",
+        "dead-btreeset-split-off-iter-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_hashset_shrink_to_fit_iter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashset_shrink_to_fit_iter_map_prune",
+        "hashset_shrink_to_fit_iter_map",
+        &[
+            "use std::collections::HashSet;",
+            "HashSet::new()",
+            "values.shrink_to_fit()",
+            ".iter()",
+            "HashsetShrinkToFitIterMapPayload::new(value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadHashsetShrinkToFitIterMapItem",
+        "dead-hashset-shrink-to-fit-iter-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_hashmap_clear_insert_get_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "hashmap_clear_insert_get_map_prune",
+        "hashmap_clear_insert_get_map",
+        &[
+            "use std::collections::HashMap;",
+            "HashMap::new()",
+            "values.clear()",
+            "values.insert(raw.to_string()",
+            ".get(raw)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadHashmapClearInsertGetMapItem",
+        "dead-hashmap-clear-insert-get-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_pathbuf_as_path_file_name_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "pathbuf_as_path_file_name_map_prune",
+        "pathbuf_as_path_file_name_map",
+        &[
+            "use std::path::PathBuf;",
+            "PathBuf::from(raw).join(\"file.txt\")",
+            "path.as_path()",
+            ".file_name()",
+            ".and_then(|name| name.to_str())",
+            "PathbufAsPathFileNameMapPayload::new(value).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadPathbufAsPathFileNameMapItem",
+        "dead-pathbuf-as-path-file-name-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_osstring_clear_push_into_string_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "osstring_clear_push_into_string_map_prune",
+        "osstring_clear_push_into_string_map",
+        &[
+            "use std::ffi::OsString;",
+            "OsString::from(\"dead\")",
+            "value.clear()",
+            "value.push(raw)",
+            ".into_string()",
+            "OsstringClearPushIntoStringMapPayload::new(&text).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadOsstringClearPushIntoStringMapItem",
+        "dead-osstring-clear-push-into-string-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_cstring_as_bytes_first_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "cstring_as_bytes_first_map_prune",
+        "cstring_as_bytes_first_map",
+        &[
+            "use std::ffi::CString;",
+            "CString::new(raw).unwrap_or_else",
+            ".as_bytes()",
+            ".first()",
+            "CstringAsBytesFirstMapPayload::new(&byte.to_string()).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadCstringAsBytesFirstMapItem",
+        "dead-cstring-as-bytes-first-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_string_into_bytes_first_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "string_into_bytes_first_map_prune",
+        "string_into_bytes_first_map",
+        &[
+            "String::from(raw)",
+            ".into_bytes()",
+            ".into_iter()",
+            ".next()",
+            "StringIntoBytesFirstMapPayload::new(&byte.to_string()).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadStringIntoBytesFirstMapItem",
+        "dead-string-into-bytes-first-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,
