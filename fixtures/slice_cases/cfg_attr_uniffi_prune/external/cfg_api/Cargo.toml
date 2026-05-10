@@ -1,0 +1,8 @@
+[package]
+name = "cfg_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+cfg_model = { path = "../cfg_model" }
+

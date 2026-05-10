@@ -331,6 +331,83 @@ fn prunes_out_dir_generated_support_chain_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_cfg_attr_uniffi_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/cfg_attr_uniffi_prune");
+    let output = temp_path("slice-case-cfg-attr-uniffi-prune-output");
+    let target_dir = temp_path("slice-case-cfg-attr-uniffi-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("cfg_attr_uniffi_prune fixture should slice");
+
+    assert_eq!(report.packages, ["cfg_api", "cfg_model", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_cfg_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+    assert_production_hazard(&report, "conditional_compilation_attrs", "warning");
+    assert_production_hazard(&report, "custom_attribute_macros", "warning");
+    assert_production_hazard(&report, "custom_derive_macros", "warning");
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("cfg_api/Cargo.toml"));
+    let api_root = read(output.join("cfg_api/src/lib.rs"));
+    let api_live = read(output.join("cfg_api/src/live.rs"));
+    let model_root = read(output.join("cfg_model/src/lib.rs"));
+    let model_live = read(output.join("cfg_model/src/live.rs"));
+
+    assert!(root_manifest.contains("../cfg_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_cfg_report"));
+    assert!(root_source.contains("cfg_api::selected_cfg_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_cfg_report"]);
+
+    assert!(api_manifest.contains("../cfg_model"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_cfg_report"), "{api_root}");
+    assert_absent(
+        "cfg_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_cfg_report"],
+    );
+    assert!(api_live.contains("cfg_model::selected_cfg_record"));
+    assert_absent("cfg_api/src/live.rs", &api_live, &["dead_live_cfg_report"]);
+    assert!(!output.join("cfg_api/src/dead.rs").exists());
+
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("selected_cfg_record"), "{model_root}");
+    assert!(model_root.contains("LiveCfgRecord"), "{model_root}");
+    assert!(model_root.contains("LiveCfgStatus"), "{model_root}");
+    assert_absent(
+        "cfg_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadCfgRecord", "dead_cfg_record"],
+    );
+    assert!(model_live.contains("pub struct LiveCfgRecord"));
+    assert!(model_live.contains("pub enum LiveCfgStatus"));
+    assert!(model_live.contains("pub fn render"));
+    assert!(model_live.contains("pub fn label"));
+    assert!(model_live.contains("pub fn selected_cfg_record"));
+    assert_absent(
+        "cfg_model/src/live.rs",
+        &model_live,
+        &["dead_method", "dead_live_cfg_record", "dead-cfg"],
+    );
+    assert!(!output.join("cfg_model/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_alias_import_support_chain_to_used_closure_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/import_alias_prune");
     let output = temp_path("slice-case-import-alias-prune-output");

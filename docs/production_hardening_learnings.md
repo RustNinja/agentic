@@ -1108,3 +1108,14 @@ then cargo-checks the generated workspace where `build.rs` recreates the file.
 The same used/unknown/unused contract proves the support package keeps only the
 live generated helper and prunes dead generated-support functions. The full
 slice-case suite now covers this contract across 764 fast fixtures.
+
+The cfg/feature blocker also now has a checked-in hard fixture.
+`cfg_attr_uniffi_prune` models a Litter-shaped UniFFI surface with
+`cfg_attr(feature = "ffi", derive(...))`, a nested `cfg_attr(...,
+uniffi::export)` impl, and a helper attribute on a retained record field. The
+production report must keep scoped `conditional_compilation_attrs`,
+`custom_attribute_macros`, and `custom_derive_macros` hazards, while the
+generated default-feature output still cargo-checks and prunes dead API/model
+modules, functions, and sibling methods. This keeps cfg/macro uncertainty as
+review evidence without letting it broad-copy unrelated support code. The full
+slice-case suite now covers this contract across 765 fast fixtures.
