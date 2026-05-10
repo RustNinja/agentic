@@ -168,6 +168,7 @@ pub struct UsageClassificationReport {
     pub status: String,
     pub summary: UsageClassificationSummary,
     pub semantic_proof: SemanticUsageProofReport,
+    pub public_reexports: PublicReexportProofReport,
     pub used: UsageClassifiedItems,
     pub unused_candidate: UsageClassifiedItems,
     pub blocked_by_unknown: UsageClassifiedItems,
@@ -195,6 +196,45 @@ pub struct UsageClassificationSummary {
     pub benign_unknown_surfaces: usize,
     pub macro_blocked_unknown_surfaces: usize,
     pub dependency_risk_unknown_surfaces: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublicReexportProofReport {
+    pub status: String,
+    pub summary: PublicReexportProofSummary,
+    pub entries: Vec<PublicReexportProofEntry>,
+}
+
+impl Default for PublicReexportProofReport {
+    fn default() -> Self {
+        Self {
+            status: "not_checked".to_string(),
+            summary: PublicReexportProofSummary::default(),
+            entries: Vec::new(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct PublicReexportProofSummary {
+    pub public_reexports: usize,
+    pub local_targets: usize,
+    pub retained_targets: usize,
+    pub prunable_targets: usize,
+    pub unclassified_targets: usize,
+    pub external_or_unresolved_targets: usize,
+    pub facade_chain_targets: usize,
+    pub source_parse_failures: usize,
+}
+
+#[derive(Debug, Clone)]
+pub struct PublicReexportProofEntry {
+    pub package: String,
+    pub module_path: Option<String>,
+    pub visible: String,
+    pub target: String,
+    pub resolved_targets: Vec<String>,
+    pub classification: String,
 }
 
 #[derive(Debug, Clone)]
@@ -767,15 +807,24 @@ fn generate_loaded(
     let source_map = source_map_report(project, &render_reduced);
     let macro_surfaces = macro_surface_report(project, &render_reduced);
     let semantic_proof = semantic_usage_proof_report(&analyzer, &usage_decisions);
+    let public_reexport_proof =
+        public_reexport_proof_report(&options.output_root, &usage_decisions);
     let production = production_readiness_report(
         &analyzer,
         project,
         &render_reduced,
         &options.output_root,
         Some(&semantic_proof),
+        Some(&public_reexport_proof),
     );
-    let usage =
-        usage_classification_report(project, &reduced, &analyzer, &usage_decisions, &production);
+    let usage = usage_classification_report(
+        project,
+        &reduced,
+        &analyzer,
+        &usage_decisions,
+        &production,
+        public_reexport_proof,
+    );
 
     Ok(GenerateReport {
         analyzer,
@@ -1758,6 +1807,7 @@ fn usage_classification_report(
     analyzer: &AnalyzerReport,
     decisions: &UsageDecisionIndex,
     production: &ProductionReadinessReport,
+    public_reexports: PublicReexportProofReport,
 ) -> UsageClassificationReport {
     let mut used_callables = decisions.used_callables();
     used_callables.sort();
@@ -1854,6 +1904,7 @@ fn usage_classification_report(
             dependency_risk_unknown_surfaces,
         },
         semantic_proof,
+        public_reexports,
         used: UsageClassifiedItems {
             callables: used_callables,
             items: used_items,
@@ -1877,6 +1928,587 @@ fn usage_classification_report(
         unknown,
         evidence,
     }
+}
+
+#[derive(Clone, Debug)]
+struct GeneratedPublicReexport {
+    package: String,
+    module_path: Vec<String>,
+    visible: String,
+    target: Vec<String>,
+}
+
+#[derive(Default)]
+struct GeneratedPublicReexportSymbols {
+    module_paths: BTreeSet<Vec<String>>,
+    public_reexports: Vec<GeneratedPublicReexport>,
+    source_parse_failures: usize,
+}
+
+fn public_reexport_proof_report(
+    output_root: &Path,
+    decisions: &UsageDecisionIndex,
+) -> PublicReexportProofReport {
+    let symbols = collect_generated_public_reexports(output_root, &decisions.retained_packages);
+    let retained_symbols = usage_symbol_base_paths(
+        &decisions.used_callables,
+        &decisions.blocked_by_unknown_callables,
+        &decisions.used_items,
+        &decisions.blocked_by_unknown_items,
+    );
+    let prunable_symbols = usage_symbol_base_paths(
+        &decisions.prunable_callables,
+        &BTreeSet::new(),
+        &decisions.prunable_items,
+        &BTreeSet::new(),
+    );
+    let known_symbols = retained_symbols
+        .union(&prunable_symbols)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let exposed_reexports = generated_exposed_reexports(&symbols);
+    let mut summary = PublicReexportProofSummary {
+        public_reexports: symbols.public_reexports.len(),
+        source_parse_failures: symbols.source_parse_failures,
+        ..PublicReexportProofSummary::default()
+    };
+    let mut entries = Vec::new();
+
+    for reexport in &symbols.public_reexports {
+        let direct = generated_public_reexport_local_candidates(
+            reexport,
+            &symbols.module_paths,
+            &known_symbols,
+        );
+        let resolved = generated_public_reexport_target_closure(
+            reexport,
+            &symbols.module_paths,
+            &known_symbols,
+            &exposed_reexports,
+        );
+        if !resolved.is_empty() {
+            summary.local_targets += 1;
+        }
+        if resolved.len() > direct.len() {
+            summary.facade_chain_targets += 1;
+        }
+
+        let classification = if resolved.is_empty() {
+            summary.external_or_unresolved_targets += 1;
+            "external_or_unresolved"
+        } else if resolved
+            .iter()
+            .any(|candidate| retained_symbols.contains(candidate))
+        {
+            summary.retained_targets += 1;
+            "retained"
+        } else if resolved
+            .iter()
+            .any(|candidate| prunable_symbols.contains(candidate))
+        {
+            summary.prunable_targets += 1;
+            "prunable"
+        } else {
+            summary.unclassified_targets += 1;
+            "unclassified"
+        };
+
+        entries.push(PublicReexportProofEntry {
+            package: reexport.package.clone(),
+            module_path: (!reexport.module_path.is_empty())
+                .then(|| reexport.module_path.join("::")),
+            visible: reexport.visible.clone(),
+            target: reexport.target.join("::"),
+            resolved_targets: resolved.into_iter().collect(),
+            classification: classification.to_string(),
+        });
+    }
+
+    let status = if summary.source_parse_failures > 0 {
+        "incomplete".to_string()
+    } else if summary.prunable_targets > 0 || summary.unclassified_targets > 0 {
+        "failed".to_string()
+    } else {
+        "proven".to_string()
+    };
+
+    PublicReexportProofReport {
+        status,
+        summary,
+        entries,
+    }
+}
+
+fn usage_symbol_base_paths(
+    left_callables: &BTreeSet<CallableId>,
+    right_callables: &BTreeSet<CallableId>,
+    left_items: &BTreeSet<ItemId>,
+    right_items: &BTreeSet<ItemId>,
+) -> BTreeSet<String> {
+    let mut paths = left_callables
+        .union(right_callables)
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    paths.extend(
+        left_items
+            .union(right_items)
+            .map(ToString::to_string)
+            .map(|item| usage_item_base_path(&item)),
+    );
+    paths
+}
+
+fn usage_item_base_path(item: &str) -> String {
+    item.rfind('(')
+        .map(|index| item[..index].to_string())
+        .unwrap_or_else(|| item.to_string())
+}
+
+fn collect_generated_public_reexports(
+    output_root: &Path,
+    packages: &BTreeSet<String>,
+) -> GeneratedPublicReexportSymbols {
+    let mut symbols = GeneratedPublicReexportSymbols::default();
+    for package in packages {
+        let source_root = output_root.join(package).join("src");
+        if !source_root.exists() {
+            continue;
+        }
+        for file in generated_rust_files_under(&source_root) {
+            let module_path = generated_module_path_from_source_file(&source_root, &file);
+            insert_generated_module_path_with_parents(&mut symbols.module_paths, &module_path);
+            let Ok(source) = fs::read_to_string(&file) else {
+                symbols.source_parse_failures += 1;
+                continue;
+            };
+            let Ok(syntax) = syn::parse_file(&source) else {
+                symbols.source_parse_failures += 1;
+                continue;
+            };
+            collect_generated_public_reexport_items(
+                package,
+                &module_path,
+                &syntax.items,
+                &mut symbols,
+            );
+        }
+    }
+    symbols
+}
+
+fn collect_generated_public_reexport_items(
+    package: &str,
+    module_path: &[String],
+    items: &[syn::Item],
+    symbols: &mut GeneratedPublicReexportSymbols,
+) {
+    for item in items {
+        match item {
+            syn::Item::Use(item_use) if generated_use_is_public_api_reexport(&item_use.vis) => {
+                collect_generated_public_reexport_tree(
+                    package,
+                    module_path,
+                    &item_use.tree,
+                    Vec::new(),
+                    symbols,
+                );
+            }
+            syn::Item::Mod(item) => {
+                if let Some((_, nested)) = &item.content {
+                    let mut nested_module_path = module_path.to_vec();
+                    nested_module_path.push(item.ident.to_string());
+                    insert_generated_module_path_with_parents(
+                        &mut symbols.module_paths,
+                        &nested_module_path,
+                    );
+                    collect_generated_public_reexport_items(
+                        package,
+                        &nested_module_path,
+                        nested,
+                        symbols,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn collect_generated_public_reexport_tree(
+    package: &str,
+    module_path: &[String],
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    symbols: &mut GeneratedPublicReexportSymbols,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_generated_public_reexport_tree(
+                package,
+                module_path,
+                &path.tree,
+                prefix,
+                symbols,
+            );
+        }
+        UseTree::Name(name) => {
+            if let Some((visible, target)) = generated_reexport_leaf(prefix, name.ident.to_string())
+            {
+                symbols.public_reexports.push(GeneratedPublicReexport {
+                    package: package.to_string(),
+                    module_path: module_path.to_vec(),
+                    visible,
+                    target,
+                });
+            }
+        }
+        UseTree::Rename(rename) => {
+            if let Some((_, target)) = generated_reexport_leaf(prefix, rename.ident.to_string()) {
+                symbols.public_reexports.push(GeneratedPublicReexport {
+                    package: package.to_string(),
+                    module_path: module_path.to_vec(),
+                    visible: rename.rename.to_string(),
+                    target,
+                });
+            }
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_generated_public_reexport_tree(
+                    package,
+                    module_path,
+                    nested,
+                    prefix.clone(),
+                    symbols,
+                );
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn generated_reexport_leaf(
+    mut prefix: Vec<String>,
+    ident: String,
+) -> Option<(String, Vec<String>)> {
+    if ident == "self" {
+        let visible = prefix.last()?.clone();
+        Some((visible, prefix))
+    } else {
+        prefix.push(ident.clone());
+        Some((ident, prefix))
+    }
+}
+
+fn generated_exposed_reexports(
+    symbols: &GeneratedPublicReexportSymbols,
+) -> BTreeMap<String, Vec<GeneratedPublicReexport>> {
+    let mut reexports = BTreeMap::<String, Vec<GeneratedPublicReexport>>::new();
+    for reexport in &symbols.public_reexports {
+        let mut exposed_path = reexport.module_path.clone();
+        exposed_path.push(reexport.visible.clone());
+        reexports
+            .entry(generated_qualified_symbol_path(
+                &reexport.package,
+                &exposed_path,
+            ))
+            .or_default()
+            .push(reexport.clone());
+    }
+    reexports
+}
+
+fn generated_public_reexport_target_closure(
+    reexport: &GeneratedPublicReexport,
+    module_paths: &BTreeSet<Vec<String>>,
+    known_symbols: &BTreeSet<String>,
+    exposed_reexports: &BTreeMap<String, Vec<GeneratedPublicReexport>>,
+) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    let mut pending =
+        generated_public_reexport_local_candidates(reexport, module_paths, known_symbols)
+            .into_iter()
+            .collect::<Vec<_>>();
+    if let Some(target) = generated_exposed_raw_reexport_target(&reexport.target, exposed_reexports)
+    {
+        pending.push(target);
+    }
+
+    while let Some(candidate) = pending.pop() {
+        if !candidates.insert(candidate.clone()) {
+            continue;
+        }
+        let Some(reexports) = exposed_reexports.get(&candidate) else {
+            continue;
+        };
+        for exposed in reexports {
+            for next in
+                generated_public_reexport_local_candidates(exposed, module_paths, known_symbols)
+            {
+                if !candidates.contains(&next) {
+                    pending.push(next);
+                }
+            }
+            if let Some(next) =
+                generated_exposed_raw_reexport_target(&exposed.target, exposed_reexports)
+            {
+                if !candidates.contains(&next) {
+                    pending.push(next);
+                }
+            }
+        }
+    }
+
+    candidates
+}
+
+fn generated_public_reexport_local_candidates(
+    reexport: &GeneratedPublicReexport,
+    module_paths: &BTreeSet<Vec<String>>,
+    known_symbols: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    if let Some(target) = generated_known_raw_reexport_target(&reexport.target, known_symbols) {
+        candidates.insert(target);
+    }
+    if let Some(local_segments) =
+        generated_normalize_public_reexport_target(&reexport.module_path, &reexport.target)
+    {
+        let explicit_local = reexport
+            .target
+            .first()
+            .is_some_and(|segment| segment == "crate" || segment == "self" || segment == "super");
+        if generated_local_reexport_candidate_is_local(
+            &reexport.package,
+            &local_segments,
+            module_paths,
+            known_symbols,
+            explicit_local,
+        ) {
+            candidates.insert(generated_qualified_symbol_path(
+                &reexport.package,
+                &local_segments,
+            ));
+        }
+    }
+
+    if reexport
+        .target
+        .first()
+        .is_some_and(|segment| segment != "crate" && segment != "self" && segment != "super")
+        && generated_local_reexport_candidate_is_local(
+            &reexport.package,
+            &reexport.target,
+            module_paths,
+            known_symbols,
+            false,
+        )
+    {
+        candidates.insert(generated_qualified_symbol_path(
+            &reexport.package,
+            &reexport.target,
+        ));
+    }
+
+    candidates
+}
+
+fn generated_known_raw_reexport_target(
+    target: &[String],
+    known_symbols: &BTreeSet<String>,
+) -> Option<String> {
+    let path = generated_raw_reexport_target(target)?;
+    known_symbols.contains(&path).then_some(path)
+}
+
+fn generated_exposed_raw_reexport_target(
+    target: &[String],
+    exposed_reexports: &BTreeMap<String, Vec<GeneratedPublicReexport>>,
+) -> Option<String> {
+    let path = generated_raw_reexport_target(target)?;
+    exposed_reexports.contains_key(&path).then_some(path)
+}
+
+fn generated_raw_reexport_target(target: &[String]) -> Option<String> {
+    if target.is_empty() {
+        return None;
+    }
+    Some(target.join("::"))
+}
+
+fn generated_local_reexport_candidate_is_local(
+    package: &str,
+    segments: &[String],
+    module_paths: &BTreeSet<Vec<String>>,
+    known_symbols: &BTreeSet<String>,
+    explicit_local: bool,
+) -> bool {
+    if segments.is_empty() {
+        return false;
+    }
+    let symbol = generated_qualified_symbol_path(package, segments);
+    if known_symbols.contains(&symbol) || module_paths.contains(segments) {
+        return true;
+    }
+    if explicit_local {
+        return true;
+    }
+    if segments.len() == 1 {
+        return false;
+    }
+    let parent = &segments[..segments.len() - 1];
+    module_paths.contains(parent)
+}
+
+fn generated_normalize_public_reexport_target(
+    module_path: &[String],
+    target: &[String],
+) -> Option<Vec<String>> {
+    let first = target.first()?;
+    if first == "crate" {
+        return Some(target[1..].to_vec());
+    }
+
+    let mut normalized = module_path.to_vec();
+    let mut index = 0;
+    if first == "self" {
+        index = 1;
+    } else {
+        while target.get(index).is_some_and(|segment| segment == "super") {
+            normalized.pop();
+            index += 1;
+        }
+    }
+    normalized.extend_from_slice(&target[index..]);
+    Some(normalized)
+}
+
+fn generated_qualified_symbol_path(package: &str, segments: &[String]) -> String {
+    let mut path = package.to_string();
+    for segment in segments {
+        path.push_str("::");
+        path.push_str(segment);
+    }
+    path
+}
+
+fn generated_rust_files_under(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_generated_rust_files(root, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_generated_rust_files(root: &Path, files: &mut Vec<PathBuf>) {
+    let Ok(entries) = fs::read_dir(root) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_generated_rust_files(&path, files);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn generated_module_path_from_source_file(source_root: &Path, file: &Path) -> Vec<String> {
+    let Ok(relative) = file.strip_prefix(source_root) else {
+        return Vec::new();
+    };
+    let mut components = relative
+        .components()
+        .filter_map(|component| match component {
+            Component::Normal(value) => Some(value.to_string_lossy().to_string()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    let Some(file_name) = components.pop() else {
+        return Vec::new();
+    };
+    match file_name.as_str() {
+        "lib.rs" | "main.rs" => Vec::new(),
+        "mod.rs" => components,
+        _ => {
+            let stem = Path::new(&file_name)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().to_string())
+                .unwrap_or_default();
+            components.push(stem);
+            components
+        }
+    }
+}
+
+fn insert_generated_module_path_with_parents(
+    modules: &mut BTreeSet<Vec<String>>,
+    module_path: &[String],
+) {
+    modules.insert(Vec::new());
+    for index in 1..=module_path.len() {
+        modules.insert(module_path[..index].to_vec());
+    }
+}
+
+fn generated_use_is_public_api_reexport(visibility: &syn::Visibility) -> bool {
+    matches!(visibility, syn::Visibility::Public(_))
+}
+
+fn add_public_reexport_proof_hazards(
+    proof: &PublicReexportProofReport,
+    hazards: &mut Vec<ProductionHazardReport>,
+) {
+    if proof.summary.prunable_targets > 0 {
+        hazards.push(production_hazard_with_details(
+            "public_reexport_prunable_targets",
+            "error",
+            "generated public reexports point at local targets classified as prunable",
+            public_reexport_proof_details(proof, "prunable"),
+        ));
+    }
+    if proof.summary.unclassified_targets > 0 {
+        hazards.push(production_hazard_with_details(
+            "public_reexport_unclassified_targets",
+            "error",
+            "generated public reexports point at local targets missing usage classification",
+            public_reexport_proof_details(proof, "unclassified"),
+        ));
+    }
+    if proof.summary.source_parse_failures > 0 {
+        hazards.push(production_hazard(
+            "public_reexport_proof_incomplete",
+            "warning",
+            "generated public reexport proof skipped source files that did not parse",
+        ));
+    }
+}
+
+fn public_reexport_proof_details(
+    proof: &PublicReexportProofReport,
+    classification: &str,
+) -> Vec<ProductionHazardDetail> {
+    proof
+        .entries
+        .iter()
+        .filter(|entry| entry.classification == classification)
+        .map(|entry| ProductionHazardDetail {
+            subject: format!(
+                "visible={}; target={}; resolved={}",
+                entry.visible,
+                entry.target,
+                entry.resolved_targets.join(",")
+            ),
+            package: Some(entry.package.clone()),
+            module_path: entry.module_path.clone(),
+            file: None,
+            start_line: None,
+            cfg: None,
+            blocked_idents: vec![entry.visible.clone()],
+            suggested_cargo_args: Vec::new(),
+        })
+        .collect()
 }
 
 fn unknown_surface_category(hazard: &ProductionHazardReport) -> &'static str {
@@ -2235,6 +2867,7 @@ fn production_readiness_report(
     reduced: &ReducedProject,
     output_root: &Path,
     semantic_proof: Option<&SemanticUsageProofReport>,
+    public_reexport_proof: Option<&PublicReexportProofReport>,
 ) -> ProductionReadinessReport {
     production_readiness_report_inner(
         analyzer,
@@ -2242,6 +2875,7 @@ fn production_readiness_report(
         reduced,
         Some(output_root),
         semantic_proof,
+        public_reexport_proof,
     )
 }
 
@@ -2250,7 +2884,7 @@ fn pre_render_production_readiness_report(
     project: &Project,
     reduced: &ReducedProject,
 ) -> ProductionReadinessReport {
-    production_readiness_report_inner(analyzer, project, reduced, None, None)
+    production_readiness_report_inner(analyzer, project, reduced, None, None, None)
 }
 
 fn production_readiness_report_inner(
@@ -2259,12 +2893,16 @@ fn production_readiness_report_inner(
     reduced: &ReducedProject,
     output_root: Option<&Path>,
     semantic_proof: Option<&SemanticUsageProofReport>,
+    public_reexport_proof: Option<&PublicReexportProofReport>,
 ) -> ProductionReadinessReport {
     let mut hazards = Vec::new();
     let semantic_pruning_proven = semantic_pruning_proof_complete(semantic_proof);
     add_workspace_production_hazards(project, reduced, &mut hazards);
     if let Some(output_root) = output_root {
         add_generated_support_package_production_hazards(output_root, &mut hazards);
+    }
+    if let Some(public_reexport_proof) = public_reexport_proof {
+        add_public_reexport_proof_hazards(public_reexport_proof, &mut hazards);
     }
     add_cfg_gated_root_production_hazards(project, reduced, &mut hazards);
     add_syntactic_production_hazards(project, reduced, &mut hazards);
@@ -6859,6 +7497,7 @@ struct UsageClassificationReportJson {
     status: String,
     summary: UsageClassificationSummaryJson,
     semantic_proof: SemanticUsageProofReportJson,
+    public_reexports: PublicReexportProofReportJson,
     decision_map: UsageDecisionMapJson,
     used: UsageClassifiedItemsJson,
     unused_candidate: UsageClassifiedItemsJson,
@@ -6875,6 +7514,7 @@ impl UsageClassificationReportJson {
             status: report.status.clone(),
             summary: UsageClassificationSummaryJson::from_report(&report.summary),
             semantic_proof: SemanticUsageProofReportJson::from_report(&report.semantic_proof),
+            public_reexports: PublicReexportProofReportJson::from_report(&report.public_reexports),
             decision_map: UsageDecisionMapJson::from_report(report),
             used: UsageClassifiedItemsJson::from_report(&report.used),
             unused_candidate: UsageClassifiedItemsJson::from_report(&report.unused_candidate),
@@ -6887,6 +7527,77 @@ impl UsageClassificationReportJson {
                 .map(UsageUnknownSurfaceJson::from_report)
                 .collect(),
             evidence: UsageClassificationEvidenceJson::from_report(&report.evidence),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PublicReexportProofReportJson {
+    status: String,
+    summary: PublicReexportProofSummaryJson,
+    entries: Vec<PublicReexportProofEntryJson>,
+}
+
+impl PublicReexportProofReportJson {
+    fn from_report(report: &PublicReexportProofReport) -> Self {
+        Self {
+            status: report.status.clone(),
+            summary: PublicReexportProofSummaryJson::from_report(&report.summary),
+            entries: report
+                .entries
+                .iter()
+                .map(PublicReexportProofEntryJson::from_report)
+                .collect(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PublicReexportProofSummaryJson {
+    public_reexports: usize,
+    local_targets: usize,
+    retained_targets: usize,
+    prunable_targets: usize,
+    unclassified_targets: usize,
+    external_or_unresolved_targets: usize,
+    facade_chain_targets: usize,
+    source_parse_failures: usize,
+}
+
+impl PublicReexportProofSummaryJson {
+    fn from_report(summary: &PublicReexportProofSummary) -> Self {
+        Self {
+            public_reexports: summary.public_reexports,
+            local_targets: summary.local_targets,
+            retained_targets: summary.retained_targets,
+            prunable_targets: summary.prunable_targets,
+            unclassified_targets: summary.unclassified_targets,
+            external_or_unresolved_targets: summary.external_or_unresolved_targets,
+            facade_chain_targets: summary.facade_chain_targets,
+            source_parse_failures: summary.source_parse_failures,
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct PublicReexportProofEntryJson {
+    package: String,
+    module_path: Option<String>,
+    visible: String,
+    target: String,
+    resolved_targets: Vec<String>,
+    classification: String,
+}
+
+impl PublicReexportProofEntryJson {
+    fn from_report(entry: &PublicReexportProofEntry) -> Self {
+        Self {
+            package: entry.package.clone(),
+            module_path: entry.module_path.clone(),
+            visible: entry.visible.clone(),
+            target: entry.target.clone(),
+            resolved_targets: entry.resolved_targets.clone(),
+            classification: entry.classification.clone(),
         }
     }
 }
@@ -7597,12 +8308,13 @@ mod tests {
     use super::model::ItemKind;
     use super::non_benign_unresolved_count;
     use super::{
-        add_semantic_inventory_hazard, default_feature_closure, generate,
-        generate_with_analyzer_feedback, production_hazard_with_details,
+        add_public_reexport_proof_hazards, add_semantic_inventory_hazard, default_feature_closure,
+        generate, generate_with_analyzer_feedback, production_hazard_with_details,
         production_readiness_status, semantic_hazard_metrics, semantic_unresolved_details,
         unknown_surface_category, usage_classification_report, usage_evidence_reason,
         usage_guarded_render_reduction, write_generate_report, AnalyzerMode, AnalyzerReport,
         CallableId, CheckDiagnostic, GenerateOptions, ItemId, ProductionHazardDetail,
+        PublicReexportProofEntry, PublicReexportProofReport, PublicReexportProofSummary,
         SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
         SemanticReport, SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic,
         SemanticUnresolvedKind, SemanticUsageReport, UsageDecision,
@@ -8000,8 +8712,14 @@ fn private_leaf() -> i32 {
                 .expect("usage-guarded render reduction should work");
         render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
             .expect("render should succeed");
-        let usage =
-            usage_classification_report(&project, &reduced, &analyzer, &usage_decisions, &blocker);
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &blocker,
+            PublicReexportProofReport::default(),
+        );
 
         let used_callables = usage
             .used
@@ -8391,6 +9109,7 @@ pub fn mapped_dead_code() -> i32 {
             &analyzer,
             &usage_decisions,
             &production,
+            PublicReexportProofReport::default(),
         );
 
         assert!(!usage.blocked_by_unknown.callables.contains(&unmapped_dead));
@@ -8525,6 +9244,7 @@ pub fn clean_dead_code() -> i32 {
             &analyzer,
             &usage_decisions,
             &production,
+            PublicReexportProofReport::default(),
         );
         assert!(!usage.blocked_by_unknown.callables.contains(&unknown_helper));
         assert!(usage.unused.callables.contains(&clean_dead));
@@ -8760,6 +9480,7 @@ pub fn clean_dead_code() -> i32 {
             &analyzer,
             &usage_decisions,
             &production,
+            PublicReexportProofReport::default(),
         );
 
         assert!(
@@ -8887,6 +9608,7 @@ pub fn clean_dead_code() -> i32 {
             &analyzer,
             &usage_decisions,
             &production,
+            PublicReexportProofReport::default(),
         );
 
         assert!(
@@ -9062,6 +9784,15 @@ theme = []
             value["usage"]["semantic_proof"]["status"],
             report.usage.semantic_proof.status
         );
+        assert_eq!(
+            value["usage"]["public_reexports"]["status"],
+            report.usage.public_reexports.status
+        );
+        assert_eq!(
+            value["usage"]["public_reexports"]["summary"]["prunable_targets"],
+            report.usage.public_reexports.summary.prunable_targets
+        );
+        assert!(value["usage"]["public_reexports"]["entries"].is_array());
         assert_eq!(value["production"]["status"], "requires_feedback");
         assert!(value["production"]["hazards"]
             .as_array()
@@ -9166,6 +9897,65 @@ theme = []
             .unwrap()
             .iter()
             .any(|detail| detail == "prunable=true"));
+    }
+
+    #[test]
+    fn public_reexport_proof_hazards_block_prunable_and_unclassified_targets() {
+        let report = PublicReexportProofReport {
+            status: "failed".to_string(),
+            summary: PublicReexportProofSummary {
+                prunable_targets: 1,
+                unclassified_targets: 1,
+                source_parse_failures: 1,
+                ..PublicReexportProofSummary::default()
+            },
+            entries: vec![
+                PublicReexportProofEntry {
+                    package: "facade".to_string(),
+                    module_path: Some("api".to_string()),
+                    visible: "DeadType".to_string(),
+                    target: "model::DeadType".to_string(),
+                    resolved_targets: vec!["model::DeadType".to_string()],
+                    classification: "prunable".to_string(),
+                },
+                PublicReexportProofEntry {
+                    package: "facade".to_string(),
+                    module_path: None,
+                    visible: "Escaped".to_string(),
+                    target: "api::Escaped".to_string(),
+                    resolved_targets: vec!["facade::api::Escaped".to_string()],
+                    classification: "unclassified".to_string(),
+                },
+            ],
+        };
+        let mut hazards = Vec::new();
+
+        add_public_reexport_proof_hazards(&report, &mut hazards);
+
+        assert!(hazards
+            .iter()
+            .any(|hazard| hazard.code == "public_reexport_prunable_targets"
+                && hazard.severity == "error"
+                && hazard.details.iter().any(|detail| {
+                    detail.package.as_deref() == Some("facade")
+                        && detail.module_path.as_deref() == Some("api")
+                        && detail
+                            .blocked_idents
+                            .iter()
+                            .any(|ident| ident == "DeadType")
+                })));
+        assert!(hazards.iter().any(
+            |hazard| hazard.code == "public_reexport_unclassified_targets"
+                && hazard.severity == "error"
+                && hazard
+                    .details
+                    .iter()
+                    .any(|detail| detail.blocked_idents.iter().any(|ident| ident == "Escaped"))
+        ));
+        assert!(hazards
+            .iter()
+            .any(|hazard| hazard.code == "public_reexport_proof_incomplete"
+                && hazard.severity == "warning"));
     }
 
     #[test]

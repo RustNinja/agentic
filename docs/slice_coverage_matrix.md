@@ -68,6 +68,13 @@ dead functions, items, modules, tests, and local crates are absent.
 
 ## Current Boundaries
 
+The generation report now exposes the same public-reexport proof that the
+fixture harness uses through `usage.public_reexports`. Production readiness
+raises errors when generated public facades resolve through local or support
+package reexport chains to symbols classified as `prunable` or missing from the
+used/unknown decision map, so stale public aliases cannot hide outside the
+source-item audit.
+
 These are tracked limitations, not silently claimed support:
 
 | Area | Boundary |

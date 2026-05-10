@@ -4960,6 +4960,27 @@ fn prunes_returned_object_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("returned_model/src/dead.rs").exists());
 
+    let public_reexports = &report.usage.public_reexports;
+    assert_eq!(public_reexports.status, "proven", "{public_reexports:#?}");
+    assert!(
+        public_reexports.summary.facade_chain_targets >= 1,
+        "returned_api facade chain should be proved through returned_model: {public_reexports:#?}"
+    );
+    assert!(
+        public_reexports.entries.iter().any(|entry| {
+            entry.package == "returned_api"
+                && entry.visible == "ReturnedSubscription"
+                && entry
+                    .resolved_targets
+                    .iter()
+                    .any(|target| target == "returned_model::ReturnedSubscription")
+                && entry.classification == "retained"
+        }),
+        "returned support facade should resolve to retained model item: {public_reexports:#?}"
+    );
+    assert_eq!(public_reexports.summary.prunable_targets, 0);
+    assert_eq!(public_reexports.summary.unclassified_targets, 0);
+
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 

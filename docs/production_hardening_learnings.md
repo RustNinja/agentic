@@ -1308,3 +1308,11 @@ chains until they reach a retained/prunable symbol, while still ignoring
 arbitrary external crate reexports that are outside the local proof. It now
 fails both stale-prunable and unclassified-local reexport targets, and the full
 slice-case suite passes across 776 tests with that stronger contract.
+
+That proof has moved into the production report path. Each generated slice now
+serializes `usage.public_reexports` with per-leaf facade-chain resolution and
+summary counts, and the production gate emits hard hazards if a generated
+public facade points at a prunable or unclassified local target. The
+`returned_object_prune` fixture asserts this through a real support-package
+facade from `returned_api` into `returned_model`, so the contract is no longer
+test-only infrastructure.
