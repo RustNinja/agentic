@@ -1213,3 +1213,16 @@ all 48 callables and 24 items, proves 23 retained-package callables and 9
 retained-package items are prunable with zero unproven symbols, and leaves only
 scoped cfg, derive, trait-object, fallback, and unresolved semantic warnings.
 The full checked slice-case suite now covers 770 generated workspaces.
+
+The Litter-shaped OUT_DIR codegen fixture exposed a real fail-closed gap:
+`generated::generated_event(label).render()` had a generated function return
+type, so RA/syn could not prove the receiver and the name-only fallback was
+capped. The renderer previously pruned `GeneratedEvent::render`, producing a
+non-buildable slice. The fix is generic: `syntactic_method_fallback_cap`
+hazards now participate in the unknown-deletion guard with package/module
+scope, so the affected same-module method stays `blocked_by_unknown` without
+globally retaining unrelated `render` methods. The fixture keeps retained
+build-script and OUT_DIR errors, proves 14 retained-package callables and 6
+items prunable with zero unproven symbols, and keeps only six scoped
+generated-code callables blocked by unknown. The full checked slice-case suite
+now covers 771 generated workspaces.

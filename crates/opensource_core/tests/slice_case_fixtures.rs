@@ -849,6 +849,130 @@ fn prunes_litter_event_callback_support_packages_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_litter_out_dir_codegen_support_packages_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_out_dir_codegen_prune");
+    let output = temp_path("slice-case-litter-out-dir-codegen-prune-output");
+    let target_dir = temp_path("slice-case-litter-out-dir-codegen-prune-target");
+    seed_out_dir_generated_source(
+        "litter_codegen_bindings.rs",
+        "pub fn generated_event(label: &str) -> super::GeneratedEvent { super::generated_event_helper(label) }\n",
+    );
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_out_dir_codegen_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["codex-core", "codex-protocol-codegen", "codex-tui"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "codex-tui::wire::render_generated_event"),
+        "out-dir codegen root should be recorded: {:?}",
+        report.roots
+    );
+    assert_production_hazard(&report, "retained_build_scripts", "error");
+    assert_production_hazard(&report, "out_dir_source_include_macros", "error");
+
+    let tui_root = read(output.join("codex-tui/src/lib.rs"));
+    let wire_source = read(output.join("codex-tui/src/wire.rs"));
+    let core_root = read(output.join("codex-core/src/lib.rs"));
+    let core_live = read(output.join("codex-core/src/live.rs"));
+    let codegen_manifest = read(output.join("codex-protocol-codegen/Cargo.toml"));
+    let codegen_root = read(output.join("codex-protocol-codegen/src/lib.rs"));
+    let codegen_live = read(output.join("codex-protocol-codegen/src/live.rs"));
+
+    assert!(tui_root.contains("pub mod wire"), "{tui_root}");
+    assert_absent(
+        "codex-tui/src/lib.rs",
+        &tui_root,
+        &["pub mod panels", "dead_tui_codegen_entry"],
+    );
+    assert!(
+        wire_source.contains("pub fn render_generated_event"),
+        "{wire_source}"
+    );
+    assert_absent(
+        "codex-tui/src/wire.rs",
+        &wire_source,
+        &["dead_generated_event", "dead_core_codegen"],
+    );
+    assert!(!output.join("codex-tui/src/panels.rs").exists());
+
+    assert!(core_root.contains("mod live"), "{core_root}");
+    assert!(core_root.contains("CoreGeneratedEvent"), "{core_root}");
+    assert_absent(
+        "codex-core/src/lib.rs",
+        &core_root,
+        &["mod dead", "DeadGeneratedCore", "dead_core_codegen"],
+    );
+    for token in [
+        "pub struct CoreGeneratedEvent",
+        "pub fn new",
+        "pub fn label",
+        "pub fn render_core_generated_event",
+        "fn normalize_core_label",
+    ] {
+        assert!(core_live.contains(token), "missing {token:?}\n{core_live}");
+    }
+    assert_absent(
+        "codex-core/src/live.rs",
+        &core_live,
+        &["dead_summary", "dead_live_core_codegen"],
+    );
+    assert!(!output.join("codex-core/src/dead.rs").exists());
+
+    assert!(codegen_manifest.contains("build = \"build.rs\""));
+    assert!(output.join("codex-protocol-codegen/build.rs").exists());
+    assert!(codegen_root.contains("mod live"), "{codegen_root}");
+    assert!(codegen_root.contains("GeneratedEvent"), "{codegen_root}");
+    assert_absent(
+        "codex-protocol-codegen/src/lib.rs",
+        &codegen_root,
+        &[
+            "mod dead",
+            "DeadGeneratedProtocol",
+            "dead_protocol_codegen_report",
+        ],
+    );
+    assert!(
+        codegen_live.contains("include!(concat!(env!(\"OUT_DIR\")"),
+        "{codegen_live}"
+    );
+    for token in [
+        "pub struct GeneratedEvent",
+        "pub fn new",
+        "pub fn label",
+        "pub fn payload",
+        "pub fn render",
+        "pub fn selected_wire_event",
+        "pub fn generated_event_helper",
+        "fn normalize_generated_payload",
+    ] {
+        assert!(
+            codegen_live.contains(token),
+            "missing {token:?}\n{codegen_live}"
+        );
+    }
+    assert_absent(
+        "codex-protocol-codegen/src/live.rs",
+        &codegen_live,
+        &["dead_debug", "dead_wire_event", "dead_generated_helper"],
+    );
+    assert!(!output.join("codex-protocol-codegen/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &tui_root, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
     let cases = [
@@ -914,6 +1038,17 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 ("syntactic_method_fallback_cap", "warning"),
                 ("syntactic_method_fallbacks", "warning"),
                 ("trait_object_surfaces", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "litter_out_dir_codegen_prune",
+            packages: &["codex-core", "codex-protocol-codegen", "codex-tui"],
+            hazards: &[
+                ("out_dir_source_include_macros", "error"),
+                ("retained_build_scripts", "error"),
+                ("semantic_unresolved_method_calls", "warning"),
+                ("semantic_unresolved_paths", "warning"),
+                ("syntactic_method_fallback_cap", "warning"),
             ],
         },
         RaHardFixture {
@@ -21785,6 +21920,12 @@ fn prepare_slice_case_fixture(fixture_name: &str) {
         seed_out_dir_generated_source(
             "slice_case_generated.rs",
             "pub fn generated_value() -> u32 { super::out_dir_generated_helper() }\n",
+        );
+    }
+    if fixture_name == "litter_out_dir_codegen_prune" {
+        seed_out_dir_generated_source(
+            "litter_codegen_bindings.rs",
+            "pub fn generated_event(label: &str) -> super::GeneratedEvent { super::generated_event_helper(label) }\n",
         );
     }
 }

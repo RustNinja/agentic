@@ -1394,6 +1394,51 @@ fn macro_surface_report(project: &Project, reduced: &ReducedProject) -> MacroSur
 struct DeletionBlockerScope {
     global: bool,
     idents: BTreeSet<String>,
+    scoped: Vec<ScopedDeletionBlocker>,
+}
+
+#[derive(Default)]
+struct ScopedDeletionBlocker {
+    package: Option<String>,
+    module_path: Option<Vec<String>>,
+    idents: BTreeSet<String>,
+}
+
+impl ScopedDeletionBlocker {
+    fn covers_callable(&self, project: &Project, callable: &CallableId) -> bool {
+        if !self.covers_package(callable.package()) {
+            return false;
+        }
+        if let Some(module_path) = &self.module_path {
+            let callable_module = callable_module_path(project, callable);
+            if callable_module.as_deref() != Some(module_path.as_slice()) {
+                return false;
+            }
+        }
+        callable_idents(callable)
+            .iter()
+            .any(|ident| self.idents.contains(ident))
+    }
+
+    fn covers_item(&self, item: &ItemId) -> bool {
+        if !self.covers_package(&item.package) {
+            return false;
+        }
+        if let Some(module_path) = &self.module_path {
+            if &item.module_path != module_path {
+                return false;
+            }
+        }
+        item_idents(item)
+            .iter()
+            .any(|ident| self.idents.contains(ident))
+    }
+
+    fn covers_package(&self, package: &str) -> bool {
+        self.package
+            .as_ref()
+            .is_none_or(|blocked_package| blocked_package == package)
+    }
 }
 
 impl DeletionBlockerScope {
@@ -1409,7 +1454,18 @@ impl DeletionBlockerScope {
             }
             for detail in &hazard.details {
                 if !detail.blocked_idents.is_empty() {
-                    scope.idents.extend(detail.blocked_idents.iter().cloned());
+                    if hazard_uses_scoped_detail_blockers(&hazard.code) {
+                        scope.scoped.push(ScopedDeletionBlocker {
+                            package: detail.package.clone(),
+                            module_path: detail
+                                .module_path
+                                .as_deref()
+                                .map(module_path_from_report_string),
+                            idents: detail.blocked_idents.iter().cloned().collect(),
+                        });
+                    } else {
+                        scope.idents.extend(detail.blocked_idents.iter().cloned());
+                    }
                     continue;
                 }
                 if hazard_uses_precise_detail_blockers(&hazard.code) {
@@ -1424,13 +1480,17 @@ impl DeletionBlockerScope {
         scope
     }
 
-    fn covers_callable(&self, callable: &CallableId) -> bool {
+    fn covers_callable(&self, project: &Project, callable: &CallableId) -> bool {
         if self.global {
             return true;
         }
         callable_idents(callable)
             .iter()
             .any(|ident| self.idents.contains(ident))
+            || self
+                .scoped
+                .iter()
+                .any(|scope| scope.covers_callable(project, callable))
     }
 
     fn covers_item(&self, item: &ItemId) -> bool {
@@ -1440,7 +1500,26 @@ impl DeletionBlockerScope {
         item_idents(item)
             .iter()
             .any(|ident| self.idents.contains(ident))
+            || self.scoped.iter().any(|scope| scope.covers_item(item))
     }
+}
+
+fn callable_module_path(project: &Project, callable: &CallableId) -> Option<Vec<String>> {
+    match callable {
+        CallableId::Free { module_path, .. } => Some(module_path.clone()),
+        CallableId::Method { .. } => project
+            .methods
+            .get(callable)
+            .map(|record| record.module_path.clone()),
+    }
+}
+
+fn module_path_from_report_string(value: &str) -> Vec<String> {
+    value
+        .split("::")
+        .filter(|segment| !segment.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn callable_idents(callable: &CallableId) -> BTreeSet<String> {
@@ -1533,6 +1612,7 @@ fn hazard_blocks_unused_pruning(code: &str) -> bool {
             | "function_pointer_surfaces"
             | "trait_object_surfaces"
             | "dynamic_callback_boundaries"
+            | "syntactic_method_fallback_cap"
     )
 }
 
@@ -1546,6 +1626,10 @@ fn hazard_uses_precise_detail_blockers(code: &str) -> bool {
             | "trait_object_surfaces"
             | "dynamic_callback_boundaries"
     )
+}
+
+fn hazard_uses_scoped_detail_blockers(code: &str) -> bool {
+    matches!(code, "syntactic_method_fallback_cap")
 }
 
 fn deletion_blocked_extra_roots(
@@ -1563,7 +1647,7 @@ fn deletion_blocked_extra_roots(
         if reduced.reachable.contains(id)
             || !reduced.packages.contains(id.package())
             || callable_record_is_test(&record.item.attrs)
-            || !scope.covers_callable(id)
+            || !scope.covers_callable(project, id)
         {
             return None;
         }
@@ -1573,7 +1657,7 @@ fn deletion_blocked_extra_roots(
         if reduced.reachable.contains(id)
             || !reduced.packages.contains(id.package())
             || callable_record_is_test(&record.item.attrs)
-            || !scope.covers_callable(id)
+            || !scope.covers_callable(project, id)
         {
             return None;
         }
