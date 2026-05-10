@@ -185,6 +185,7 @@ fn ra_hir_proves_support_sub_dependency_pruning_contract() {
 
     assert_eq!(report.packages, ["adapter", "leaf", "root"]);
     assert_ra_pruning_proof_complete(&report);
+    assert_ra_promoted_reference_edges(&report);
 
     let root_source = read(output.join("root/src/lib.rs"));
     assert_cargo_check(&output, &target_dir, &root_source, &report);
@@ -285,9 +286,130 @@ fn ra_hir_proves_litter_theme_support_pruning_contract() {
 
     assert_eq!(report.packages, ["mobile-client", "tui"]);
     assert_ra_pruning_proof_complete(&report);
+    assert_ra_promoted_reference_edges(&report);
 
     let root_source = read(output.join("tui/src/lib.rs"));
     assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
+#[cfg(feature = "ra-hir")]
+fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
+    let cases = [
+        RaHardFixture {
+            fixture: "proc_macro_surface_prune",
+            packages: &["api", "macro_support", "model", "root"],
+            hazards: &[
+                ("custom_attribute_macros", "warning"),
+                ("custom_derive_macros", "warning"),
+                ("semantic_unresolved_paths", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "macro_generated_prune",
+            packages: &["macro_api", "macro_support", "root"],
+            hazards: &[("semantic_usage_mapping_incomplete", "warning")],
+        },
+        RaHardFixture {
+            fixture: "macro_receiver_prune",
+            packages: &["macro_api", "macro_support", "root"],
+            hazards: &[
+                ("custom_macro_invocations", "warning"),
+                ("semantic_usage_mapping_incomplete", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "cfg_attr_uniffi_prune",
+            packages: &["cfg_api", "cfg_model", "root"],
+            hazards: &[
+                ("custom_attribute_macros", "warning"),
+                ("custom_derive_macros", "warning"),
+                ("conditional_compilation_attrs", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "returned_dyn_trait_prune",
+            packages: &["dyn_api", "dyn_model", "root"],
+            hazards: &[
+                ("trait_object_surfaces", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "callback_store_prune",
+            packages: &["callback_store_api", "callback_store_support", "root"],
+            hazards: &[
+                ("trait_object_surfaces", "warning"),
+                ("syntactic_method_fallbacks", "warning"),
+                ("syntactic_method_fallback_cap", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "ffi_export_prune",
+            packages: &["ffi_api", "ffi_support", "root"],
+            hazards: &[],
+        },
+        RaHardFixture {
+            fixture: "static_registry_prune",
+            packages: &["registry_api", "registry_support", "root"],
+            hazards: &[
+                ("syntactic_method_fallback_cap", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "poll_adapter_prune",
+            packages: &["poll_api", "poll_support", "root"],
+            hazards: &[
+                ("syntactic_method_fallbacks", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "uniffi_runtime_prune",
+            packages: &["root", "runtime_api", "runtime_support"],
+            hazards: &[
+                ("syntactic_method_fallback_cap", "warning"),
+                ("semantic_unresolved_method_calls", "warning"),
+            ],
+        },
+        RaHardFixture {
+            fixture: "out_dir_generated_prune",
+            packages: &["generated_support", "root"],
+            hazards: &[
+                ("out_dir_source_include_macros", "error"),
+                ("retained_build_scripts", "error"),
+                ("semantic_unresolved_paths", "warning"),
+            ],
+        },
+    ];
+
+    for case in cases {
+        let (output, target_dir, report) = generate_slice_case_fixture(
+            case.fixture,
+            &format!("slice-case-{}-ra-output", case.fixture),
+            &format!("slice-case-{}-ra-target", case.fixture),
+            AnalyzerMode::RustAnalyzerHir,
+        );
+
+        let actual_packages = report
+            .packages
+            .iter()
+            .map(String::as_str)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            actual_packages, case.packages,
+            "{} retained unexpected packages",
+            case.fixture
+        );
+        assert_ra_pruning_proof_complete(&report);
+        assert_expected_production_hazards(&report, case.hazards);
+
+        let diagnostic_source = diagnostic_source_for_report(&output, &report);
+        assert_cargo_check(&output, &target_dir, &diagnostic_source, &report);
+    }
 }
 
 #[test]
@@ -21033,6 +21155,8 @@ fn generate_slice_case_fixture(
     target_name: &str,
     analyzer: AnalyzerMode,
 ) -> (PathBuf, PathBuf, GenerateReport) {
+    prepare_slice_case_fixture(fixture_name);
+
     let fixture = repo_root().join("fixtures/slice_cases").join(fixture_name);
     let output = temp_path(output_name);
     let target_dir = temp_path(target_name);
@@ -21047,6 +21171,16 @@ fn generate_slice_case_fixture(
     .unwrap_or_else(|err| panic!("{fixture_name} fixture should slice with {analyzer:?}: {err}"));
 
     (output, target_dir, report)
+}
+
+#[cfg(feature = "ra-hir")]
+fn prepare_slice_case_fixture(fixture_name: &str) {
+    if fixture_name == "out_dir_generated_prune" {
+        seed_out_dir_generated_source(
+            "slice_case_generated.rs",
+            "pub fn generated_value() -> u32 { super::out_dir_generated_helper() }\n",
+        );
+    }
 }
 
 #[cfg(feature = "ra-hir")]
@@ -21065,11 +21199,6 @@ fn assert_ra_pruning_proof_complete(report: &GenerateReport) {
     assert!(
         semantic_usage.reference_queries > 0,
         "RA semantic usage should query references: {:?}",
-        semantic_usage
-    );
-    assert!(
-        semantic_usage.callable_reference_edges + semantic_usage.item_reference_edges > 0,
-        "RA semantic usage should promote reference edges: {:?}",
         semantic_usage
     );
 
@@ -21099,6 +21228,55 @@ fn assert_ra_pruning_proof_complete(report: &GenerateReport) {
         "no prunable item should remain unproven: {:?}",
         proof.unproven.items
     );
+}
+
+#[cfg(feature = "ra-hir")]
+fn assert_ra_promoted_reference_edges(report: &GenerateReport) {
+    let semantic_usage = report
+        .analyzer
+        .semantic_usage
+        .as_ref()
+        .expect("RA-backed slice should report semantic usage mapping");
+    assert!(
+        semantic_usage.callable_reference_edges + semantic_usage.item_reference_edges > 0,
+        "RA semantic usage should promote reference edges: {:?}",
+        semantic_usage
+    );
+}
+
+#[cfg(feature = "ra-hir")]
+fn assert_expected_production_hazards(
+    report: &GenerateReport,
+    expected: &[(&'static str, &'static str)],
+) {
+    let actual = report
+        .production
+        .hazards
+        .iter()
+        .map(|hazard| (hazard.code.as_str(), hazard.severity.as_str()))
+        .collect::<BTreeSet<_>>();
+    let expected = expected.iter().copied().collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        actual, expected,
+        "RA hard fixture should report exactly the expected scoped hazards"
+    );
+}
+
+#[cfg(feature = "ra-hir")]
+fn diagnostic_source_for_report(workspace: &Path, report: &GenerateReport) -> String {
+    let mut source = String::new();
+    for package in &report.packages {
+        let path = workspace.join(package).join("src/lib.rs");
+        if !path.exists() {
+            continue;
+        }
+        source.push_str("\n// ");
+        source.push_str(&path.display().to_string());
+        source.push('\n');
+        source.push_str(&read(path));
+    }
+    source
 }
 
 fn fixture_rustflags_with_denied_unused_imports() -> String {
@@ -21286,6 +21464,13 @@ struct RenderedSymbols {
 struct RenderedTraitDefaultMethod {
     trait_item: String,
     method: String,
+}
+
+#[cfg(feature = "ra-hir")]
+struct RaHardFixture {
+    fixture: &'static str,
+    packages: &'static [&'static str],
+    hazards: &'static [(&'static str, &'static str)],
 }
 
 fn collect_rendered_symbols(workspace: &Path, packages: &[String]) -> RenderedSymbols {

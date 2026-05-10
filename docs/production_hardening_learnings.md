@@ -1163,3 +1163,14 @@ important production contract for those fixtures: retained root and dependency
 package source may contain only used symbols or symbols explicitly protected by
 unknown analysis surfaces; prunable retained-package symbols must be absent
 from generated Rust.
+
+That RA proof now runs as a high-risk fixture matrix instead of only isolated
+examples. The matrix covers proc-macro surfaces, macro-generated references,
+macro receiver calls, cfg_attr/UniFFI-style macro attrs, returned dyn trait
+surfaces, stored callbacks, FFI exports, static registries, poll adapters,
+UniFFI runtime-shaped helpers, and build.rs/OUT_DIR includes. Each row asserts
+the exact retained package set, exact scoped production hazards, complete RA
+proof for every prunable retained-package symbol, a generated cargo check, and
+the rendered-source used/unknown/prunable audit. This keeps conservative
+blockers visible while proving they do not force unrelated dependency code to
+survive in those fixtures.
