@@ -18766,6 +18766,296 @@ fn prunes_slice_chunk_by_mut_flatten_map_support_chain_with_default_analyzer() {
         &["pub fn unused_label"],
     );
 }
+#[test]
+fn prunes_typed_array_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_array_pattern_prune",
+        "typed_array_pattern",
+        &[
+            "let [payload, _other]: [TypedArrayPatternPayload; 2]",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadTypedArrayPatternItem",
+        "dead-typed-array-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_array_ref_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_array_ref_pattern_prune",
+        "typed_array_ref_pattern",
+        &[
+            "let [payload, _other]: &[TypedArrayRefPatternPayload; 2]",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadTypedArrayRefPatternItem",
+        "dead-typed-array-ref-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_array_mut_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_array_mut_pattern_prune",
+        "typed_array_mut_pattern",
+        &[
+            "let [payload, _other]: &mut [TypedArrayMutPatternPayload; 2]",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadTypedArrayMutPatternItem",
+        "dead-typed-array-mut-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_let_else_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_let_else_pattern_prune",
+        "slice_let_else_pattern",
+        &[
+            "let [payload, ..] = items.as_slice()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadSliceLetElsePatternItem",
+        "dead-slice-let-else-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_if_let_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_if_let_pattern_prune",
+        "slice_if_let_pattern",
+        &[
+            "if let [payload, ..] = items.as_slice()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadSliceIfLetPatternItem",
+        "dead-slice-if-let-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_mut_let_else_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_mut_let_else_pattern_prune",
+        "slice_mut_let_else_pattern",
+        &[
+            "let [payload, ..] = items.as_mut_slice()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceMutLetElsePatternItem",
+        "dead-slice-mut-let-else-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_mut_if_let_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_mut_if_let_pattern_prune",
+        "slice_mut_if_let_pattern",
+        &[
+            "if let [payload, ..] = items.as_mut_slice()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceMutIfLetPatternItem",
+        "dead-slice-mut-if-let-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_slice_ref_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_slice_ref_pattern_prune",
+        "typed_slice_ref_pattern",
+        &[
+            "let [payload, ..]: &[TypedSliceRefPatternPayload] = items.as_slice()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadTypedSliceRefPatternItem",
+        "dead-typed-slice-ref-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_slice_mut_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_slice_mut_pattern_prune",
+        "typed_slice_mut_pattern",
+        &[
+            "let [payload, ..]: &mut [TypedSliceMutPatternPayload] = items.as_mut_slice()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadTypedSliceMutPatternItem",
+        "dead-typed-slice-mut-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_slice_tuple_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_slice_tuple_pattern_prune",
+        "typed_slice_tuple_pattern",
+        &[
+            "let [(payload, _flag), ..]: &[(TypedSliceTuplePatternPayload, bool)]",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadTypedSliceTuplePatternItem",
+        "dead-typed-slice-tuple-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_slice_tuple_mut_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_slice_tuple_mut_pattern_prune",
+        "typed_slice_tuple_mut_pattern",
+        &[
+            "let [(payload, _flag), ..]: &mut [(TypedSliceTupleMutPatternPayload, bool)]",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadTypedSliceTupleMutPatternItem",
+        "dead-typed-slice-tuple-mut-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_slice_named_struct_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_slice_named_struct_pattern_prune",
+        "typed_slice_named_struct_pattern",
+        &[
+            "struct TypedSliceNamedStructPatternEnvelope",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadTypedSliceNamedStructPatternItem",
+        "dead-typed-slice-named-struct-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_slice_tuple_struct_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_slice_tuple_struct_pattern_prune",
+        "typed_slice_tuple_struct_pattern",
+        &[
+            "struct TypedSliceTupleStructPatternEnvelope",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadTypedSliceTupleStructPatternItem",
+        "dead-typed-slice-tuple-struct-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_slice_enum_tuple_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_slice_enum_tuple_pattern_prune",
+        "typed_slice_enum_tuple_pattern",
+        &[
+            "enum TypedSliceEnumTuplePatternEnvelope",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadTypedSliceEnumTuplePatternItem",
+        "dead-typed-slice-enum-tuple-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_typed_slice_enum_struct_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "typed_slice_enum_struct_pattern_prune",
+        "typed_slice_enum_struct_pattern",
+        &[
+            "enum TypedSliceEnumStructPatternEnvelope",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadTypedSliceEnumStructPatternItem",
+        "dead-typed-slice-enum-struct-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_chunks_for_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_chunks_for_pattern_prune",
+        "slice_chunks_for_pattern",
+        &[
+            "for chunk in items.chunks(2)",
+            "let [payload, ..] = chunk",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        "DeadSliceChunksForPatternItem",
+        "dead-slice-chunks-for-pattern",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_chunks_mut_for_pattern_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_chunks_mut_for_pattern_prune",
+        "slice_chunks_mut_for_pattern",
+        &[
+            "for chunk in items.chunks_mut(2)",
+            "let [payload, ..] = chunk",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceChunksMutForPatternItem",
+        "dead-slice-chunks-mut-for-pattern",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
 
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,

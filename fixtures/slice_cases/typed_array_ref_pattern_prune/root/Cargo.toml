@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+typed_array_ref_pattern_api = { path = "../external/typed_array_ref_pattern_api" }

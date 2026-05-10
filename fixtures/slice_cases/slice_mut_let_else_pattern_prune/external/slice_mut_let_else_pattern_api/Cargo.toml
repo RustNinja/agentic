@@ -1,0 +1,7 @@
+[package]
+name = "slice_mut_let_else_pattern_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+slice_mut_let_else_pattern_model = { path = "../slice_mut_let_else_pattern_model" }

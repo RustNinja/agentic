@@ -1043,3 +1043,21 @@ only when a concrete reducer/render/validation bug appears.
 | `fixture.iter_empty_chain_once_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::iter::empty::<T>().chain(once(T)) payload mapping while pruning dead support package items |
 | `fixture.slice_chunk_by_flatten_map_prune.support_chain.001` | covered | A checked-in support fixture slices through slice::chunk_by grouping and flattened payload mapping while pruning dead support package items |
 | `fixture.slice_chunk_by_mut_flatten_map_prune.support_chain.001` | covered | A checked-in support fixture slices through slice::chunk_by_mut grouping and flattened mutable payload mapping while pruning dead support package items |
+
+| `fixture.typed_array_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed array pattern payload recovery while pruning dead support package items |
+| `fixture.typed_array_ref_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed array ref pattern payload recovery while pruning dead support package items |
+| `fixture.typed_array_mut_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed array mut pattern payload recovery while pruning dead support package items |
+| `fixture.slice_let_else_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice let else pattern payload recovery while pruning dead support package items |
+| `fixture.slice_if_let_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice if let pattern payload recovery while pruning dead support package items |
+| `fixture.slice_mut_let_else_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice mut let else pattern payload recovery while pruning dead support package items |
+| `fixture.slice_mut_if_let_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice mut if let pattern payload recovery while pruning dead support package items |
+| `fixture.typed_slice_ref_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice ref pattern payload recovery while pruning dead support package items |
+| `fixture.typed_slice_mut_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice mut pattern payload recovery while pruning dead support package items |
+| `fixture.typed_slice_tuple_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice tuple pattern payload recovery while pruning dead support package items |
+| `fixture.typed_slice_tuple_mut_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice tuple mut pattern payload recovery while pruning dead support package items |
+| `fixture.typed_slice_named_struct_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice named struct pattern payload recovery while pruning dead support package items |
+| `fixture.typed_slice_tuple_struct_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice tuple struct pattern payload recovery while pruning dead support package items |
+| `fixture.typed_slice_enum_tuple_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice enum tuple pattern payload recovery while pruning dead support package items |
+| `fixture.typed_slice_enum_struct_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through typed slice enum struct pattern payload recovery while pruning dead support package items |
+| `fixture.slice_chunks_for_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice chunks for pattern payload recovery while pruning dead support package items |
+| `fixture.slice_chunks_mut_for_pattern_prune.support_chain.001` | covered | A checked-in support fixture slices through slice chunks mut for pattern payload recovery while pruning dead support package items |

@@ -1,0 +1,4 @@
+[package]
+name = "typed_slice_named_struct_pattern_model"
+version = "0.1.0"
+edition = "2021"

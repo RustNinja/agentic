@@ -4218,6 +4218,21 @@ impl<'a> DependencyVisitor<'a> {
                     self.insert_pattern_type_data_from_type(pattern, ty);
                 }
             }
+            (Pat::Slice(pattern), Type::Array(ty)) => {
+                for pattern in &pattern.elems {
+                    if !matches!(pattern, Pat::Rest(_)) {
+                        self.insert_pattern_type_data_from_type(pattern, &ty.elem);
+                    }
+                }
+            }
+            (Pat::Slice(pattern), Type::Slice(ty)) => {
+                for pattern in &pattern.elems {
+                    if !matches!(pattern, Pat::Rest(_)) {
+                        self.insert_pattern_type_data_from_type(pattern, &ty.elem);
+                    }
+                }
+            }
+            (_, Type::Reference(ty)) => self.insert_pattern_type_data_from_type(pattern, &ty.elem),
             (_, Type::Group(group)) => {
                 self.insert_pattern_type_data_from_type(pattern, &group.elem)
             }
@@ -4732,6 +4747,23 @@ impl<'a> DependencyVisitor<'a> {
                 for (pattern, ty) in pattern.elems.iter().zip(&ty.elems) {
                     self.collect_pattern_type_bindings(pattern, ty, resolver, bindings);
                 }
+            }
+            (Pat::Slice(pattern), Type::Array(ty)) => {
+                for pattern in &pattern.elems {
+                    if !matches!(pattern, Pat::Rest(_)) {
+                        self.collect_pattern_type_bindings(pattern, &ty.elem, resolver, bindings);
+                    }
+                }
+            }
+            (Pat::Slice(pattern), Type::Slice(ty)) => {
+                for pattern in &pattern.elems {
+                    if !matches!(pattern, Pat::Rest(_)) {
+                        self.collect_pattern_type_bindings(pattern, &ty.elem, resolver, bindings);
+                    }
+                }
+            }
+            (_, Type::Reference(ty)) => {
+                self.collect_pattern_type_bindings(pattern, &ty.elem, resolver, bindings);
             }
             (Pat::TupleStruct(pattern), Type::Path(type_path)) => {
                 let mut matched_generic_variant = false;
@@ -5364,6 +5396,13 @@ impl<'a> DependencyVisitor<'a> {
                         .or_else(|| self.resolver.field_type(type_ref, &field.member))
                     {
                         self.add_pattern_bindings_for_type(&field.pat, &field_type);
+                    }
+                }
+            }
+            Pat::Slice(slice_pat) => {
+                for element in &slice_pat.elems {
+                    if !matches!(element, Pat::Rest(_)) {
+                        self.add_pattern_bindings_for_type(element, type_ref);
                     }
                 }
             }
@@ -6112,6 +6151,13 @@ impl<'a> DependencyVisitor<'a> {
                     self.bind_pattern_type(&pat_type.pat, type_ref);
                 }
             }
+            Pat::Slice(slice_pat) => {
+                for element in &slice_pat.elems {
+                    if !matches!(element, Pat::Rest(_)) {
+                        self.bind_pattern_type(element, type_ref);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -6164,6 +6210,13 @@ impl<'a> DependencyVisitor<'a> {
                 self.bind_pattern_type_arguments(&reference.pat, &type_arguments)
             }
             Pat::Type(pat_type) => self.bind_pattern_type_arguments(&pat_type.pat, &type_arguments),
+            Pat::Slice(slice_pat) => {
+                for element in &slice_pat.elems {
+                    if !matches!(element, Pat::Rest(_)) {
+                        self.bind_pattern_type_arguments(element, &type_arguments);
+                    }
+                }
+            }
             _ => {}
         }
     }
@@ -6303,6 +6356,8 @@ impl<'a> DependencyVisitor<'a> {
                         | "chunk_by_mut"
                         | "chunks"
                         | "chunks_exact"
+                        | "chunks_exact_mut"
+                        | "chunks_mut"
                         | "clone"
                         | "cloned"
                         | "copied"
@@ -6341,6 +6396,8 @@ impl<'a> DependencyVisitor<'a> {
                         | "rev"
                         | "rchunks"
                         | "rchunks_exact"
+                        | "rchunks_exact_mut"
+                        | "rchunks_mut"
                         | "rsplit"
                         | "rsplitn"
                         | "skip"
@@ -7765,6 +7822,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.insert_variable_candidates(name, type_ref, candidates);
         }
         if let Some(init) = &local.init {
+            if pattern_contains_slice(&local.pat) {
+                let type_arguments = self.expression_type_arguments(&init.expr);
+                if let [type_ref] = type_arguments.as_slice() {
+                    self.bind_single_payload_pattern(&local.pat, type_ref);
+                }
+            }
             self.bind_tuple_adapter_type_arguments(&local.pat, &init.expr);
         }
         if let Some((name, type_ref, candidates)) = self.local_binding_type(local) {
@@ -11930,6 +11993,22 @@ fn collect_pattern_ident_names(pattern: &Pat, names: &mut BTreeSet<String>) {
             }
         }
         _ => {}
+    }
+}
+
+fn pattern_contains_slice(pattern: &Pat) -> bool {
+    match pattern {
+        Pat::Slice(_) => true,
+        Pat::Reference(reference) => pattern_contains_slice(&reference.pat),
+        Pat::Type(pat_type) => pattern_contains_slice(&pat_type.pat),
+        Pat::Tuple(tuple) => tuple.elems.iter().any(pattern_contains_slice),
+        Pat::TupleStruct(tuple) => tuple.elems.iter().any(pattern_contains_slice),
+        Pat::Struct(item_struct) => item_struct
+            .fields
+            .iter()
+            .any(|field| pattern_contains_slice(&field.pat)),
+        Pat::Or(or) => or.cases.iter().any(pattern_contains_slice),
+        _ => false,
     }
 }
 

@@ -1,0 +1,7 @@
+[package]
+name = "typed_slice_tuple_mut_pattern_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+typed_slice_tuple_mut_pattern_model = { path = "../typed_slice_tuple_mut_pattern_model" }
