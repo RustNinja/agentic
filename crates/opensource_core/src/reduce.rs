@@ -4968,6 +4968,9 @@ impl<'a> DependencyVisitor<'a> {
                 .first()
                 .cloned();
         }
+        if call.method == "get_mut" && call.args.is_empty() {
+            return self.single_expression_type_argument(&call.receiver);
+        }
         if matches!(call.method.to_string().as_str(), "as_ref" | "clone") {
             return self.receiver_type(&call.receiver);
         }
@@ -4976,13 +4979,30 @@ impl<'a> DependencyVisitor<'a> {
         }
         if matches!(
             call.method.to_string().as_str(),
-            "expect" | "unwrap" | "unwrap_or" | "unwrap_or_default" | "unwrap_or_else"
+            "expect"
+                | "unwrap"
+                | "unwrap_unchecked"
+                | "unwrap_or"
+                | "unwrap_or_default"
+                | "unwrap_or_else"
         ) {
             return self.expression_result_ok_type(&call.receiver).or_else(|| {
                 self.expression_type_arguments(&call.receiver)
                     .first()
                     .cloned()
             });
+        }
+        if matches!(
+            call.method.to_string().as_str(),
+            "expect_err" | "unwrap_err" | "unwrap_err_unchecked"
+        ) {
+            return self
+                .expression_result_error_type(&call.receiver)
+                .or_else(|| {
+                    self.expression_type_arguments(&call.receiver)
+                        .get(1)
+                        .cloned()
+                });
         }
         self.receiver_type(&call.receiver)
             .and_then(|receiver| {
@@ -5133,7 +5153,8 @@ impl<'a> DependencyVisitor<'a> {
                         .nth(1)
                         .and_then(|argument| self.infer_expr_type(argument))
                 }),
-            "into_inner" | "make_mut" | "pin" | "from" => call
+            "try_unwrap" | "into_inner" | "unwrap_or_clone" | "from_raw" | "into_raw"
+            | "make_mut" | "pin" | "from" => call
                 .args
                 .first()
                 .and_then(|argument| self.first_arg_receiver_type(argument)),
@@ -6157,6 +6178,7 @@ impl<'a> DependencyVisitor<'a> {
                     .flat_map(|callable| {
                         self.resolver.return_type_arguments_from_callable(callable)
                     })
+                    .chain(self.known_associated_return_type(call))
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect()
@@ -6218,6 +6240,7 @@ impl<'a> DependencyVisitor<'a> {
                         | "find"
                         | "flatten"
                         | "fuse"
+                        | "get_mut"
                         | "get_or_insert"
                         | "get_or_insert_default"
                         | "get_or_insert_with"
@@ -6371,6 +6394,7 @@ impl<'a> DependencyVisitor<'a> {
                 callables
                     .iter()
                     .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
+                    .or_else(|| self.known_associated_return_type(call))
             }
             Expr::MethodCall(call) => {
                 if call.method == "collect" {
@@ -6400,7 +6424,10 @@ impl<'a> DependencyVisitor<'a> {
                     }
                 }
                 if call.method == "get_mut" && call.args.is_empty() {
-                    if let Some(ok_type) = self.receiver_type(&call.receiver) {
+                    if let Some(ok_type) = self
+                        .single_expression_type_argument(&call.receiver)
+                        .or_else(|| self.receiver_type(&call.receiver))
+                    {
                         return Some(ok_type);
                     }
                 }
@@ -11105,7 +11132,17 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
     let function = segments.last()?;
     if !matches!(
         function.as_str(),
-        "take" | "replace" | "get_mut" | "into_inner" | "make_mut" | "pin" | "from"
+        "take"
+            | "replace"
+            | "get_mut"
+            | "try_unwrap"
+            | "into_inner"
+            | "unwrap_or_clone"
+            | "from_raw"
+            | "into_raw"
+            | "make_mut"
+            | "pin"
+            | "from"
     ) {
         return None;
     }
@@ -11129,6 +11166,48 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
             Some(function.clone())
         }
         ([root, module, wrapper], "get_mut")
+            if matches!(
+                (root.as_str(), module.as_str(), wrapper.as_str()),
+                ("std" | "alloc", "sync", "Arc") | ("std" | "alloc", "rc", "Rc")
+            ) =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "try_unwrap") if matches!(wrapper.as_str(), "Arc" | "Rc") => {
+            Some(function.clone())
+        }
+        ([root, module, wrapper], "try_unwrap")
+            if matches!(
+                (root.as_str(), module.as_str(), wrapper.as_str()),
+                ("std" | "alloc", "sync", "Arc") | ("std" | "alloc", "rc", "Rc")
+            ) =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "into_inner")
+            if matches!(
+                wrapper.as_str(),
+                "Cell" | "RefCell" | "Mutex" | "RwLock" | "OnceLock"
+            ) =>
+        {
+            Some(function.clone())
+        }
+        ([root, module, wrapper], "into_inner")
+            if matches!(
+                (root.as_str(), module.as_str(), wrapper.as_str()),
+                ("std" | "core", "cell", "Cell")
+                    | ("std" | "core", "cell", "RefCell")
+                    | ("std", "sync", "Mutex")
+                    | ("std", "sync", "RwLock")
+                    | ("std", "sync", "OnceLock")
+            ) =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "unwrap_or_clone") if matches!(wrapper.as_str(), "Arc" | "Rc") => {
+            Some(function.clone())
+        }
+        ([root, module, wrapper], "unwrap_or_clone")
             if matches!(
                 (root.as_str(), module.as_str(), wrapper.as_str()),
                 ("std" | "alloc", "sync", "Arc") | ("std" | "alloc", "rc", "Rc")
@@ -11166,6 +11245,14 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
             if matches!(root.as_str(), "std" | "core")
                 && module == "ptr"
                 && wrapper == "NonNull" =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "from_raw" | "into_raw") if wrapper == "Box" => Some(function.clone()),
+        ([root, module, wrapper], "from_raw" | "into_raw")
+            if matches!(root.as_str(), "std" | "alloc")
+                && module == "boxed"
+                && wrapper == "Box" =>
         {
             Some(function.clone())
         }

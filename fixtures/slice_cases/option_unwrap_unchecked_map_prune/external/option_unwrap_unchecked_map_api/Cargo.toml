@@ -1,0 +1,7 @@
+[package]
+name = "option_unwrap_unchecked_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+option_unwrap_unchecked_map_model = { path = "../option_unwrap_unchecked_map_model" }

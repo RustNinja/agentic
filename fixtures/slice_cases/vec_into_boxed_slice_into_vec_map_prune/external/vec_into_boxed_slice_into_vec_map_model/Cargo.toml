@@ -1,0 +1,4 @@
+[package]
+name = "vec_into_boxed_slice_into_vec_map_model"
+version = "0.1.0"
+edition = "2021"

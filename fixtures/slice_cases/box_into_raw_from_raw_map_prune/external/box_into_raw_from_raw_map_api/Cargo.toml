@@ -1,0 +1,7 @@
+[package]
+name = "box_into_raw_from_raw_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+box_into_raw_from_raw_map_model = { path = "../box_into_raw_from_raw_map_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "refcell_into_inner_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+refcell_into_inner_map_model = { path = "../refcell_into_inner_map_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "once_lock_take_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+once_lock_take_map_model = { path = "../once_lock_take_map_model" }

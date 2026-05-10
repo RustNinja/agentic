@@ -1,0 +1,3 @@
+[workspace]
+members = ["root", "external/boxed_slice_iter_map_api", "external/boxed_slice_iter_map_model"]
+resolver = "2"

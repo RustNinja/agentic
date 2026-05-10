@@ -1,0 +1,7 @@
+[package]
+name = "mutex_into_inner_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mutex_into_inner_map_model = { path = "../mutex_into_inner_map_model" }

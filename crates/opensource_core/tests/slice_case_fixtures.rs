@@ -17723,6 +17723,364 @@ fn prunes_string_into_bytes_first_map_support_chain_with_default_analyzer() {
     );
 }
 
+#[test]
+fn prunes_arc_try_unwrap_ok_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "arc_try_unwrap_ok_map_prune",
+        "arc_try_unwrap_ok_map",
+        &[
+            "use std::sync::Arc;",
+            "Arc::try_unwrap(payload)",
+            ".ok()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadArcTryUnwrapOkMapItem",
+        "dead-arc-try-unwrap-ok-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_rc_try_unwrap_ok_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "rc_try_unwrap_ok_map_prune",
+        "rc_try_unwrap_ok_map",
+        &[
+            "use std::rc::Rc;",
+            "Rc::try_unwrap(payload)",
+            ".ok()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadRcTryUnwrapOkMapItem",
+        "dead-rc-try-unwrap-ok-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_arc_unwrap_or_clone_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "arc_unwrap_or_clone_map_prune",
+        "arc_unwrap_or_clone_map",
+        &[
+            "use std::sync::Arc;",
+            "Arc::unwrap_or_clone(payload).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadArcUnwrapOrCloneMapItem",
+        "dead-arc-unwrap-or-clone-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_rc_unwrap_or_clone_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "rc_unwrap_or_clone_map_prune",
+        "rc_unwrap_or_clone_map",
+        &[
+            "use std::rc::Rc;",
+            "Rc::unwrap_or_clone(payload).render_label()",
+            "pub fn render_label",
+        ],
+        "DeadRcUnwrapOrCloneMapItem",
+        "dead-rc-unwrap-or-clone-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mutex_into_inner_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mutex_into_inner_map_prune",
+        "mutex_into_inner_map",
+        &[
+            "use std::sync::Mutex;",
+            "Mutex::into_inner(payload)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadMutexIntoInnerMapItem",
+        "dead-mutex-into-inner-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_rwlock_into_inner_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "rwlock_into_inner_map_prune",
+        "rwlock_into_inner_map",
+        &[
+            "use std::sync::RwLock;",
+            "RwLock::into_inner(payload)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadRwlockIntoInnerMapItem",
+        "dead-rwlock-into-inner-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_cell_into_inner_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "cell_into_inner_map_prune",
+        "cell_into_inner_map",
+        &[
+            "use std::cell::Cell;",
+            "Cell::new(CellIntoInnerMapPayload::new(raw))",
+            "payload.into_inner().render_label()",
+            "pub fn render_label",
+        ],
+        "DeadCellIntoInnerMapItem",
+        "dead-cell-into-inner-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_refcell_into_inner_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "refcell_into_inner_map_prune",
+        "refcell_into_inner_map",
+        &[
+            "use std::cell::RefCell;",
+            "RefCell::new(RefcellIntoInnerMapPayload::new(raw))",
+            "payload.into_inner().render_label()",
+            "pub fn render_label",
+        ],
+        "DeadRefcellIntoInnerMapItem",
+        "dead-refcell-into-inner-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_once_lock_into_inner_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "once_lock_into_inner_map_prune",
+        "once_lock_into_inner_map",
+        &[
+            "use std::sync::OnceLock;",
+            "let _ = slot.set(OnceLockIntoInnerMapPayload::new(raw))",
+            "slot.into_inner()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadOnceLockIntoInnerMapItem",
+        "dead-once-lock-into-inner-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_once_lock_get_mut_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "once_lock_get_mut_map_prune",
+        "once_lock_get_mut_map",
+        &[
+            "use std::sync::OnceLock;",
+            "let mut slot: OnceLock<OnceLockGetMutMapPayload>",
+            "slot.get_mut()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn bump_and_render",
+        ],
+        "DeadOnceLockGetMutMapItem",
+        "dead-once-lock-get-mut-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_once_lock_take_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "once_lock_take_map_prune",
+        "once_lock_take_map",
+        &[
+            "use std::sync::OnceLock;",
+            "let mut slot: OnceLock<OnceLockTakeMapPayload>",
+            "slot.take()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadOnceLockTakeMapItem",
+        "dead-once-lock-take-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_option_unwrap_unchecked_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "option_unwrap_unchecked_map_prune",
+        "option_unwrap_unchecked_map",
+        &[
+            "Some(OptionUnwrapUncheckedMapPayload::new(raw))",
+            "unsafe { value.unwrap_unchecked().render_label() }",
+            "pub fn render_label",
+        ],
+        "DeadOptionUnwrapUncheckedMapItem",
+        "dead-option-unwrap-unchecked-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_result_unwrap_unchecked_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "result_unwrap_unchecked_map_prune",
+        "result_unwrap_unchecked_map",
+        &[
+            "let value: Result<ResultUnwrapUncheckedMapPayload, ()>",
+            "unsafe { value.unwrap_unchecked().render_label() }",
+            "pub fn render_label",
+        ],
+        "DeadResultUnwrapUncheckedMapItem",
+        "dead-result-unwrap-unchecked-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_result_unwrap_err_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "result_unwrap_err_map_prune",
+        "result_unwrap_err_map",
+        &[
+            "let value: Result<(), ResultUnwrapErrMapPayload>",
+            "value.unwrap_err().render_label()",
+            "pub fn render_label",
+        ],
+        "DeadResultUnwrapErrMapItem",
+        "dead-result-unwrap-err-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_result_expect_err_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "result_expect_err_map_prune",
+        "result_expect_err_map",
+        &[
+            "let value: Result<(), ResultExpectErrMapPayload>",
+            "value.expect_err(\"expected payload\").render_label()",
+            "pub fn render_label",
+        ],
+        "DeadResultExpectErrMapItem",
+        "dead-result-expect-err-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_result_unwrap_err_unchecked_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "result_unwrap_err_unchecked_map_prune",
+        "result_unwrap_err_unchecked_map",
+        &[
+            "let value: Result<(), ResultUnwrapErrUncheckedMapPayload>",
+            "unsafe { value.unwrap_err_unchecked().render_label() }",
+            "pub fn render_label",
+        ],
+        "DeadResultUnwrapErrUncheckedMapItem",
+        "dead-result-unwrap-err-unchecked-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_box_into_raw_from_raw_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "box_into_raw_from_raw_map_prune",
+        "box_into_raw_from_raw_map",
+        &[
+            "Box::into_raw(Box::new(BoxIntoRawFromRawMapPayload::new(raw)))",
+            "unsafe { Box::from_raw(ptr).render_label() }",
+            "pub fn render_label",
+        ],
+        "DeadBoxIntoRawFromRawMapItem",
+        "dead-box-into-raw-from-raw-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_into_boxed_slice_into_vec_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_into_boxed_slice_into_vec_map_prune",
+        "vec_into_boxed_slice_into_vec_map",
+        &[
+            ".into_boxed_slice()",
+            ".into_vec()",
+            ".into_iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecIntoBoxedSliceIntoVecMapItem",
+        "dead-vec-into-boxed-slice-into-vec-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_boxed_slice_iter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "boxed_slice_iter_map_prune",
+        "boxed_slice_iter_map",
+        &[
+            "let boxed: Box<[BoxedSliceIterMapPayload]>",
+            ".iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadBoxedSliceIterMapItem",
+        "dead-boxed-slice-iter-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_vec_from_array_into_iter_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "vec_from_array_into_iter_map_prune",
+        "vec_from_array_into_iter_map",
+        &[
+            "Vec::from([VecFromArrayIntoIterMapPayload::new(raw)])",
+            ".into_iter()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadVecFromArrayIntoIterMapItem",
+        "dead-vec-from-array-into-iter-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,

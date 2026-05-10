@@ -1,0 +1,10 @@
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_cell_into_inner_map_report(raw: &str) -> String {
+    cell_into_inner_map_api::selected_cell_into_inner_map_report(raw)
+}
+
+pub fn dead_cell_into_inner_map_report(raw: &str) -> String {
+    cell_into_inner_map_api::dead_cell_into_inner_map_report(raw)
+}

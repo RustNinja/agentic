@@ -769,6 +769,26 @@ file.
 | `fixture.osstring_clear_push_into_string_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `OsString::clear`/`push` plus UTF-8 conversion and live payload rendering |
 | `fixture.cstring_as_bytes_first_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `CString::as_bytes().first()` byte payload conversion only |
 | `fixture.string_into_bytes_first_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::into_bytes` owned byte iteration and live payload construction only |
+| `fixture.arc_try_unwrap_ok_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Arc::try_unwrap(...).ok().map(...) and retains only the recovered payload renderer |
+| `fixture.rc_try_unwrap_ok_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Rc::try_unwrap(...).ok().map(...) and retains only the recovered payload renderer |
+| `fixture.arc_unwrap_or_clone_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Arc::unwrap_or_clone and direct recovered payload rendering |
+| `fixture.rc_unwrap_or_clone_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Rc::unwrap_or_clone and direct recovered payload rendering |
+| `fixture.mutex_into_inner_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Mutex::into_inner(...).map(...) fallible payload recovery |
+| `fixture.rwlock_into_inner_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RwLock::into_inner(...).map(...) fallible payload recovery |
+| `fixture.cell_into_inner_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Cell::into_inner direct payload recovery |
+| `fixture.refcell_into_inner_map_prune.support_chain.001` | covered | A checked-in support fixture slices through RefCell::into_inner direct payload recovery |
+| `fixture.once_lock_into_inner_map_prune.support_chain.001` | covered | A checked-in support fixture slices through OnceLock::into_inner Option payload recovery |
+| `fixture.once_lock_get_mut_map_prune.support_chain.001` | covered | A checked-in support fixture slices through OnceLock::get_mut mutable payload mapping |
+| `fixture.once_lock_take_map_prune.support_chain.001` | covered | A checked-in support fixture slices through OnceLock::take owned Option payload recovery |
+| `fixture.option_unwrap_unchecked_map_prune.support_chain.001` | covered | A checked-in support fixture slices through unsafe Option::unwrap_unchecked payload recovery |
+| `fixture.result_unwrap_unchecked_map_prune.support_chain.001` | covered | A checked-in support fixture slices through unsafe Result::unwrap_unchecked OK payload recovery |
+| `fixture.result_unwrap_err_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Result::unwrap_err error payload recovery |
+| `fixture.result_expect_err_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Result::expect_err error payload recovery |
+| `fixture.result_unwrap_err_unchecked_map_prune.support_chain.001` | covered | A checked-in support fixture slices through unsafe Result::unwrap_err_unchecked error payload recovery |
+| `fixture.box_into_raw_from_raw_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Box::into_raw/Box::from_raw payload recovery without dead methods |
+| `fixture.vec_into_boxed_slice_into_vec_map_prune.support_chain.001` | covered | A checked-in support fixture slices through boxed-slice into_vec owned payload iteration |
+| `fixture.boxed_slice_iter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through boxed slice borrowed iteration |
+| `fixture.vec_from_array_into_iter_map_prune.support_chain.001` | covered | A checked-in support fixture slices through Vec::from(array).into_iter payload mapping |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

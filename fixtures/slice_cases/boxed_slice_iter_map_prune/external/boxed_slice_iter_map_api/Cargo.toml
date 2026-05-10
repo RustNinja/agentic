@@ -1,0 +1,7 @@
+[package]
+name = "boxed_slice_iter_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+boxed_slice_iter_map_model = { path = "../boxed_slice_iter_map_model" }
