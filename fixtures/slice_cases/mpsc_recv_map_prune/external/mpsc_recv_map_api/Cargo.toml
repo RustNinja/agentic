@@ -1,0 +1,7 @@
+[package]
+name = "mpsc_recv_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+mpsc_recv_map_model = { path = "../mpsc_recv_map_model" }

@@ -18487,6 +18487,286 @@ fn prunes_vecdeque_make_contiguous_last_mut_map_support_chain_with_default_analy
     );
 }
 
+#[test]
+fn prunes_mpsc_recv_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mpsc_recv_map_prune",
+        "mpsc_recv_map",
+        &[
+            "use std::sync::mpsc::{self, Receiver, Sender};",
+            "Receiver<MpscRecvMapPayload>",
+            ".recv()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadMpscRecvMapItem",
+        "dead-mpsc-recv-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mpsc_try_recv_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mpsc_try_recv_map_prune",
+        "mpsc_try_recv_map",
+        &[
+            ".try_recv()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadMpscTryRecvMapItem",
+        "dead-mpsc-try-recv-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mpsc_recv_unwrap_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mpsc_recv_unwrap_map_prune",
+        "mpsc_recv_unwrap_map",
+        &["rx.recv().unwrap().render_label()", "pub fn render_label"],
+        "DeadMpscRecvUnwrapMapItem",
+        "dead-mpsc-recv-unwrap-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mpsc_try_recv_unwrap_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mpsc_try_recv_unwrap_map_prune",
+        "mpsc_try_recv_unwrap_map",
+        &[
+            "rx.try_recv().unwrap().render_label()",
+            "pub fn render_label",
+        ],
+        "DeadMpscTryRecvUnwrapMapItem",
+        "dead-mpsc-try-recv-unwrap-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mpsc_recv_timeout_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mpsc_recv_timeout_map_prune",
+        "mpsc_recv_timeout_map",
+        &[
+            "Duration::from_millis(1)",
+            ".recv_timeout(",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadMpscRecvTimeoutMapItem",
+        "dead-mpsc-recv-timeout-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mpsc_iter_next_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mpsc_iter_next_map_prune",
+        "mpsc_iter_next_map",
+        &[
+            ".iter()",
+            ".next()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadMpscIterNextMapItem",
+        "dead-mpsc-iter-next-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mpsc_try_iter_next_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mpsc_try_iter_next_map_prune",
+        "mpsc_try_iter_next_map",
+        &[
+            ".try_iter()",
+            ".next()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadMpscTryIterNextMapItem",
+        "dead-mpsc-try-iter-next-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_mpsc_into_iter_next_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "mpsc_into_iter_next_map_prune",
+        "mpsc_into_iter_next_map",
+        &[
+            ".into_iter()",
+            ".next()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadMpscIntoIterNextMapItem",
+        "dead-mpsc-into-iter-next-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_sync_mpsc_recv_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "sync_mpsc_recv_map_prune",
+        "sync_mpsc_recv_map",
+        &[
+            "SyncSender<SyncMpscRecvMapPayload>",
+            "mpsc::sync_channel",
+            ".recv()",
+            "pub fn render_label",
+        ],
+        "DeadSyncMpscRecvMapItem",
+        "dead-sync-mpsc-recv-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_sync_mpsc_try_recv_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "sync_mpsc_try_recv_map_prune",
+        "sync_mpsc_try_recv_map",
+        &[
+            "mpsc::sync_channel",
+            ".try_recv()",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadSyncMpscTryRecvMapItem",
+        "dead-sync-mpsc-try-recv-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iter_once_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iter_once_map_prune",
+        "iter_once_map",
+        &[
+            "iter::once(IterOnceMapPayload::new(raw))",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIterOnceMapItem",
+        "dead-iter-once-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iter_once_with_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iter_once_with_map_prune",
+        "iter_once_with_map",
+        &[
+            "iter::once_with(|| IterOnceWithMapPayload::new(raw))",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIterOnceWithMapItem",
+        "dead-iter-once-with-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iter_repeat_n_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iter_repeat_n_map_prune",
+        "iter_repeat_n_map",
+        &[
+            "iter::repeat_n(IterRepeatNMapPayload::new(raw), 1)",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIterRepeatNMapItem",
+        "dead-iter-repeat-n-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_iter_empty_chain_once_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "iter_empty_chain_once_map_prune",
+        "iter_empty_chain_once_map",
+        &[
+            "iter::empty::<IterEmptyChainOnceMapPayload>()",
+            ".chain(iter::once(",
+            ".map(|payload| payload.render_label())",
+            "pub fn render_label",
+        ],
+        "DeadIterEmptyChainOnceMapItem",
+        "dead-iter-empty-chain-once-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_chunk_by_flatten_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_chunk_by_flatten_map_prune",
+        "slice_chunk_by_flatten_map",
+        &[
+            ".chunk_by(|left, right| left.group_key() == right.group_key())",
+            ".flatten()",
+            ".map(|payload| payload.render_label())",
+            "pub fn group_key",
+            "pub fn render_label",
+        ],
+        "DeadSliceChunkByFlattenMapItem",
+        "dead-slice-chunk-by-flatten-map",
+        "pub fn bump_and_render",
+        &["pub fn unused_label"],
+    );
+}
+
+#[test]
+fn prunes_slice_chunk_by_mut_flatten_map_support_chain_with_default_analyzer() {
+    assert_extended_tuple_adapter_support_fixture(
+        "slice_chunk_by_mut_flatten_map_prune",
+        "slice_chunk_by_mut_flatten_map",
+        &[
+            ".chunk_by_mut(|left, right| left.group_key() == right.group_key())",
+            ".flatten()",
+            ".map(|payload| payload.bump_and_render())",
+            "pub fn group_key",
+            "pub fn bump_and_render",
+        ],
+        "DeadSliceChunkByMutFlattenMapItem",
+        "dead-slice-chunk-by-mut-flatten-map",
+        "pub fn render_label",
+        &["pub fn unused_label"],
+    );
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,

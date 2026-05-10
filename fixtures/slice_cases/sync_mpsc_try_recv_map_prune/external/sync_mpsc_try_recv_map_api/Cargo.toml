@@ -1,0 +1,7 @@
+[package]
+name = "sync_mpsc_try_recv_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+sync_mpsc_try_recv_map_model = { path = "../sync_mpsc_try_recv_map_model" }

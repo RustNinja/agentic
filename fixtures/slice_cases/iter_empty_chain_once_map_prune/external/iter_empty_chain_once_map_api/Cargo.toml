@@ -1,0 +1,7 @@
+[package]
+name = "iter_empty_chain_once_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iter_empty_chain_once_map_model = { path = "../iter_empty_chain_once_map_model" }

@@ -1,0 +1,7 @@
+[package]
+name = "iter_once_with_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+iter_once_with_map_model = { path = "../iter_once_with_map_model" }

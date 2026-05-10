@@ -1027,3 +1027,19 @@ contracts.
 Cfg/custom-cfg matrix expansion is not expanded blindly. Catalog rules track
 cfg gates as move-intact/fail-closed work, and executable rules should be added
 only when a concrete reducer/render/validation bug appears.
+| `fixture.mpsc_recv_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::Receiver::recv payload recovery while pruning dead support package items |
+| `fixture.mpsc_try_recv_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::Receiver::try_recv payload recovery while pruning dead support package items |
+| `fixture.mpsc_recv_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::Receiver::recv().unwrap() payload recovery while pruning dead support package items |
+| `fixture.mpsc_try_recv_unwrap_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::Receiver::try_recv().unwrap() payload recovery while pruning dead support package items |
+| `fixture.mpsc_recv_timeout_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::Receiver::recv_timeout payload recovery while pruning dead support package items |
+| `fixture.mpsc_iter_next_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::Receiver::iter next payload recovery while pruning dead support package items |
+| `fixture.mpsc_try_iter_next_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::Receiver::try_iter next payload recovery while pruning dead support package items |
+| `fixture.mpsc_into_iter_next_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::Receiver::into_iter next payload recovery while pruning dead support package items |
+| `fixture.sync_mpsc_recv_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::sync_channel Receiver::recv payload recovery while pruning dead support package items |
+| `fixture.sync_mpsc_try_recv_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::sync::mpsc::sync_channel Receiver::try_recv payload recovery while pruning dead support package items |
+| `fixture.iter_once_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::iter::once payload mapping while pruning dead support package items |
+| `fixture.iter_once_with_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::iter::once_with payload mapping while pruning dead support package items |
+| `fixture.iter_repeat_n_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::iter::repeat_n payload mapping while pruning dead support package items |
+| `fixture.iter_empty_chain_once_map_prune.support_chain.001` | covered | A checked-in support fixture slices through std::iter::empty::<T>().chain(once(T)) payload mapping while pruning dead support package items |
+| `fixture.slice_chunk_by_flatten_map_prune.support_chain.001` | covered | A checked-in support fixture slices through slice::chunk_by grouping and flattened payload mapping while pruning dead support package items |
+| `fixture.slice_chunk_by_mut_flatten_map_prune.support_chain.001` | covered | A checked-in support fixture slices through slice::chunk_by_mut grouping and flattened mutable payload mapping while pruning dead support package items |

@@ -4199,6 +4199,35 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn insert_pattern_type_data_from_type(&mut self, pattern: &Pat, ty: &Type) {
+        match (pattern, ty) {
+            (Pat::Ident(ident), _) => {
+                self.insert_variable_type_data_from_type(ident.ident.to_string(), ty);
+            }
+            (Pat::Reference(pattern), Type::Reference(ty)) => {
+                self.insert_pattern_type_data_from_type(&pattern.pat, &ty.elem);
+            }
+            (Pat::Reference(pattern), _) => {
+                self.insert_pattern_type_data_from_type(&pattern.pat, ty);
+            }
+            (Pat::Type(pattern), _) => {
+                self.insert_pattern_type_data_from_type(&pattern.pat, &pattern.ty);
+            }
+            (Pat::Tuple(pattern), Type::Tuple(ty)) => {
+                for (pattern, ty) in pattern.elems.iter().zip(&ty.elems) {
+                    self.insert_pattern_type_data_from_type(pattern, ty);
+                }
+            }
+            (_, Type::Group(group)) => {
+                self.insert_pattern_type_data_from_type(pattern, &group.elem)
+            }
+            (_, Type::Paren(paren)) => {
+                self.insert_pattern_type_data_from_type(pattern, &paren.elem)
+            }
+            _ => {}
+        }
+    }
+
     fn insert_variable_type_data_from_expr(&mut self, name: String, expression: &Expr) {
         let type_arguments = self.expression_type_arguments(expression);
         if !type_arguments.is_empty() {
@@ -5172,6 +5201,35 @@ impl<'a> DependencyVisitor<'a> {
                 .and_then(|argument| self.first_arg_receiver_type(argument)),
             _ => None,
         }
+    }
+
+    fn known_call_type_arguments(&self, call: &ExprCall) -> Vec<TypeRef> {
+        let Expr::Path(path) = call.func.as_ref() else {
+            return Vec::new();
+        };
+        let Some(function) = path
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return Vec::new();
+        };
+        let type_ref = match function.as_str() {
+            "empty" => self.resolver.type_from_path_turbofish(&path.path),
+            "once" | "repeat_n" => call
+                .args
+                .first()
+                .and_then(|argument| self.first_arg_receiver_type(argument)),
+            "once_with" | "repeat_with" => call.args.first().and_then(|argument| {
+                let Expr::Closure(closure) = argument else {
+                    return None;
+                };
+                self.infer_expr_type(&closure.body)
+            }),
+            _ => None,
+        };
+        type_ref.into_iter().collect()
     }
 
     fn first_arg_receiver_type(&self, argument: &Expr) -> Option<TypeRef> {
@@ -6191,6 +6249,7 @@ impl<'a> DependencyVisitor<'a> {
                         self.resolver.return_type_arguments_from_callable(callable)
                     })
                     .chain(self.known_associated_return_type(call))
+                    .chain(self.known_call_type_arguments(call))
                     .collect::<BTreeSet<_>>()
                     .into_iter()
                     .collect()
@@ -6240,6 +6299,8 @@ impl<'a> DependencyVisitor<'a> {
                         | "as_mut_slice"
                         | "by_ref"
                         | "chain"
+                        | "chunk_by"
+                        | "chunk_by_mut"
                         | "chunks"
                         | "chunks_exact"
                         | "clone"
@@ -6305,6 +6366,7 @@ impl<'a> DependencyVisitor<'a> {
                         | "try_borrow"
                         | "try_borrow_mut"
                         | "try_lock"
+                        | "try_iter"
                         | "try_read"
                         | "try_write"
                         | "transpose"
@@ -6457,6 +6519,15 @@ impl<'a> DependencyVisitor<'a> {
                         .single_expression_type_argument(&call.receiver)
                         .or_else(|| self.receiver_type(&call.receiver))
                     {
+                        return Some(ok_type);
+                    }
+                }
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "recv" | "try_recv" | "recv_timeout"
+                ) && call.args.len() <= 1
+                {
+                    if let Some(ok_type) = self.single_expression_type_argument(&call.receiver) {
                         return Some(ok_type);
                     }
                 }
@@ -7073,6 +7144,8 @@ impl<'a> DependencyVisitor<'a> {
         if !matches!(
             method.as_str(),
             "dedup_by"
+                | "chunk_by"
+                | "chunk_by_mut"
                 | "max_by"
                 | "min_by"
                 | "reduce"
@@ -7484,6 +7557,8 @@ impl<'a> DependencyVisitor<'a> {
             | "sort_by_cached_key"
             | "sort_by_key"
             | "sort_unstable_by_key"
+            | "chunk_by"
+            | "chunk_by_mut"
             | "split"
             | "split_inclusive"
             | "splitn"
@@ -7682,6 +7757,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             } else if let Some(init) = &local.init {
                 self.insert_variable_type_data_from_expr(name, &init.expr);
             }
+        }
+        if let Pat::Type(pat_type) = &local.pat {
+            self.insert_pattern_type_data_from_type(&pat_type.pat, &pat_type.ty);
         }
         for (name, type_ref, candidates) in self.local_destructured_binding_types(local) {
             self.insert_variable_candidates(name, type_ref, candidates);
