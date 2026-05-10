@@ -1298,3 +1298,13 @@ positives. This closes another escape hatch where source declarations could be
 removed correctly but a stale public facade alias still advertised a pruned
 local target. The full slice-case suite passed across all 774 generated
 workspaces with the stricter reexport contract.
+
+Tightening that audit again found a real facade-chain proof gap. A generated
+support package can reexport a local facade leaf, where that facade leaf is
+itself a public reexport into another retained support package. Treating only
+the first local path as a concrete item mislabeled the chain as unclassified.
+The harness now builds an exposed-public-reexport index and follows reexport
+chains until they reach a retained/prunable symbol, while still ignoring
+arbitrary external crate reexports that are outside the local proof. It now
+fails both stale-prunable and unclassified-local reexport targets, and the full
+slice-case suite passes across 776 tests with that stronger contract.

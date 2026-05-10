@@ -31,6 +31,30 @@ fn public_reexport_contract_rejects_prunable_local_targets() {
 }
 
 #[test]
+#[should_panic(
+    expected = "generated source exposes public reexports to unclassified local targets"
+)]
+fn public_reexport_contract_rejects_unclassified_local_targets() {
+    let mut rendered = RenderedSymbols::default();
+    rendered.module_paths.insert(Vec::new());
+    rendered.module_paths.insert(vec!["facade".to_string()]);
+    rendered.public_reexports.insert(RenderedPublicReexport {
+        package: "root".to_string(),
+        module_path: Vec::new(),
+        visible: "Escaped".to_string(),
+        target: vec!["facade".to_string(), "Escaped".to_string()],
+    });
+
+    assert_public_reexport_contract(
+        &rendered,
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+        &BTreeSet::new(),
+    );
+}
+
+#[test]
 fn trims_unused_checked_fixture_workspace_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/trim_unused");
     let output = temp_path("slice-case-trim-unused-output");
@@ -22940,11 +22964,17 @@ fn assert_public_reexport_contract(
         .union(&prunable_symbols)
         .cloned()
         .collect::<BTreeSet<_>>();
+    let exposed_reexports = rendered_exposed_reexports(rendered);
     let mut stale_reexports = Vec::new();
+    let mut unclassified_reexports = Vec::new();
 
     for reexport in &rendered.public_reexports {
-        let candidates =
-            public_reexport_local_candidates(reexport, &rendered.module_paths, &known_symbols);
+        let candidates = public_reexport_target_closure(
+            reexport,
+            &rendered.module_paths,
+            &known_symbols,
+            &exposed_reexports,
+        );
         if candidates
             .iter()
             .any(|candidate| retained_symbols.contains(candidate))
@@ -22959,6 +22989,8 @@ fn assert_public_reexport_contract(
             .collect::<Vec<_>>();
         if !prunable_hits.is_empty() {
             stale_reexports.push((reexport.clone(), prunable_hits));
+        } else if !candidates.is_empty() {
+            unclassified_reexports.push((reexport.clone(), candidates));
         }
     }
 
@@ -22967,6 +22999,64 @@ fn assert_public_reexport_contract(
         "generated source exposes public reexports to prunable local targets: {:?}",
         stale_reexports
     );
+    assert!(
+        unclassified_reexports.is_empty(),
+        "generated source exposes public reexports to unclassified local targets: {:?}",
+        unclassified_reexports
+    );
+}
+
+fn rendered_exposed_reexports(
+    rendered: &RenderedSymbols,
+) -> BTreeMap<String, Vec<RenderedPublicReexport>> {
+    let mut reexports = BTreeMap::<String, Vec<RenderedPublicReexport>>::new();
+    for reexport in &rendered.public_reexports {
+        let mut exposed_path = reexport.module_path.clone();
+        exposed_path.push(reexport.visible.clone());
+        reexports
+            .entry(qualified_symbol_path(&reexport.package, &exposed_path))
+            .or_default()
+            .push(reexport.clone());
+    }
+    reexports
+}
+
+fn public_reexport_target_closure(
+    reexport: &RenderedPublicReexport,
+    module_paths: &BTreeSet<Vec<String>>,
+    known_symbols: &BTreeSet<String>,
+    exposed_reexports: &BTreeMap<String, Vec<RenderedPublicReexport>>,
+) -> BTreeSet<String> {
+    let mut candidates = BTreeSet::new();
+    let mut pending = public_reexport_local_candidates(reexport, module_paths, known_symbols)
+        .into_iter()
+        .collect::<Vec<_>>();
+    if let Some(target) = exposed_raw_reexport_target(&reexport.target, exposed_reexports) {
+        pending.push(target);
+    }
+
+    while let Some(candidate) = pending.pop() {
+        if !candidates.insert(candidate.clone()) {
+            continue;
+        }
+        let Some(reexports) = exposed_reexports.get(&candidate) else {
+            continue;
+        };
+        for exposed in reexports {
+            for next in public_reexport_local_candidates(exposed, module_paths, known_symbols) {
+                if !candidates.contains(&next) {
+                    pending.push(next);
+                }
+            }
+            if let Some(next) = exposed_raw_reexport_target(&exposed.target, exposed_reexports) {
+                if !candidates.contains(&next) {
+                    pending.push(next);
+                }
+            }
+        }
+    }
+
+    candidates
 }
 
 fn symbol_base_paths(callables: &BTreeSet<String>, items: &BTreeSet<String>) -> BTreeSet<String> {
@@ -22987,14 +23077,22 @@ fn public_reexport_local_candidates(
     known_symbols: &BTreeSet<String>,
 ) -> BTreeSet<String> {
     let mut candidates = BTreeSet::new();
+    if let Some(target) = known_raw_reexport_target(&reexport.target, known_symbols) {
+        candidates.insert(target);
+    }
     if let Some(local_segments) =
         normalize_public_reexport_target(&reexport.module_path, &reexport.target)
     {
-        if local_reexport_candidate_is_known(
+        let explicit_local = reexport
+            .target
+            .first()
+            .is_some_and(|segment| segment == "crate" || segment == "self" || segment == "super");
+        if local_reexport_candidate_is_local(
             &reexport.package,
             &local_segments,
             module_paths,
             known_symbols,
+            explicit_local,
         ) {
             candidates.insert(qualified_symbol_path(&reexport.package, &local_segments));
         }
@@ -23004,11 +23102,12 @@ fn public_reexport_local_candidates(
         .target
         .first()
         .is_some_and(|segment| segment != "crate" && segment != "self" && segment != "super")
-        && local_reexport_candidate_is_known(
+        && local_reexport_candidate_is_local(
             &reexport.package,
             &reexport.target,
             module_paths,
             known_symbols,
+            false,
         )
     {
         candidates.insert(qualified_symbol_path(&reexport.package, &reexport.target));
@@ -23017,11 +23116,35 @@ fn public_reexport_local_candidates(
     candidates
 }
 
-fn local_reexport_candidate_is_known(
+fn known_raw_reexport_target(
+    target: &[String],
+    known_symbols: &BTreeSet<String>,
+) -> Option<String> {
+    let path = raw_reexport_target(target)?;
+    known_symbols.contains(&path).then_some(path)
+}
+
+fn exposed_raw_reexport_target(
+    target: &[String],
+    exposed_reexports: &BTreeMap<String, Vec<RenderedPublicReexport>>,
+) -> Option<String> {
+    let path = raw_reexport_target(target)?;
+    exposed_reexports.contains_key(&path).then_some(path)
+}
+
+fn raw_reexport_target(target: &[String]) -> Option<String> {
+    if target.is_empty() {
+        return None;
+    }
+    Some(target.join("::"))
+}
+
+fn local_reexport_candidate_is_local(
     package: &str,
     segments: &[String],
     module_paths: &BTreeSet<Vec<String>>,
     known_symbols: &BTreeSet<String>,
+    explicit_local: bool,
 ) -> bool {
     if segments.is_empty() {
         return false;
@@ -23029,6 +23152,12 @@ fn local_reexport_candidate_is_known(
     let symbol = qualified_symbol_path(package, segments);
     if known_symbols.contains(&symbol) || module_paths.contains(segments) {
         return true;
+    }
+    if explicit_local {
+        return true;
+    }
+    if segments.len() == 1 {
+        return false;
     }
     let parent = &segments[..segments.len() - 1];
     module_paths.contains(parent)
