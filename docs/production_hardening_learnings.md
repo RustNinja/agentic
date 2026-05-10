@@ -1151,3 +1151,15 @@ The first failure from that stricter import check was a retained private
 definition. The renderer now prunes same-module, non-public macro self-reexports
 before normal use-tree pruning. The macro definition and invocation still remain,
 but the generated support package no longer carries an unused import.
+
+The hard fixture loop now has explicit RA-backed proof tests for both a true
+support sub-dependency chain and a Litter-shaped theme/support-package slice.
+These tests force `AnalyzerMode::RustAnalyzerHir`, require semantic usage
+mapping and promoted reference edges, require
+`complete_for_retained_packages`, require zero unproven prunable callables or
+items, then cargo-check the generated output with `unused_imports` denied and
+run the same rendered-source used/unknown/prunable audit. This proves the
+important production contract for those fixtures: retained root and dependency
+package source may contain only used symbols or symbols explicitly protected by
+unknown analysis surfaces; prunable retained-package symbols must be absent
+from generated Rust.

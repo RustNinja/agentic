@@ -174,6 +174,23 @@ fn prunes_support_sub_dependencies_to_used_closure_with_default_analyzer() {
 }
 
 #[test]
+#[cfg(feature = "ra-hir")]
+fn ra_hir_proves_support_sub_dependency_pruning_contract() {
+    let (output, target_dir, report) = generate_slice_case_fixture(
+        "sub_dependency_prune",
+        "slice-case-sub-dependency-prune-ra-output",
+        "slice-case-sub-dependency-prune-ra-target",
+        AnalyzerMode::RustAnalyzerHir,
+    );
+
+    assert_eq!(report.packages, ["adapter", "leaf", "root"]);
+    assert_ra_pruning_proof_complete(&report);
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_litter_theme_health_support_package_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/litter_theme_health_prune");
     let output = temp_path("slice-case-litter-theme-health-prune-output");
@@ -253,6 +270,23 @@ fn prunes_litter_theme_health_support_package_with_default_analyzer() {
     assert!(!snapshot.contains("is_connected"), "{snapshot}");
     assert!(!snapshot.contains("dead_label"), "{snapshot}");
 
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
+#[cfg(feature = "ra-hir")]
+fn ra_hir_proves_litter_theme_support_pruning_contract() {
+    let (output, target_dir, report) = generate_slice_case_fixture(
+        "litter_theme_health_prune",
+        "slice-case-litter-theme-health-prune-ra-output",
+        "slice-case-litter-theme-health-prune-ra-target",
+        AnalyzerMode::RustAnalyzerHir,
+    );
+
+    assert_eq!(report.packages, ["mobile-client", "tui"]);
+    assert_ra_pruning_proof_complete(&report);
+
+    let root_source = read(output.join("tui/src/lib.rs"));
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
@@ -20990,6 +21024,81 @@ fn assert_cargo_check(
         root_source,
     );
     assert_usage_contract(workspace, report);
+}
+
+#[cfg(feature = "ra-hir")]
+fn generate_slice_case_fixture(
+    fixture_name: &str,
+    output_name: &str,
+    target_name: &str,
+    analyzer: AnalyzerMode,
+) -> (PathBuf, PathBuf, GenerateReport) {
+    let fixture = repo_root().join("fixtures/slice_cases").join(fixture_name);
+    let output = temp_path(output_name);
+    let target_dir = temp_path(target_name);
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        analyzer,
+    )
+    .unwrap_or_else(|err| panic!("{fixture_name} fixture should slice with {analyzer:?}: {err}"));
+
+    (output, target_dir, report)
+}
+
+#[cfg(feature = "ra-hir")]
+fn assert_ra_pruning_proof_complete(report: &GenerateReport) {
+    assert_eq!(report.analyzer.mode, AnalyzerMode::RustAnalyzerHir);
+    assert!(
+        report.analyzer.loaded,
+        "RA analyzer should be loaded: {:?}",
+        report.analyzer
+    );
+    let semantic_usage = report
+        .analyzer
+        .semantic_usage
+        .as_ref()
+        .expect("RA-backed slice should report semantic usage mapping");
+    assert!(
+        semantic_usage.reference_queries > 0,
+        "RA semantic usage should query references: {:?}",
+        semantic_usage
+    );
+    assert!(
+        semantic_usage.callable_reference_edges + semantic_usage.item_reference_edges > 0,
+        "RA semantic usage should promote reference edges: {:?}",
+        semantic_usage
+    );
+
+    let proof = &report.usage.semantic_proof;
+    assert!(
+        proof.summary.analyzer_available,
+        "semantic proof should record analyzer availability: {:?}",
+        proof
+    );
+    assert!(
+        proof.summary.proof_required_callables + proof.summary.proof_required_items > 0,
+        "fixture should require retained-package pruning proof: {:?}",
+        proof
+    );
+    assert_eq!(
+        proof.status, "complete_for_retained_packages",
+        "RA pruning proof should be complete: {:?}",
+        proof
+    );
+    assert_eq!(
+        proof.summary.unproven_callables, 0,
+        "no prunable callable should remain unproven: {:?}",
+        proof.unproven.callables
+    );
+    assert_eq!(
+        proof.summary.unproven_items, 0,
+        "no prunable item should remain unproven: {:?}",
+        proof.unproven.items
+    );
 }
 
 fn fixture_rustflags_with_denied_unused_imports() -> String {
