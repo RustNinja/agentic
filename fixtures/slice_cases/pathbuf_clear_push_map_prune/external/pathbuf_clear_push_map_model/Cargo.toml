@@ -1,0 +1,4 @@
+[package]
+name = "pathbuf_clear_push_map_model"
+version = "0.1.0"
+edition = "2021"

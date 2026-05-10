@@ -696,6 +696,26 @@ file.
 | `fixture.pathbuf_with_extension_to_str_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::with_extension` owned transforms and live string payload rendering |
 | `fixture.hashmap_extend_values_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap::extend` plus value iteration and prunes dead map payload helpers |
 | `fixture.vecdeque_truncate_front_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `VecDeque::truncate` followed by front payload rendering only |
+| `fixture.vec_swap_get_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::swap` plus indexed access, retaining only the swapped payload renderer |
+| `fixture.vec_clear_extend_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `Vec::clear` and `extend` reconstruction without retaining dead vector helpers |
+| `fixture.vec_extend_from_within_map_prune.support_chain.001` | covered | A checked-in support fixture slices through clone-backed `Vec::extend_from_within`, keeping the required clone surface and live payload renderer only |
+| `fixture.vec_resize_clone_map_prune.support_chain.001` | covered | A checked-in support fixture slices through clone-backed `Vec::resize` and last-item rendering without dead clone siblings |
+| `fixture.slice_fill_map_prune.support_chain.001` | covered | A checked-in support fixture slices through clone-backed slice `fill` mutation and live payload iteration only |
+| `fixture.slice_fill_with_map_prune.support_chain.001` | covered | A checked-in support fixture slices through slice `fill_with` closure construction and live iteration without retaining dead constructors |
+| `fixture.string_push_char_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::push` plus `push_str` and retains only live string payload rendering |
+| `fixture.string_push_str_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::push_str` mutation without retaining dead string support methods |
+| `fixture.string_insert_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::insert` character mutation and live payload rendering only |
+| `fixture.string_insert_str_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::insert_str` prefix mutation and prunes unrelated string helpers |
+| `fixture.string_extend_chars_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `String::extend(raw.chars())`, retaining only live character-extension payload rendering |
+| `fixture.str_replace_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `str::replace` owned string transforms and live payload construction |
+| `fixture.str_replacen_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `str::replacen` bounded replacement transforms and prunes dead string helpers |
+| `fixture.str_to_lowercase_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `str::to_lowercase` owned transforms and retains live case-conversion payload rendering only |
+| `fixture.str_to_uppercase_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `str::to_uppercase` owned transforms and prunes dead case-conversion helpers |
+| `fixture.pathbuf_clear_push_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::clear` plus `push`, retaining only live path payload rendering |
+| `fixture.pathbuf_reserve_push_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `PathBuf::with_capacity`/`reserve` plus push and live string conversion |
+| `fixture.hashmap_reserve_insert_values_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `HashMap::reserve` plus insert/value iteration and prunes dead map support |
+| `fixture.btreemap_append_keys_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `BTreeMap::append` plus key iteration while pruning dead ordered-map helpers |
+| `fixture.binaryheap_append_peek_map_prune.support_chain.001` | covered | A checked-in support fixture slices through `BinaryHeap::append` plus peeked payload rendering without retaining dead heap helpers |
 | `manifest.support_nonstandard_lib_root.001` | covered | External support path packages with `[lib] path = "..."` copy the nonstandard library module graph and skip default orphan roots |
 | `dyn.callback.future_alias.001` | covered | Nested `Arc<dyn Fn() -> Pin<Box<dyn Future...>>>` aliases are hard hazards |
 | `macro.pub_crate_reexport.001` | covered | `pub(crate) use` macro helper reexports survive when live modules invoke them |

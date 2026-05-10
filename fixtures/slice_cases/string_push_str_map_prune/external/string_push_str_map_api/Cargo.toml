@@ -1,0 +1,7 @@
+[package]
+name = "string_push_str_map_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+string_push_str_map_model = { path = "../string_push_str_map_model" }
