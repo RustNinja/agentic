@@ -2526,9 +2526,10 @@ use super::parent::ParentLocalType;
 
 #[cfg(test)]
 mod tests {
+    use std::path::{Path, PathBuf};
+    #[cfg(feature = "ra-hir")]
     use std::{
         fs,
-        path::{Path, PathBuf},
         time::{SystemTime, UNIX_EPOCH},
     };
 

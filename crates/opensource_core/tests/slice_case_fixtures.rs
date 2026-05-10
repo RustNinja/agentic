@@ -1,11 +1,12 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
     time::{SystemTime, UNIX_EPOCH},
 };
 
-use opensource_core::{generate_with_analyzer, AnalyzerMode, GenerateOptions};
+use opensource_core::{generate_with_analyzer, AnalyzerMode, GenerateOptions, GenerateReport};
 
 #[test]
 fn trims_unused_checked_fixture_workspace_with_default_analyzer() {
@@ -72,7 +73,7 @@ fn trims_unused_checked_fixture_workspace_with_default_analyzer() {
     assert!(!output.join("used/src/dead.rs").exists());
     assert!(!output.join("unused").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -169,7 +170,90 @@ fn prunes_support_sub_dependencies_to_used_closure_with_default_analyzer() {
     assert!(!leaf_live.contains("dead_live_leaf"), "{leaf_live}");
     assert!(!output.join("leaf/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
+fn prunes_litter_theme_health_support_package_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_theme_health_prune");
+    let output = temp_path("slice-case-litter-theme-health-prune-output");
+    let target_dir = temp_path("slice-case-litter-theme-health-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_theme_health_prune fixture should slice");
+
+    assert_eq!(report.packages, ["mobile-client", "tui"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "tui::theme::health_color"),
+        "health_color root should be recorded: {:?}",
+        report.roots
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "tui::theme::health_symbol"),
+        "health_symbol root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_source = read(output.join("tui/src/lib.rs"));
+    let theme_source = read(output.join("tui/src/theme.rs"));
+    let mobile_root = read(output.join("mobile-client/src/lib.rs"));
+    let store_mod = read(output.join("mobile-client/src/store/mod.rs"));
+    let snapshot = read(output.join("mobile-client/src/store/snapshot.rs"));
+
+    assert!(root_source.contains("pub mod theme"), "{root_source}");
+    assert!(!root_source.contains("dead_preview"), "{root_source}");
+    assert!(theme_source.contains("pub enum Color"), "{theme_source}");
+    assert!(
+        theme_source.contains("pub fn health_color"),
+        "{theme_source}"
+    );
+    assert!(
+        theme_source.contains("pub fn health_symbol"),
+        "{theme_source}"
+    );
+    assert!(theme_source.contains("pub const SUCCESS"), "{theme_source}");
+    assert!(!theme_source.contains("pub const ACCENT"), "{theme_source}");
+    assert!(!theme_source.contains("pub fn accent"), "{theme_source}");
+    assert!(
+        !theme_source.contains("dead_status_label"),
+        "{theme_source}"
+    );
+    assert!(!theme_source.contains("dead_name"), "{theme_source}");
+
+    assert!(mobile_root.contains("pub mod store"), "{mobile_root}");
+    assert!(!mobile_root.contains("dead_api"), "{mobile_root}");
+    assert!(store_mod.contains("pub mod snapshot"), "{store_mod}");
+    assert!(
+        store_mod.contains("pub use snapshot::ServerHealthSnapshot"),
+        "{store_mod}"
+    );
+    assert!(!store_mod.contains("AppSnapshot"), "{store_mod}");
+    assert!(!store_mod.contains("DeadHealthSnapshot"), "{store_mod}");
+    assert!(!store_mod.contains("dead_health_label"), "{store_mod}");
+    assert!(!output.join("mobile-client/src/store/private.rs").exists());
+    assert!(
+        snapshot.contains("pub enum ServerHealthSnapshot"),
+        "{snapshot}"
+    );
+    assert!(!snapshot.contains("AppSnapshot"), "{snapshot}");
+    assert!(!snapshot.contains("DeadHealthSnapshot"), "{snapshot}");
+    assert!(!snapshot.contains("dead_snapshot"), "{snapshot}");
+    assert!(!snapshot.contains("is_connected"), "{snapshot}");
+    assert!(!snapshot.contains("dead_label"), "{snapshot}");
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -288,7 +372,7 @@ fn prunes_alias_import_support_chain_to_used_closure_with_default_analyzer() {
     assert_no_dead_tokens("helper/src/live.rs", &helper_live);
     assert!(!output.join("helper/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -371,7 +455,7 @@ fn prunes_proc_macro_surface_support_chain_with_default_analyzer() {
     assert!(!macro_support.contains("dead_attr"), "{macro_support}");
     assert!(!macro_support.contains("DeadRecord"), "{macro_support}");
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -468,7 +552,7 @@ fn prunes_asset_conversion_support_chain_with_default_analyzer() {
     assert!(!output.join("asset_codec/src/assets/dead.txt").exists());
     assert!(!output.join("asset_codec/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -597,7 +681,7 @@ fn prunes_callback_boundary_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("callback_runtime/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -700,7 +784,7 @@ fn prunes_trait_ufcs_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("trait_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -803,7 +887,7 @@ fn prunes_iterator_result_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("stream_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -894,7 +978,7 @@ fn prunes_facade_glob_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("facade_support/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -978,7 +1062,7 @@ fn prunes_macro_generated_support_chain_with_default_analyzer() {
         &["DeadGenerated", "build_dead_generated", "dead_generated"],
     );
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1079,7 +1163,7 @@ fn prunes_static_registry_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("registry_support/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1173,7 +1257,7 @@ fn prunes_patch_state_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("patch_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1273,7 +1357,7 @@ fn prunes_uniffi_runtime_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("runtime_support/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1371,7 +1455,7 @@ fn prunes_async_command_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("command_runtime/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1448,7 +1532,7 @@ fn prunes_ffi_export_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("ffi_support/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1531,7 +1615,7 @@ fn prunes_conversion_roundtrip_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("wire_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1611,7 +1695,7 @@ fn prunes_macro_receiver_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("macro_support/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1693,7 +1777,7 @@ fn prunes_error_source_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("error_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1780,7 +1864,7 @@ fn prunes_poll_adapter_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("poll_support/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1873,7 +1957,7 @@ fn prunes_type_alias_surface_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("envelope_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -1994,7 +2078,7 @@ fn prunes_callback_store_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("callback_store_support/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2078,7 +2162,7 @@ fn prunes_const_chain_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("const_support/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2158,7 +2242,7 @@ fn prunes_struct_update_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("settings_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2237,7 +2321,7 @@ fn prunes_pattern_destructure_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("pattern_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2320,7 +2404,7 @@ fn prunes_closure_combinator_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("closure_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2404,7 +2488,7 @@ fn prunes_generic_bound_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("generic_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2480,7 +2564,7 @@ fn prunes_enum_variant_constructor_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("enum_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2576,7 +2660,7 @@ fn prunes_associated_projection_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("projection_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2658,7 +2742,7 @@ fn prunes_iterator_method_reference_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("iterator_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2743,7 +2827,7 @@ fn prunes_display_format_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("display_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2825,7 +2909,7 @@ fn prunes_deref_method_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("deref_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2906,7 +2990,7 @@ fn prunes_question_mark_conversion_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("question_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -2983,7 +3067,7 @@ fn prunes_match_guard_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("guard_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3060,7 +3144,7 @@ fn prunes_from_str_parse_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("parse_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3142,7 +3226,7 @@ fn prunes_index_operator_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("index_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3223,7 +3307,7 @@ fn prunes_option_field_payload_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("option_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3321,7 +3405,7 @@ fn prunes_closure_return_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("closure_return_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3406,7 +3490,7 @@ fn prunes_try_from_transpose_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("transpose_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3481,7 +3565,7 @@ fn prunes_returned_object_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("returned_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3556,7 +3640,7 @@ fn prunes_method_dispatch_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("dispatch_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3626,7 +3710,7 @@ fn prunes_map_payload_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("map_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3708,7 +3792,7 @@ fn prunes_free_function_closure_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("closure_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3783,7 +3867,7 @@ fn prunes_result_map_err_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("result_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3858,7 +3942,7 @@ fn prunes_const_generic_array_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("array_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -3937,7 +4021,7 @@ fn prunes_newtype_tuple_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("newtype_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -4013,7 +4097,7 @@ fn prunes_lazy_parser_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("lazy_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -4088,7 +4172,7 @@ fn prunes_global_mutex_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("mutex_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -4167,7 +4251,7 @@ fn prunes_protocol_projection_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("protocol_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -4242,7 +4326,7 @@ fn prunes_iterator_fold_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("fold_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -4315,7 +4399,7 @@ fn prunes_iterator_filter_map_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("filter_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -4385,7 +4469,7 @@ fn prunes_iterator_any_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("any_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -4459,7 +4543,7 @@ fn prunes_result_unwrap_or_else_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("unwrap_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -4533,7 +4617,7 @@ fn prunes_retain_sort_support_chain_with_default_analyzer() {
     );
     assert!(!output.join("retain_model/src/dead.rs").exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
 #[test]
@@ -20636,10 +20720,15 @@ fn assert_support_slice_fixture(expect: SupportSliceFixture<'_>) {
         .join(format!("{}/src/dead.rs", expect.model_pkg))
         .exists());
 
-    assert_cargo_check(&output, &target_dir, &root_source);
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
 }
 
-fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
+fn assert_cargo_check(
+    workspace: &Path,
+    target_dir: &Path,
+    root_source: &str,
+    report: &GenerateReport,
+) {
     let output = Command::new("cargo")
         .arg("check")
         .arg("--quiet")
@@ -20655,6 +20744,370 @@ fn assert_cargo_check(workspace: &Path, target_dir: &Path, root_source: &str) {
         String::from_utf8_lossy(&output.stderr),
         root_source,
     );
+    assert_usage_contract(workspace, report);
+}
+
+fn assert_usage_contract(workspace: &Path, report: &GenerateReport) {
+    let reachable_callables = report
+        .reachable
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let reachable_items = report
+        .reachable_items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let used_callables = report
+        .usage
+        .used
+        .callables
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let used_items = report
+        .usage
+        .used
+        .items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let blocked_callables = report
+        .usage
+        .blocked_by_unknown
+        .callables
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let blocked_items = report
+        .usage
+        .blocked_by_unknown
+        .items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let prunable_callables = report
+        .usage
+        .prunable
+        .callables
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let prunable_items = report
+        .usage
+        .prunable
+        .items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let unused_callables = report
+        .usage
+        .unused
+        .callables
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+    let unused_items = report
+        .usage
+        .unused
+        .items
+        .iter()
+        .map(ToString::to_string)
+        .collect::<BTreeSet<_>>();
+
+    let retained_callables = used_callables
+        .union(&blocked_callables)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let retained_items = used_items
+        .union(&blocked_items)
+        .cloned()
+        .collect::<BTreeSet<_>>();
+
+    assert_eq!(
+        retained_callables, reachable_callables,
+        "every rendered callable must be classified as used or blocked_by_unknown"
+    );
+    assert_eq!(
+        retained_items, reachable_items,
+        "every rendered item must be classified as used or blocked_by_unknown"
+    );
+    assert!(
+        prunable_callables.is_disjoint(&reachable_callables),
+        "prunable callables must not be reachable/rendered: {:?}",
+        prunable_callables
+            .intersection(&reachable_callables)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        prunable_items.is_disjoint(&reachable_items),
+        "prunable items must not be reachable/rendered: {:?}",
+        prunable_items
+            .intersection(&reachable_items)
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        unused_callables, prunable_callables,
+        "public usage.unused must contain only the removable prunable callables"
+    );
+    assert_eq!(
+        unused_items, prunable_items,
+        "public usage.unused must contain only the removable prunable items"
+    );
+
+    let rendered = collect_rendered_symbols(workspace, &report.packages);
+    assert!(
+        rendered.callables.is_disjoint(&prunable_callables),
+        "generated source still declares prunable callables: {:?}",
+        rendered
+            .callables
+            .intersection(&prunable_callables)
+            .collect::<Vec<_>>()
+    );
+    assert!(
+        rendered.items.is_disjoint(&prunable_items),
+        "generated source still declares prunable items: {:?}",
+        rendered
+            .items
+            .intersection(&prunable_items)
+            .collect::<Vec<_>>()
+    );
+}
+
+#[derive(Default)]
+struct RenderedSymbols {
+    callables: BTreeSet<String>,
+    items: BTreeSet<String>,
+}
+
+fn collect_rendered_symbols(workspace: &Path, packages: &[String]) -> RenderedSymbols {
+    let mut symbols = RenderedSymbols::default();
+    for package in packages {
+        let source_root = workspace.join(package).join("src");
+        if !source_root.exists() {
+            continue;
+        }
+        for file in rust_files_under(&source_root) {
+            let module_path = module_path_from_source_file(&source_root, &file);
+            let source = read(&file);
+            let syntax = syn::parse_file(&source).unwrap_or_else(|err| {
+                panic!("generated source should parse: {}\n{err}", file.display())
+            });
+            collect_rendered_items(package, &module_path, &syntax.items, &mut symbols);
+        }
+    }
+    symbols
+}
+
+fn collect_rendered_items(
+    package: &str,
+    module_path: &[String],
+    items: &[syn::Item],
+    symbols: &mut RenderedSymbols,
+) {
+    for item in items {
+        match item {
+            syn::Item::Fn(function) => {
+                symbols.callables.insert(symbol_path(
+                    package,
+                    module_path,
+                    &function.sig.ident.to_string(),
+                ));
+            }
+            syn::Item::Struct(item) => {
+                symbols.items.insert(item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Struct",
+                ));
+            }
+            syn::Item::Enum(item) => {
+                symbols.items.insert(item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Enum",
+                ));
+            }
+            syn::Item::Union(item) => {
+                symbols.items.insert(item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Union",
+                ));
+            }
+            syn::Item::Type(item) => {
+                symbols.items.insert(item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Type",
+                ));
+            }
+            syn::Item::Trait(item) => {
+                symbols.items.insert(item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Trait",
+                ));
+            }
+            syn::Item::Const(item) => {
+                symbols.items.insert(item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Const",
+                ));
+            }
+            syn::Item::Static(item) => {
+                symbols.items.insert(item_symbol_path(
+                    package,
+                    module_path,
+                    &item.ident.to_string(),
+                    "Static",
+                ));
+            }
+            syn::Item::Macro(item) => {
+                if let Some(ident) = &item.ident {
+                    symbols.items.insert(item_symbol_path(
+                        package,
+                        module_path,
+                        &ident.to_string(),
+                        "Macro",
+                    ));
+                }
+            }
+            syn::Item::Mod(item) => {
+                let name = item.ident.to_string();
+                if let Some((_, nested)) = &item.content {
+                    let mut nested_module_path = module_path.to_vec();
+                    nested_module_path.push(name);
+                    collect_rendered_items(package, &nested_module_path, nested, symbols);
+                }
+            }
+            syn::Item::Impl(item) => {
+                if item.trait_.is_none() {
+                    if let Some(type_path) = impl_type_path(module_path, &item.self_ty) {
+                        for impl_item in &item.items {
+                            if let syn::ImplItem::Fn(method) = impl_item {
+                                symbols.callables.insert(method_symbol_path(
+                                    package,
+                                    &type_path,
+                                    &method.sig.ident.to_string(),
+                                ));
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+fn rust_files_under(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    collect_rust_files(root, &mut files);
+    files.sort();
+    files
+}
+
+fn collect_rust_files(root: &Path, files: &mut Vec<PathBuf>) {
+    for entry in fs::read_dir(root).unwrap_or_else(|err| {
+        panic!(
+            "generated source directory should be readable: {}\n{err}",
+            root.display()
+        )
+    }) {
+        let entry = entry.expect("generated source directory entry should be readable");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rust_files(&path, files);
+        } else if path.extension().and_then(|extension| extension.to_str()) == Some("rs") {
+            files.push(path);
+        }
+    }
+}
+
+fn module_path_from_source_file(source_root: &Path, file: &Path) -> Vec<String> {
+    let relative = file
+        .strip_prefix(source_root)
+        .expect("generated Rust file should live below source root");
+    let mut components = relative
+        .components()
+        .map(|component| component.as_os_str().to_string_lossy().to_string())
+        .collect::<Vec<_>>();
+    let Some(file_name) = components.pop() else {
+        return Vec::new();
+    };
+    match file_name.as_str() {
+        "lib.rs" | "main.rs" => Vec::new(),
+        "mod.rs" => components,
+        _ => {
+            let stem = Path::new(&file_name)
+                .file_stem()
+                .expect("Rust source file should have a stem")
+                .to_string_lossy()
+                .to_string();
+            components.push(stem);
+            components
+        }
+    }
+}
+
+fn impl_type_path(module_path: &[String], ty: &syn::Type) -> Option<Vec<String>> {
+    let syn::Type::Path(path) = ty else {
+        return None;
+    };
+    if path.qself.is_some() {
+        return None;
+    }
+    let mut segments = path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .filter(|segment| segment != "crate" && segment != "self")
+        .collect::<Vec<_>>();
+    if segments.is_empty() {
+        return None;
+    }
+    if segments.len() == 1 {
+        let mut type_path = module_path.to_vec();
+        type_path.append(&mut segments);
+        Some(type_path)
+    } else {
+        Some(segments)
+    }
+}
+
+fn symbol_path(package: &str, module_path: &[String], name: &str) -> String {
+    let mut path = package.to_string();
+    for segment in module_path {
+        path.push_str("::");
+        path.push_str(segment);
+    }
+    path.push_str("::");
+    path.push_str(name);
+    path
+}
+
+fn method_symbol_path(package: &str, type_path: &[String], method: &str) -> String {
+    let mut path = package.to_string();
+    for segment in type_path {
+        path.push_str("::");
+        path.push_str(segment);
+    }
+    path.push_str("::");
+    path.push_str(method);
+    path
+}
+
+fn item_symbol_path(package: &str, module_path: &[String], name: &str, kind: &str) -> String {
+    format!("{}({kind})", symbol_path(package, module_path, name))
 }
 
 fn assert_absent(label: &str, source: &str, tokens: &[&str]) {

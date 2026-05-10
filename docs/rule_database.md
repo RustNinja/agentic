@@ -52,6 +52,8 @@ file.
 | `import.renamed_alias_shadowed_local.001` | covered | Private renamed import aliases are retained only for actual alias path/macro uses or implicit trait scope effects, so local bindings do not keep aliases to items used only elsewhere |
 | `import.direct_leaf_shadowed_local.001` | covered | Private direct import leaves are retained only for actual retained path/macro/surface uses, so a local binding does not keep an imported function or item that is used only from another module |
 | `import.super_glob.shadowed_parent_leaf.001` | covered | Child `use super::*` imports retain parent leaves only for actual child path/macro/surface uses, not child local bindings with the same name |
+| `fixture.usage_contract.rendered_prunable.001` | covered | Checked slice fixtures now fail when generated Rust still declares callables or semantic items classified as prunable/removable |
+| `fixture.litter.theme_health_support.001` | covered | Litter-shaped theme roots retain only live color/symbol helpers and the support enum path while pruning dead local helper functions, support methods, and dead support modules |
 | `dyn.owned.registry.001` | covered | Stored `Box<dyn Trait>` and callback aliases are hard production hazards |
 | `dyn.pruned_private_field.001` | covered | Dynamic hazards on private struct fields that are pruned from the rendered slice do not block production readiness |
 | `struct.private_generic_field_usage.001` | covered | Private generic fields are pruned when other retained fields already keep the struct type parameter used |

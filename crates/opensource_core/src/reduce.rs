@@ -330,6 +330,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &mut reachable_items,
         &mut evidence,
     );
+    retain_reachable_module_items(project, &packages, &reachable, &mut reachable_items);
 
     Ok(ReducedProject {
         root,
@@ -430,6 +431,72 @@ fn reachable_packages(
             .map(|item| item.package().to_string()),
     );
     packages
+}
+
+fn retain_reachable_module_items(
+    project: &Project,
+    packages: &BTreeSet<String>,
+    reachable: &BTreeSet<CallableId>,
+    reachable_items: &mut BTreeSet<ItemId>,
+) {
+    let mut module_paths = BTreeSet::new();
+    let retained_items = reachable_items.clone();
+    for callable in reachable {
+        match callable {
+            CallableId::Free {
+                package,
+                module_path,
+                ..
+            } => add_module_path_prefixes(&mut module_paths, package, module_path),
+            CallableId::Method {
+                package, type_path, ..
+            } => {
+                let module_path = project
+                    .methods
+                    .get(callable)
+                    .map(|record| record.module_path.as_slice())
+                    .unwrap_or(type_path.as_slice());
+                add_module_path_prefixes(&mut module_paths, package, module_path);
+            }
+        }
+    }
+
+    for item in &retained_items {
+        add_module_path_prefixes(&mut module_paths, &item.package, &item.module_path);
+        if item.kind == ItemKind::Mod {
+            let mut child_path = item.module_path.clone();
+            child_path.push(item.name.clone());
+            add_module_path_prefixes(&mut module_paths, &item.package, &child_path);
+        }
+    }
+
+    for (package, module_path) in module_paths {
+        if !packages.contains(&package) {
+            continue;
+        }
+        let Some((name, parent_path)) = module_path.split_last() else {
+            continue;
+        };
+        let module_item = ItemId {
+            package,
+            module_path: parent_path.to_vec(),
+            name: name.clone(),
+            kind: ItemKind::Mod,
+        };
+        if project.items.contains_key(&module_item) {
+            reachable_items.insert(module_item);
+        }
+    }
+}
+
+fn add_module_path_prefixes(
+    module_paths: &mut BTreeSet<(String, Vec<String>)>,
+    package: &str,
+    module_path: &[String],
+) {
+    for depth in 1..=module_path.len() {
+        module_paths.insert((package.to_string(), module_path[..depth].to_vec()));
+    }
 }
 
 fn retained_item_macro_dependencies(

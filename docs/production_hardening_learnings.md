@@ -1072,3 +1072,28 @@ warning after cfg pruning removed the Android-only reassignment branch. Repair
 now applies rustc `MachineApplicable` `unused_mut` suggestions, so strict
 batch feedback can remove the stale `mut` and accept the generated workspace
 with zero warnings.
+
+The fixture harness now enforces the used/unknown/unused contract after every
+generated slice build. Each checked slice-case fixture runs `cargo check`, then
+verifies that rendered callables/items are partitioned as `used` or
+`blocked_by_unknown`, that public `usage.unused` equals the prunable/removable
+set, and that generated Rust source does not still declare prunable functions,
+methods, structs, enums, traits, aliases, constants, statics, or macros. The
+first pass exposed a report/render mismatch for structural module declarations:
+file-backed `mod live;` wrappers were rendered to reach live child code but
+were still reported as prunable. The reducer now promotes module wrappers for
+reachable file-backed modules into the retained item set. Inline facade and
+prelude modules remain structural scaffolding for import paths; they are not
+treated as semantic declarations in the generated-source prunable scan, because
+feeding those public reexport wrappers back into the reducer causes dead public
+reexport leaves to survive.
+
+A new lightweight Litter-shaped fixture mirrors the demonstrated
+`codex-tui::theme::{health_color, health_symbol}` slice without depending on
+the full Litter build. The fixture keeps two selected theme roots, a local
+`mobile-client` support package, an enum matched by both roots, live constants,
+and dead sibling helpers/API surfaces. The expected output keeps only the theme
+roots, required constants/type surface, and `ServerHealthSnapshot` support path,
+while pruning dead mobile modules, support methods, dead enum/data surfaces,
+and unrelated theme helpers. The full slice-case suite now covers this contract
+across 763 fast fixtures.
