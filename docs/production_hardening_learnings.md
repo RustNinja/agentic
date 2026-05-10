@@ -1253,3 +1253,19 @@ checking whether an exposed leaf is used, preventing dangling
 through a different module path. Restricted macro helper reexports remain
 generic: `pub(crate) use helper_macro` is kept only when a rendered module or
 reachable callable imports/calls that macro through the defining module path.
+
+The hard slice-case audit now also fails if generated source declares any
+callable or item that is not classified as `used` or `blocked_by_unknown`.
+Previously it only proved that `usage.prunable` symbols were absent, which left
+room for symbols missing from the report inventory to survive unnoticed. The
+stricter check passed across the full fixture suite and now protects support
+packages from both explicit prunable leakage and unclassified rendered leakage.
+
+The next Litter-shaped fixture covers the `codex-ipc` reconnect callback shape:
+`Arc<RwLock<Option<Arc<dyn RequestHandler>>>>` plus a connector typed as
+`dyn Fn() -> Pin<Box<dyn Future<Output = Result<...>> + Send>>`. The generated
+support package keeps the live request handler, connector aliases, future/error
+surface, and selected reconnect controller while pruning dead controller,
+handler, response, and sibling module code. Under RA it reports only scoped
+method fallback and trait-object review warnings, and the full checked
+slice-case suite now covers 773 generated workspaces.

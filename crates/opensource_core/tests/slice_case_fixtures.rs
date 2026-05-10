@@ -1058,6 +1058,99 @@ fn prunes_litter_reconnect_grouped_import_support_package_with_default_analyzer(
 }
 
 #[test]
+fn prunes_litter_reconnect_callback_support_package_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_reconnect_callback_prune");
+    let output = temp_path("slice-case-litter-reconnect-callback-prune-output");
+    let target_dir = temp_path("slice-case-litter-reconnect-callback-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_reconnect_callback_prune fixture should slice");
+
+    assert_eq!(report.packages, ["codex-client", "codex-ipc"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "codex-ipc::reconnect_callback_summary"),
+        "reconnect callback root should be recorded: {:?}",
+        report.roots
+    );
+    assert_production_hazard(&report, "trait_object_surfaces", "warning");
+
+    let ipc_root = read(output.join("codex-ipc/src/lib.rs"));
+    let client_root = read(output.join("codex-client/src/lib.rs"));
+    let client_live = read(output.join("codex-client/src/live.rs"));
+
+    assert!(
+        ipc_root.contains("pub fn reconnect_callback_summary"),
+        "{ipc_root}"
+    );
+    assert_absent(
+        "codex-ipc/src/lib.rs",
+        &ipc_root,
+        &["dead_reconnect_callback_summary", "dead_reconnect"],
+    );
+
+    assert!(client_root.contains("mod live"), "{client_root}");
+    assert!(
+        client_root.contains(
+            "pub use live::{selected_reconnect, ClientResponse, ReconnectController, RequestHandler}"
+        ),
+        "{client_root}"
+    );
+    assert_absent(
+        "codex-client/src/lib.rs",
+        &client_root,
+        &["mod dead", "DeadReconnectController", "dead_reconnect"],
+    );
+    assert!(!output.join("codex-client/src/dead.rs").exists());
+
+    for token in [
+        "pub type ConnectFuture",
+        "pub type Connector",
+        "pub struct IpcClient",
+        "pub struct IpcError",
+        "pub struct ClientRequest",
+        "pub struct ClientResponse",
+        "pub trait RequestHandler",
+        "pub struct ReconnectController",
+        "Arc<RwLock<Option<Arc<dyn RequestHandler>>>>",
+        "dyn Fn() -> ConnectFuture",
+        "pub fn new",
+        "pub fn set_handler",
+        "pub fn summarize",
+        "struct EchoHandler",
+        "impl RequestHandler for EchoHandler",
+        "fn normalize_id",
+        "pub fn selected_reconnect",
+    ] {
+        assert!(
+            client_live.contains(token),
+            "missing {token:?}\n{client_live}"
+        );
+    }
+    assert_absent(
+        "codex-client/src/live.rs",
+        &client_live,
+        &[
+            "dead_client_debug",
+            "dead_response",
+            "dead_handler_method",
+            "dead_controller_debug",
+            "dead_live_reconnect",
+        ],
+    );
+
+    assert_cargo_check(&output, &target_dir, &ipc_root, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
     let cases = [
@@ -1140,6 +1233,16 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             fixture: "litter_reconnect_import_prune",
             packages: &["codex-client", "codex-ipc"],
             hazards: &[("semantic_unresolved_method_calls", "warning")],
+        },
+        RaHardFixture {
+            fixture: "litter_reconnect_callback_prune",
+            packages: &["codex-client", "codex-ipc"],
+            hazards: &[
+                ("semantic_unresolved_method_calls", "warning"),
+                ("syntactic_method_fallback_cap", "warning"),
+                ("syntactic_method_fallbacks", "warning"),
+                ("trait_object_surfaces", "warning"),
+            ],
         },
         RaHardFixture {
             fixture: "macro_receiver_prune",
@@ -22258,6 +22361,24 @@ fn assert_usage_contract(workspace: &Path, report: &GenerateReport) {
     );
 
     let rendered = collect_rendered_symbols(workspace, &report.packages);
+    let unclassified_rendered_callables = rendered
+        .callables
+        .difference(&retained_callables)
+        .collect::<Vec<_>>();
+    let unclassified_rendered_items = rendered
+        .items
+        .difference(&retained_items)
+        .collect::<Vec<_>>();
+    assert!(
+        unclassified_rendered_callables.is_empty(),
+        "generated source declares callables that are not classified as used or blocked_by_unknown: {:?}",
+        unclassified_rendered_callables
+    );
+    assert!(
+        unclassified_rendered_items.is_empty(),
+        "generated source declares items that are not classified as used or blocked_by_unknown: {:?}",
+        unclassified_rendered_items
+    );
     assert!(
         rendered.callables.is_disjoint(&prunable_callables),
         "generated source still declares prunable callables: {:?}",
