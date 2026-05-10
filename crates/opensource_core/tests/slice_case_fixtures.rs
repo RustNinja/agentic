@@ -293,6 +293,123 @@ fn ra_hir_proves_litter_theme_support_pruning_contract() {
 }
 
 #[test]
+fn prunes_litter_conversation_render_support_packages_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/litter_conversation_render_prune");
+    let output = temp_path("slice-case-litter-conversation-render-prune-output");
+    let target_dir = temp_path("slice-case-litter-conversation-render-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("litter_conversation_render_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["codex-core", "codex-protocol", "codex-tui"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "codex-tui::screens::conversation::render"),
+        "conversation render root should be recorded: {:?}",
+        report.roots
+    );
+
+    let tui_root = read(output.join("codex-tui/src/lib.rs"));
+    let screens_root = read(output.join("codex-tui/src/screens/mod.rs"));
+    let conversation = read(output.join("codex-tui/src/screens/conversation.rs"));
+    let core_root = read(output.join("codex-core/src/lib.rs"));
+    let core_live = read(output.join("codex-core/src/live.rs"));
+    let protocol_root = read(output.join("codex-protocol/src/lib.rs"));
+    let protocol_live = read(output.join("codex-protocol/src/live.rs"));
+
+    assert!(tui_root.contains("pub mod screens"), "{tui_root}");
+    assert_absent(
+        "codex-tui/src/lib.rs",
+        &tui_root,
+        &["theme", "dead_tui_entry"],
+    );
+    assert!(
+        screens_root.contains("pub mod conversation"),
+        "{screens_root}"
+    );
+    assert_absent("codex-tui/src/screens/mod.rs", &screens_root, &["settings"]);
+    assert!(conversation.contains("pub fn render"), "{conversation}");
+    for token in [
+        "fn render_header",
+        "fn render_event",
+        "fn render_message",
+        "fn role_label",
+        "fn render_footer",
+    ] {
+        assert!(
+            conversation.contains(token),
+            "missing {token:?}\n{conversation}"
+        );
+    }
+    assert_absent(
+        "codex-tui/src/screens/conversation.rs",
+        &conversation,
+        &["dead_conversation_panel", "dead_summary"],
+    );
+    assert!(!output.join("codex-tui/src/screens/settings.rs").exists());
+    assert!(!output.join("codex-tui/src/theme.rs").exists());
+
+    assert!(core_root.contains("mod live"), "{core_root}");
+    assert!(core_root.contains("ConversationState"), "{core_root}");
+    assert_absent(
+        "codex-core/src/lib.rs",
+        &core_root,
+        &["mod dead", "DeadState"],
+    );
+    assert!(
+        core_live.contains("pub struct ConversationState"),
+        "{core_live}"
+    );
+    assert!(core_live.contains("pub struct ScreenStats"), "{core_live}");
+    assert!(core_live.contains("pub fn visible_events"), "{core_live}");
+    assert_absent(
+        "codex-core/src/live.rs",
+        &core_live,
+        &["dead_live_state", "dead_summary"],
+    );
+    assert!(!output.join("codex-core/src/dead.rs").exists());
+
+    assert!(protocol_root.contains("mod live"), "{protocol_root}");
+    assert!(
+        protocol_root.contains("ConversationEvent"),
+        "{protocol_root}"
+    );
+    assert_absent(
+        "codex-protocol/src/lib.rs",
+        &protocol_root,
+        &["mod dead", "DeadEvent"],
+    );
+    assert!(
+        protocol_live.contains("pub enum ConversationEvent"),
+        "{protocol_live}"
+    );
+    assert!(
+        protocol_live.contains("pub struct Message"),
+        "{protocol_live}"
+    );
+    assert!(protocol_live.contains("pub enum Role"), "{protocol_live}");
+    assert_absent(
+        "codex-protocol/src/live.rs",
+        &protocol_live,
+        &["dead_live_event", "dead_kind", "dead_render"],
+    );
+    assert!(!output.join("codex-protocol/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &tui_root, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
     let cases = [
@@ -309,6 +426,15 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             fixture: "macro_generated_prune",
             packages: &["macro_api", "macro_support", "root"],
             hazards: &[("semantic_usage_mapping_incomplete", "warning")],
+        },
+        RaHardFixture {
+            fixture: "litter_conversation_render_prune",
+            packages: &["codex-core", "codex-protocol", "codex-tui"],
+            hazards: &[
+                ("semantic_unresolved_method_calls", "warning"),
+                ("semantic_unresolved_paths", "warning"),
+                ("syntactic_method_fallbacks", "warning"),
+            ],
         },
         RaHardFixture {
             fixture: "macro_receiver_prune",

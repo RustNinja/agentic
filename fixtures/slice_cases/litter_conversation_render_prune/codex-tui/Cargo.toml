@@ -1,0 +1,10 @@
+[package]
+name = "codex-tui"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+codex-core = { path = "../external/codex-core" }
+codex-protocol = { path = "../external/codex-protocol" }
+

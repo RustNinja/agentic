@@ -1174,3 +1174,12 @@ proof for every prunable retained-package symbol, a generated cargo check, and
 the rendered-source used/unknown/prunable audit. This keeps conservative
 blockers visible while proving they do not force unrelated dependency code to
 survive in those fixtures.
+
+The latest Litter-shaped fixture adds a `codex-tui` conversation render root
+that reaches nested screen modules plus `codex-core` state helpers and
+`codex-protocol` event/message/role types. It prunes the dead settings/theme UI
+modules, dead support packages modules, and dead sibling methods while keeping
+the live iterator/filter/render closure. Under RA it proves 20 retained-package
+callables and 7 retained-package items are prunable with zero unproven symbols,
+then still reports only scoped unresolved/fallback warnings. The full checked
+slice-case suite now covers 767 generated workspaces.
