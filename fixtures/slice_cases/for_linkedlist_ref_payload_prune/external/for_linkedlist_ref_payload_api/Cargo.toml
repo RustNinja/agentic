@@ -1,0 +1,7 @@
+[package]
+name = "for_linkedlist_ref_payload_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+for_linkedlist_ref_payload_model = { path = "../for_linkedlist_ref_payload_model" }

@@ -19786,6 +19786,519 @@ fn prunes_vecdeque_range_mut_map_support_chain_with_default_analyzer() {
     });
 }
 
+#[test]
+fn prunes_for_hashmap_iter_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_hashmap_iter_pair_prune",
+        root_fn: "selected_for_hashmap_iter_pair_report",
+        api_pkg: "for_hashmap_iter_pair_api",
+        model_pkg: "for_hashmap_iter_pair_model",
+        api_fn: "selected_for_hashmap_iter_pair_report",
+        model_fn: "selected_for_hashmap_iter_pair",
+        model_required: &[
+            "use std::collections::HashMap;",
+            "for (_key, payload) in items.iter()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForHashmapIterPairPayload",
+            "dead_for_hashmap_iter_pair",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-hashmap-iter-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_hashmap_iter_mut_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_hashmap_iter_mut_pair_prune",
+        root_fn: "selected_for_hashmap_iter_mut_pair_report",
+        api_pkg: "for_hashmap_iter_mut_pair_api",
+        model_pkg: "for_hashmap_iter_mut_pair_model",
+        api_fn: "selected_for_hashmap_iter_mut_pair_report",
+        model_fn: "selected_for_hashmap_iter_mut_pair",
+        model_required: &[
+            "use std::collections::HashMap;",
+            "for (_key, payload) in items.iter_mut()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForHashmapIterMutPairPayload",
+            "dead_for_hashmap_iter_mut_pair",
+            "pub fn render_label",
+            "unused_label",
+            "dead-for-hashmap-iter-mut-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_hashmap_into_iter_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_hashmap_into_iter_pair_prune",
+        root_fn: "selected_for_hashmap_into_iter_pair_report",
+        api_pkg: "for_hashmap_into_iter_pair_api",
+        model_pkg: "for_hashmap_into_iter_pair_model",
+        api_fn: "selected_for_hashmap_into_iter_pair_report",
+        model_fn: "selected_for_hashmap_into_iter_pair",
+        model_required: &[
+            "use std::collections::HashMap;",
+            "for (_key, payload) in items",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForHashmapIntoIterPairPayload",
+            "dead_for_hashmap_into_iter_pair",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-hashmap-into-iter-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_hashmap_drain_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_hashmap_drain_pair_prune",
+        root_fn: "selected_for_hashmap_drain_pair_report",
+        api_pkg: "for_hashmap_drain_pair_api",
+        model_pkg: "for_hashmap_drain_pair_model",
+        api_fn: "selected_for_hashmap_drain_pair_report",
+        model_fn: "selected_for_hashmap_drain_pair",
+        model_required: &[
+            "use std::collections::HashMap;",
+            "for (_key, payload) in items.drain()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForHashmapDrainPairPayload",
+            "dead_for_hashmap_drain_pair",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-hashmap-drain-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_btreemap_iter_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_btreemap_iter_pair_prune",
+        root_fn: "selected_for_btreemap_iter_pair_report",
+        api_pkg: "for_btreemap_iter_pair_api",
+        model_pkg: "for_btreemap_iter_pair_model",
+        api_fn: "selected_for_btreemap_iter_pair_report",
+        model_fn: "selected_for_btreemap_iter_pair",
+        model_required: &[
+            "use std::collections::BTreeMap;",
+            "for (_key, payload) in items.iter()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForBtreemapIterPairPayload",
+            "dead_for_btreemap_iter_pair",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-btreemap-iter-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_btreemap_iter_mut_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_btreemap_iter_mut_pair_prune",
+        root_fn: "selected_for_btreemap_iter_mut_pair_report",
+        api_pkg: "for_btreemap_iter_mut_pair_api",
+        model_pkg: "for_btreemap_iter_mut_pair_model",
+        api_fn: "selected_for_btreemap_iter_mut_pair_report",
+        model_fn: "selected_for_btreemap_iter_mut_pair",
+        model_required: &[
+            "use std::collections::BTreeMap;",
+            "for (_key, payload) in items.iter_mut()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForBtreemapIterMutPairPayload",
+            "dead_for_btreemap_iter_mut_pair",
+            "pub fn render_label",
+            "unused_label",
+            "dead-for-btreemap-iter-mut-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_btreemap_into_iter_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_btreemap_into_iter_pair_prune",
+        root_fn: "selected_for_btreemap_into_iter_pair_report",
+        api_pkg: "for_btreemap_into_iter_pair_api",
+        model_pkg: "for_btreemap_into_iter_pair_model",
+        api_fn: "selected_for_btreemap_into_iter_pair_report",
+        model_fn: "selected_for_btreemap_into_iter_pair",
+        model_required: &[
+            "use std::collections::BTreeMap;",
+            "for (_key, payload) in items",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForBtreemapIntoIterPairPayload",
+            "dead_for_btreemap_into_iter_pair",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-btreemap-into-iter-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_btreemap_range_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_btreemap_range_pair_prune",
+        root_fn: "selected_for_btreemap_range_pair_report",
+        api_pkg: "for_btreemap_range_pair_api",
+        model_pkg: "for_btreemap_range_pair_model",
+        api_fn: "selected_for_btreemap_range_pair_report",
+        model_fn: "selected_for_btreemap_range_pair",
+        model_required: &[
+            "use std::collections::BTreeMap;",
+            "for (_key, payload) in items.range(0..=3)",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForBtreemapRangePairPayload",
+            "dead_for_btreemap_range_pair",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-btreemap-range-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_btreemap_range_mut_pair_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_btreemap_range_mut_pair_prune",
+        root_fn: "selected_for_btreemap_range_mut_pair_report",
+        api_pkg: "for_btreemap_range_mut_pair_api",
+        model_pkg: "for_btreemap_range_mut_pair_model",
+        api_fn: "selected_for_btreemap_range_mut_pair_report",
+        model_fn: "selected_for_btreemap_range_mut_pair",
+        model_required: &[
+            "use std::collections::BTreeMap;",
+            "for (_key, payload) in items.range_mut(0..=3)",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForBtreemapRangeMutPairPayload",
+            "dead_for_btreemap_range_mut_pair",
+            "pub fn render_label",
+            "unused_label",
+            "dead-for-btreemap-range-mut-pair",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_vec_ref_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_vec_ref_payload_prune",
+        root_fn: "selected_for_vec_ref_payload_report",
+        api_pkg: "for_vec_ref_payload_api",
+        model_pkg: "for_vec_ref_payload_model",
+        api_fn: "selected_for_vec_ref_payload_report",
+        model_fn: "selected_for_vec_ref_payload",
+        model_required: &[
+            "for payload in &items",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForVecRefPayloadPayload",
+            "dead_for_vec_ref_payload",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-vec-ref-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_vec_mut_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_vec_mut_payload_prune",
+        root_fn: "selected_for_vec_mut_payload_report",
+        api_pkg: "for_vec_mut_payload_api",
+        model_pkg: "for_vec_mut_payload_model",
+        api_fn: "selected_for_vec_mut_payload_report",
+        model_fn: "selected_for_vec_mut_payload",
+        model_required: &[
+            "for payload in &mut items",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForVecMutPayloadPayload",
+            "dead_for_vec_mut_payload",
+            "pub fn render_label",
+            "unused_label",
+            "dead-for-vec-mut-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_array_ref_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_array_ref_payload_prune",
+        root_fn: "selected_for_array_ref_payload_report",
+        api_pkg: "for_array_ref_payload_api",
+        model_pkg: "for_array_ref_payload_model",
+        api_fn: "selected_for_array_ref_payload_report",
+        model_fn: "selected_for_array_ref_payload",
+        model_required: &[
+            "for payload in &items",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForArrayRefPayloadPayload",
+            "dead_for_array_ref_payload",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-array-ref-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_option_iter_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_option_iter_payload_prune",
+        root_fn: "selected_for_option_iter_payload_report",
+        api_pkg: "for_option_iter_payload_api",
+        model_pkg: "for_option_iter_payload_model",
+        api_fn: "selected_for_option_iter_payload_report",
+        model_fn: "selected_for_option_iter_payload",
+        model_required: &[
+            "for payload in maybe.iter()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForOptionIterPayloadPayload",
+            "dead_for_option_iter_payload",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-option-iter-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_option_iter_mut_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_option_iter_mut_payload_prune",
+        root_fn: "selected_for_option_iter_mut_payload_report",
+        api_pkg: "for_option_iter_mut_payload_api",
+        model_pkg: "for_option_iter_mut_payload_model",
+        api_fn: "selected_for_option_iter_mut_payload_report",
+        model_fn: "selected_for_option_iter_mut_payload",
+        model_required: &[
+            "for payload in maybe.iter_mut()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForOptionIterMutPayloadPayload",
+            "dead_for_option_iter_mut_payload",
+            "pub fn render_label",
+            "unused_label",
+            "dead-for-option-iter-mut-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_result_iter_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_result_iter_payload_prune",
+        root_fn: "selected_for_result_iter_payload_report",
+        api_pkg: "for_result_iter_payload_api",
+        model_pkg: "for_result_iter_payload_model",
+        api_fn: "selected_for_result_iter_payload_report",
+        model_fn: "selected_for_result_iter_payload",
+        model_required: &[
+            "for payload in result.iter()",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForResultIterPayloadPayload",
+            "dead_for_result_iter_payload",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-result-iter-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_result_iter_mut_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_result_iter_mut_payload_prune",
+        root_fn: "selected_for_result_iter_mut_payload_report",
+        api_pkg: "for_result_iter_mut_payload_api",
+        model_pkg: "for_result_iter_mut_payload_model",
+        api_fn: "selected_for_result_iter_mut_payload_report",
+        model_fn: "selected_for_result_iter_mut_payload",
+        model_required: &[
+            "for payload in result.iter_mut()",
+            "payload.bump_and_render()",
+            "pub fn bump_and_render",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForResultIterMutPayloadPayload",
+            "dead_for_result_iter_mut_payload",
+            "pub fn render_label",
+            "unused_label",
+            "dead-for-result-iter-mut-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_vecdeque_ref_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_vecdeque_ref_payload_prune",
+        root_fn: "selected_for_vecdeque_ref_payload_report",
+        api_pkg: "for_vecdeque_ref_payload_api",
+        model_pkg: "for_vecdeque_ref_payload_model",
+        api_fn: "selected_for_vecdeque_ref_payload_report",
+        model_fn: "selected_for_vecdeque_ref_payload",
+        model_required: &[
+            "use std::collections::VecDeque;",
+            "for payload in &items",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForVecdequeRefPayloadPayload",
+            "dead_for_vecdeque_ref_payload",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-vecdeque-ref-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_linkedlist_ref_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_linkedlist_ref_payload_prune",
+        root_fn: "selected_for_linkedlist_ref_payload_report",
+        api_pkg: "for_linkedlist_ref_payload_api",
+        model_pkg: "for_linkedlist_ref_payload_model",
+        api_fn: "selected_for_linkedlist_ref_payload_report",
+        model_fn: "selected_for_linkedlist_ref_payload",
+        model_required: &[
+            "use std::collections::LinkedList;",
+            "for payload in &items",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForLinkedlistRefPayloadPayload",
+            "dead_for_linkedlist_ref_payload",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-linkedlist-ref-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_hashset_ref_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_hashset_ref_payload_prune",
+        root_fn: "selected_for_hashset_ref_payload_report",
+        api_pkg: "for_hashset_ref_payload_api",
+        model_pkg: "for_hashset_ref_payload_model",
+        api_fn: "selected_for_hashset_ref_payload_report",
+        model_fn: "selected_for_hashset_ref_payload",
+        model_required: &[
+            "use std::collections::HashSet;",
+            "for payload in &items",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForHashsetRefPayloadPayload",
+            "dead_for_hashset_ref_payload",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-hashset-ref-payload",
+        ],
+    });
+}
+
+#[test]
+fn prunes_for_btreeset_ref_payload_support_chain_with_default_analyzer() {
+    assert_support_slice_fixture(SupportSliceFixture {
+        fixture_name: "for_btreeset_ref_payload_prune",
+        root_fn: "selected_for_btreeset_ref_payload_report",
+        api_pkg: "for_btreeset_ref_payload_api",
+        model_pkg: "for_btreeset_ref_payload_model",
+        api_fn: "selected_for_btreeset_ref_payload_report",
+        model_fn: "selected_for_btreeset_ref_payload",
+        model_required: &[
+            "use std::collections::BTreeSet;",
+            "for payload in &items",
+            "payload.render_label()",
+            "pub fn render_label",
+        ],
+        model_absent: &[
+            "mod dead",
+            "DeadForBtreesetRefPayloadPayload",
+            "dead_for_btreeset_ref_payload",
+            "pub fn bump_and_render",
+            "unused_label",
+            "dead-for-btreeset-ref-payload",
+        ],
+    });
+}
+
 fn assert_set_algebra_support_fixture(
     fixture_name: &str,
     stem: &str,

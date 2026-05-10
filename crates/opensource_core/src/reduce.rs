@@ -7661,6 +7661,48 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn bind_map_pair_pattern_from_expr(&mut self, pattern: &Pat, expression: &Expr) -> bool {
+        let Pat::Tuple(tuple) = pattern else {
+            return false;
+        };
+        let Some((key_type, value_type)) = self.expression_map_pair_types(expression) else {
+            return false;
+        };
+        let Some(key_pat) = tuple.elems.first() else {
+            return false;
+        };
+        let Some(value_pat) = tuple.elems.get(1) else {
+            return false;
+        };
+        self.bind_pattern_type(key_pat, &key_type);
+        self.bind_pattern_type(value_pat, &value_type);
+        true
+    }
+
+    fn expression_map_pair_types(&self, expression: &Expr) -> Option<(TypeRef, TypeRef)> {
+        match expression {
+            Expr::Path(_) | Expr::Field(_) | Expr::Call(_) => self
+                .expression_map_key_type(expression)
+                .zip(self.expression_map_value_type(expression)),
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "drain" | "into_iter" | "iter" | "iter_mut" | "range" | "range_mut"
+                ) =>
+            {
+                self.expression_map_key_type(&call.receiver)
+                    .zip(self.expression_map_value_type(&call.receiver))
+            }
+            Expr::Reference(reference) => self.expression_map_pair_types(&reference.expr),
+            Expr::Paren(paren) => self.expression_map_pair_types(&paren.expr),
+            Expr::Block(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_map_pair_types(expr)),
+            Expr::Unsafe(expr) => final_block_expression(&expr.block)
+                .and_then(|expr| self.expression_map_pair_types(expr)),
+            _ => None,
+        }
+    }
+
     fn single_payload_closure_method_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
         let method = call.method.to_string();
         let type_arguments = self.expression_type_arguments(&call.receiver);
@@ -8122,8 +8164,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_expr_for_loop(&mut self, expr_for_loop: &'ast syn::ExprForLoop) {
         self.visit_expr(&expr_for_loop.expr);
         self.push_local_value_scope();
-        let item_types = self.expression_type_arguments(&expr_for_loop.expr);
-        if let [type_ref] = item_types.as_slice() {
+        if self.bind_map_pair_pattern_from_expr(&expr_for_loop.pat, &expr_for_loop.expr) {
+            // Pattern bindings are already registered from the key/value pair.
+        } else if let [type_ref] = self
+            .expression_type_arguments(&expr_for_loop.expr)
+            .as_slice()
+        {
             self.add_pattern_bindings_for_type(&expr_for_loop.pat, type_ref);
         }
         self.bind_local_value_names(&expr_for_loop.pat);

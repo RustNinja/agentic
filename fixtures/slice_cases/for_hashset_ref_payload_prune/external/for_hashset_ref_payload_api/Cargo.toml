@@ -1,0 +1,7 @@
+[package]
+name = "for_hashset_ref_payload_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+for_hashset_ref_payload_model = { path = "../for_hashset_ref_payload_model" }

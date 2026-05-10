@@ -1,0 +1,8 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+for_hashmap_drain_pair_api = { path = "../external/for_hashmap_drain_pair_api" }
