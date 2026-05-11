@@ -1648,3 +1648,10 @@ a package-level set of payload names that are mentioned only by pruned variants,
 filters them out of reachable item/import surface unless another reachable root
 or unknown blocker needs them, and restricted support rendering applies the same
 rule before pruning empty modules.
+
+Enum compaction needs syntax cleanup after graph cleanup. Once dead variants are
+removed, a match that previously needed `_ => ...` can become exhaustively
+covered by the retained variants. Leaving the wildcard arm is buildable but
+creates `unreachable_patterns` warnings and fails stricter production checks.
+Rendered impls now prune catch-all match arms only when all retained variants of
+the impl enum are already covered by unguarded explicit variant patterns.

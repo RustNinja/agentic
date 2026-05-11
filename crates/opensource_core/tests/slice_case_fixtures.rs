@@ -5979,6 +5979,7 @@ fn prunes_method_dispatch_support_chain_with_default_analyzer() {
             "pub struct StopParams",
             "pub struct ListParams",
             "pub enum DeadNotification",
+            "unsupported",
             "dead_method",
             "dead_live_dispatch",
             "dead-dispatch",

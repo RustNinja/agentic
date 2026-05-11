@@ -5594,6 +5594,10 @@ fn transform_restricted_support_file(
                     return None;
                 }
                 transform_support_impl(item_impl, &named_items, live_set).map(|mut item_impl| {
+                    prune_unreachable_enum_wildcard_match_arms_in_impl(
+                        &mut item_impl,
+                        &retained_enum_variants,
+                    );
                     prune_support_struct_literals_in_impl(&mut item_impl, &pruned_struct_fields);
                     Item::Impl(item_impl)
                 })
@@ -5893,6 +5897,147 @@ fn transform_support_enum(
         .cloned()
         .collect();
     item_enum
+}
+
+fn prune_unreachable_enum_wildcard_match_arms_in_impl(
+    item_impl: &mut syn::ItemImpl,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
+) {
+    if retained_enum_variants.is_empty() {
+        return;
+    }
+    let Some(enum_name) = support_impl_self_named_item(item_impl) else {
+        return;
+    };
+    if !retained_enum_variants.contains_key(&enum_name) {
+        return;
+    }
+    let mut pruner = EnumWildcardMatchArmPruner {
+        enum_name,
+        retained_enum_variants,
+    };
+    pruner.visit_item_impl_mut(item_impl);
+}
+
+struct EnumWildcardMatchArmPruner<'a> {
+    enum_name: String,
+    retained_enum_variants: &'a BTreeMap<String, BTreeSet<String>>,
+}
+
+impl VisitMut for EnumWildcardMatchArmPruner<'_> {
+    fn visit_expr_match_mut(&mut self, node: &mut syn::ExprMatch) {
+        visit_mut::visit_expr_match_mut(self, node);
+
+        let Some(retained_variants) = self.retained_enum_variants.get(&self.enum_name) else {
+            return;
+        };
+        if retained_variants.is_empty() {
+            return;
+        }
+
+        let mut covered_variants = BTreeSet::new();
+        node.arms = node
+            .arms
+            .iter()
+            .filter_map(|arm| {
+                if enum_match_arm_is_unconditional_catch_all(&arm.pat)
+                    && retained_variants.is_subset(&covered_variants)
+                {
+                    return None;
+                }
+                if arm.guard.is_none() {
+                    collect_enum_pattern_variants(
+                        &arm.pat,
+                        &self.enum_name,
+                        retained_variants,
+                        &mut covered_variants,
+                    );
+                }
+                Some(arm.clone())
+            })
+            .collect();
+    }
+}
+
+fn enum_match_arm_is_unconditional_catch_all(pat: &Pat) -> bool {
+    match pat {
+        Pat::Wild(_) => true,
+        Pat::Ident(ident) => ident.subpat.is_none(),
+        Pat::Reference(reference) => enum_match_arm_is_unconditional_catch_all(&reference.pat),
+        Pat::Paren(paren) => enum_match_arm_is_unconditional_catch_all(&paren.pat),
+        _ => false,
+    }
+}
+
+fn collect_enum_pattern_variants(
+    pat: &Pat,
+    enum_name: &str,
+    retained_variants: &BTreeSet<String>,
+    out: &mut BTreeSet<String>,
+) {
+    match pat {
+        Pat::Path(path) => {
+            if let Some(variant) =
+                enum_pattern_path_variant(&path.path, enum_name, retained_variants)
+            {
+                out.insert(variant);
+            }
+        }
+        Pat::Struct(pat_struct) => {
+            if let Some(variant) =
+                enum_pattern_path_variant(&pat_struct.path, enum_name, retained_variants)
+            {
+                out.insert(variant);
+            }
+        }
+        Pat::TupleStruct(tuple_struct) => {
+            if let Some(variant) =
+                enum_pattern_path_variant(&tuple_struct.path, enum_name, retained_variants)
+            {
+                out.insert(variant);
+            }
+        }
+        Pat::Or(pat_or) => {
+            for case in &pat_or.cases {
+                collect_enum_pattern_variants(case, enum_name, retained_variants, out);
+            }
+        }
+        Pat::Reference(reference) => {
+            collect_enum_pattern_variants(&reference.pat, enum_name, retained_variants, out);
+        }
+        Pat::Paren(paren) => {
+            collect_enum_pattern_variants(&paren.pat, enum_name, retained_variants, out);
+        }
+        _ => {}
+    }
+}
+
+fn enum_pattern_path_variant(
+    path: &syn::Path,
+    enum_name: &str,
+    retained_variants: &BTreeSet<String>,
+) -> Option<String> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let variant = segments.last()?;
+    if !retained_variants.contains(variant) {
+        return None;
+    }
+    if segments.len() == 2 && segments.first().is_some_and(|root| root == "Self") {
+        return Some(variant.clone());
+    }
+    if segments
+        .iter()
+        .rev()
+        .nth(1)
+        .is_some_and(|parent| parent == enum_name)
+    {
+        return Some(variant.clone());
+    }
+    None
 }
 
 fn prune_support_struct_literals_in_item(
@@ -13452,6 +13597,47 @@ fn transform_file(
     transformed
 }
 
+fn retained_enum_variants_for_rendered_module(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut retained = BTreeMap::new();
+    for item in items {
+        let Item::Enum(item_enum) = item else {
+            continue;
+        };
+        let Some(id) = item_id(package, module_path, item) else {
+            continue;
+        };
+        if !render_plan.item_should_render(&id) {
+            continue;
+        }
+        let variants = if enum_preserves_full_variant_surface(project, reduced, &id, item_enum) {
+            item_enum
+                .variants
+                .iter()
+                .map(|variant| variant.ident.to_string())
+                .collect()
+        } else {
+            item_enum
+                .variants
+                .iter()
+                .filter_map(|variant| {
+                    let variant_name = variant.ident.to_string();
+                    enum_variant_should_remain(project, reduced, package, &variant_name)
+                        .then_some(variant_name)
+                })
+                .collect()
+        };
+        retained.insert(item_enum.ident.to_string(), variants);
+    }
+    retained
+}
+
 fn transform_items(
     project: &Project,
     reduced: &ReducedProject,
@@ -13477,6 +13663,14 @@ fn transform_items(
         module_path,
         items,
     ));
+    let retained_enum_variants = retained_enum_variants_for_rendered_module(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        items,
+    );
 
     let mut transformed = Vec::new();
     for item in items {
@@ -13741,6 +13935,10 @@ fn transform_items(
                         strip_uniffi_attrs(&mut item_impl.attrs);
                     }
                     item_impl.items = kept_impl_items;
+                    prune_unreachable_enum_wildcard_match_arms_in_impl(
+                        &mut item_impl,
+                        &retained_enum_variants,
+                    );
                     transformed.push(Item::Impl(item_impl));
                     continue;
                 };
@@ -13960,6 +14158,10 @@ fn transform_items(
                     }
                     item_impl.items = kept_impl_items;
                     downgrade_uniffi_async_runtime_if_no_async_methods(&mut item_impl);
+                    prune_unreachable_enum_wildcard_match_arms_in_impl(
+                        &mut item_impl,
+                        &retained_enum_variants,
+                    );
                     Some(Item::Impl(item_impl))
                 } else {
                     None

@@ -290,7 +290,9 @@ passed deliberately.
   asset pruning remains under the cfg-oracle track.
 - `protocol.enum_method.compact.001`: covered for enum parser/render methods
   like `from_wire` that retain live variants/helpers while dropping payload-only
-  items introduced by pruned variants.
+  items introduced by pruned variants. Matches over the compacted enum also drop
+  unreachable wildcard/catch-all arms after all retained variants are covered,
+  so stricter `--deny-warnings` checks stay clean.
 - `bridge.state_constructor.heavy.001`: constructor roots with broad private
   state should expose exactly which fields/types force large support closure.
 - `async_io.generic_root.001`: generic async I/O functions with `AsyncRead` /
