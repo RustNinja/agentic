@@ -273,6 +273,35 @@ record, its public field surface stays intact. This keeps the slicer aligned
 with the production invariant that generated sub-dependencies contain only used
 or explicitly API/unknown-retained code.
 
+`manifest.support_path_dependency_internal_field_prune.001` extends that
+invariant to copied external path support packages. Restricted support source
+now prunes unused pure fields from internal helper structs and removes matching
+pure struct-literal initializers, instead of copying the whole live struct
+verbatim. `manifest.support_path_dependency_signature_field_surface.001` keeps
+the opposite boundary intact: when the selected root directly exposes the
+support struct in its signature, the copied support package preserves the public
+field surface.
+
+The same external support rule now treats public facade paths as API evidence.
+When the root crate reaches a support struct through public glob reexports,
+inline facade modules, or module aliases, the resolved support struct is marked
+as surface before internal field pruning runs. That keeps fields accessed by the
+root API intact without reopening whole-package copying for unrelated support
+helpers.
+
+Retained trait impl methods are another source of live dependencies even when
+they were not selected roots. Trait-surface methods now feed their `self.foo()`,
+`Self::CONST`, and path-associated references back into inherent impl retention.
+This fixes autoderef/helper chains generically while still allowing unrelated
+inherent methods and associated items to prune.
+
+Import proof for impl-associated non-function items is now tied to the rendered
+associated item decision. Tokens inside a pruned associated const/type no longer
+keep imports alive, so an unused const such as `INTERVAL: Duration` can be
+removed together with the `Duration` import. Non-public reexports also use local
+alias evidence rather than public-API retention, so `pub(crate) use` leaves prune
+when only the source module needs the target item.
+
 `fixture.public_field_collision_prune.support_chain.001` closes the next
 over-retention class in that same area. Public support fields are now retained
 from concrete struct evidence instead of package-global field-name matches, so

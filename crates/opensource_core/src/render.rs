@@ -2619,6 +2619,7 @@ struct SupportModuleSource {
 #[derive(Clone, Default)]
 struct SupportLiveSet {
     item_names: BTreeSet<String>,
+    surface_item_names: BTreeSet<String>,
     public_exports: BTreeSet<String>,
     assoc_item_names: BTreeMap<String, BTreeSet<String>>,
 }
@@ -3368,7 +3369,7 @@ fn seed_support_required_name(
     }
     if let Some((prefix, target_name)) = support_required_path(required_name) {
         let mut visited = BTreeSet::new();
-        return matches!(
+        let matched = matches!(
             mark_support_use_target(
                 ctx,
                 ctx.root_file,
@@ -3379,12 +3380,17 @@ fn seed_support_required_name(
             ),
             SupportReexportMark::Matched(_)
         );
+        if matched {
+            mark_support_surface_name(live, &target_name);
+        }
+        return matched;
     }
     let named_items = support_named_item_names(&root_module.syntax.items);
     if named_items.contains_key(required_name) {
-        live.entry(ctx.root_file.to_path_buf())
-            .or_default()
-            .item_names
+        let live_set = live.entry(ctx.root_file.to_path_buf()).or_default();
+        live_set.item_names.insert(required_name.to_string());
+        live_set
+            .surface_item_names
             .insert(required_name.to_string());
         return true;
     }
@@ -3412,6 +3418,7 @@ fn seed_support_required_name(
                     .or_default()
                     .public_exports
                     .insert(required_name.to_string());
+                mark_support_surface_name(live, required_name);
                 return true;
             }
             SupportReexportMark::Unsupported => return false,
@@ -3420,6 +3427,16 @@ fn seed_support_required_name(
     }
 
     false
+}
+
+fn mark_support_surface_name(live: &mut BTreeMap<PathBuf, SupportLiveSet>, required_name: &str) {
+    for live_set in live.values_mut() {
+        if live_set.item_names.contains(required_name) {
+            live_set
+                .surface_item_names
+                .insert(required_name.to_string());
+        }
+    }
 }
 
 fn support_required_path(required_name: &str) -> Option<(Vec<String>, String)> {
@@ -4523,6 +4540,14 @@ fn transform_restricted_support_file(
     live_usage_override: Option<&TokenUsage>,
 ) -> syn::File {
     let named_items = support_named_item_names(&syntax.items);
+    let pruned_struct_fields = support_pruned_struct_fields(
+        ctx,
+        live_by_file,
+        source_file,
+        syntax,
+        live_set,
+        &named_items,
+    );
     let live_usage = live_usage_override
         .cloned()
         .unwrap_or_else(|| support_live_item_usage(syntax, live_set));
@@ -4585,11 +4610,26 @@ fn transform_restricted_support_file(
             }
             Item::ExternCrate(_) => Some(item.clone()),
             Item::Impl(item_impl) => {
-                transform_support_impl(item_impl, &named_items, live_set).map(Item::Impl)
+                transform_support_impl(item_impl, &named_items, live_set).map(|mut item_impl| {
+                    prune_support_struct_literals_in_impl(&mut item_impl, &pruned_struct_fields);
+                    Item::Impl(item_impl)
+                })
+            }
+            Item::Struct(item_struct) => {
+                if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
+                    Some(Item::Struct(transform_support_struct(
+                        item_struct,
+                        &pruned_struct_fields,
+                    )))
+                } else {
+                    None
+                }
             }
             _ => {
                 if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
-                    Some(item.clone())
+                    let mut item = item.clone();
+                    prune_support_struct_literals_in_item(&mut item, &pruned_struct_fields);
+                    Some(item)
                 } else {
                     None
                 }
@@ -4597,6 +4637,351 @@ fn transform_restricted_support_file(
         })
         .collect();
     transformed
+}
+
+fn support_pruned_struct_fields(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+    source_file: &Path,
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+    named_items: &BTreeMap<String, Item>,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut pruned = BTreeMap::new();
+    for item in &syntax.items {
+        let Item::Struct(item_struct) = item else {
+            continue;
+        };
+        let struct_name = item_struct.ident.to_string();
+        if !live_set.item_names.contains(&struct_name)
+            || support_struct_preserves_full_field_surface(item_struct, live_set)
+            || support_struct_is_used_by_other_live_file(
+                ctx,
+                live_by_file,
+                source_file,
+                &struct_name,
+            )
+            || support_struct_is_live_signature_surface(syntax, live_set, named_items, &struct_name)
+        {
+            continue;
+        }
+        let Fields::Named(fields) = &item_struct.fields else {
+            continue;
+        };
+        for field in &fields.named {
+            let Some(field_name) = field.ident.as_ref().map(ToString::to_string) else {
+                continue;
+            };
+            if !support_struct_field_should_remain(
+                syntax,
+                live_set,
+                named_items,
+                item_struct,
+                &struct_name,
+                field,
+                &field_name,
+            ) {
+                pruned
+                    .entry(struct_name.clone())
+                    .or_insert_with(BTreeSet::new)
+                    .insert(field_name);
+            }
+        }
+    }
+    pruned
+}
+
+fn support_struct_preserves_full_field_surface(
+    item_struct: &syn::ItemStruct,
+    live_set: &SupportLiveSet,
+) -> bool {
+    let struct_name = item_struct.ident.to_string();
+    live_set.surface_item_names.contains(&struct_name)
+        || live_set.public_exports.contains(&struct_name)
+        || struct_attrs_require_field_surface(item_struct)
+        || support_struct_attrs_preserve_field_surface(item_struct)
+}
+
+fn support_struct_attrs_preserve_field_surface(item_struct: &syn::ItemStruct) -> bool {
+    item_struct.attrs.iter().any(|attr| {
+        let tokens = attr.to_token_stream();
+        let path = attr.path();
+        path.is_ident("serde")
+            || path.is_ident("clap")
+            || path_starts_with(path, "uniffi")
+            || (path.is_ident("derive")
+                && (token_stream_mentions_ident(&tokens, "Serialize")
+                    || token_stream_mentions_ident(&tokens, "Deserialize")))
+            || (path.is_ident("cfg_attr")
+                && (token_stream_mentions_ident(&tokens, "serde")
+                    || token_stream_mentions_ident(&tokens, "Serialize")
+                    || token_stream_mentions_ident(&tokens, "Deserialize")
+                    || token_stream_mentions_ident(&tokens, "uniffi")
+                    || token_stream_mentions_ident(&tokens, "clap")))
+    })
+}
+
+fn support_struct_is_used_by_other_live_file(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+    source_file: &Path,
+    struct_name: &str,
+) -> bool {
+    for (candidate_file, live_set) in live_by_file {
+        if candidate_file == source_file {
+            continue;
+        }
+        let Some(module) = ctx.modules.get(candidate_file) else {
+            continue;
+        };
+        let named_items = support_named_item_names(&module.syntax.items);
+        for item in &module.syntax.items {
+            if support_item_should_collect_live_usage(item, &named_items, live_set)
+                && token_stream_mentions_ident(&item.to_token_stream(), struct_name)
+            {
+                return true;
+            }
+        }
+    }
+    false
+}
+
+fn support_struct_is_live_signature_surface(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+    named_items: &BTreeMap<String, Item>,
+    struct_name: &str,
+) -> bool {
+    for item in &syntax.items {
+        if !support_item_should_collect_live_usage(item, named_items, live_set) {
+            continue;
+        }
+        match item {
+            Item::Fn(item_fn) => {
+                if token_stream_mentions_ident(&item_fn.sig.to_token_stream(), struct_name) {
+                    return true;
+                }
+            }
+            Item::Impl(item_impl) => {
+                if let Some(rendered_impl) =
+                    transform_support_impl(item_impl, named_items, live_set)
+                {
+                    for impl_item in &rendered_impl.items {
+                        if let ImplItem::Fn(item_fn) = impl_item {
+                            if token_stream_mentions_ident(
+                                &item_fn.sig.to_token_stream(),
+                                struct_name,
+                            ) {
+                                return true;
+                            }
+                        }
+                    }
+                }
+            }
+            Item::Enum(item_enum) => {
+                if item_enum
+                    .variants
+                    .iter()
+                    .flat_map(|variant| variant.fields.iter())
+                    .any(|field| {
+                        token_stream_mentions_ident(&field.ty.to_token_stream(), struct_name)
+                    })
+                {
+                    return true;
+                }
+            }
+            Item::Type(item_type) => {
+                if token_stream_mentions_ident(&item_type.ty.to_token_stream(), struct_name) {
+                    return true;
+                }
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
+fn support_struct_field_should_remain(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+    named_items: &BTreeMap<String, Item>,
+    item_struct: &syn::ItemStruct,
+    struct_name: &str,
+    field: &Field,
+    field_name: &str,
+) -> bool {
+    if field_attrs_require_field(field) || field_mentions_struct_type_params(item_struct, field) {
+        return true;
+    }
+    let mut visitor = SupportStructFieldUseVisitor {
+        struct_name,
+        field_name,
+        needs_field: false,
+    };
+    for item in &syntax.items {
+        if !support_item_should_collect_live_usage(item, named_items, live_set) {
+            continue;
+        }
+        match item {
+            Item::Impl(item_impl) => {
+                if let Some(rendered_impl) =
+                    transform_support_impl(item_impl, named_items, live_set)
+                {
+                    visitor.visit_item_impl(&rendered_impl);
+                }
+            }
+            _ => visitor.visit_item(item),
+        }
+        if visitor.needs_field {
+            return true;
+        }
+    }
+    false
+}
+
+fn transform_support_struct(
+    item_struct: &syn::ItemStruct,
+    pruned_struct_fields: &BTreeMap<String, BTreeSet<String>>,
+) -> syn::ItemStruct {
+    let mut item_struct = item_struct.clone();
+    let struct_name = item_struct.ident.to_string();
+    let Some(pruned_fields) = pruned_struct_fields.get(&struct_name) else {
+        return item_struct;
+    };
+    let Fields::Named(fields) = &mut item_struct.fields else {
+        return item_struct;
+    };
+    fields.named = fields
+        .named
+        .iter()
+        .filter(|field| {
+            field
+                .ident
+                .as_ref()
+                .is_none_or(|ident| !pruned_fields.contains(&ident.to_string()))
+        })
+        .cloned()
+        .collect();
+    item_struct
+}
+
+fn prune_support_struct_literals_in_item(
+    item: &mut Item,
+    pruned_struct_fields: &BTreeMap<String, BTreeSet<String>>,
+) {
+    if pruned_struct_fields.is_empty() {
+        return;
+    }
+    let mut pruner = SupportStructLiteralFieldPruner {
+        pruned_struct_fields,
+    };
+    pruner.visit_item_mut(item);
+}
+
+fn prune_support_struct_literals_in_impl(
+    item_impl: &mut syn::ItemImpl,
+    pruned_struct_fields: &BTreeMap<String, BTreeSet<String>>,
+) {
+    if pruned_struct_fields.is_empty() {
+        return;
+    }
+    let mut pruner = SupportStructLiteralFieldPruner {
+        pruned_struct_fields,
+    };
+    pruner.visit_item_impl_mut(item_impl);
+}
+
+struct SupportStructFieldUseVisitor<'a> {
+    struct_name: &'a str,
+    field_name: &'a str,
+    needs_field: bool,
+}
+
+impl Visit<'_> for SupportStructFieldUseVisitor<'_> {
+    fn visit_expr_field(&mut self, field: &syn::ExprField) {
+        if member_name(&field.member).as_deref() == Some(self.field_name) {
+            self.needs_field = true;
+        }
+        visit::visit_expr_field(self, field);
+    }
+
+    fn visit_pat_struct(&mut self, pattern: &syn::PatStruct) {
+        if path_leaf_is(&pattern.path, self.struct_name)
+            && pattern
+                .fields
+                .iter()
+                .any(|field| member_name(&field.member).as_deref() == Some(self.field_name))
+        {
+            self.needs_field = true;
+        }
+        visit::visit_pat_struct(self, pattern);
+    }
+
+    fn visit_expr_struct(&mut self, expr: &ExprStruct) {
+        let targets_struct = path_leaf_is(&expr.path, self.struct_name);
+        for field in &expr.fields {
+            if targets_struct
+                && member_name(&field.member).as_deref() == Some(self.field_name)
+                && !struct_literal_initializer_can_be_pruned_with_aliases(&field.expr, None)
+            {
+                self.needs_field = true;
+            }
+            self.visit_expr(&field.expr);
+        }
+        if let Some(rest) = &expr.rest {
+            self.visit_expr(rest);
+        }
+    }
+
+    fn visit_macro(&mut self, mac: &syn::Macro) {
+        if token_stream_mentions_ident(&mac.tokens, self.field_name) {
+            self.needs_field = true;
+        }
+        visit::visit_macro(self, mac);
+    }
+}
+
+struct SupportStructLiteralFieldPruner<'a> {
+    pruned_struct_fields: &'a BTreeMap<String, BTreeSet<String>>,
+}
+
+impl VisitMut for SupportStructLiteralFieldPruner<'_> {
+    fn visit_expr_struct_mut(&mut self, expr: &mut ExprStruct) {
+        for field in &mut expr.fields {
+            visit_mut::visit_expr_mut(self, &mut field.expr);
+        }
+        if let Some(rest) = &mut expr.rest {
+            visit_mut::visit_expr_mut(self, rest);
+        }
+        let Some(struct_name) = expr
+            .path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return;
+        };
+        let Some(pruned_fields) = self.pruned_struct_fields.get(&struct_name) else {
+            return;
+        };
+        expr.fields = expr
+            .fields
+            .iter()
+            .filter(|field| {
+                member_name(&field.member).is_none_or(|field_name| {
+                    !pruned_fields.contains(&field_name)
+                        || !struct_literal_initializer_can_be_pruned_with_aliases(&field.expr, None)
+                })
+            })
+            .cloned()
+            .collect();
+    }
+}
+
+fn path_leaf_is(path: &syn::Path, name: &str) -> bool {
+    path.segments
+        .last()
+        .is_some_and(|segment| segment.ident == name)
 }
 
 fn transform_support_inline_module(
@@ -7117,6 +7502,114 @@ fn rendered_items_reference_inherent_assoc_item(
         );
         visitor.visit_item(&record.item);
         visitor.found
+    })
+}
+
+fn retained_trait_surface_impl_items_reference_inherent_assoc_item(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    target_package: &str,
+    target_type_path: &[String],
+    assoc_name: &str,
+) -> bool {
+    project.items.iter().any(|(item_id, record)| {
+        if item_id.package != target_package {
+            return false;
+        }
+        let Item::Impl(item_impl) = &record.item else {
+            return false;
+        };
+        let Some((_, trait_path_syn, _)) = &item_impl.trait_ else {
+            return false;
+        };
+        let aliases = project
+            .module_aliases
+            .get(&(record.package.clone(), record.module_path.clone()))
+            .cloned()
+            .unwrap_or_default();
+        let Some(type_path) = resolved_local_type_path(
+            project,
+            &record.package,
+            &record.module_path,
+            &item_impl.self_ty,
+            &aliases,
+        ) else {
+            return false;
+        };
+        if type_path != target_type_path {
+            return false;
+        }
+        let trait_path = normalized_path(&record.module_path, trait_path_syn, &aliases);
+        let resolved_trait = resolve_trait_path_for_impl(
+            project,
+            &record.package,
+            &record.module_path,
+            trait_path_syn,
+            &aliases,
+        );
+        let trait_input_type_paths =
+            trait_input_type_paths(&record.module_path, trait_path_syn, &aliases);
+        let trait_item = trait_item_for_path(project, &record.package, &trait_path).or_else(|| {
+            resolved_trait
+                .as_ref()
+                .and_then(|(trait_package, trait_path)| {
+                    trait_item_for_package_path(project, trait_package, trait_path)
+                })
+        });
+        if !impl_surface_should_render(
+            project,
+            reduced,
+            render_plan,
+            &record.package,
+            &record.module_path,
+            &type_path,
+            Some(&trait_path),
+            resolved_trait
+                .as_ref()
+                .map(|(trait_package, trait_path)| (trait_package.as_str(), trait_path.as_slice())),
+            trait_input_type_paths.as_slice(),
+            trait_item.as_ref(),
+            item_impl,
+        ) {
+            return false;
+        }
+        item_impl.items.iter().any(|impl_item| {
+            if !impl_item_should_render_for_trait_surface(
+                project,
+                reduced,
+                &record.package,
+                &type_path,
+                Some(&trait_path),
+                resolved_trait.as_ref().map(|(trait_package, trait_path)| {
+                    (trait_package.as_str(), trait_path.as_slice())
+                }),
+                trait_input_type_paths.as_slice(),
+                trait_item.as_ref(),
+                item_impl,
+                impl_item,
+            ) {
+                return false;
+            }
+            if let ImplItem::Fn(method) = impl_item {
+                if impl_item_fn_has_method_call(method, assoc_name) {
+                    return true;
+                }
+                let mut visitor = InherentAssocPathReferenceVisitor::new(
+                    project,
+                    &record.package,
+                    &record.module_path,
+                    &aliases,
+                    target_package,
+                    target_type_path,
+                    assoc_name,
+                    Some((&record.package, type_path.as_slice())),
+                );
+                visitor.visit_impl_item_fn(method);
+                return visitor.found;
+            }
+            token_stream_mentions_ident(&impl_item.to_token_stream(), assoc_name)
+        })
     })
 }
 
@@ -11330,7 +11823,7 @@ fn transform_items(
             }
             Item::Use(item_use) => {
                 let mut item_use = item_use.clone();
-                let is_public_use = use_is_reexport(&item_use.vis);
+                let is_public_use = use_is_public_api_reexport(&item_use.vis);
                 let tree = prune_use_tree(
                     project,
                     reduced,
@@ -13141,6 +13634,7 @@ fn retained_impl_headers_mention_unqualified_ident(
 fn retained_impl_non_fn_items_mention_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     module_path: &[String],
     ident: &str,
@@ -13164,6 +13658,18 @@ fn retained_impl_non_fn_items_mention_ident(
         item_impl.items.iter().any(|impl_item| {
             !matches!(impl_item, ImplItem::Fn(_))
                 && !impl_item_is_test(impl_item)
+                && render_plan.is_none_or(|render_plan| {
+                    impl_non_fn_item_should_render_for_import_scan(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        item_impl,
+                        impl_item,
+                        &aliases,
+                    )
+                })
                 && token_stream_mentions_ident(&impl_item.to_token_stream(), ident)
         })
     })
@@ -13172,6 +13678,7 @@ fn retained_impl_non_fn_items_mention_ident(
 fn retained_impl_non_fn_items_mention_unqualified_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     module_path: &[String],
     ident: &str,
@@ -13195,9 +13702,83 @@ fn retained_impl_non_fn_items_mention_unqualified_ident(
         item_impl.items.iter().any(|impl_item| {
             !matches!(impl_item, ImplItem::Fn(_))
                 && !impl_item_is_test(impl_item)
+                && render_plan.is_none_or(|render_plan| {
+                    impl_non_fn_item_should_render_for_import_scan(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        item_impl,
+                        impl_item,
+                        &aliases,
+                    )
+                })
                 && token_stream_mentions_unqualified_ident(&impl_item.to_token_stream(), ident)
         })
     })
+}
+
+fn impl_non_fn_item_should_render_for_import_scan(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    item_impl: &syn::ItemImpl,
+    impl_item: &ImplItem,
+    aliases: &HashMap<String, Vec<String>>,
+) -> bool {
+    let Some(type_path) =
+        resolved_local_type_path(project, package, module_path, &item_impl.self_ty, aliases)
+    else {
+        return false;
+    };
+    let trait_path = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| normalized_path(module_path, path, aliases));
+    if let Some(trait_path) = &trait_path {
+        let resolved_trait = item_impl.trait_.as_ref().and_then(|(_, path, _)| {
+            resolve_trait_path_for_impl(project, package, module_path, path, aliases)
+        });
+        let trait_input_type_paths = item_impl
+            .trait_
+            .as_ref()
+            .map(|(_, path, _)| trait_input_type_paths(module_path, path, aliases))
+            .unwrap_or_default();
+        let trait_item = trait_item_for_path(project, package, trait_path).or_else(|| {
+            resolved_trait
+                .as_ref()
+                .and_then(|(trait_package, trait_path)| {
+                    trait_item_for_package_path(project, trait_package, trait_path)
+                })
+        });
+        return impl_item_should_render_for_trait_surface(
+            project,
+            reduced,
+            package,
+            &type_path,
+            Some(trait_path),
+            resolved_trait
+                .as_ref()
+                .map(|(trait_package, trait_path)| (trait_package.as_str(), trait_path.as_slice())),
+            trait_input_type_paths.as_slice(),
+            trait_item.as_ref(),
+            item_impl,
+            impl_item,
+        );
+    }
+    inherent_impl_assoc_item_should_render(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        &type_path,
+        item_impl,
+        impl_item,
+    )
 }
 
 fn retained_root_macro_impl_items_mention_ident(
@@ -13875,6 +14456,13 @@ fn inherent_impl_assoc_item_should_render(
         package,
         type_path,
         &name,
+    ) || retained_trait_surface_impl_items_reference_inherent_assoc_item(
+        project,
+        reduced,
+        render_plan,
+        package,
+        type_path,
+        &name,
     ) || reachable_reduced_callables_macro_tokens_mention_ident(project, reduced, &name)
         || rendered_items_macro_tokens_mention_ident(project, render_plan, &name)
         || retained_root_macro_impl_items_mention_ident(
@@ -13906,6 +14494,13 @@ fn inherent_impl_method_should_render(
         package,
         type_path,
         item_impl,
+        name,
+    ) || retained_trait_surface_impl_items_reference_inherent_assoc_item(
+        project,
+        reduced,
+        render_plan,
+        package,
+        type_path,
         name,
     )
 }
@@ -14622,6 +15217,7 @@ fn attr_requires_impl_surface_retention(attribute: &syn::Attribute) -> bool {
             | "forbid"
             | "inline"
             | "must_use"
+            | "opensourced"
             | "repr"
             | "test"
             | "warn"
@@ -14845,7 +15441,14 @@ fn reachable_module_mentions_ident(
                 })
             })
         || retained_impl_attrs_mention_ident(project, reduced, package, module_path, ident)
-        || retained_impl_non_fn_items_mention_ident(project, reduced, package, module_path, ident)
+        || retained_impl_non_fn_items_mention_ident(
+            project,
+            reduced,
+            None,
+            package,
+            module_path,
+            ident,
+        )
         || retained_root_macro_impl_items_mention_ident(
             project,
             reduced,
@@ -14903,6 +15506,7 @@ fn reachable_module_mentions_unqualified_ident(
         || retained_impl_non_fn_items_mention_unqualified_ident(
             project,
             reduced,
+            None,
             package,
             module_path,
             ident,
@@ -18813,6 +19417,7 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
         || retained_impl_non_fn_items_mention_unqualified_ident(
             project,
             reduced,
+            Some(render_plan),
             package,
             module_path,
             ident,
@@ -19035,7 +19640,14 @@ fn reachable_module_non_callable_mentions_imported_ident(
             })
         })
         || retained_impl_attrs_mention_ident(project, reduced, package, module_path, ident)
-        || retained_impl_non_fn_items_mention_ident(project, reduced, package, module_path, ident)
+        || retained_impl_non_fn_items_mention_ident(
+            project,
+            reduced,
+            Some(render_plan),
+            package,
+            module_path,
+            ident,
+        )
         || retained_root_macro_impl_items_mention_ident(
             project,
             reduced,

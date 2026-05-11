@@ -42,6 +42,11 @@ and block unsafe claims.
   proof. Public fields and enum variants can be dead even when their parent type
   is retained for an impl or helper surface, so the renderer must classify and
   prune members with concrete owner evidence.
+- External path support packages need the same member-level pruning when they
+  are copied as restricted source. A helper record retained only behind a live
+  support function can drop unused pure fields and matching pure struct-literal
+  initializers, while a support type that appears directly in the selected API
+  signature must keep its public field surface.
 - Concrete member evidence must include cross-package typed bindings. A retained
   helper can receive `dependency::Type` as a parameter and access one field; the
   slicer must retain that field without promoting every same-named field in the
@@ -1452,3 +1457,21 @@ those fields precise without reopening package-wide field-name retention. The
 closure override must also continue visiting input patterns, because
 destructuring such as `|Record { value, .. }: Record| value` is itself concrete
 field evidence.
+
+Copied external path support packages need member-level minimization, not just
+file/module pruning. Restricted support source now removes unused pure fields
+and matching pure struct-literal initializers from internal helper structs, while
+support structs directly exposed by the selected API signature keep their public
+field surface. Public support facades, glob reexports, and module aliases also
+mark the resolved support struct as API surface before field pruning runs.
+
+Retained trait impl methods are live dependency owners even when they were not
+selected roots. Trait-surface methods must promote their inherent helper calls
+and associated references back into the rendered inherent impl, otherwise valid
+slices can drop helper methods such as `self.as_str()` used only by a retained
+`Deref` impl.
+
+Import pruning must look at rendered associated item decisions, not just tokens
+inside any impl block that has a retained method. Pruned associated const/type
+items should not keep their imports alive, and non-public reexports should not
+be treated as public API unless retained code actually uses that alias.

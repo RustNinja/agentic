@@ -2515,7 +2515,7 @@ fn keeps_optional_dependency_requested_by_retained_local_package_feature() {
 }
 
 #[test]
-fn retains_mutex_guard_field_method_and_associated_const_imports() {
+fn retains_mutex_guard_field_method_and_prunes_unused_associated_const_imports() {
     let workspace = temp_path("mutex-field-workspace");
     let output = temp_path("mutex-field-output");
     let target_dir = temp_path("mutex-field-target");
@@ -2528,11 +2528,14 @@ fn retains_mutex_guard_field_method_and_associated_const_imports() {
     .expect("reduction should succeed");
 
     let source = read(output.join("app/src/lib.rs"));
-    assert!(source.contains("Duration"));
     assert!(source.contains("fn push"));
-    assert!(source.contains("const INTERVAL"));
     assert!(source.contains("Weak"));
     assert!(source.contains("SqlInterruptHandle"));
+    assert!(source.contains("RateLimiter::new"));
+    assert!(!source.contains("Duration"));
+    assert!(!source.contains("Instant"));
+    assert!(!source.contains("const INTERVAL"));
+    assert!(!source.contains("last_report"));
 
     let cargo_check = Command::new("cargo")
         .arg("check")
@@ -7456,14 +7459,31 @@ mod test_only;
 pub fn decorate(value: &str) -> String {
     live::decorate(value)
 }
+
+pub fn unused_root(value: &str) -> String {
+    format!("dead:{value}")
+}
 "#,
     );
     write(
         helper.join("src/live.rs"),
         r#"const LABEL: &str = include_str!("live.txt");
 
+pub struct LiveRecord {
+    pub value: String,
+    pub dead_note: Option<String>,
+}
+
 pub fn decorate(value: &str) -> String {
-    format!("{value}:{}", LABEL.trim())
+    let record = LiveRecord {
+        value: format!("{value}:{}", LABEL.trim()),
+        dead_note: None,
+    };
+    record.value
+}
+
+pub fn unused_live(value: &str) -> String {
+    format!("dead:{value}")
 }
 "#,
     );
@@ -7498,6 +7518,25 @@ pub fn orphan_value() -> &'static str {
     assert!(output.join("support/external-helper/src/lib.rs").exists());
     assert!(output.join("support/external-helper/src/live.rs").exists());
     assert!(output.join("support/external-helper/src/live.txt").exists());
+    let support_root = read(output.join("support/external-helper/src/lib.rs"));
+    let support_live = read(output.join("support/external-helper/src/live.rs"));
+    assert!(
+        !support_root.contains("unused_root"),
+        "direct dependency path usage should restrict support root items\n{support_root}"
+    );
+    assert!(
+        !support_live.contains("unused_live"),
+        "direct dependency path usage should restrict support child items\n{support_live}"
+    );
+    assert!(
+        support_live.contains("pub struct LiveRecord"),
+        "{support_live}"
+    );
+    assert!(support_live.contains("pub value: String"), "{support_live}");
+    assert!(
+        !support_live.contains("dead_note"),
+        "restricted support structs should prune unused pure fields and their initializers\n{support_live}"
+    );
     assert!(!output
         .join("support/external-helper/src/test_only.rs")
         .exists());
@@ -7524,6 +7563,109 @@ pub fn orphan_value() -> &'static str {
         cargo_check.status,
         String::from_utf8_lossy(&cargo_check.stdout),
         String::from_utf8_lossy(&cargo_check.stderr),
+    );
+}
+
+#[test]
+fn preserves_direct_required_support_struct_field_surface() {
+    let workspace = temp_path("support-required-struct-surface-workspace");
+    let output = temp_path("support-required-struct-surface-output");
+    let target_dir = temp_path("support-required-struct-surface-target");
+    let external = temp_path("support-required-struct-surface-external");
+    let helper = external.join("external-helper");
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+external-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper),
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(value: &str) -> external_helper::LiveRecord {
+    external_helper::make_record(value)
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        r#"[package]
+name = "external-helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"pub struct LiveRecord {
+    pub value: String,
+    pub dead_note: Option<String>,
+}
+
+pub fn make_record(value: &str) -> LiveRecord {
+    LiveRecord {
+        value: value.to_string(),
+        dead_note: None,
+    }
+}
+
+pub fn unused_record() -> LiveRecord {
+    LiveRecord {
+        value: "dead".to_string(),
+        dead_note: Some("dead".to_string()),
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let support = read(output.join("support/external-helper/src/lib.rs"));
+    assert!(support.contains("pub struct LiveRecord"), "{support}");
+    assert!(support.contains("pub value: String"), "{support}");
+    assert!(
+        support.contains("pub dead_note: Option<String>"),
+        "direct required support API structs must preserve their public field surface\n{support}"
+    );
+    assert!(!support.contains("unused_record"), "{support}");
+
+    fs::rename(&helper, helper.with_extension("moved")).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated required support struct slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsupport/external-helper/src/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        support,
     );
 }
 
