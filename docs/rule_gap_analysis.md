@@ -9,7 +9,7 @@ found from the local Litter checkout at:
 
 The current committed baseline after the fixture expansion pass is:
 
-- 920 focused cargo-checked fixture/rule cases.
+- 921 focused cargo-checked fixture/rule cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
 - The first documented gap batch is now executable in
   `crates/opensource_core/tests/rule_database.rs`.
@@ -177,6 +177,11 @@ Fixture ideas:
 - `manifest.cdylib_staticlib_target_patch_bundle.001`: selected FFI crate keeps
   crate type, target deps, features, workspace patches, and lock/toolchain
   context without keeping unrelated packages.
+
+Current coverage note: dependency-driven patch path retention is now covered by
+`manifest.patch_path_dependency_scoped.001`, so unused workspace patch entries no
+longer copy or emit support packages. The larger FFI crate-type/target bundle is
+still listed because it needs one combined fixture.
 
 ### 8. Serde protocol projection and custom helpers
 

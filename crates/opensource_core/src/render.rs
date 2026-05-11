@@ -1165,8 +1165,7 @@ impl SupportPackagePlan {
     ) -> Result<Self, Box<dyn std::error::Error>> {
         let mut builder = SupportPackagePlanBuilder::new(project, reduced);
         builder.collect_retained_dependency_paths(reduced, package_usages)?;
-        builder
-            .collect_patch_replace_paths(&project.workspace.root, &project.workspace.manifest)?;
+        builder.collect_replace_paths(&project.workspace.root, &project.workspace.manifest)?;
         builder.finish()
     }
 
@@ -1525,26 +1524,106 @@ impl<'a> SupportPackagePlanBuilder<'a> {
             return Ok(());
         }
 
-        self.add_dependency_path(
-            source,
-            manifest_dir,
-            package_usage.dependency_public_names(alias),
-        )
+        let required_names = package_usage.dependency_public_names(alias);
+        self.add_dependency_path(source, manifest_dir, required_names.clone())?;
+        if dependency_path_root(source, manifest_dir)?.is_none() {
+            self.collect_patch_paths_for_dependency(None, &dependency_package, required_names)?;
+        }
+        Ok(())
     }
 
-    fn collect_patch_replace_paths(
+    fn collect_replace_paths(
         &mut self,
         manifest_dir: &Path,
         manifest: &Value,
     ) -> Result<(), Box<dyn std::error::Error>> {
-        if let Some(patches) = manifest.get("patch").and_then(Value::as_table) {
-            for value in patches.values() {
-                self.collect_manifest_path_dependencies(manifest_dir, value)?;
-            }
-        }
         if let Some(replacements) = manifest.get("replace").and_then(Value::as_table) {
             for value in replacements.values() {
                 self.collect_manifest_path_dependencies(manifest_dir, value)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn collect_patch_paths_for_dependency(
+        &mut self,
+        workspace: Option<&SupportWorkspace>,
+        dependency_name: &str,
+        required_names: Option<BTreeSet<String>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let project_root = self.project.workspace.root.clone();
+        let project_manifest = self.project.workspace.manifest.clone();
+        self.collect_patch_paths_for_dependency_in_manifest(
+            &project_root,
+            &project_manifest,
+            dependency_name,
+            required_names.clone(),
+        )?;
+
+        let Some(workspace) = workspace else {
+            return Ok(());
+        };
+        if workspace.root == project_root {
+            return Ok(());
+        }
+        self.collect_patch_paths_for_dependency_in_manifest(
+            &workspace.root,
+            &workspace.manifest,
+            dependency_name,
+            required_names,
+        )
+    }
+
+    fn collect_patch_paths_for_dependency_in_manifest(
+        &mut self,
+        manifest_dir: &Path,
+        manifest: &Value,
+        dependency_name: &str,
+        required_names: Option<BTreeSet<String>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(patches) = manifest.get("patch").and_then(Value::as_table) else {
+            return Ok(());
+        };
+        for value in patches.values() {
+            self.collect_matching_patch_path_dependencies(
+                manifest_dir,
+                value,
+                dependency_name,
+                required_names.clone(),
+            )?;
+        }
+        Ok(())
+    }
+
+    fn collect_matching_patch_path_dependencies(
+        &mut self,
+        manifest_dir: &Path,
+        value: &Value,
+        dependency_name: &str,
+        required_names: Option<BTreeSet<String>>,
+    ) -> Result<(), Box<dyn std::error::Error>> {
+        let Some(table) = value.as_table() else {
+            return Ok(());
+        };
+        for (alias, dependency) in table {
+            let Some(dependency_table) = dependency.as_table() else {
+                continue;
+            };
+            if dependency_table.contains_key("path")
+                || dependency_table.contains_key("git")
+                || dependency_table.contains_key("version")
+                || dependency_table.contains_key("package")
+            {
+                if dependency_patch_name(alias, dependency) == dependency_name {
+                    self.add_dependency_path(dependency, manifest_dir, required_names.clone())?;
+                }
+            } else {
+                self.collect_matching_patch_path_dependencies(
+                    manifest_dir,
+                    dependency,
+                    dependency_name,
+                    required_names.clone(),
+                )?;
             }
         }
         Ok(())
@@ -1694,7 +1773,7 @@ impl<'a> SupportPackagePlanBuilder<'a> {
                 self.workspace_manifests
                     .entry(workspace.root.clone())
                     .or_insert_with(|| workspace.manifest.clone());
-                self.collect_patch_replace_paths(&workspace.root, &workspace.manifest)?;
+                self.collect_replace_paths(&workspace.root, &workspace.manifest)?;
             }
             let source_plan = if let Some(required_names) = &required_names {
                 build_support_source_plan(&root, &manifest, workspace.as_ref(), required_names)?
@@ -1799,7 +1878,18 @@ impl<'a> SupportPackagePlanBuilder<'a> {
             }
             let (value, manifest_dir) =
                 materialized_dependency_value_for_workspace(package_root, workspace, alias, value)?;
-            self.add_dependency_path(&value, &manifest_dir, required_names)?;
+            let dependency_package = dependency_package_name(alias, &value);
+            if is_marker_dependency(alias, &dependency_package) {
+                continue;
+            }
+            self.add_dependency_path(&value, &manifest_dir, required_names.clone())?;
+            if dependency_path_root(&value, &manifest_dir)?.is_none() {
+                self.collect_patch_paths_for_dependency(
+                    workspace,
+                    &dependency_package,
+                    required_names,
+                )?;
+            }
         }
         Ok(())
     }
@@ -9955,14 +10045,14 @@ fn support_package_patch_dependency_names(
 ) -> Result<BTreeSet<String>, Box<dyn std::error::Error>> {
     let mut names = BTreeSet::new();
     for package in support_packages.packages.values() {
-        for table in support_manifest_dependency_tables(&package.manifest) {
+        let transformed_manifest = support_packages.transformed_support_manifest(package)?;
+        for table in support_manifest_dependency_tables(&transformed_manifest) {
             for (alias, value) in table {
-                let (value, _) = materialized_support_dependency_value(package, alias, value)?;
-                let dependency_package = dependency_package_name(alias, &value);
+                let dependency_package = dependency_package_name(alias, value);
                 if is_marker_dependency(alias, &dependency_package) {
                     continue;
                 }
-                names.insert(dependency_patch_name(alias, &value));
+                names.insert(dependency_patch_name(alias, value));
             }
         }
     }

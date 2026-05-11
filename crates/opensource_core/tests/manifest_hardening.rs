@@ -2969,6 +2969,10 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
     assert!(root_manifest.contains("external_helper"));
     assert!(root_manifest.contains("path = \"support/external-helper\""));
     assert!(root_manifest.contains("path = \"support/external-leaf\""));
+    assert!(
+        !root_manifest.contains("external-unused"),
+        "unused patch packages must not be emitted into the generated root manifest\n{root_manifest}"
+    );
     assert!(!root_manifest.contains("path = \"/"));
     assert!(!root_manifest.contains("path = \"../"));
     assert!(root_manifest.contains("[patch.crates-io.external-helper]"));
@@ -2976,6 +2980,10 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
     assert!(app_manifest.contains("external_helper"));
     assert!(support_manifest.contains("name = \"external-helper\""));
     assert!(support_leaf_manifest.contains("name = \"external-leaf\""));
+    assert!(
+        !output.join("support/external-unused").exists(),
+        "unused patch packages must not be copied as support dependencies"
+    );
     assert!(support_source.contains("pub fn decorate"));
     assert!(lockfile.contains("version = 3"));
 
@@ -2987,12 +2995,22 @@ fn resolves_external_workspace_path_dependencies_from_original_root() {
         "{}-external-leaf",
         workspace.file_name().unwrap().to_string_lossy()
     );
+    let external_unused_name = format!(
+        "{}-external-unused",
+        workspace.file_name().unwrap().to_string_lossy()
+    );
     let external_root = workspace.parent().unwrap().join(external_name);
     let external_leaf_root = workspace.parent().unwrap().join(external_leaf_name);
+    let external_unused_root = workspace.parent().unwrap().join(external_unused_name);
     fs::rename(&external_root, external_root.with_extension("moved")).unwrap();
     fs::rename(
         &external_leaf_root,
         external_leaf_root.with_extension("moved"),
+    )
+    .unwrap();
+    fs::rename(
+        &external_unused_root,
+        external_unused_root.with_extension("moved"),
     )
     .unwrap();
 
@@ -11068,6 +11086,10 @@ fn write_external_workspace_path_fixture(root: &Path) {
         "{}-external-leaf",
         root.file_name().unwrap().to_string_lossy()
     );
+    let external_unused_name = format!(
+        "{}-external-unused",
+        root.file_name().unwrap().to_string_lossy()
+    );
     let external_root = root.parent().unwrap().join(&external_name);
     if external_root.exists() {
         fs::remove_dir_all(&external_root).unwrap();
@@ -11075,6 +11097,10 @@ fn write_external_workspace_path_fixture(root: &Path) {
     let external_leaf_root = root.parent().unwrap().join(&external_leaf_name);
     if external_leaf_root.exists() {
         fs::remove_dir_all(&external_leaf_root).unwrap();
+    }
+    let external_unused_root = root.parent().unwrap().join(&external_unused_name);
+    if external_unused_root.exists() {
+        fs::remove_dir_all(&external_unused_root).unwrap();
     }
     let opensourced_path = repo_root().join("crates/opensourced");
 
@@ -11092,6 +11118,7 @@ opensourced = {{ path = "{}" }}
 [patch.crates-io]
 external-helper = {{ path = "../{external_name}" }}
 external-leaf = {{ path = "../{external_leaf_name}" }}
+external-unused = {{ path = "../{external_unused_name}" }}
 "#,
             manifest_path(&opensourced_path)
         ),
@@ -11162,6 +11189,21 @@ edition = "2021"
         external_leaf_root.join("src/lib.rs"),
         r#"pub fn suffix() -> &'static str {
     "leaf"
+}
+"#,
+    );
+    write(
+        external_unused_root.join("Cargo.toml"),
+        r#"[package]
+name = "external-unused"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        external_unused_root.join("src/lib.rs"),
+        r#"pub fn unused_patch() -> &'static str {
+    "unused"
 }
 "#,
     );

@@ -1546,3 +1546,12 @@ crate as live when only one derive is used over-retains dead helper modules in
 the copied support package. The support scanner now records quote-body
 dependencies per exported macro and follows helper functions called by that
 export before merging generated-source dependency evidence.
+
+Workspace patches should be copied for retained dependency names, not because
+they exist in `[patch]`. A root or support workspace can carry extra patch path
+entries for packages unrelated to the selected API. Broadly discovering every
+patch path creates redundant `support/` packages even when the generated root
+manifest later filters the `[patch]` table. Patch discovery is now driven by the
+dependency package name encountered in retained root/support manifests; retained
+patched transitive dependencies still get copied, while unused patch entries are
+left out of both the root manifest and support tree.
