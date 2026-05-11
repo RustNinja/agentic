@@ -312,6 +312,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 
 fn print_rendered_symbol_summary(report: &GenerateReport, kind: &str, label: &str) {
     println!("{label}:");
+    let decisions = match kind {
+        "callable" => Some(&report.usage.rendered_decision_map.callables),
+        "item" => Some(&report.usage.rendered_decision_map.items),
+        _ => None,
+    };
     for entry in report
         .usage
         .rendered_symbols
@@ -319,7 +324,10 @@ fn print_rendered_symbol_summary(report: &GenerateReport, kind: &str, label: &st
         .iter()
         .filter(|entry| entry.kind == kind)
     {
-        println!("  {} [{}]", entry.id, entry.classification);
+        let classification = decisions
+            .and_then(|decisions| decisions.get(&entry.id))
+            .unwrap_or(&entry.classification);
+        println!("  {} [{}]", entry.id, classification);
     }
 }
 
