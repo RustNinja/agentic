@@ -5,4 +5,4 @@ edition = "2021"
 
 [dependencies]
 opensourced = { path = "../../../../crates/opensourced" }
-registry_api = { path = "../external/registry_api" }
+serde_adjacent_api = { path = "../external/serde_adjacent_api" }

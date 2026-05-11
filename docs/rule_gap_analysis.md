@@ -212,8 +212,10 @@ Evidence:
 
 Fixture ideas:
 
-- `serde.adjacent_tag_content_contract.001`: retained DTO enum keeps payload
-  variants and nested payload records used only by serde tag/content metadata.
+- `serde.adjacent_tag_content_contract.001`: covered by
+  `serde_adjacent_contract_prune`; retained adjacent-tagged DTO enums keep
+  payload variants, nested payload records, and contract-only fields while
+  pruning same-name local functions that only match serde data strings.
 - `serde.custom_numeric_string_helpers.001`: retained DTO keeps custom
   serializer/deserializer helper functions referenced only through serde attrs.
 - `pattern.external_protocol_variant_projection.001`: retained state reducer
@@ -268,8 +270,7 @@ Do not grow production confidence by adding 1,000 hand-written near-duplicates.
 Keep the generated 1,200-row catalog for breadth. The next focused batch should
 target the remaining shapes that are not closed above:
 
-1. `serde.adjacent_tag_content_contract.001`
-2. A real-project Litter mining pass after the focused fixture above, so new
+1. A real-project Litter mining pass after the focused fixture above, so new
    failures become minimized generic fixtures instead of one-off project logic
 
 After that fixture is executable, rerun five random Litter roots and compare

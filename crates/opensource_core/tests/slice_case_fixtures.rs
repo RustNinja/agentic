@@ -3209,6 +3209,134 @@ fn prunes_request_json_patch_state_machine_support_chain_with_default_analyzer()
 }
 
 #[test]
+fn prunes_serde_adjacent_contract_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/serde_adjacent_contract_prune");
+    let output = temp_path("slice-case-serde-adjacent-contract-prune-output");
+    let target_dir = temp_path("slice-case-serde-adjacent-contract-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("serde_adjacent_contract_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["root", "serde_adjacent_api", "serde_adjacent_model"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_adjacent_summary"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("serde_adjacent_api/Cargo.toml"));
+    let api_root = read(output.join("serde_adjacent_api/src/lib.rs"));
+    let api_live = read(output.join("serde_adjacent_api/src/live.rs"));
+    let model_manifest = read(output.join("serde_adjacent_model/Cargo.toml"));
+    let model_root = read(output.join("serde_adjacent_model/src/lib.rs"));
+    let model_live = read(output.join("serde_adjacent_model/src/live.rs"));
+
+    assert!(
+        root_manifest.contains("../serde_adjacent_api"),
+        "{root_manifest}"
+    );
+    assert!(
+        root_source.contains("pub fn selected_adjacent_summary"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("serde_adjacent_api::selected_adjacent_summary"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_adjacent_summary"]);
+
+    assert!(
+        api_manifest.contains("../serde_adjacent_model"),
+        "{api_manifest}"
+    );
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_adjacent_summary"), "{api_root}");
+    assert_absent(
+        "serde_adjacent_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_adjacent_summary"],
+    );
+    assert!(
+        api_live.contains("serde_adjacent_model::parse_live_command"),
+        "{api_live}"
+    );
+    assert_absent(
+        "serde_adjacent_api/src/live.rs",
+        &api_live,
+        &["dead_live_adjacent_summary"],
+    );
+    assert!(!output.join("serde_adjacent_api/src/dead.rs").exists());
+
+    for dependency in ["serde", "serde_json"] {
+        assert!(
+            model_manifest.contains(dependency),
+            "serde_adjacent_model manifest should retain dependency {dependency:?}\n{model_manifest}"
+        );
+    }
+    assert!(model_root.contains("mod live"), "{model_root}");
+    assert!(model_root.contains("parse_live_command"), "{model_root}");
+    assert!(model_root.contains("LiveEnvelope"), "{model_root}");
+    assert_absent(
+        "serde_adjacent_model/src/lib.rs",
+        &model_root,
+        &["mod dead", "DeadEnvelope", "dead_contract_summary"],
+    );
+    assert!(!output.join("serde_adjacent_model/src/dead.rs").exists());
+
+    for token in [
+        "use serde::{Deserialize, Serialize}",
+        "#[serde(tag = \"kind\", content = \"payload\", rename_all = \"camelCase\")]",
+        "pub enum LiveEnvelope",
+        "Started(StartedPayload)",
+        "Update {",
+        "Failed(FailurePayload)",
+        "pub struct StartedPayload",
+        "pub labels: Vec<String>",
+        "pub struct LiveMessage",
+        "pub metadata: Vec<String>",
+        "pub struct FailurePayload",
+        "pub recoverable: bool",
+        "pub fn parse_live_command",
+    ] {
+        assert!(
+            model_live.contains(token),
+            "missing {token:?}\n{model_live}"
+        );
+    }
+    assert_absent(
+        "serde_adjacent_model/src/live.rs",
+        &model_live,
+        &[
+            "dead_live_contract_summary",
+            "DeadPayload",
+            "dead_payload_debug",
+            "dead-content-meta-word",
+            "dead-kind-meta-word",
+            "dead-payload-meta-word",
+            "pub fn content",
+            "pub fn kind",
+            "pub fn payload",
+        ],
+    );
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_uniffi_runtime_support_chain_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/uniffi_runtime_prune");
     let output = temp_path("slice-case-uniffi-runtime-prune-output");

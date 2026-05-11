@@ -1620,3 +1620,12 @@ Treating it as opaque created avoidable syntactic method fallback hazards. The
 reducer now carries receiver/type-argument/result-type inference through
 `Expr::Await`, allowing async support chains to stay typed and prune unrelated
 methods.
+
+Serde helper attributes need two separate dependency policies. Values under
+keys like `default`, `with`, `serialize_with`, `deserialize_with`, and
+`skip_serializing_if` are executable helper paths and must become top-down
+edges. Data-contract strings under keys like `tag`, `content`, `rename`, and
+`rename_all` are schema metadata and must not retain same-name local functions.
+The adjacent-tag fixture also showed that external deserializers such as
+`serde_json::from_str::<T>()` must expose `T` as the `Result::Ok` payload so
+closures like `.map(|value| value.render())` keep only the typed method closure.

@@ -1,4 +1,4 @@
-use opensource_attr::opensourced;
+use opensourced::opensourced;
 
 #[opensourced]
 pub async fn selected_async_runtime_status(raw: &str) -> String {

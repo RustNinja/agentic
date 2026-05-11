@@ -9168,7 +9168,16 @@ fn macro_surface_blocked_idents(path: &syn::Path, tokens: &TokenStream) -> Vec<S
 }
 
 fn macro_attribute_blocked_idents(attribute: &Attribute) -> Vec<String> {
-    let mut idents = token_stream_idents(&attribute.meta.to_token_stream());
+    let mut idents = if attribute
+        .path()
+        .segments
+        .first()
+        .is_some_and(|segment| helper_attribute_name(&segment.ident.to_string()))
+    {
+        BTreeSet::new()
+    } else {
+        token_stream_idents(&attribute.meta.to_token_stream())
+    };
     collect_attribute_helper_path_idents(&attribute.meta, &mut idents);
     filter_macro_surface_blocked_idents(attribute.path(), idents)
 }
@@ -9349,6 +9358,7 @@ fn macro_surface_meta_word(ident: &str) -> bool {
     matches!(
         ident,
         "as" | "bound"
+            | "content"
             | "crate"
             | "default"
             | "deny_unknown_fields"

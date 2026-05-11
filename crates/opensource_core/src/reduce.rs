@@ -5321,6 +5321,9 @@ impl<'a> DependencyVisitor<'a> {
         };
         let type_ref = match function.as_str() {
             "empty" => self.resolver.type_from_path_turbofish(&path.path),
+            "from_reader" | "from_slice" | "from_str" | "from_value" => {
+                self.resolver.type_from_path_turbofish(&path.path)
+            }
             "once" | "repeat_n" => call
                 .args
                 .first()
@@ -5334,6 +5337,20 @@ impl<'a> DependencyVisitor<'a> {
             _ => None,
         };
         type_ref.into_iter().collect()
+    }
+
+    fn known_result_ok_type_from_call(&self, call: &ExprCall) -> Option<TypeRef> {
+        let Expr::Path(path) = call.func.as_ref() else {
+            return None;
+        };
+        let function = path.path.segments.last()?.ident.to_string();
+        if !matches!(
+            function.as_str(),
+            "from_reader" | "from_slice" | "from_str" | "from_value"
+        ) {
+            return None;
+        }
+        self.resolver.type_from_path_turbofish(&path.path)
     }
 
     fn first_arg_receiver_type(&self, argument: &Expr) -> Option<TypeRef> {
@@ -6632,6 +6649,7 @@ impl<'a> DependencyVisitor<'a> {
                 callables
                     .iter()
                     .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
+                    .or_else(|| self.known_result_ok_type_from_call(call))
                     .or_else(|| self.known_associated_return_type(call))
             }
             Expr::MethodCall(call) => {
@@ -7968,7 +7986,8 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_call_path(&path);
             }
         }
-        if attribute_can_expand_to_code(attribute) {
+        let helper_attribute = dependency_helper_attribute_name(attribute.path());
+        if attribute_can_expand_to_code(attribute) && !helper_attribute {
             for segments in token_path_candidates(&attribute.meta.to_token_stream()) {
                 let Ok(path) = syn::parse_str::<Path>(&segments.join("::")) else {
                     continue;
@@ -7978,17 +7997,35 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_macro_path(&path);
             }
         }
-        for segments in string_literal_path_candidates(&attribute.meta.to_token_stream()) {
-            let Ok(path) = syn::parse_str::<Path>(&segments.join("::")) else {
-                continue;
-            };
-            self.add_call_path(&path);
-            self.add_item_path(&path);
-            self.add_macro_path(&path);
-            if attribute_uses_serde_helper_paths(attribute.path()) {
-                for path in serde_module_helper_paths(&segments) {
-                    self.add_call_path(&path);
-                    self.add_item_path(&path);
+        if helper_attribute {
+            for helper_path in attribute_helper_path_candidates(&attribute.meta) {
+                let Ok(path) = syn::parse_str::<Path>(&helper_path.segments.join("::")) else {
+                    continue;
+                };
+                self.add_call_path(&path);
+                self.add_item_path(&path);
+                self.add_macro_path(&path);
+                if helper_path.module_helpers && attribute_uses_serde_helper_paths(attribute.path())
+                {
+                    for path in serde_module_helper_paths(&helper_path.segments) {
+                        self.add_call_path(&path);
+                        self.add_item_path(&path);
+                    }
+                }
+            }
+        } else {
+            for segments in string_literal_path_candidates(&attribute.meta.to_token_stream()) {
+                let Ok(path) = syn::parse_str::<Path>(&segments.join("::")) else {
+                    continue;
+                };
+                self.add_call_path(&path);
+                self.add_item_path(&path);
+                self.add_macro_path(&path);
+                if attribute_uses_serde_helper_paths(attribute.path()) {
+                    for path in serde_module_helper_paths(&segments) {
+                        self.add_call_path(&path);
+                        self.add_item_path(&path);
+                    }
                 }
             }
         }
@@ -12214,6 +12251,109 @@ fn string_literal_path_candidates(tokens: &TokenStream) -> Vec<Vec<String>> {
     let mut candidates = Vec::new();
     collect_string_literal_path_candidates(tokens, &mut candidates);
     candidates
+}
+
+struct AttributeHelperPathCandidate {
+    segments: Vec<String>,
+    module_helpers: bool,
+}
+
+fn attribute_helper_path_candidates(meta: &Meta) -> Vec<AttributeHelperPathCandidate> {
+    let mut candidates = Vec::new();
+    collect_attribute_helper_path_candidates(meta, &mut candidates);
+    candidates
+}
+
+fn collect_attribute_helper_path_candidates(
+    meta: &Meta,
+    candidates: &mut Vec<AttributeHelperPathCandidate>,
+) {
+    match meta {
+        Meta::Path(_) => {}
+        Meta::NameValue(name_value) => {
+            let key = path_segments(&name_value.path).join("::");
+            if !attribute_helper_path_meta_key(&key) {
+                return;
+            }
+            let Some(value) = format_literal_value(&name_value.value) else {
+                return;
+            };
+            collect_attribute_helper_literal_candidates(&value, key == "with", candidates);
+        }
+        Meta::List(list) => {
+            let key = path_segments(&list.path).join("::");
+            if attribute_helper_path_meta_key(&key) {
+                if let Ok(literal) = syn::parse2::<syn::LitStr>(list.tokens.clone()) {
+                    collect_attribute_helper_literal_candidates(
+                        &literal.value(),
+                        key == "with",
+                        candidates,
+                    );
+                    return;
+                }
+            }
+            let Ok(arguments) =
+                syn::punctuated::Punctuated::<Meta, syn::Token![,]>::parse_terminated
+                    .parse2(list.tokens.clone())
+            else {
+                return;
+            };
+            for nested in arguments {
+                collect_attribute_helper_path_candidates(&nested, candidates);
+            }
+        }
+    }
+}
+
+fn collect_attribute_helper_literal_candidates(
+    value: &str,
+    module_helpers: bool,
+    candidates: &mut Vec<AttributeHelperPathCandidate>,
+) {
+    let Ok(path) = syn::parse_str::<Path>(value) else {
+        return;
+    };
+    let segments = path_segments(&path);
+    if segments.is_empty() {
+        return;
+    }
+    candidates.push(AttributeHelperPathCandidate {
+        segments,
+        module_helpers,
+    });
+}
+
+fn attribute_helper_path_meta_key(key: &str) -> bool {
+    matches!(
+        key,
+        "default"
+            | "deserialize_with"
+            | "serialize_with"
+            | "skip_serializing_if"
+            | "with"
+            | "serde_as"
+            | "value_parser"
+    )
+}
+
+fn dependency_helper_attribute_name(path: &Path) -> bool {
+    path.segments.first().is_some_and(|segment| {
+        matches!(
+            segment.ident.to_string().as_str(),
+            "serde"
+                | "serde_with"
+                | "error"
+                | "from"
+                | "source"
+                | "backtrace"
+                | "strum"
+                | "schemars"
+                | "clap"
+                | "arg"
+                | "command"
+                | "builder"
+        )
+    })
 }
 
 fn serde_module_helper_paths(segments: &[String]) -> Vec<Path> {

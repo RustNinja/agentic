@@ -933,6 +933,7 @@ file.
 | `import.nested_private_facade_chain.001` | covered | Nested private facade modules reexport only selected live constructors and client objects while pruning dead sibling facade names |
 | `uniffi.enum.struct_variants.001` | covered | UniFFI-style enum roots with struct variants retain every variant payload DTO/error surface and prune dead enum families |
 | `serde.nested_discriminated_response.001` | covered | Nested discriminated serde envelopes retain both outer and inner tagged contracts plus payload DTOs while pruning dead envelope families |
+| `serde.adjacent_tag_content_contract.001` | covered | Litter-shaped adjacent-tag serde contracts retain tag/content enum variants, nested DTO fields, and `serde_json::from_*::<T>().map(...)` method closure dependencies while pruning local functions that only match serde data strings such as `kind`, `content`, or `payload` |
 | `serde.multi_deserialize_with_helpers.001` | covered | Multiple `deserialize_with = "module::helper"` fields retain every referenced helper and shared helper imports while pruning unused helper functions |
 | `trait.conversion.generic_try_into_bridge.001` | covered | Generic `T: TryInto<Target, Error = E>` helper functions retain only the concrete call-site conversion impl and matching error bridge |
 | `error.wire_fallback_conversion.001` | covered | Wire error fallback enums and `map_err(ApiError::from)` retain unknown/fallback variants and exact error conversion impls without dead parsers |

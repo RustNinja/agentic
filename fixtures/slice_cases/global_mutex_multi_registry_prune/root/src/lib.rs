@@ -1,4 +1,4 @@
-use opensource_attr::opensourced;
+use opensourced::opensourced;
 
 #[opensourced]
 pub fn selected_registry_lookup(raw: &str) -> String {
