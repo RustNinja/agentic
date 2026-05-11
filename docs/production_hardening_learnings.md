@@ -1489,3 +1489,10 @@ identifiers mentioned by the included tokens as scoped unknown blockers, and
 downgrade the production hazard to feedback review. Item/module `include!` and
 `OUT_DIR` generated source still stay fail-closed because they can introduce
 unindexed symbols.
+
+Build-script generated source is not always item-shaped. `OUT_DIR` includes can
+expand to a single expression such as `helper()`, so generated-source literal
+scanning must recognize parseable call/method/macro expressions and generic
+type strings in addition to obvious item syntax. Otherwise a helper referenced
+only by generated expression source can be misclassified as unused and pruned
+before compiler feedback has a chance to validate the slice.

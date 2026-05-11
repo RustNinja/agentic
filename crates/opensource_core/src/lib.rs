@@ -7472,6 +7472,42 @@ fn string_literal_may_contain_rust_source(value: &str) -> bool {
         || value.contains("let ")
         || value.contains("->")
         || value.contains('{')
+        || string_literal_parses_as_rust_call_expression(value)
+        || string_literal_parses_as_rust_generic_type(value)
+}
+
+fn string_literal_parses_as_rust_call_expression(value: &str) -> bool {
+    let Ok(expr) = syn::parse_str::<syn::Expr>(value) else {
+        return false;
+    };
+    let mut visitor = RustSourceExpressionSignalVisitor { found: false };
+    visitor.visit_expr(&expr);
+    visitor.found
+}
+
+struct RustSourceExpressionSignalVisitor {
+    found: bool,
+}
+
+impl<'ast> Visit<'ast> for RustSourceExpressionSignalVisitor {
+    fn visit_expr_call(&mut self, call: &'ast syn::ExprCall) {
+        self.found = true;
+        syn::visit::visit_expr_call(self, call);
+    }
+
+    fn visit_expr_method_call(&mut self, call: &'ast syn::ExprMethodCall) {
+        self.found = true;
+        syn::visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_macro(&mut self, mac: &'ast syn::ExprMacro) {
+        self.found = true;
+        syn::visit::visit_expr_macro(self, mac);
+    }
+}
+
+fn string_literal_parses_as_rust_generic_type(value: &str) -> bool {
+    value.contains('<') && value.contains('>') && syn::parse_str::<syn::Type>(value).is_ok()
 }
 
 fn filtered_source_blocker_idents(mut idents: BTreeSet<String>) -> Vec<String> {

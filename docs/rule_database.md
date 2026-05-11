@@ -843,6 +843,7 @@ file.
 | `import.reexport.chain_hub.001` | covered | Reexport chains prune dead grouped names at each public hub |
 | `include.str.static_concat.001` | covered | Literal and `concat!` `include_str!` assets are copied while dead siblings are pruned |
 | `build.out_dir_source_include.001` | covered | Retained `include!(concat!(env!("OUT_DIR"), ...))` is production-blocking, and simple build-script generated Rust literals retain only referenced helper paths while pruning unrelated dead helpers |
+| `build.out_dir_expression_include.001` | covered | Build-script generated expression Rust such as `helper()` is scanned from string literals, so helpers referenced only by `include!(concat!(env!("OUT_DIR"), ...))` remain blocked-by-unknown while unrelated dead helpers prune |
 | `include.source.static_helper_refs.001` | covered | Static package-local `include!` Rust is scanned for referenced helper paths so helpers used only by included source are retained without keeping unrelated dead siblings |
 | `macro.helper_attr.std_path_noise.001` | covered | Helper attributes such as `#[serde(skip_serializing_if = "Option::is_none")]` do not retain local items named like std/prelude wrapper paths or methods |
 | `macro.item_invocation.generated_api.001` | covered | Live macro-generated item invocations survive while dead sibling invocations are pruned |
