@@ -1,6 +1,6 @@
 # Production Hardening Learnings
 
-Last updated: 2026-05-05
+Last updated: 2026-05-11
 
 This document captures the implementation lessons from moving the slicer from a
 small proof-of-concept toward a production Rust workspace slicer. It is written
@@ -38,6 +38,10 @@ and block unsafe claims.
 - Production readiness must be a gate, not a slogan. A slice that compiles but
   still has unresolved semantic hazards should be `review_required`, not
   `accepted`.
+- Support-package minimization needs member-level proof, not only item-level
+  proof. Public fields and enum variants can be dead even when their parent type
+  is retained for an impl or helper surface, so the renderer must classify and
+  prune members with concrete owner evidence.
 
 ## What Did Not Work
 

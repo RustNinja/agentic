@@ -272,3 +272,11 @@ boundary case: when a selected callable signature resolves to that support
 record, its public field surface stays intact. This keeps the slicer aligned
 with the production invariant that generated sub-dependencies contain only used
 or explicitly API/unknown-retained code.
+
+`fixture.public_field_collision_prune.support_chain.001` closes the next
+over-retention class in that same area. Public support fields are now retained
+from concrete struct evidence instead of package-global field-name matches, so
+one dependency's live `value` field does not keep an unrelated support struct's
+dead `value` field. The same fix extends struct-literal field pruning across
+package boundaries, so removed dependency fields are also removed from retained
+caller initializers.

@@ -16355,14 +16355,10 @@ impl VisitMut for StructLiteralFieldPruner<'_> {
         if root_item_should_render(self.reduced, &item_id) {
             return;
         }
-        let struct_module_path = item_id.module_path.clone();
-
         expr.fields = expr
             .fields
             .iter()
-            .filter(|field| {
-                self.struct_literal_field_should_remain(&struct_module_path, item_struct, field)
-            })
+            .filter(|field| self.struct_literal_field_should_remain(&item_id, item_struct, field))
             .cloned()
             .collect();
     }
@@ -16373,26 +16369,27 @@ impl<'a> StructLiteralFieldPruner<'a> {
         &self,
         expr: &ExprStruct,
     ) -> Option<(ItemId, &'a syn::ItemStruct)> {
-        let type_path = if path_is_self(&expr.path) {
-            self.current_type_path.clone()?
+        let item_id = if path_is_self(&expr.path) {
+            let type_path = self.current_type_path.clone()?;
+            let (name, module_path) = type_path.split_last()?;
+            ItemId {
+                package: self.package.to_string(),
+                module_path: module_path.to_vec(),
+                name: name.clone(),
+                kind: ItemKind::Struct,
+            }
         } else {
-            let path = &expr.path;
-            let ty: Type = parse_quote!(#path);
-            resolved_local_type_path(
+            path_to_type_like_item(
                 self.project,
                 self.package,
                 self.module_path,
-                &ty,
+                &expr.path,
                 &self.aliases,
             )?
         };
-        let (name, module_path) = type_path.split_last()?;
-        let item_id = ItemId {
-            package: self.package.to_string(),
-            module_path: module_path.to_vec(),
-            name: name.clone(),
-            kind: ItemKind::Struct,
-        };
+        if item_id.kind != ItemKind::Struct {
+            return None;
+        }
         let record = self.project.items.get(&item_id)?;
         let Item::Struct(item_struct) = &record.item else {
             return None;
@@ -16402,7 +16399,7 @@ impl<'a> StructLiteralFieldPruner<'a> {
 
     fn struct_literal_field_should_remain(
         &self,
-        struct_module_path: &[String],
+        item_id: &ItemId,
         item_struct: &syn::ItemStruct,
         field_value: &FieldValue,
     ) -> bool {
@@ -16422,8 +16419,8 @@ impl<'a> StructLiteralFieldPruner<'a> {
             self.project,
             self.reduced,
             Some(self.render_plan),
-            self.package,
-            struct_module_path,
+            &item_id.package,
+            &item_id.module_path,
             item_struct,
             field,
         )
@@ -16445,6 +16442,7 @@ fn struct_field_should_remain(
     if public_struct_field_surface_should_remain(
         project,
         reduced,
+        render_plan,
         package,
         module_path,
         item_struct,
@@ -16568,6 +16566,7 @@ fn struct_field_should_remain_without_type_param_guard(
     if public_struct_field_surface_should_remain(
         project,
         reduced,
+        render_plan,
         package,
         module_path,
         item_struct,
@@ -16629,6 +16628,7 @@ fn struct_item_is_blocked_by_unknown(
 fn public_struct_field_surface_should_remain(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     module_path: &[String],
     item_struct: &syn::ItemStruct,
@@ -16648,13 +16648,15 @@ fn public_struct_field_surface_should_remain(
     root_item_should_render(reduced, &item_id)
         || item_is_root_callable_signature_surface(project, reduced, &item_id)
         || struct_attrs_require_public_field_surface(item_struct)
-        || reachable_callables_need_struct_field_in_any_package(
-            project,
-            reduced,
-            None,
-            None,
-            field.ident.as_ref().map(ToString::to_string).as_deref(),
-        )
+        || field.ident.as_ref().is_some_and(|field_name| {
+            reachable_callables_need_concrete_struct_field(
+                project,
+                reduced,
+                render_plan,
+                &item_id,
+                &field_name.to_string(),
+            )
+        })
 }
 
 fn struct_attrs_require_public_field_surface(item_struct: &syn::ItemStruct) -> bool {
@@ -16784,6 +16786,448 @@ fn reachable_callables_need_struct_field_in_any_package(
                 method_needs_struct_field(&record.item, &record.aliases, field_name)
             })
         })
+}
+
+fn reachable_callables_need_concrete_struct_field(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
+    item_id: &ItemId,
+    field_name: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| {
+            render_plan.is_none_or(|render_plan| render_plan.callable_should_render(callable))
+        })
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                function_needs_concrete_struct_field(project, record, item_id, field_name)
+            }) || project.methods.get(callable).is_some_and(|record| {
+                method_needs_concrete_struct_field(project, callable, record, item_id, field_name)
+            })
+        })
+}
+
+fn function_needs_concrete_struct_field(
+    project: &Project,
+    record: &crate::model::FunctionRecord,
+    item_id: &ItemId,
+    field_name: &str,
+) -> bool {
+    let mut visitor = ConcreteStructFieldUseVisitor::new(
+        project,
+        &record.package,
+        &record.module_path,
+        &record.aliases,
+        item_id,
+        field_name,
+        None,
+    );
+    visitor.visit_item_fn(&record.item);
+    visitor.needs_field
+}
+
+fn method_needs_concrete_struct_field(
+    project: &Project,
+    callable: &CallableId,
+    record: &crate::model::MethodRecord,
+    item_id: &ItemId,
+    field_name: &str,
+) -> bool {
+    let self_item = match callable {
+        CallableId::Method {
+            package, type_path, ..
+        } => Some(ItemId {
+            package: package.clone(),
+            module_path: type_path[..type_path.len().saturating_sub(1)].to_vec(),
+            name: type_path.last().cloned().unwrap_or_default(),
+            kind: ItemKind::Struct,
+        }),
+        CallableId::Free { .. } => None,
+    };
+    let mut visitor = ConcreteStructFieldUseVisitor::new(
+        project,
+        callable.package(),
+        &record.module_path,
+        &record.aliases,
+        item_id,
+        field_name,
+        self_item,
+    );
+    visitor.visit_impl_item_fn(&record.item);
+    visitor.needs_field
+}
+
+struct ConcreteStructFieldUseVisitor<'a> {
+    project: &'a Project,
+    package: &'a str,
+    module_path: &'a [String],
+    aliases: &'a HashMap<String, Vec<String>>,
+    target_item: &'a ItemId,
+    field_name: &'a str,
+    self_item: Option<ItemId>,
+    bindings: Vec<(String, ItemId)>,
+    needs_field: bool,
+}
+
+impl<'a> ConcreteStructFieldUseVisitor<'a> {
+    fn new(
+        project: &'a Project,
+        package: &'a str,
+        module_path: &'a [String],
+        aliases: &'a HashMap<String, Vec<String>>,
+        target_item: &'a ItemId,
+        field_name: &'a str,
+        self_item: Option<ItemId>,
+    ) -> Self {
+        Self {
+            project,
+            package,
+            module_path,
+            aliases,
+            target_item,
+            field_name,
+            self_item,
+            bindings: Vec::new(),
+            needs_field: false,
+        }
+    }
+
+    fn expr_type_item(&self, expr: &Expr) -> Option<ItemId> {
+        match expr {
+            Expr::Struct(expr) => self.resolve_type_path(&expr.path),
+            Expr::Path(path) => self.resolve_type_path(&path.path),
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return None;
+                };
+                self.call_return_type_item(&path.path)
+            }
+            Expr::MethodCall(call) => self.method_call_return_type_item(call),
+            Expr::Reference(reference) => self.expr_type_item(&reference.expr),
+            Expr::Paren(paren) => self.expr_type_item(&paren.expr),
+            Expr::Block(block) => {
+                final_block_expression(&block.block).and_then(|expr| self.expr_type_item(expr))
+            }
+            Expr::Unsafe(block) => {
+                final_block_expression(&block.block).and_then(|expr| self.expr_type_item(expr))
+            }
+            _ => None,
+        }
+    }
+
+    fn call_return_type_item(&self, path: &syn::Path) -> Option<ItemId> {
+        let callable = self.resolve_callable_path(path)?;
+        let return_type = match &callable {
+            CallableId::Free { .. } => &self.project.functions.get(&callable)?.item.sig.output,
+            CallableId::Method { .. } => &self.project.methods.get(&callable)?.item.sig.output,
+        };
+        self.return_type_item(return_type, &callable)
+    }
+
+    fn method_call_return_type_item(&self, call: &syn::ExprMethodCall) -> Option<ItemId> {
+        let receiver_item = self.expr_type_item(&call.receiver)?;
+        let callable = CallableId::Method {
+            package: receiver_item.package.clone(),
+            type_path: item_type_path(&receiver_item),
+            trait_path: None,
+            trait_input_type_paths: Vec::new(),
+            method: call.method.to_string(),
+        };
+        if !self.project.methods.contains_key(&callable) {
+            return None;
+        }
+        let return_type = &self.project.methods.get(&callable)?.item.sig.output;
+        self.return_type_item(return_type, &callable)
+    }
+
+    fn return_type_item(
+        &self,
+        return_type: &syn::ReturnType,
+        callable: &CallableId,
+    ) -> Option<ItemId> {
+        let syn::ReturnType::Type(_, ty) = return_type else {
+            return None;
+        };
+        if type_is_self_path(ty) {
+            if let CallableId::Method {
+                package, type_path, ..
+            } = callable
+            {
+                return type_path_to_struct_item(package, type_path);
+            }
+        }
+        let (package, module_path, aliases) = match callable {
+            CallableId::Free { package, .. } => {
+                let record = self.project.functions.get(callable)?;
+                (
+                    package.as_str(),
+                    record.module_path.as_slice(),
+                    &record.aliases,
+                )
+            }
+            CallableId::Method { package, .. } => {
+                let record = self.project.methods.get(callable)?;
+                (
+                    package.as_str(),
+                    record.module_path.as_slice(),
+                    &record.aliases,
+                )
+            }
+        };
+        type_to_type_like_item(self.project, package, module_path, ty, aliases)
+    }
+
+    fn resolve_callable_path(&self, path: &syn::Path) -> Option<CallableId> {
+        let path = apply_alias(path_segments(path), self.aliases);
+        let (package, target_path) =
+            resolve_use_target_path(self.project, self.package, self.module_path, &path)?;
+        find_use_function(self.project, &package, &target_path).or_else(|| {
+            let (assoc_name, type_path) = target_path.split_last()?;
+            let type_item = path_segments_to_type_like_item(self.project, &package, type_path)?;
+            let callable = CallableId::Method {
+                package: type_item.package.clone(),
+                type_path: item_type_path(&type_item),
+                trait_path: None,
+                trait_input_type_paths: Vec::new(),
+                method: assoc_name.clone(),
+            };
+            self.project
+                .methods
+                .contains_key(&callable)
+                .then_some(callable)
+        })
+    }
+
+    fn resolve_type_path(&self, path: &syn::Path) -> Option<ItemId> {
+        path_to_type_like_item(
+            self.project,
+            self.package,
+            self.module_path,
+            path,
+            self.aliases,
+        )
+    }
+
+    fn current_binding(&self, name: &str) -> Option<&ItemId> {
+        self.bindings
+            .iter()
+            .rev()
+            .find_map(|(candidate, item)| (candidate == name).then_some(item))
+    }
+
+    fn field_base_targets_item(&self, base: &Expr) -> bool {
+        match base {
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first().unwrap().ident.to_string();
+                if name == "self" {
+                    return self.self_item.as_ref() == Some(self.target_item);
+                }
+                self.current_binding(&name) == Some(self.target_item)
+            }
+            _ => self.expr_type_item(base).as_ref() == Some(self.target_item),
+        }
+    }
+
+    fn record_binding_from_local(&mut self, local: &syn::Local) {
+        let Some(name) = local_binding_name(&local.pat) else {
+            return;
+        };
+        let item = local
+            .init
+            .as_ref()
+            .and_then(|init| self.expr_type_item(&init.expr))
+            .or_else(|| local_pat_type_item(self, &local.pat));
+        if let Some(item) = item {
+            self.bindings.push((name, item));
+        }
+    }
+}
+
+fn type_path_to_struct_item(package: &str, type_path: &[String]) -> Option<ItemId> {
+    let (name, module_path) = type_path.split_last()?;
+    Some(ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name: name.clone(),
+        kind: ItemKind::Struct,
+    })
+}
+
+fn type_is_self_path(ty: &Type) -> bool {
+    match ty {
+        Type::Path(type_path) => {
+            type_path.path.segments.len() == 1 && type_path.path.segments[0].ident == "Self"
+        }
+        Type::Reference(reference) => type_is_self_path(&reference.elem),
+        Type::Group(group) => type_is_self_path(&group.elem),
+        Type::Paren(paren) => type_is_self_path(&paren.elem),
+        _ => false,
+    }
+}
+
+fn final_block_expression(block: &Block) -> Option<&Expr> {
+    block.stmts.iter().rev().find_map(|stmt| match stmt {
+        syn::Stmt::Expr(expr, None) => Some(expr),
+        _ => None,
+    })
+}
+
+fn path_segments(path: &syn::Path) -> Vec<String> {
+    path.segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect()
+}
+
+fn item_type_path(item: &ItemId) -> Vec<String> {
+    let mut path = item.module_path.clone();
+    path.push(item.name.clone());
+    path
+}
+
+fn local_binding_name(pattern: &Pat) -> Option<String> {
+    match pattern {
+        Pat::Ident(ident) => Some(ident.ident.to_string()),
+        Pat::Type(typed) => local_binding_name(&typed.pat),
+        Pat::Reference(reference) => local_binding_name(&reference.pat),
+        Pat::Paren(paren) => local_binding_name(&paren.pat),
+        _ => None,
+    }
+}
+
+fn local_pat_type_item(
+    visitor: &ConcreteStructFieldUseVisitor<'_>,
+    pattern: &Pat,
+) -> Option<ItemId> {
+    match pattern {
+        Pat::Type(typed) => type_to_type_like_item(
+            visitor.project,
+            visitor.package,
+            visitor.module_path,
+            &typed.ty,
+            visitor.aliases,
+        ),
+        Pat::Reference(reference) => local_pat_type_item(visitor, &reference.pat),
+        Pat::Paren(paren) => local_pat_type_item(visitor, &paren.pat),
+        _ => None,
+    }
+}
+
+fn type_to_type_like_item(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    ty: &Type,
+    aliases: &HashMap<String, Vec<String>>,
+) -> Option<ItemId> {
+    match ty {
+        Type::Path(type_path) => {
+            path_to_type_like_item(project, package, module_path, &type_path.path, aliases)
+        }
+        Type::Reference(reference) => {
+            type_to_type_like_item(project, package, module_path, &reference.elem, aliases)
+        }
+        Type::Group(group) => {
+            type_to_type_like_item(project, package, module_path, &group.elem, aliases)
+        }
+        Type::Paren(paren) => {
+            type_to_type_like_item(project, package, module_path, &paren.elem, aliases)
+        }
+        _ => None,
+    }
+}
+
+fn path_to_type_like_item(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &HashMap<String, Vec<String>>,
+) -> Option<ItemId> {
+    let raw = path_segments(path);
+    path_segments_to_type_like_item(project, package, &raw).or_else(|| {
+        let aliased = apply_alias(raw, aliases);
+        let (target_package, target_path) =
+            resolve_use_target_path(project, package, module_path, &aliased)?;
+        path_segments_to_type_like_item(project, &target_package, &target_path)
+    })
+}
+
+fn path_segments_to_type_like_item(
+    project: &Project,
+    package: &str,
+    path: &[String],
+) -> Option<ItemId> {
+    find_use_item(project, package, path)
+        .filter(type_like_item_kind)
+        .or_else(|| {
+            let (target_package, target_path) =
+                resolve_reexported_use_path(project, package, path)?;
+            find_use_item(project, &target_package, &target_path).filter(type_like_item_kind)
+        })
+}
+
+fn type_like_item_kind(item: &ItemId) -> bool {
+    matches!(
+        item.kind,
+        ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type | ItemKind::Trait
+    )
+}
+
+impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
+    fn visit_block(&mut self, block: &Block) {
+        let binding_count = self.bindings.len();
+        visit::visit_block(self, block);
+        self.bindings.truncate(binding_count);
+    }
+
+    fn visit_local(&mut self, local: &syn::Local) {
+        self.record_binding_from_local(local);
+        visit::visit_local(self, local);
+    }
+
+    fn visit_expr_field(&mut self, field: &syn::ExprField) {
+        if member_name(&field.member).as_deref() == Some(self.field_name)
+            && self.field_base_targets_item(&field.base)
+        {
+            self.needs_field = true;
+        }
+        visit::visit_expr_field(self, field);
+    }
+
+    fn visit_pat_struct(&mut self, pattern: &syn::PatStruct) {
+        if self.resolve_type_path(&pattern.path).as_ref() == Some(self.target_item)
+            && pattern
+                .fields
+                .iter()
+                .any(|field| member_name(&field.member).as_deref() == Some(self.field_name))
+        {
+            self.needs_field = true;
+        }
+        visit::visit_pat_struct(self, pattern);
+    }
+
+    fn visit_expr_struct(&mut self, expr: &ExprStruct) {
+        let targets_item = self.resolve_type_path(&expr.path).as_ref() == Some(self.target_item);
+        for field in &expr.fields {
+            if targets_item
+                && member_name(&field.member).as_deref() == Some(self.field_name)
+                && !struct_literal_initializer_can_be_pruned_with_aliases(
+                    &field.expr,
+                    Some(self.aliases),
+                )
+            {
+                self.needs_field = true;
+            }
+            self.visit_expr(&field.expr);
+        }
+        if let Some(rest) = &expr.rest {
+            self.visit_expr(rest);
+        }
+    }
 }
 
 fn function_needs_struct_field(

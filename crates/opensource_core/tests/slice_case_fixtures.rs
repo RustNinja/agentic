@@ -220,6 +220,77 @@ fn prunes_support_sub_dependencies_to_used_closure_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_public_support_field_name_collisions_to_concrete_struct_use() {
+    let fixture = repo_root().join("fixtures/slice_cases/public_field_collision_prune");
+    let output = temp_path("slice-case-public-field-collision-prune-output");
+    let target_dir = temp_path("slice-case-public-field-collision-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("public_field_collision_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["audit_record", "field_api", "live_record", "root"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_summary"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    let field_api = read(output.join("field_api/src/lib.rs"));
+    let live_record = read(output.join("live_record/src/lib.rs"));
+    let audit_record = read(output.join("audit_record/src/lib.rs"));
+
+    assert!(
+        root_source.contains("pub fn selected_summary"),
+        "{root_source}"
+    );
+    assert!(!root_source.contains("dead_summary"), "{root_source}");
+    assert!(field_api.contains("pub fn selected"), "{field_api}");
+    assert!(field_api.contains("LiveRecord"), "{field_api}");
+    assert!(field_api.contains(".value"), "{field_api}");
+    assert!(field_api.contains("AuditRecord::label_only"), "{field_api}");
+    assert!(!field_api.contains("pub fn dead"), "{field_api}");
+
+    assert!(
+        live_record.contains("pub struct LiveRecord"),
+        "{live_record}"
+    );
+    assert!(live_record.contains("pub value: u32"), "{live_record}");
+    assert!(!live_record.contains("dead_note"), "{live_record}");
+    assert!(!live_record.contains("dead_live"), "{live_record}");
+
+    assert!(
+        audit_record.contains("pub struct AuditRecord"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub fn label_only"), "{audit_record}");
+    assert!(
+        !audit_record.contains("pub value: u32"),
+        "unrelated public support field with same name as a live field must be pruned\n{audit_record}"
+    );
+    assert!(
+        !audit_record.contains("pub label: String"),
+        "{audit_record}"
+    );
+    assert!(!audit_record.contains("dead_value"), "{audit_record}");
+    assert!(!audit_record.contains("dead_audit"), "{audit_record}");
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_support_sub_dependency_pruning_contract() {
     let (output, target_dir, report) = generate_slice_case_fixture(

@@ -1,0 +1,9 @@
+[package]
+name = "field_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+audit_record = { path = "../audit_record" }
+live_record = { path = "../live_record" }
+
