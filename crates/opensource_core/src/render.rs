@@ -2624,14 +2624,7 @@ fn collect_reachable_macro_expansion_quote_bodies(
 ) {
     collect_macro_expansion_quote_bodies(tokens, bodies);
 
-    let mut usage = TokenUsage::default();
-    collect_token_usage(tokens, &mut usage);
-    let function_names = usage
-        .idents
-        .iter()
-        .filter(|ident| function_bodies.contains_key(*ident))
-        .cloned()
-        .collect::<Vec<_>>();
+    let function_names = collect_called_proc_macro_helper_names(tokens, function_bodies);
 
     for function_name in function_names {
         if !visited_functions.insert(function_name.clone()) {
@@ -2649,6 +2642,59 @@ fn collect_reachable_macro_expansion_quote_bodies(
             );
         }
     }
+}
+
+fn collect_called_proc_macro_helper_names(
+    tokens: &TokenStream,
+    function_bodies: &BTreeMap<String, Vec<TokenStream>>,
+) -> Vec<String> {
+    let Ok(block) = syn::parse2::<Block>(tokens.clone()) else {
+        return Vec::new();
+    };
+    let mut visitor = ProcMacroHelperCallVisitor {
+        function_bodies,
+        names: BTreeSet::new(),
+    };
+    visitor.visit_block(&block);
+    visitor.names.into_iter().collect()
+}
+
+struct ProcMacroHelperCallVisitor<'a> {
+    function_bodies: &'a BTreeMap<String, Vec<TokenStream>>,
+    names: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for ProcMacroHelperCallVisitor<'_> {
+    fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
+        if let Some(name) = local_proc_macro_helper_call_name(&node.func, self.function_bodies) {
+            self.names.insert(name);
+        }
+        visit::visit_expr_call(self, node);
+    }
+}
+
+fn local_proc_macro_helper_call_name(
+    func: &Expr,
+    function_bodies: &BTreeMap<String, Vec<TokenStream>>,
+) -> Option<String> {
+    let Expr::Path(expr_path) = func else {
+        return None;
+    };
+    if expr_path.qself.is_some() || expr_path.path.leading_colon.is_some() {
+        return None;
+    }
+
+    let segments = expr_path.path.segments.iter().collect::<Vec<_>>();
+    let candidate = match segments.as_slice() {
+        [segment] => segment.ident.to_string(),
+        [prefix, segment] if matches!(prefix.ident.to_string().as_str(), "self" | "crate") => {
+            segment.ident.to_string()
+        }
+        _ => return None,
+    };
+    function_bodies
+        .contains_key(&candidate)
+        .then_some(candidate)
 }
 
 fn support_macro_expansion_is_live(

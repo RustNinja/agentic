@@ -14534,6 +14534,8 @@ use quote::quote;
 
 #[proc_macro_derive(LiveDerive)]
 pub fn live_derive(_input: TokenStream) -> TokenStream {
+    let dead_tokens = proc_macro2::TokenStream::new();
+    let _ = dead_tokens;
     live_tokens().into()
 }
 
