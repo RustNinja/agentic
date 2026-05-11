@@ -887,7 +887,8 @@ file.
 | `manifest.dependency_crate_alias.001` | covered | `use dependency_crate as alias` qualified paths retain the aliased dependency edge and concrete live dependency items while pruning dead sibling dependency items |
 | `import.private_child_wildcard_selected_reexport.001` | covered | Private child wildcard imports combined with selected public reexports keep only the live child helper path and prune dead child reexports/items |
 | `dyn.boundary.direct_inputs.001` | covered | Selected `&dyn Trait` and `fn(...)` callback inputs stay as feedback-dischargeable API boundary warnings |
-| `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions are production-blocking |
+| `include.source.expression_scoped.001` | covered | Retained package-local `include!("...rs")` expression/type inclusions are copied, scoped to referenced helper identifiers, and downgraded to feedback warnings instead of production errors |
+| `include.source.static.001` | covered | Retained plain `include!("...rs")` source inclusions that can declare items remain production-blocking |
 | `include.source.inline_fallback_module.001` | covered | Fallback-retained inline modules run the full syntactic hazard scan, so plain source includes are reported even when the module was retained by path mention |
 | `macro.external_crate_alias_body.001` | covered | Dependency aliases used only inside retained macro bodies keep the aliased dependency edge |
 | `macro.serde_json.qualified_json.001` | covered | Fully qualified `serde_json::json!` macro invocations retain the dependency without keeping dead imported `json` uses |

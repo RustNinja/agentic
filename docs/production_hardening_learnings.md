@@ -1481,3 +1481,11 @@ the helper's returned value constructs a concrete local implementor. This drops
 review noise for `selected() -> Box<dyn Trait> { make_live() }` without
 pretending that input-forwarded values such as `fn selected(x: Box<dyn Trait>) ->
 Box<dyn Trait> { x }` are statically proven.
+
+Static package-local `include!` needs a smaller production gate than generated
+item source. If the included file parses only as an expression or type, it
+cannot declare new Rust items, so the slicer can copy it, retain helper
+identifiers mentioned by the included tokens as scoped unknown blockers, and
+downgrade the production hazard to feedback review. Item/module `include!` and
+`OUT_DIR` generated source still stay fail-closed because they can introduce
+unindexed symbols.

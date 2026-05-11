@@ -3504,7 +3504,7 @@ fn prunes_local_facade_glob_reexports_to_selected_symbols() {
 }
 
 #[test]
-fn flags_retained_source_include_macros_as_production_blockers() {
+fn downgrades_expression_source_include_macros_to_scoped_warnings() {
     let workspace = temp_path("rule-source-include-workspace");
     let output = temp_path("rule-source-include-output");
     let target_dir = temp_path("rule-source-include-target");
@@ -3516,12 +3516,22 @@ fn flags_retained_source_include_macros_as_production_blockers() {
     })
     .expect("source include rule should reduce");
 
-    assert_eq!(report.production.status, "hazards_detected");
-    assert!(report
+    assert_eq!(report.production.status, "requires_feedback");
+    assert_no_error_hazards(&report.production.hazards);
+    let scoped_include = report
         .production
         .hazards
         .iter()
-        .any(|hazard| { hazard.code == "source_include_macros" && hazard.severity == "error" }));
+        .find(|hazard| {
+            hazard.code == "scoped_source_include_macros" && hazard.severity == "warning"
+        })
+        .expect("expression source include should be scoped warning");
+    assert!(scoped_include.details.iter().any(|detail| {
+        detail
+            .blocked_idents
+            .iter()
+            .any(|ident| ident == "helper_from_generated_expr")
+    }));
     let lib = read(output.join("source_include_rule/src/lib.rs"));
     assert!(lib.contains("include!(\"generated_expr.rs\")"), "{lib}");
     assert!(lib.contains("helper_from_generated_expr"), "{lib}");

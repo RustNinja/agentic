@@ -2062,6 +2062,7 @@ fn hazard_blocks_unused_pruning(code: &str) -> bool {
     matches!(
         code,
         "source_include_macros"
+            | "scoped_source_include_macros"
             | "out_dir_source_include_macros"
             | "custom_attribute_macros"
             | "custom_derive_macros"
@@ -2074,7 +2075,8 @@ fn hazard_blocks_unused_pruning(code: &str) -> bool {
 fn hazard_uses_precise_detail_blockers(code: &str) -> bool {
     matches!(
         code,
-        "custom_attribute_macros"
+        "scoped_source_include_macros"
+            | "custom_attribute_macros"
             | "custom_derive_macros"
             | "custom_macro_invocations"
             | "function_pointer_surfaces"
@@ -5265,6 +5267,17 @@ fn add_generated_support_syntactic_hazards(
             counts.source_include_details,
         ));
     }
+    if counts.scoped_source_include_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "scoped_source_include_macros",
+            "warning",
+            format!(
+                "{} copied support expression/type include! macro(s) inject package-local Rust tokens already scoped by retained identifier blockers",
+                counts.scoped_source_include_macros
+            ),
+            counts.scoped_source_include_details,
+        ));
+    }
     if counts.out_dir_source_include_macros > 0 {
         hazards.push(production_hazard_with_details(
             "out_dir_source_include_macros",
@@ -5958,6 +5971,17 @@ fn add_syntactic_production_hazards(
             counts.source_include_details,
         ));
     }
+    if counts.scoped_source_include_macros > 0 {
+        hazards.push(production_hazard_with_details(
+            "scoped_source_include_macros",
+            "warning",
+            format!(
+                "{} retained expression/type include! macro(s) inject package-local Rust tokens already scoped by retained identifier blockers",
+                counts.scoped_source_include_macros
+            ),
+            counts.scoped_source_include_details,
+        ));
+    }
     if counts.out_dir_source_include_macros > 0 {
         hazards.push(production_hazard_with_details(
             "out_dir_source_include_macros",
@@ -6175,6 +6199,8 @@ fn capped_method_fallback_details(
 struct SyntacticHazardCounts {
     source_include_macros: usize,
     source_include_details: Vec<ProductionHazardDetail>,
+    scoped_source_include_macros: usize,
+    scoped_source_include_details: Vec<ProductionHazardDetail>,
     out_dir_source_include_macros: usize,
     out_dir_source_include_details: Vec<ProductionHazardDetail>,
     nonliteral_file_include_macros: usize,
@@ -6209,6 +6235,9 @@ impl SyntacticHazardCounts {
         self.source_include_macros += other.source_include_macros;
         self.source_include_details
             .extend(other.source_include_details);
+        self.scoped_source_include_macros += other.scoped_source_include_macros;
+        self.scoped_source_include_details
+            .extend(other.scoped_source_include_details);
         self.out_dir_source_include_macros += other.out_dir_source_include_macros;
         self.out_dir_source_include_details
             .extend(other.out_dir_source_include_details);
@@ -6253,6 +6282,8 @@ impl SyntacticHazardCounts {
         Self {
             source_include_macros: self.source_include_macros,
             source_include_details: self.source_include_details,
+            scoped_source_include_macros: self.scoped_source_include_macros,
+            scoped_source_include_details: self.scoped_source_include_details,
             out_dir_source_include_macros: self.out_dir_source_include_macros,
             out_dir_source_include_details: self.out_dir_source_include_details,
             nonliteral_file_include_macros: self.nonliteral_file_include_macros,
@@ -7011,6 +7042,11 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor<'_> {
                 self.counts
                     .out_dir_source_include_details
                     .push(self.out_dir_source_include_detail(mac));
+            } else if self.static_source_include_is_expression_or_type(mac) {
+                self.counts.scoped_source_include_macros += 1;
+                self.counts
+                    .scoped_source_include_details
+                    .push(self.source_include_detail(mac));
             } else {
                 self.counts.source_include_macros += 1;
                 self.counts
@@ -7172,6 +7208,19 @@ impl SyntacticHazardVisitor<'_> {
             return Vec::new();
         };
         source_text_blocked_idents(&text)
+    }
+
+    fn static_source_include_is_expression_or_type(&self, mac: &Macro) -> bool {
+        let Some(path) = static_include_path(&mac.tokens) else {
+            return false;
+        };
+        let Some(path) = self.resolved_package_include_path(&path) else {
+            return false;
+        };
+        let Ok(text) = fs::read_to_string(path) else {
+            return false;
+        };
+        source_text_is_expression_or_type_only(&text)
     }
 
     fn build_script_generated_source_blocked_idents(&self) -> Vec<String> {
@@ -7380,6 +7429,13 @@ fn source_text_blocked_idents(text: &str) -> Vec<String> {
         return filtered_source_blocker_idents(visitor.idents);
     }
     Vec::new()
+}
+
+fn source_text_is_expression_or_type_only(text: &str) -> bool {
+    if let Ok(file) = syn::parse_file(text) {
+        return file.items.is_empty();
+    }
+    syn::parse_str::<syn::Expr>(text).is_ok() || syn::parse_str::<syn::Type>(text).is_ok()
 }
 
 fn collect_rust_source_string_literal_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
