@@ -1913,6 +1913,29 @@ fn prunes_unused_inherent_associated_consts_without_dropping_used_const() {
 }
 
 #[test]
+fn prunes_inherent_associated_const_impl_for_pruned_same_named_type() {
+    let workspace = temp_path("rule-inherent-associated-const-type-workspace");
+    let output = temp_path("rule-inherent-associated-const-type-output");
+    let target_dir = temp_path("rule-inherent-associated-const-type-target");
+    write_inherent_associated_const_same_name_type_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("same-name inherent associated const rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("inherent_assoc_const_type_rule/src/lib.rs"));
+    assert!(lib.contains("pub struct Live"), "{lib}");
+    assert!(lib.contains("pub const LIMIT: u32 = 7"), "{lib}");
+    assert!(!lib.contains("pub struct Dead"), "{lib}");
+    assert!(!lib.contains("99"), "{lib}");
+    assert!(!lib.contains("impl Dead"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_try_from_conversion_impls_for_boundary_types() {
     let workspace = temp_path("rule-try-from-workspace");
     let output = temp_path("rule-try-from-output");
@@ -5250,6 +5273,31 @@ impl Counter {
 #[opensourced]
 pub fn selected() -> u32 {
     Counter::LIVE
+}
+"#,
+    );
+}
+
+fn write_inherent_associated_const_same_name_type_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "inherent_assoc_const_type_rule",
+        r#"use opensourced::opensourced;
+
+pub struct Live;
+pub struct Dead;
+
+impl Live {
+    pub const LIMIT: u32 = 7;
+}
+
+impl Dead {
+    pub const LIMIT: u32 = 99;
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    Live::LIMIT
 }
 "#,
     );

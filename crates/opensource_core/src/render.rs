@@ -458,6 +458,7 @@ fn record_impl_assoc_item_decisions(
                     render_plan,
                     package,
                     module_path,
+                    &type_path,
                     item_impl,
                     impl_item,
                 )
@@ -10665,6 +10666,7 @@ fn transform_items(
                                 render_plan,
                                 package,
                                 module_path,
+                                &type_path,
                                 item_impl,
                                 impl_item,
                             )
@@ -10728,6 +10730,7 @@ fn transform_items(
                                         render_plan,
                                         package,
                                         module_path,
+                                        &type_path,
                                         item_impl,
                                         impl_item,
                                     ))
@@ -12580,6 +12583,7 @@ fn impl_surface_should_render(
                 render_plan,
                 package,
                 module_path,
+                type_path,
                 item_impl,
                 impl_item,
             )
@@ -12668,6 +12672,7 @@ fn inherent_impl_assoc_item_should_render(
     render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
+    type_path: &[String],
     item_impl: &syn::ItemImpl,
     impl_item: &ImplItem,
 ) -> bool {
@@ -12677,6 +12682,9 @@ fn inherent_impl_assoc_item_should_render(
     let Some((name, _kind)) = impl_item_assoc_name_kind(impl_item) else {
         return false;
     };
+    if !path_item_should_render(render_plan, package, type_path, type_surface_item_kinds()) {
+        return false;
+    }
     if item_impl
         .attrs
         .iter()
@@ -13009,6 +13017,25 @@ fn path_item_is_blocked_by_unknown(
     };
     kinds.iter().any(|kind| {
         usage.is_blocked_by_unknown_item(&ItemId {
+            package: package.to_string(),
+            module_path: module_path.to_vec(),
+            name: name.clone(),
+            kind: *kind,
+        })
+    })
+}
+
+fn path_item_should_render(
+    render_plan: &RenderPlan,
+    package: &str,
+    path: &[String],
+    kinds: &[ItemKind],
+) -> bool {
+    let Some((name, module_path)) = path.split_last() else {
+        return false;
+    };
+    kinds.iter().any(|kind| {
+        render_plan.item_should_render(&ItemId {
             package: package.to_string(),
             module_path: module_path.to_vec(),
             name: name.clone(),
