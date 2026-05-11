@@ -1433,4 +1433,7 @@ Concrete support-field proof must bind typed closure inputs as well as typed
 function and method parameters. Iterator and callback bodies often carry the
 only non-API evidence that a dependency field is live, and a pure struct
 initializer is not enough reason to keep that field. Binding closure inputs keeps
-those fields precise without reopening package-wide field-name retention.
+those fields precise without reopening package-wide field-name retention. The
+closure override must also continue visiting input patterns, because
+destructuring such as `|Record { value, .. }: Record| value` is itself concrete
+field evidence.

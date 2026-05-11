@@ -294,3 +294,10 @@ proof to typed closure parameters. A retained iterator closure such as
 evidence for the dependency record, even when the field initializer itself is
 otherwise pure and would be pruned. Dead sibling fields and dead closure helpers
 remain removable.
+
+`fixture.public_field_typed_closure_pattern_prune.support_chain.001` guards the
+pattern side of that same closure surface. The concrete field proof now still
+visits closure input patterns after binding typed closure arguments, so
+`|dependency::Record { value, .. }: dependency::Record| value` keeps only the
+destructured live field instead of treating the closure override as body-only
+evidence.

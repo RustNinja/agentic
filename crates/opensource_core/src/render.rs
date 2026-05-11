@@ -17234,6 +17234,10 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
 
     fn visit_expr_closure(&mut self, closure: &syn::ExprClosure) {
         let binding_count = self.push_closure_input_bindings(closure.inputs.iter());
+        for input in &closure.inputs {
+            self.visit_pat(input);
+        }
+        visit::visit_return_type(self, &closure.output);
         self.visit_expr(&closure.body);
         self.bindings.truncate(binding_count);
     }

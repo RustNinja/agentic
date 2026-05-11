@@ -1,0 +1,4 @@
+[workspace]
+members = ["audit_record", "field_api", "root"]
+resolver = "2"
+
