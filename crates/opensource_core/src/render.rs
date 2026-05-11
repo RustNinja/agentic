@@ -7491,6 +7491,157 @@ impl Visit<'_> for TraitAssocPathReferenceVisitor<'_> {
     }
 }
 
+struct TraitImplAssocPathReferenceVisitor<'a> {
+    project: &'a Project,
+    package: &'a str,
+    module_path: &'a [String],
+    aliases: &'a HashMap<String, Vec<String>>,
+    target_package: &'a str,
+    target_type_path: &'a [String],
+    target_trait_path: &'a [String],
+    assoc_name: &'a str,
+    self_impl: Option<(&'a str, &'a [String], &'a [String])>,
+    found: bool,
+}
+
+impl<'a> TraitImplAssocPathReferenceVisitor<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        project: &'a Project,
+        package: &'a str,
+        module_path: &'a [String],
+        aliases: &'a HashMap<String, Vec<String>>,
+        target_package: &'a str,
+        target_type_path: &'a [String],
+        target_trait_path: &'a [String],
+        assoc_name: &'a str,
+        self_impl: Option<(&'a str, &'a [String], &'a [String])>,
+    ) -> Self {
+        Self {
+            project,
+            package,
+            module_path,
+            aliases,
+            target_package,
+            target_type_path,
+            target_trait_path,
+            assoc_name,
+            self_impl,
+            found: false,
+        }
+    }
+
+    fn path_references_target(&self, path: &syn::Path, qself: Option<&syn::QSelf>) -> bool {
+        if !path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == self.assoc_name)
+        {
+            return false;
+        }
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if let Some(qself) = qself {
+            return self.qself_path_references_target(qself, &segments);
+        }
+        self.segments_reference_target(&segments)
+    }
+
+    fn qself_path_references_target(&self, qself: &syn::QSelf, segments: &[String]) -> bool {
+        if qself.position == 0 || segments.is_empty() {
+            return false;
+        }
+        let trait_segment_count = qself.position.min(segments.len().saturating_sub(1));
+        self.type_references_target_type(&qself.ty)
+            && self
+                .resolve_segments(&segments[..trait_segment_count])
+                .is_some_and(|(package, path)| {
+                    package == self.target_package && path == self.target_trait_path
+                })
+    }
+
+    fn segments_reference_target(&self, segments: &[String]) -> bool {
+        segments.len() == 2
+            && segments[0] == "Self"
+            && segments[1] == self.assoc_name
+            && self.self_impl_is_target()
+    }
+
+    fn type_references_target_type(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Path(type_path) if type_path.path.is_ident("Self") => self.self_impl_is_target(),
+            Type::Path(type_path) => {
+                let segments = type_path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                self.resolve_segments(&segments)
+                    .is_some_and(|(package, path)| {
+                        package == self.target_package && path == self.target_type_path
+                    })
+            }
+            Type::Reference(reference) => self.type_references_target_type(&reference.elem),
+            Type::Group(group) => self.type_references_target_type(&group.elem),
+            Type::Paren(paren) => self.type_references_target_type(&paren.elem),
+            _ => false,
+        }
+    }
+
+    fn self_impl_is_target(&self) -> bool {
+        self.self_impl
+            .is_some_and(|(package, type_path, trait_path)| {
+                package == self.target_package
+                    && type_path == self.target_type_path
+                    && trait_path == self.target_trait_path
+            })
+    }
+
+    fn resolve_segments(&self, segments: &[String]) -> Option<(String, Vec<String>)> {
+        let aliased = apply_alias(segments.to_vec(), self.aliases);
+        let (package, path) = resolve_macro_invocation_segments(
+            self.project,
+            self.package,
+            self.module_path,
+            &aliased,
+        )?;
+        let canonical_module_path = if package == self.package {
+            self.module_path
+        } else {
+            &[]
+        };
+        let path = canonical_type_path(self.project, &package, canonical_module_path, path);
+        Some((package, path))
+    }
+}
+
+impl Visit<'_> for TraitImplAssocPathReferenceVisitor<'_> {
+    fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+        self.found |= self.path_references_target(&node.path, node.qself.as_ref());
+        if !self.found {
+            visit::visit_expr_path(self, node);
+        }
+    }
+
+    fn visit_type_path(&mut self, node: &syn::TypePath) {
+        self.found |= self.path_references_target(&node.path, node.qself.as_ref());
+        if !self.found {
+            visit::visit_type_path(self, node);
+        }
+    }
+
+    fn visit_path(&mut self, node: &syn::Path) {
+        self.found |= self.path_references_target(node, None);
+        if !self.found {
+            visit::visit_path(self, node);
+        }
+    }
+}
+
 fn path_segment_has_assoc_binding(segment: &syn::PathSegment, assoc_name: &str) -> bool {
     let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
         return false;
@@ -13243,6 +13394,17 @@ fn impl_item_should_render_for_trait_surface(
     }) {
         return true;
     }
+    if let (Some(trait_item), Some(trait_path), Some((name, _kind))) =
+        (trait_item, trait_path, impl_item_assoc_name_kind(impl_item))
+    {
+        if trait_impl_assoc_item_should_remain_for_references(
+            project, reduced, package, type_path, trait_path, &name,
+        ) || trait_default_method_assoc_item_override_should_render(
+            project, reduced, package, type_path, trait_item, &name,
+        ) {
+            return true;
+        }
+    }
     let (Some(trait_path), ImplItem::Fn(method)) = (trait_path, impl_item) else {
         return trait_item.is_none();
     };
@@ -13335,6 +13497,166 @@ fn trait_default_method_is_referenced_by_reachable_callables(
                 reduced,
                 &method.sig.ident.to_string(),
             )
+    })
+}
+
+fn trait_default_method_assoc_item_override_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    type_path: &[String],
+    trait_item: &ItemId,
+    assoc_name: &str,
+) -> bool {
+    if !trait_impl_self_type_is_referenced_by_reachable_surface(
+        project, reduced, package, type_path,
+    ) {
+        return false;
+    }
+    let Some(record) = project.items.get(trait_item) else {
+        return false;
+    };
+    let Item::Trait(item_trait) = &record.item else {
+        return false;
+    };
+    let trait_path = path_from_item(trait_item);
+    item_trait.items.iter().any(|item| {
+        let TraitItem::Fn(method) = item else {
+            return false;
+        };
+        let Some(default) = &method.default else {
+            return false;
+        };
+        if !reachable_reduced_callables_mention_ident(
+            project,
+            reduced,
+            &method.sig.ident.to_string(),
+        ) {
+            return false;
+        }
+        let mut visitor = TraitAssocPathReferenceVisitor::new(
+            project,
+            &record.package,
+            &record.module_path,
+            &record.aliases,
+            &trait_item.package,
+            &trait_path,
+            assoc_name,
+            Some((trait_item.package.as_str(), trait_path.as_slice())),
+        );
+        visitor.visit_block(default);
+        visitor.found || token_stream_mentions_ident(&default.to_token_stream(), assoc_name)
+    })
+}
+
+fn trait_impl_assoc_item_should_remain_for_references(
+    project: &Project,
+    reduced: &ReducedProject,
+    target_package: &str,
+    target_type_path: &[String],
+    target_trait_path: &[String],
+    assoc_name: &str,
+) -> bool {
+    reachable_reduced_callables_reference_trait_impl_assoc_item(
+        project,
+        reduced,
+        target_package,
+        target_type_path,
+        target_trait_path,
+        assoc_name,
+    ) || reachable_items_reference_trait_impl_assoc_item(
+        project,
+        reduced,
+        target_package,
+        target_type_path,
+        target_trait_path,
+        assoc_name,
+    ) || reachable_reduced_callables_macro_tokens_mention_ident(project, reduced, assoc_name)
+        || reachable_items_macro_tokens_mention_ident(project, reduced, assoc_name)
+}
+
+fn reachable_reduced_callables_reference_trait_impl_assoc_item(
+    project: &Project,
+    reduced: &ReducedProject,
+    target_package: &str,
+    target_type_path: &[String],
+    target_trait_path: &[String],
+    assoc_name: &str,
+) -> bool {
+    reduced.reachable.iter().any(|callable| {
+        if let Some(record) = project.functions.get(callable) {
+            let mut visitor = TraitImplAssocPathReferenceVisitor::new(
+                project,
+                &record.package,
+                &record.module_path,
+                &record.aliases,
+                target_package,
+                target_type_path,
+                target_trait_path,
+                assoc_name,
+                None,
+            );
+            visitor.visit_item_fn(&record.item);
+            return visitor.found;
+        }
+
+        let Some(record) = project.methods.get(callable) else {
+            return false;
+        };
+        let self_impl = match callable {
+            CallableId::Method {
+                package,
+                type_path,
+                trait_path: Some(trait_path),
+                ..
+            } => Some((
+                package.as_str(),
+                type_path.as_slice(),
+                trait_path.as_slice(),
+            )),
+            _ => None,
+        };
+        let mut visitor = TraitImplAssocPathReferenceVisitor::new(
+            project,
+            callable.package(),
+            &record.module_path,
+            &record.aliases,
+            target_package,
+            target_type_path,
+            target_trait_path,
+            assoc_name,
+            self_impl,
+        );
+        visitor.visit_impl_item_fn(&record.item);
+        visitor.found
+    })
+}
+
+fn reachable_items_reference_trait_impl_assoc_item(
+    project: &Project,
+    reduced: &ReducedProject,
+    target_package: &str,
+    target_type_path: &[String],
+    target_trait_path: &[String],
+    assoc_name: &str,
+) -> bool {
+    reduced.reachable_items.iter().any(|item_id| {
+        let Some(record) = project.items.get(item_id) else {
+            return false;
+        };
+        let mut visitor = TraitImplAssocPathReferenceVisitor::new(
+            project,
+            &record.package,
+            &record.module_path,
+            &record.aliases,
+            target_package,
+            target_type_path,
+            target_trait_path,
+            assoc_name,
+            None,
+        );
+        visitor.visit_item(&record.item);
+        visitor.found
     })
 }
 

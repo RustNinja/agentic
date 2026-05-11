@@ -284,8 +284,37 @@ fn retains_trait_default_methods_and_impl_associated_consts() {
     assert_no_error_hazards(&report.production.hazards);
     let lib = read(output.join("default_trait_rule/src/lib.rs"));
     assert!(lib.contains("pub trait Fragment"), "{lib}");
-    assert!(lib.contains("const KIND: &'static str"), "{lib}");
+    assert!(
+        lib.contains("const KIND: &'static str = \"default\""),
+        "{lib}"
+    );
     assert!(lib.contains("fn render(&self) -> &'static str"), "{lib}");
+    assert!(lib.contains("impl Fragment for EnvFragment"), "{lib}");
+    assert!(lib.contains("const KIND: &'static str = \"env\""), "{lib}");
+    assert!(!lib.contains("DeadFragment"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_default_trait_associated_const_override_referenced_by_ufcs() {
+    let workspace = temp_path("rule-default-trait-const-ufcs-workspace");
+    let output = temp_path("rule-default-trait-const-ufcs-output");
+    let target_dir = temp_path("rule-default-trait-const-ufcs-target");
+    write_default_trait_associated_const_ufcs_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("default trait associated const UFCS rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("default_trait_const_ufcs_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Fragment"), "{lib}");
+    assert!(
+        lib.contains("const KIND: &'static str = \"default\""),
+        "{lib}"
+    );
     assert!(lib.contains("impl Fragment for EnvFragment"), "{lib}");
     assert!(lib.contains("const KIND: &'static str = \"env\""), "{lib}");
     assert!(!lib.contains("DeadFragment"), "{lib}");
@@ -4173,7 +4202,7 @@ fn write_default_trait_method_rule_fixture(root: &Path) {
         r#"use opensourced::opensourced;
 
 pub trait Fragment {
-    const KIND: &'static str;
+    const KIND: &'static str = "default";
 
     fn render(&self) -> &'static str {
         Self::KIND
@@ -4195,6 +4224,36 @@ impl Fragment for DeadFragment {
 #[opensourced]
 pub fn selected(fragment: &EnvFragment) -> &'static str {
     fragment.render()
+}
+"#,
+    );
+}
+
+fn write_default_trait_associated_const_ufcs_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "default_trait_const_ufcs_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Fragment {
+    const KIND: &'static str = "default";
+}
+
+pub struct EnvFragment;
+
+impl Fragment for EnvFragment {
+    const KIND: &'static str = "env";
+}
+
+pub struct DeadFragment;
+
+impl Fragment for DeadFragment {
+    const KIND: &'static str = "dead";
+}
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    <EnvFragment as Fragment>::KIND
 }
 "#,
     );
