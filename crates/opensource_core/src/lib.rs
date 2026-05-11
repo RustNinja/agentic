@@ -6304,6 +6304,9 @@ impl SyntacticHazardCounts {
 fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
     let mut counts = SyntacticHazardCounts::default();
     counts.add(retained_module_boundary_hazard_counts(project, reduced));
+    counts.add(retained_top_level_out_dir_macro_hazard_counts(
+        project, reduced,
+    ));
     counts.add(retained_inline_out_dir_macro_hazard_counts(
         project, reduced,
     ));
@@ -6344,6 +6347,46 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
         }
     }
 
+    counts
+}
+
+fn retained_top_level_out_dir_macro_hazard_counts(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> SyntacticHazardCounts {
+    let mut counts = SyntacticHazardCounts::default();
+    for source in project
+        .files
+        .values()
+        .filter(|source| reduced.packages.contains(&source.package))
+    {
+        let mut visitor = syntactic_hazard_visitor_for_location(
+            project,
+            &source.package,
+            &source.module_path,
+            None,
+        );
+        let generated_source_idents = visitor.build_script_generated_source_candidate_idents();
+        if generated_source_idents.is_empty() {
+            continue;
+        }
+        for item in &source.syntax.items {
+            let Item::Macro(item_macro) = item else {
+                continue;
+            };
+            if item_macro.ident.is_some()
+                || !macro_path_ends_with(&item_macro.mac, "include")
+                || !macro_tokens_reference_out_dir(&item_macro.mac.tokens)
+                || !generated_source_idents.iter().any(|ident| {
+                    reduced_package_mentions_ident(project, reduced, &source.package, ident)
+                })
+            {
+                continue;
+            }
+            visitor.visit_item(item);
+        }
+        counts.add(visitor.counts);
+    }
     counts
 }
 
@@ -7241,6 +7284,24 @@ impl SyntacticHazardVisitor<'_> {
         filtered_source_blocker_idents(idents)
     }
 
+    fn build_script_generated_source_candidate_idents(&self) -> BTreeSet<String> {
+        let Some(context) = &self.include_context else {
+            return BTreeSet::new();
+        };
+        let Some(build_script) = &context.build_script_path else {
+            return BTreeSet::new();
+        };
+        let Ok(text) = fs::read_to_string(build_script) else {
+            return BTreeSet::new();
+        };
+        let Ok(tokens) = text.parse::<TokenStream>() else {
+            return BTreeSet::new();
+        };
+        let mut idents = BTreeSet::new();
+        collect_rust_source_candidate_idents(&tokens, &mut idents);
+        idents
+    }
+
     fn resolved_package_include_path(&self, path: &StaticIncludePath) -> Option<PathBuf> {
         let context = self.include_context.as_ref()?;
         let candidate = match path {
@@ -7431,6 +7492,15 @@ fn source_text_blocked_idents(text: &str) -> Vec<String> {
     Vec::new()
 }
 
+pub(crate) fn source_text_candidate_idents(text: &str) -> BTreeSet<String> {
+    let mut idents = BTreeSet::new();
+    collect_text_idents(text, &mut idents);
+    idents.retain(|ident| {
+        !type_surface_wrapper_or_builtin_ident(ident) && !source_include_noise_ident(ident)
+    });
+    idents
+}
+
 fn source_text_is_expression_or_type_only(text: &str) -> bool {
     if let Ok(file) = syn::parse_file(text) {
         return file.items.is_empty();
@@ -7486,12 +7556,65 @@ fn collect_rust_source_string_literal_idents(tokens: &TokenStream, idents: &mut 
     }
 }
 
-fn generated_source_macro_string_value(name: &str, tokens: &TokenStream) -> Option<String> {
+fn collect_rust_source_candidate_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    let mut index = 0;
+    while index < tokens.len() {
+        if let (
+            Some(proc_macro2::TokenTree::Ident(ident)),
+            Some(proc_macro2::TokenTree::Punct(punct)),
+            Some(proc_macro2::TokenTree::Group(group)),
+        ) = (
+            tokens.get(index),
+            tokens.get(index + 1),
+            tokens.get(index + 2),
+        ) {
+            if punct.as_char() == '!' {
+                let macro_name = ident.to_string();
+                if let Some(value) =
+                    generated_source_macro_string_value(&macro_name, &group.stream())
+                {
+                    if string_literal_may_contain_rust_source(&value) {
+                        idents.extend(source_text_candidate_idents(&value));
+                    }
+                }
+                collect_rust_source_candidate_idents(&group.stream(), idents);
+                index += 3;
+                continue;
+            }
+        }
+
+        match &tokens[index] {
+            proc_macro2::TokenTree::Literal(literal) => {
+                let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) else {
+                    index += 1;
+                    continue;
+                };
+                let value = literal.value();
+                if string_literal_may_contain_rust_source(&value) {
+                    idents.extend(source_text_candidate_idents(&value));
+                }
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                collect_rust_source_candidate_idents(&group.stream(), idents);
+            }
+            proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
+        }
+        index += 1;
+    }
+}
+
+pub(crate) fn generated_source_macro_string_value(
+    name: &str,
+    tokens: &TokenStream,
+) -> Option<String> {
     match name {
         "concat" => concat_macro_string_literal_value(tokens),
         "format" | "format_args" => format_macro_string_literal_value(tokens, 0, false),
         "write" => format_macro_string_literal_value(tokens, 1, false),
         "writeln" => format_macro_string_literal_value(tokens, 1, true),
+        "quote" => quote_macro_token_source_value(tokens),
+        "quote_spanned" => quote_spanned_macro_token_source_value(tokens),
         _ => None,
     }
 }
@@ -7513,6 +7636,92 @@ fn concat_macro_string_literal_value(tokens: &TokenStream) -> Option<String> {
         }
     }
     saw_literal.then_some(value)
+}
+
+fn quote_macro_token_source_value(tokens: &TokenStream) -> Option<String> {
+    if token_stream_contains_quote_interpolation(tokens) {
+        return None;
+    }
+    let value = tokens.to_string();
+    (!value.trim().is_empty()).then_some(value)
+}
+
+fn quote_spanned_macro_token_source_value(tokens: &TokenStream) -> Option<String> {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    for index in 0..tokens.len().saturating_sub(1) {
+        if matches!(&tokens[index], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '=')
+            && matches!(&tokens[index + 1], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '>')
+        {
+            let body = tokens[index + 2..].iter().cloned().collect::<TokenStream>();
+            return quote_macro_token_source_value(&body);
+        }
+    }
+    None
+}
+
+fn token_stream_contains_quote_interpolation(tokens: &TokenStream) -> bool {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    let mut index = 0;
+    while index < tokens.len() {
+        match &tokens[index] {
+            proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '#' => {
+                if let Some(group) = rust_attribute_group_after_hash(&tokens, index) {
+                    if token_stream_contains_quote_interpolation(&group.stream()) {
+                        return true;
+                    }
+                    index += rust_attribute_token_len_after_hash(&tokens, index);
+                    continue;
+                }
+                return true;
+            }
+            proc_macro2::TokenTree::Group(group) => {
+                if token_stream_contains_quote_interpolation(&group.stream()) {
+                    return true;
+                }
+            }
+            proc_macro2::TokenTree::Ident(_)
+            | proc_macro2::TokenTree::Literal(_)
+            | proc_macro2::TokenTree::Punct(_) => {}
+        }
+        index += 1;
+    }
+    false
+}
+
+fn rust_attribute_group_after_hash(
+    tokens: &[proc_macro2::TokenTree],
+    hash_index: usize,
+) -> Option<&proc_macro2::Group> {
+    match tokens.get(hash_index + 1) {
+        Some(proc_macro2::TokenTree::Group(group))
+            if group.delimiter() == proc_macro2::Delimiter::Bracket =>
+        {
+            Some(group)
+        }
+        Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == '!' => {
+            match tokens.get(hash_index + 2) {
+                Some(proc_macro2::TokenTree::Group(group))
+                    if group.delimiter() == proc_macro2::Delimiter::Bracket =>
+                {
+                    Some(group)
+                }
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+fn rust_attribute_token_len_after_hash(
+    tokens: &[proc_macro2::TokenTree],
+    hash_index: usize,
+) -> usize {
+    if matches!(tokens.get(hash_index + 1), Some(proc_macro2::TokenTree::Punct(punct)) if punct.as_char() == '!')
+    {
+        3
+    } else {
+        2
+    }
 }
 
 fn format_macro_string_literal_value(
@@ -7645,7 +7854,7 @@ fn evaluate_literal_format_string(
     Some(output)
 }
 
-fn string_literal_may_contain_rust_source(value: &str) -> bool {
+pub(crate) fn string_literal_may_contain_rust_source(value: &str) -> bool {
     value.contains("::")
         || value.contains("fn ")
         || value.contains("pub ")
@@ -8349,7 +8558,7 @@ fn cargo_manifest_modeled_env_var(name: &str) -> bool {
     name.starts_with("CARGO_PKG_") || matches!(name, "CARGO_CRATE_NAME" | "CARGO_BIN_NAME")
 }
 
-fn token_stream_mentions_string_literal(tokens: &TokenStream, value: &str) -> bool {
+pub(crate) fn token_stream_mentions_string_literal(tokens: &TokenStream, value: &str) -> bool {
     tokens.clone().into_iter().any(|token| match token {
         proc_macro2::TokenTree::Literal(literal) => {
             syn::parse2::<syn::LitStr>(literal.to_token_stream())

@@ -1510,3 +1510,21 @@ string literal parses as Rust source but the formatted output does. The scanner
 now evaluates literal-only `format!`, `format_args!`, `write!`, and `writeln!`
 payloads, including escaped braces and simple positional/named placeholders,
 before source-blocker extraction.
+
+Generated Rust can also be assembled as token trees rather than strings. A
+build script that writes `quote! { helper() }` has no source-like string literal
+for the old scanner to inspect. Non-interpolated `quote!` and `quote_spanned!`
+token bodies are now converted to source text and scanned conservatively. Rust
+attributes inside quoted source, such as `#[allow(...)]` and `#![...]`, are
+treated as source syntax rather than quote interpolation; real `#name`/`#(...)`
+interpolation stays unknown because final generated identifiers depend on
+runtime build-script values.
+
+Root-level `include!(concat!(env!("OUT_DIR"), ...))` needs a pre-render pass,
+not just a final hazard report. When selected code calls a function defined by
+generated source, the include macro itself is unnamed and would otherwise be
+pruned before its generated helper dependencies can block deletion. The scanner
+now records generated-source declaration/candidate identifiers separately from
+helper blockers, retains the top-level OUT_DIR include only when retained code
+mentions one of those generated identifiers, and still blocks only the helper
+paths found inside the generated source.

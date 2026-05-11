@@ -12775,8 +12775,108 @@ fn should_retain_macro_invocation(
     if is_uniffi && !package_preserves_uniffi_surface(project, reduced, package) {
         return false;
     }
+    if out_dir_source_include_feeds_reachable_code(
+        project,
+        reduced,
+        package,
+        module_path,
+        item_macro,
+    ) {
+        return true;
+    }
 
     macro_invocation_feeds_reachable_code(project, reduced, package, module_path, item_macro)
+}
+
+fn out_dir_source_include_feeds_reachable_code(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    item_macro: &syn::ItemMacro,
+) -> bool {
+    if !macro_path_ends_with(&item_macro.mac.path, "include")
+        || !crate::token_stream_mentions_string_literal(&item_macro.mac.tokens, "OUT_DIR")
+    {
+        return false;
+    }
+    build_script_generated_source_ident_candidates(project, package)
+        .into_iter()
+        .any(|ident| {
+            reachable_macro_generated_ident(project, reduced, package, module_path, &ident)
+        })
+}
+
+fn build_script_generated_source_ident_candidates(
+    project: &Project,
+    package: &str,
+) -> BTreeSet<String> {
+    let Some(package) = project.workspace.packages.get(package) else {
+        return BTreeSet::new();
+    };
+    let Some(build_script) = build_script_path(package) else {
+        return BTreeSet::new();
+    };
+    let Ok(text) = fs::read_to_string(build_script) else {
+        return BTreeSet::new();
+    };
+    let Ok(tokens) = text.parse::<TokenStream>() else {
+        return BTreeSet::new();
+    };
+    let mut idents = BTreeSet::new();
+    collect_build_script_generated_source_ident_candidates(&tokens, &mut idents);
+    idents
+}
+
+fn collect_build_script_generated_source_ident_candidates(
+    tokens: &TokenStream,
+    idents: &mut BTreeSet<String>,
+) {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < tokens.len() {
+        if let (
+            Some(TokenTree::Ident(ident)),
+            Some(TokenTree::Punct(punct)),
+            Some(TokenTree::Group(group)),
+        ) = (
+            tokens.get(index),
+            tokens.get(index + 1),
+            tokens.get(index + 2),
+        ) {
+            if punct.as_char() == '!' {
+                let macro_name = ident.to_string();
+                if let Some(value) =
+                    crate::generated_source_macro_string_value(&macro_name, &group.stream())
+                {
+                    if crate::string_literal_may_contain_rust_source(&value) {
+                        idents.extend(crate::source_text_candidate_idents(&value));
+                    }
+                }
+                collect_build_script_generated_source_ident_candidates(&group.stream(), idents);
+                index += 3;
+                continue;
+            }
+        }
+
+        match &tokens[index] {
+            TokenTree::Literal(literal) => {
+                let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) else {
+                    index += 1;
+                    continue;
+                };
+                let value = literal.value();
+                if crate::string_literal_may_contain_rust_source(&value) {
+                    idents.extend(crate::source_text_candidate_idents(&value));
+                }
+            }
+            TokenTree::Group(group) => {
+                collect_build_script_generated_source_ident_candidates(&group.stream(), idents);
+            }
+            TokenTree::Ident(_) | TokenTree::Punct(_) => {}
+        }
+        index += 1;
+    }
 }
 
 fn retained_macro_definitions_for_generated_items(
