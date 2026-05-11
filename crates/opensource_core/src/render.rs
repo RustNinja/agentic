@@ -6937,6 +6937,277 @@ fn reachable_reduced_callables_mention_ident(
     })
 }
 
+fn reachable_reduced_callables_reference_inherent_assoc_item(
+    project: &Project,
+    reduced: &ReducedProject,
+    target_package: &str,
+    target_type_path: &[String],
+    assoc_name: &str,
+) -> bool {
+    reduced.reachable.iter().any(|callable| {
+        if let Some(record) = project.functions.get(callable) {
+            let mut visitor = InherentAssocPathReferenceVisitor::new(
+                project,
+                &record.package,
+                &record.module_path,
+                &record.aliases,
+                target_package,
+                target_type_path,
+                assoc_name,
+                None,
+            );
+            visitor.visit_item_fn(&record.item);
+            return visitor.found;
+        }
+
+        let Some(record) = project.methods.get(callable) else {
+            return false;
+        };
+        let self_type = match callable {
+            CallableId::Method {
+                package, type_path, ..
+            } => Some((package.as_str(), type_path.as_slice())),
+            CallableId::Free { .. } => None,
+        };
+        let mut visitor = InherentAssocPathReferenceVisitor::new(
+            project,
+            callable.package(),
+            &record.module_path,
+            &record.aliases,
+            target_package,
+            target_type_path,
+            assoc_name,
+            self_type,
+        );
+        visitor.visit_impl_item_fn(&record.item);
+        visitor.found
+    })
+}
+
+fn rendered_items_reference_inherent_assoc_item(
+    project: &Project,
+    render_plan: &RenderPlan,
+    target_package: &str,
+    target_type_path: &[String],
+    assoc_name: &str,
+) -> bool {
+    project.items.iter().any(|(item_id, record)| {
+        if !render_plan.item_should_render(item_id) {
+            return false;
+        }
+        let mut visitor = InherentAssocPathReferenceVisitor::new(
+            project,
+            &record.package,
+            &record.module_path,
+            &record.aliases,
+            target_package,
+            target_type_path,
+            assoc_name,
+            None,
+        );
+        visitor.visit_item(&record.item);
+        visitor.found
+    })
+}
+
+fn reachable_reduced_callables_macro_tokens_mention_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    ident: &str,
+) -> bool {
+    reduced.reachable.iter().any(|callable| {
+        if let Some(record) = project.functions.get(callable) {
+            let mut visitor = MacroTokenIdentVisitor {
+                ident,
+                found: false,
+            };
+            visitor.visit_item_fn(&record.item);
+            return visitor.found;
+        }
+        project.methods.get(callable).is_some_and(|record| {
+            let mut visitor = MacroTokenIdentVisitor {
+                ident,
+                found: false,
+            };
+            visitor.visit_impl_item_fn(&record.item);
+            visitor.found
+        })
+    })
+}
+
+fn rendered_items_macro_tokens_mention_ident(
+    project: &Project,
+    render_plan: &RenderPlan,
+    ident: &str,
+) -> bool {
+    project.items.iter().any(|(item_id, record)| {
+        if !render_plan.item_should_render(item_id) {
+            return false;
+        }
+        let mut visitor = MacroTokenIdentVisitor {
+            ident,
+            found: false,
+        };
+        visitor.visit_item(&record.item);
+        visitor.found
+    })
+}
+
+struct InherentAssocPathReferenceVisitor<'a> {
+    project: &'a Project,
+    package: &'a str,
+    module_path: &'a [String],
+    aliases: &'a HashMap<String, Vec<String>>,
+    target_package: &'a str,
+    target_type_path: &'a [String],
+    assoc_name: &'a str,
+    self_type: Option<(&'a str, &'a [String])>,
+    found: bool,
+}
+
+impl<'a> InherentAssocPathReferenceVisitor<'a> {
+    #[allow(clippy::too_many_arguments)]
+    fn new(
+        project: &'a Project,
+        package: &'a str,
+        module_path: &'a [String],
+        aliases: &'a HashMap<String, Vec<String>>,
+        target_package: &'a str,
+        target_type_path: &'a [String],
+        assoc_name: &'a str,
+        self_type: Option<(&'a str, &'a [String])>,
+    ) -> Self {
+        Self {
+            project,
+            package,
+            module_path,
+            aliases,
+            target_package,
+            target_type_path,
+            assoc_name,
+            self_type,
+            found: false,
+        }
+    }
+
+    fn path_references_target(&self, path: &syn::Path, qself: Option<&syn::QSelf>) -> bool {
+        if !path
+            .segments
+            .last()
+            .is_some_and(|segment| segment.ident == self.assoc_name)
+        {
+            return false;
+        }
+
+        if let Some(qself) = qself {
+            return qself.position == 0 && self.type_references_target(&qself.ty);
+        }
+
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        self.segments_reference_target(&segments)
+    }
+
+    fn segments_reference_target(&self, segments: &[String]) -> bool {
+        if segments.len() < 2 || !segments.last().is_some_and(|name| name == self.assoc_name) {
+            return false;
+        }
+        let type_segments = &segments[..segments.len() - 1];
+        if type_segments.len() == 1 && type_segments[0] == "Self" {
+            return self.self_type_is_target();
+        }
+        self.resolve_type_segments(type_segments)
+            .is_some_and(|(package, path)| {
+                package == self.target_package && path == self.target_type_path
+            })
+    }
+
+    fn type_references_target(&self, ty: &Type) -> bool {
+        match ty {
+            Type::Path(type_path) if type_path.path.is_ident("Self") => self.self_type_is_target(),
+            Type::Path(type_path) => {
+                let segments = type_path
+                    .path
+                    .segments
+                    .iter()
+                    .map(|segment| segment.ident.to_string())
+                    .collect::<Vec<_>>();
+                self.resolve_type_segments(&segments)
+                    .is_some_and(|(package, path)| {
+                        package == self.target_package && path == self.target_type_path
+                    })
+            }
+            Type::Reference(reference) => self.type_references_target(&reference.elem),
+            Type::Group(group) => self.type_references_target(&group.elem),
+            Type::Paren(paren) => self.type_references_target(&paren.elem),
+            _ => false,
+        }
+    }
+
+    fn self_type_is_target(&self) -> bool {
+        self.self_type.is_some_and(|(package, path)| {
+            package == self.target_package && path == self.target_type_path
+        })
+    }
+
+    fn resolve_type_segments(&self, segments: &[String]) -> Option<(String, Vec<String>)> {
+        let aliased = apply_alias(segments.to_vec(), self.aliases);
+        let (package, path) = resolve_macro_invocation_segments(
+            self.project,
+            self.package,
+            self.module_path,
+            &aliased,
+        )?;
+        let canonical_module_path = if package == self.package {
+            self.module_path
+        } else {
+            &[]
+        };
+        let path = canonical_type_path(self.project, &package, canonical_module_path, path);
+        Some((package, path))
+    }
+}
+
+impl Visit<'_> for InherentAssocPathReferenceVisitor<'_> {
+    fn visit_expr_path(&mut self, node: &syn::ExprPath) {
+        self.found |= self.path_references_target(&node.path, node.qself.as_ref());
+        if !self.found {
+            visit::visit_expr_path(self, node);
+        }
+    }
+
+    fn visit_type_path(&mut self, node: &syn::TypePath) {
+        self.found |= self.path_references_target(&node.path, node.qself.as_ref());
+        if !self.found {
+            visit::visit_type_path(self, node);
+        }
+    }
+
+    fn visit_path(&mut self, node: &syn::Path) {
+        self.found |= self.path_references_target(node, None);
+        if !self.found {
+            visit::visit_path(self, node);
+        }
+    }
+}
+
+struct MacroTokenIdentVisitor<'a> {
+    ident: &'a str,
+    found: bool,
+}
+
+impl Visit<'_> for MacroTokenIdentVisitor<'_> {
+    fn visit_macro(&mut self, node: &syn::Macro) {
+        self.found |= token_stream_mentions_ident(&node.tokens, self.ident);
+        if !self.found {
+            visit::visit_macro(self, node);
+        }
+    }
+}
+
 fn retained_surface_idents_by_package(
     project: &Project,
     reduced: &ReducedProject,
@@ -12693,9 +12964,16 @@ fn inherent_impl_assoc_item_should_render(
     {
         return true;
     }
-    render_plan.package_mentions_ident(package, &name)
-        || render_plan.module_mentions_ident(package, module_path, &name)
-        || reachable_reduced_callables_mention_ident(project, reduced, &name)
+    reachable_reduced_callables_reference_inherent_assoc_item(
+        project, reduced, package, type_path, &name,
+    ) || rendered_items_reference_inherent_assoc_item(
+        project,
+        render_plan,
+        package,
+        type_path,
+        &name,
+    ) || reachable_reduced_callables_macro_tokens_mention_ident(project, reduced, &name)
+        || rendered_items_macro_tokens_mention_ident(project, render_plan, &name)
         || retained_root_macro_impl_items_mention_ident(
             project,
             reduced,
