@@ -14336,8 +14336,9 @@ pub fn entry() -> u32 {
             r#"use opensourced::opensourced;
 
 #[opensourced]
-pub fn entry() -> String {
-    String::new()
+pub fn entry() -> usize {
+    let values = std::collections::HashMap::<String, String>::new();
+    values.len()
 }
 
 pub struct Worker;
@@ -14368,6 +14369,25 @@ impl Other {
             .hazards
             .iter()
             .all(|hazard| hazard.code != "syntactic_method_fallback_cap"));
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "syntactic_method_fallbacks"),
+            "external associated calls must not retain unrelated same-name local impl methods: {:?}",
+            report.production.hazards
+        );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("Worker::new")
+                    && !callable.contains("Other::new")),
+            "external associated call fallback should stay typed and top-down: {:?}",
+            report.reachable
+        );
     }
 
     #[test]

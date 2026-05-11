@@ -9,7 +9,7 @@ found from the local Litter checkout at:
 
 The current committed baseline after the fixture expansion pass is:
 
-- 923 focused cargo-checked fixture/rule cases.
+- 925 focused cargo-checked fixture/rule cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
 - The first documented gap batch is now executable in
   `crates/opensource_core/tests/rule_database.rs`.
@@ -206,6 +206,9 @@ Fixture ideas:
 - `pattern.external_protocol_variant_projection.001`: retained state reducer
   keeps external enum variants, conversion helpers, and JSON mutation helpers
   used by reachable match arms while pruning unrelated protocol variants.
+- `request.json_patch_state_machine.001`: retained request/state reducer keeps
+  serde adjacent tag/content patch DTO payloads, live state-machine methods, and
+  selected API reexports while pruning dead request/state modules.
 
 Current coverage note: `pattern.external_protocol_variant_projection.001` now
 has an executable support-package fixture. The reducer carries enum variant
@@ -213,6 +216,14 @@ requirements through root usage, support facade reexports, and support-to-suppor
 type aliases; dependency enum match payloads seed the precise payload methods
 called by retained state reducers. Dead external protocol variants and their
 payload structs are pruned instead of kept as public support surface.
+
+Current coverage note: `request.json_patch_state_machine.001` now has an
+executable checked-in Rust fixture. The key generic fix is that unresolved
+external/std associated calls are no longer name-only fallbacks: the reducer
+carries the associated receiver type into fallback matching, so
+`serde_json::Map::new()` and `std::collections::HashMap::new()` do not retain
+unrelated local `new` methods. This keeps the top-down support closure focused
+on selected request/state reducer code and explicit serde contract payloads.
 
 ## Closed In First Gap Pass
 
@@ -244,12 +255,11 @@ Do not grow production confidence by adding 1,000 hand-written near-duplicates.
 Keep the generated 1,200-row catalog for breadth. The next focused batch should
 target the remaining shapes that are not closed above:
 
-1. `request.json_patch_state_machine.001`
-2. `serde.adjacent_tag_content_contract.001`
-3. `static.lazy_regex_constructor.001` with external regex-like dependency behavior
-4. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
-5. `uniffi.shared_runtime_once_lock.001`
-6. `uniffi.async_runtime_exported_object.001`
+1. `serde.adjacent_tag_content_contract.001`
+2. `static.lazy_regex_constructor.001` with external regex-like dependency behavior
+3. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
+4. `uniffi.shared_runtime_once_lock.001`
+5. `uniffi.async_runtime_exported_object.001`
 
 After those fixtures are executable, rerun five random Litter roots and compare
 failures against this list. Any new failure should become a minimized generic

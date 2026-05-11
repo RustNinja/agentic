@@ -1573,3 +1573,14 @@ enums bind payload variables back to their concrete dependency payload types.
 That lets the slicer retain exact payload methods such as `session_id()` or
 `text()` while pruning dead variants, dead payload structs, and dead payload
 methods from transitive support packages.
+
+Top-down fallback must stay typed. A JSON patch state-machine fixture showed
+that `serde_json::Map::new()` was being treated as an unresolved name-only
+method fallback, which retained an unrelated local `DeadState::new` and its
+dead module. The reducer now carries the associated receiver type into
+unresolved fallback matching. External/std constructors such as
+`std::collections::HashMap::new()` and dependency constructors such as
+`serde_json::Map::new()` therefore produce zero local candidates instead of
+pulling same-name local methods into the slice. This keeps the support closure
+aligned with the top-down invariant: selected roots expand only through typed
+or explicitly unknown dependencies.

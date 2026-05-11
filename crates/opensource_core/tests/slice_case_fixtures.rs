@@ -2981,6 +2981,124 @@ fn prunes_patch_state_support_chain_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_request_json_patch_state_machine_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/request_json_patch_state_machine_prune");
+    let output = temp_path("slice-case-request-json-patch-state-machine-prune-output");
+    let target_dir = temp_path("slice-case-request-json-patch-state-machine-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("request_json_patch_state_machine_prune fixture should slice");
+
+    assert_eq!(report.packages, ["request_api", "request_state", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_patch_summary"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("request_api/Cargo.toml"));
+    let api_root = read(output.join("request_api/src/lib.rs"));
+    let api_live = read(output.join("request_api/src/live.rs"));
+    let state_manifest = read(output.join("request_state/Cargo.toml"));
+    let state_root = read(output.join("request_state/src/lib.rs"));
+    let state_live = read(output.join("request_state/src/live.rs"));
+
+    assert!(root_manifest.contains("../request_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_patch_summary"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("request_api::selected_patch_summary"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_patch_summary"]);
+
+    assert!(api_manifest.contains("../request_state"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_patch_summary"), "{api_root}");
+    assert_absent(
+        "request_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "DeadPatchRequest", "dead_patch_summary"],
+    );
+    assert!(
+        api_live.contains("request_state::apply_patch_request"),
+        "{api_live}"
+    );
+    assert_absent(
+        "request_api/src/live.rs",
+        &api_live,
+        &["dead_live_patch_summary"],
+    );
+    assert!(!output.join("request_api/src/dead.rs").exists());
+
+    for dependency in ["serde", "serde_json"] {
+        assert!(
+            state_manifest.contains(dependency),
+            "request_state manifest should retain dependency {dependency:?}\n{state_manifest}"
+        );
+    }
+    assert!(state_root.contains("mod live"), "{state_root}");
+    assert!(state_root.contains("apply_patch_request"), "{state_root}");
+    assert!(state_root.contains("PatchCommand"), "{state_root}");
+    assert_absent(
+        "request_state/src/lib.rs",
+        &state_root,
+        &["mod dead", "DeadState", "dead_state_summary"],
+    );
+    assert!(!output.join("request_state/src/dead.rs").exists());
+
+    for token in [
+        "use serde::{Deserialize, Serialize}",
+        "use serde_json::{Map, Value}",
+        "#[serde(rename_all = \"camelCase\")]",
+        "#[serde(tag = \"op\", content = \"value\", rename_all = \"camelCase\")]",
+        "pub enum PatchCommand",
+        "Add(PatchPayload)",
+        "Replace(PatchPayload)",
+        "Remove(RemovePayload)",
+        "Test(TestPayload)",
+        "pub struct PatchPayload",
+        "pub struct RemovePayload",
+        "pub struct TestPayload",
+        "pub struct PatchSegment",
+        "fn path_label",
+        "fn render",
+        "pub fn apply_patch_request",
+    ] {
+        assert!(
+            state_live.contains(token),
+            "missing {token:?}\n{state_live}"
+        );
+    }
+    assert_absent(
+        "request_state/src/live.rs",
+        &state_live,
+        &[
+            "dead_live_state_summary",
+            "dead_payload_debug",
+            "dead_segment_debug",
+            "DeadState",
+            "dead-state",
+        ],
+    );
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_uniffi_runtime_support_chain_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/uniffi_runtime_prune");
     let output = temp_path("slice-case-uniffi-runtime-prune-output");

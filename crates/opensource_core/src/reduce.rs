@@ -5813,10 +5813,6 @@ impl<'a> DependencyVisitor<'a> {
         self.dependencies.callables.insert(callable.clone());
     }
 
-    fn add_unresolved_method_fallback(&mut self, method_name: &str, start_line: Option<usize>) {
-        self.add_unresolved_method_candidates(method_name, &[], start_line);
-    }
-
     fn add_unresolved_method_candidates(
         &mut self,
         method_name: &str,
@@ -8061,16 +8057,14 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_call_closure_arg_dependencies(call, &resolved_callables);
             self.add_generic_conversion_call_arg_dependencies(call, &resolved_callables);
             self.add_external_call_arg_trait_impls(call);
-            if resolved_callables.is_empty()
-                && path.path.segments.len() >= 2
-                && self
-                    .resolver
-                    .resolve_associated_call_type(&path.path)
-                    .is_some()
-            {
-                if let Some(method) = path.path.segments.last() {
-                    self.add_unresolved_method_fallback(
+            if resolved_callables.is_empty() && path.path.segments.len() >= 2 {
+                if let (Some(receiver), Some(method)) = (
+                    self.resolver.resolve_associated_call_type(&path.path),
+                    path.path.segments.last(),
+                ) {
+                    self.add_unresolved_method_candidates(
                         &method.ident.to_string(),
+                        &[receiver],
                         Some(method.ident.span().start().line),
                     );
                 }
