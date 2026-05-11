@@ -1703,6 +1703,52 @@ fn retains_macro_generated_public_reexports_referenced_through_dependency_crate_
 }
 
 #[test]
+fn support_proc_macro_expansion_dependencies_are_scoped_to_live_export() {
+    let workspace = temp_path("support-proc-macro-scope-workspace");
+    let output = temp_path("support-proc-macro-scope-output");
+    let target_dir = temp_path("support-proc-macro-scope-target");
+    let helper = temp_path("support-proc-macro-scope-helper");
+    let macros = temp_path("support-proc-macro-scope-macros");
+    write_support_proc_macro_scope_fixture(&workspace, &helper, &macros);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("support proc macro scope fixture should reduce");
+
+    let helper_lib = read(output.join("support/provider-helper/src/lib.rs"));
+    let helper_helpers = read(output.join("support/provider-helper/src/helpers.rs"));
+    assert!(helper_lib.contains("LiveRecord"), "{helper_lib}");
+    assert!(!helper_lib.contains("DeadRecord"), "{helper_lib}");
+    assert!(helper_lib.contains("LiveDerive"), "{helper_lib}");
+    assert!(!helper_lib.contains("DeadDerive"), "{helper_lib}");
+    assert!(helper_helpers.contains("live_helper"), "{helper_helpers}");
+    assert!(!helper_helpers.contains("dead_helper"), "{helper_helpers}");
+
+    fs::rename(&helper, helper.with_extension("moved"))
+        .expect("original helper package should move away");
+    fs::rename(&macros, macros.with_extension("moved"))
+        .expect("original macro package should move away");
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated support proc macro scope slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nhelper/src/lib.rs:\n{}\nhelper/src/helpers.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        helper_lib,
+        helper_helpers,
+    );
+}
+
+#[test]
 fn slices_nested_modules_declared_from_file_modules() {
     let workspace = temp_path("nested-file-workspace");
     let output = temp_path("nested-file-output");
@@ -14388,6 +14434,132 @@ macro_rules! define_error {
         #[derive(Debug)]
         pub struct Error(pub $kind);
     };
+}
+"#,
+    );
+}
+
+fn write_support_proc_macro_scope_fixture(root: &Path, helper: &Path, macros: &Path) {
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["app"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+provider-helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(helper)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> u32 {
+    provider_helper::LiveRecord::live_generated()
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "provider-helper"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+derive-helper-macros = {{ path = "{}" }}
+"#,
+            manifest_path(macros)
+        ),
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"mod helpers;
+
+#[derive(derive_helper_macros::LiveDerive)]
+pub struct LiveRecord;
+
+#[derive(derive_helper_macros::DeadDerive)]
+pub struct DeadRecord;
+"#,
+    );
+    write(
+        helper.join("src/helpers.rs"),
+        r#"pub fn live_helper() -> u32 {
+    7
+}
+
+pub fn dead_helper() -> u32 {
+    13
+}
+"#,
+    );
+    write(
+        macros.join("Cargo.toml"),
+        r#"[package]
+name = "derive-helper-macros"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+proc-macro = true
+
+[dependencies]
+proc-macro2 = "1"
+quote = "1"
+"#,
+    );
+    write(
+        macros.join("src/lib.rs"),
+        r#"extern crate proc_macro;
+
+use proc_macro::TokenStream;
+use quote::quote;
+
+#[proc_macro_derive(LiveDerive)]
+pub fn live_derive(_input: TokenStream) -> TokenStream {
+    live_tokens().into()
+}
+
+fn live_tokens() -> proc_macro2::TokenStream {
+    quote! {
+        impl LiveRecord {
+            pub fn live_generated() -> u32 {
+                crate::helpers::live_helper()
+            }
+        }
+    }
+}
+
+#[proc_macro_derive(DeadDerive)]
+pub fn dead_derive(_input: TokenStream) -> TokenStream {
+    dead_tokens().into()
+}
+
+fn dead_tokens() -> proc_macro2::TokenStream {
+    quote! {
+        impl DeadRecord {
+            pub fn dead_generated() -> u32 {
+                crate::helpers::dead_helper()
+            }
+        }
+    }
 }
 "#,
     );

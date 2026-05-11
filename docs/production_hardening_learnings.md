@@ -1528,3 +1528,12 @@ now records generated-source declaration/candidate identifiers separately from
 helper blockers, retains the top-level OUT_DIR include only when retained code
 mentions one of those generated identifiers, and still blocks only the helper
 paths found inside the generated source.
+
+Support proc-macro expansion evidence must be scoped to the exported macro that
+is actually live. A proc-macro crate can define `LiveDerive` and `DeadDerive`
+next to each other, and both may contain `quote!` bodies that reference helpers
+in the consuming support package. Treating every quote body in that proc-macro
+crate as live when only one derive is used over-retains dead helper modules in
+the copied support package. The support scanner now records quote-body
+dependencies per exported macro and follows helper functions called by that
+export before merging generated-source dependency evidence.

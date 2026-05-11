@@ -2439,45 +2439,47 @@ fn collect_support_macro_expansions_from_manifest_table(
         let Some(root) = dependency_path_root(&value, &manifest_dir)? else {
             continue;
         };
-        let key = (root.clone(), alias.clone());
-        if expansions.contains_key(&key) {
-            continue;
+        for expansion in support_proc_macro_expansions(alias, &root)? {
+            let export_key = expansion
+                .export_names
+                .iter()
+                .next()
+                .cloned()
+                .unwrap_or_default();
+            let key = (root.clone(), format!("{alias}::{export_key}"));
+            expansions.entry(key).or_insert(expansion);
         }
-        let Some(expansion) = support_proc_macro_expansion(alias, &root)? else {
-            continue;
-        };
-        expansions.insert(key, expansion);
     }
     Ok(())
 }
 
-fn support_proc_macro_expansion(
+fn support_proc_macro_expansions(
     alias: &str,
     package_root: &Path,
-) -> Result<Option<SupportMacroExpansion>, Box<dyn std::error::Error>> {
+) -> Result<Vec<SupportMacroExpansion>, Box<dyn std::error::Error>> {
     let manifest = read_toml_value(&package_root.join("Cargo.toml"))?;
     if !manifest_is_proc_macro_crate(&manifest) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let Some(lib_path) = support_library_source_path_from(package_root, &manifest) else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let Ok(package_root) = package_root.canonicalize() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     let Ok(lib_path) = lib_path.canonicalize() else {
-        return Ok(None);
+        return Ok(Vec::new());
     };
     if !lib_path.starts_with(&package_root) {
-        return Ok(None);
+        return Ok(Vec::new());
     }
     let text = match fs::read_to_string(&lib_path) {
         Ok(text) => text,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(Vec::new()),
     };
     let syntax = match syn::parse_file(&text) {
         Ok(syntax) => syntax,
-        Err(_) => return Ok(None),
+        Err(_) => return Ok(Vec::new()),
     };
 
     let mut modules = BTreeMap::new();
@@ -2490,35 +2492,48 @@ fn support_proc_macro_expansion(
         syntax,
         &mut modules,
     )? {
-        return Ok(None);
+        return Ok(Vec::new());
     }
 
-    let mut export_names = BTreeSet::new();
-    let mut quote_bodies = Vec::new();
+    let mut function_bodies = BTreeMap::<String, Vec<TokenStream>>::new();
+    let mut exports = Vec::<(String, String, TokenStream)>::new();
     for module in modules.values() {
-        collect_proc_macro_export_names(&module.syntax, &mut export_names);
-        collect_macro_expansion_quote_bodies(&module.syntax.to_token_stream(), &mut quote_bodies);
-    }
-    if export_names.is_empty() || quote_bodies.is_empty() {
-        return Ok(None);
+        collect_proc_macro_function_bodies(&module.syntax, &mut function_bodies, &mut exports);
     }
 
-    let mut usage = TokenUsage::default();
-    let mut paths = Vec::new();
-    for body in quote_bodies {
-        collect_token_usage(&body, &mut usage);
-        paths.extend(token_path_candidates(&body));
-    }
-    if usage.idents.is_empty() && usage.path_roots.is_empty() {
-        return Ok(None);
+    let mut expansions = Vec::new();
+    for (export_name, function_name, body) in exports {
+        let mut quote_bodies = Vec::new();
+        let mut visited_functions = BTreeSet::from([function_name]);
+        collect_reachable_macro_expansion_quote_bodies(
+            &body,
+            &function_bodies,
+            &mut visited_functions,
+            &mut quote_bodies,
+        );
+        if quote_bodies.is_empty() {
+            continue;
+        }
+
+        let mut usage = TokenUsage::default();
+        let mut paths = Vec::new();
+        for body in quote_bodies {
+            collect_token_usage(&body, &mut usage);
+            paths.extend(token_path_candidates(&body));
+        }
+        if usage.idents.is_empty() && usage.path_roots.is_empty() {
+            continue;
+        }
+
+        expansions.push(SupportMacroExpansion {
+            alias: alias.to_string(),
+            export_names: BTreeSet::from([export_name]),
+            usage,
+            paths,
+        });
     }
 
-    Ok(Some(SupportMacroExpansion {
-        alias: alias.to_string(),
-        export_names,
-        usage,
-        paths,
-    }))
+    Ok(expansions)
 }
 
 fn manifest_is_proc_macro_crate(manifest: &Value) -> bool {
@@ -2529,14 +2544,24 @@ fn manifest_is_proc_macro_crate(manifest: &Value) -> bool {
         .unwrap_or(false)
 }
 
-fn collect_proc_macro_export_names(syntax: &syn::File, export_names: &mut BTreeSet<String>) {
+fn collect_proc_macro_function_bodies(
+    syntax: &syn::File,
+    function_bodies: &mut BTreeMap<String, Vec<TokenStream>>,
+    exports: &mut Vec<(String, String, TokenStream)>,
+) {
     for item in &syntax.items {
         let Item::Fn(item_fn) = item else {
             continue;
         };
+        let function_name = item_fn.sig.ident.to_string();
+        let body = item_fn.block.to_token_stream();
+        function_bodies
+            .entry(function_name.clone())
+            .or_default()
+            .push(body.clone());
         for attr in &item_fn.attrs {
             if let Some(export_name) = proc_macro_export_name(attr, &item_fn.sig.ident) {
-                export_names.insert(export_name);
+                exports.push((export_name, function_name.clone(), body.clone()));
             }
         }
     }
@@ -2588,6 +2613,41 @@ fn collect_macro_expansion_quote_bodies(tokens: &TokenStream, bodies: &mut Vec<T
             }
         }
         index += 1;
+    }
+}
+
+fn collect_reachable_macro_expansion_quote_bodies(
+    tokens: &TokenStream,
+    function_bodies: &BTreeMap<String, Vec<TokenStream>>,
+    visited_functions: &mut BTreeSet<String>,
+    bodies: &mut Vec<TokenStream>,
+) {
+    collect_macro_expansion_quote_bodies(tokens, bodies);
+
+    let mut usage = TokenUsage::default();
+    collect_token_usage(tokens, &mut usage);
+    let function_names = usage
+        .idents
+        .iter()
+        .filter(|ident| function_bodies.contains_key(*ident))
+        .cloned()
+        .collect::<Vec<_>>();
+
+    for function_name in function_names {
+        if !visited_functions.insert(function_name.clone()) {
+            continue;
+        }
+        let Some(candidates) = function_bodies.get(&function_name) else {
+            continue;
+        };
+        for body in candidates {
+            collect_reachable_macro_expansion_quote_bodies(
+                body,
+                function_bodies,
+                visited_functions,
+                bodies,
+            );
+        }
     }
 }
 

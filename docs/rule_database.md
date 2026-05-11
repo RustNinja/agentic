@@ -908,6 +908,7 @@ file.
 | `macro.path_qualified_derive.001` | covered | Path-qualified derive macros such as `macro_helpers::FixtureRecord` keep the proc-macro package but do not retain unused simple `use` imports |
 | `macro.proc_attr_import_retention.001` | covered | Unqualified retained custom attributes keep the proc-macro import that brings the attribute into scope while still pruning unused derive-only imports |
 | `macro.proc_macro_export_pruning.001` | covered | Local proc-macro crates retain only exported derive/attribute/function-like proc macros referenced by reachable rendered surfaces, while unused proc-macro exports and their private helpers are pruned |
+| `macro.proc_macro_export_expansion_scope.001` | covered | Support-package proc-macro expansion evidence is scoped per exported macro, so using one derive does not retain helper dependencies generated only by a dead sibling derive in the same proc-macro crate |
 | `macro.proc_macro_helper_support.001` | covered | Local helper library crates used by retained proc-macro exports are copied as pruned `support/` packages instead of being promoted to root workspace members, and dead proc-macro helper crates are omitted |
 | `macro.reachable_module_attr.001` | covered | Path-qualified proc-macro attributes on modules are retained when nested reachable code causes the module boundary to render |
 | `macro.inline_impl_attr.001` | covered | Proc-macro attributes on impl blocks inside inline modules remain when reachable constructors or methods require the impl surface |
