@@ -1364,3 +1364,13 @@ otherwise a generated support package cannot keep a prunable module shell after
 its contents were removed. This is intentionally separate from public-reexport
 module-path tracking: module paths help resolve facades, while module items are
 now checked against the used/unknown/prunable decision index.
+
+Trait associated const overrides need the same path-aware treatment as inherent
+associated items. A selected root can read a trait const override through
+`Type::CONST` when the trait is in scope, not only through
+`<Type as Trait>::CONST`. The renderer now treats that as a concrete reference
+to the live trait impl item and keeps the matching trait associated const
+declaration as well; otherwise the slice can either fail to compile with an impl
+member that no longer exists in the trait, or worse, compile after falling back
+to a default value and silently change behavior. This is a generic type-path
+resolution rule, not a project-specific fixture string.

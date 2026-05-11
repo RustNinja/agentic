@@ -7032,8 +7032,90 @@ fn trait_assoc_item_should_remain_for_references(
         package,
         &trait_path,
         assoc_name,
+    ) || trait_assoc_item_impl_override_should_remain_for_references(
+        project,
+        reduced,
+        package,
+        module_path,
+        trait_name,
+        assoc_name,
     ) || reachable_reduced_callables_macro_tokens_mention_ident(project, reduced, assoc_name)
         || reachable_items_macro_tokens_mention_ident(project, reduced, assoc_name)
+}
+
+fn trait_assoc_item_impl_override_should_remain_for_references(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    trait_name: &str,
+    assoc_name: &str,
+) -> bool {
+    let mut trait_path = module_path.to_vec();
+    trait_path.push(trait_name.to_string());
+    let Some(trait_item) = trait_item_for_path(project, package, &trait_path) else {
+        return false;
+    };
+
+    project_module_paths(project, package)
+        .iter()
+        .any(|impl_module_path| {
+            let Some(items) = module_items_for_path(project, package, impl_module_path) else {
+                return false;
+            };
+            let aliases = project
+                .module_aliases
+                .get(&(package.to_string(), impl_module_path.to_vec()))
+                .cloned()
+                .unwrap_or_default();
+            items.iter().any(|item| {
+                let Item::Impl(item_impl) = item else {
+                    return false;
+                };
+                let Some(impl_trait_path) = item_impl
+                    .trait_
+                    .as_ref()
+                    .map(|(_, path, _)| normalized_path(impl_module_path, path, &aliases))
+                else {
+                    return false;
+                };
+                if impl_trait_path != trait_path {
+                    return false;
+                }
+                let has_matching_override = item_impl.items.iter().any(|impl_item| {
+                    !impl_item_is_test(impl_item)
+                        && impl_item_assoc_name_kind(impl_item)
+                            .is_some_and(|(name, _kind)| name == assoc_name)
+                });
+                if !has_matching_override {
+                    return false;
+                }
+                let Some(type_path) = resolved_local_type_path(
+                    project,
+                    package,
+                    impl_module_path,
+                    &item_impl.self_ty,
+                    &aliases,
+                ) else {
+                    return false;
+                };
+                trait_impl_assoc_item_should_remain_for_references(
+                    project,
+                    reduced,
+                    package,
+                    &type_path,
+                    &trait_path,
+                    assoc_name,
+                ) || trait_default_method_assoc_item_override_should_render(
+                    project,
+                    reduced,
+                    package,
+                    &type_path,
+                    &trait_item,
+                    assoc_name,
+                )
+            })
+        })
 }
 
 fn reachable_reduced_callables_reference_trait_assoc_item(
@@ -7564,10 +7646,17 @@ impl<'a> TraitImplAssocPathReferenceVisitor<'a> {
     }
 
     fn segments_reference_target(&self, segments: &[String]) -> bool {
-        segments.len() == 2
-            && segments[0] == "Self"
-            && segments[1] == self.assoc_name
-            && self.self_impl_is_target()
+        if segments.len() < 2 || !segments.last().is_some_and(|name| name == self.assoc_name) {
+            return false;
+        }
+        let type_segments = &segments[..segments.len() - 1];
+        if type_segments.len() == 1 && type_segments[0] == "Self" {
+            return self.self_impl_is_target();
+        }
+        self.resolve_segments(type_segments)
+            .is_some_and(|(package, path)| {
+                package == self.target_package && path == self.target_type_path
+            })
     }
 
     fn type_references_target_type(&self, ty: &Type) -> bool {

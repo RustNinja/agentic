@@ -322,6 +322,32 @@ fn retains_default_trait_associated_const_override_referenced_by_ufcs() {
 }
 
 #[test]
+fn retains_default_trait_associated_const_override_referenced_by_type_path() {
+    let workspace = temp_path("rule-default-trait-const-type-path-workspace");
+    let output = temp_path("rule-default-trait-const-type-path-output");
+    let target_dir = temp_path("rule-default-trait-const-type-path-target");
+    write_default_trait_associated_const_type_path_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("default trait associated const type-path rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("default_trait_const_type_path_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Fragment"), "{lib}");
+    assert!(
+        lib.contains("const KIND: &'static str = \"default\""),
+        "{lib}"
+    );
+    assert!(lib.contains("impl Fragment for EnvFragment"), "{lib}");
+    assert!(lib.contains("const KIND: &'static str = \"env\""), "{lib}");
+    assert!(!lib.contains("DeadFragment"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_inline_callback_future_fields_as_dynamic_hazards() {
     let workspace = temp_path("rule-inline-callback-future-workspace");
     let output = temp_path("rule-inline-callback-future-output");
@@ -4254,6 +4280,36 @@ impl Fragment for DeadFragment {
 #[opensourced]
 pub fn selected() -> &'static str {
     <EnvFragment as Fragment>::KIND
+}
+"#,
+    );
+}
+
+fn write_default_trait_associated_const_type_path_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "default_trait_const_type_path_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Fragment {
+    const KIND: &'static str = "default";
+}
+
+pub struct EnvFragment;
+
+impl Fragment for EnvFragment {
+    const KIND: &'static str = "env";
+}
+
+pub struct DeadFragment;
+
+impl Fragment for DeadFragment {
+    const KIND: &'static str = "dead";
+}
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    EnvFragment::KIND
 }
 "#,
     );
