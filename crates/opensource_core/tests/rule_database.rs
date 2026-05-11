@@ -820,6 +820,33 @@ fn proves_returned_trait_object_surfaces_with_concrete_impls() {
 }
 
 #[test]
+fn proves_forwarded_trait_object_returns_through_local_helper_construction() {
+    let workspace = temp_path("rule-forwarded-helper-dyn-workspace");
+    let output = temp_path("rule-forwarded-helper-dyn-output");
+    let target_dir = temp_path("rule-forwarded-helper-dyn-target");
+    write_forwarded_helper_trait_object_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("forwarded helper dyn rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    assert!(!report
+        .production
+        .hazards
+        .iter()
+        .any(|hazard| hazard.code == "trait_object_surfaces"));
+    let lib = read(output.join("forwarded_helper_dyn_rule/src/lib.rs"));
+    assert!(lib.contains("Box<dyn Reader>"), "{lib}");
+    assert!(lib.contains("fn make_reader"), "{lib}");
+    assert!(lib.contains("pub struct LiveReader"), "{lib}");
+    assert!(!lib.contains("DeadReader"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_forwarded_trait_object_returns_without_concrete_proof() {
     let workspace = temp_path("rule-forwarded-dyn-workspace");
     let output = temp_path("rule-forwarded-dyn-output");
@@ -5213,6 +5240,45 @@ impl Reader for LiveReader {
 #[opensourced]
 pub fn selected() -> Box<dyn Reader> {
     Box::new(LiveReader)
+}
+"#,
+    );
+}
+
+fn write_forwarded_helper_trait_object_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "forwarded_helper_dyn_rule",
+        r#"
+use opensourced::opensourced;
+
+pub trait Reader {
+    fn read(&self) -> u32;
+}
+
+pub struct LiveReader;
+
+impl Reader for LiveReader {
+    fn read(&self) -> u32 {
+        1
+    }
+}
+
+pub struct DeadReader;
+
+impl Reader for DeadReader {
+    fn read(&self) -> u32 {
+        0
+    }
+}
+
+fn make_reader() -> Box<dyn Reader> {
+    Box::new(LiveReader)
+}
+
+#[opensourced]
+pub fn selected() -> Box<dyn Reader> {
+    make_reader()
 }
 "#,
     );

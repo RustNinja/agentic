@@ -1475,3 +1475,9 @@ Import pruning must look at rendered associated item decisions, not just tokens
 inside any impl block that has a retained method. Pruned associated const/type
 items should not keep their imports alive, and non-public reexports should not
 be treated as public API unless retained code actually uses that alias.
+
+Returned trait-object proof can safely follow local helper return chains when
+the helper's returned value constructs a concrete local implementor. This drops
+review noise for `selected() -> Box<dyn Trait> { make_live() }` without
+pretending that input-forwarded values such as `fn selected(x: Box<dyn Trait>) ->
+Box<dyn Trait> { x }` are statically proven.

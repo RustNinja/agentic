@@ -7098,8 +7098,12 @@ impl SyntacticHazardVisitor<'_> {
             return BTreeSet::new();
         }
 
-        let constructed_types =
-            returned_constructed_local_type_names(project, &self.location.package, block);
+        let constructed_types = returned_constructed_local_type_names(
+            project,
+            &self.location.package,
+            &self.location.module_path,
+            block,
+        );
         if constructed_types.is_empty() {
             return BTreeSet::new();
         }
@@ -7512,7 +7516,25 @@ fn trait_object_surface_key(trait_object: &syn::TypeTraitObject) -> String {
 fn returned_constructed_local_type_names(
     project: &Project,
     package: &str,
+    module_path: &[String],
     block: &syn::Block,
+) -> BTreeSet<String> {
+    let mut visited_callables = BTreeSet::new();
+    returned_constructed_local_type_names_inner(
+        project,
+        package,
+        module_path,
+        block,
+        &mut visited_callables,
+    )
+}
+
+fn returned_constructed_local_type_names_inner(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    block: &syn::Block,
+    visited_callables: &mut BTreeSet<CallableId>,
 ) -> BTreeSet<String> {
     let mut local_type_counts = BTreeMap::<String, usize>::new();
     for item in project.items.keys().filter(|item| {
@@ -7550,7 +7572,23 @@ fn returned_constructed_local_type_names(
         return_visitor.constructor.visit_expr(tail_expr);
     }
 
-    return_visitor.constructor.constructed
+    let mut constructed = return_visitor.constructor.constructed;
+    for callable in returned_local_function_calls(project, package, module_path, block) {
+        if !visited_callables.insert(callable.clone()) {
+            continue;
+        }
+        let Some(record) = project.functions.get(&callable) else {
+            continue;
+        };
+        constructed.extend(returned_constructed_local_type_names_inner(
+            project,
+            package,
+            &record.module_path,
+            &record.item.block,
+            visited_callables,
+        ));
+    }
+    constructed
 }
 
 struct ReturnConstructedLocalTypeVisitor<'types> {
@@ -7569,6 +7607,153 @@ impl<'ast> Visit<'ast> for ReturnConstructedLocalTypeVisitor<'_> {
     fn visit_item_fn(&mut self, _item: &'ast syn::ItemFn) {}
 
     fn visit_impl_item_fn(&mut self, _item: &'ast syn::ImplItemFn) {}
+}
+
+fn returned_local_function_calls(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    block: &syn::Block,
+) -> BTreeSet<CallableId> {
+    let mut visitor = ReturnLocalFunctionCallVisitor {
+        project,
+        package,
+        module_path,
+        calls: BTreeSet::new(),
+    };
+    visitor.visit_block(block);
+    if let Some(tail_expr) = block.stmts.iter().rev().find_map(|stmt| match stmt {
+        syn::Stmt::Expr(expr, None) => Some(expr),
+        syn::Stmt::Local(_)
+        | syn::Stmt::Item(_)
+        | syn::Stmt::Expr(_, Some(_))
+        | syn::Stmt::Macro(_) => None,
+    }) {
+        visitor.visit_return_value_expr(tail_expr);
+    }
+    visitor.calls
+}
+
+struct ReturnLocalFunctionCallVisitor<'a> {
+    project: &'a Project,
+    package: &'a str,
+    module_path: &'a [String],
+    calls: BTreeSet<CallableId>,
+}
+
+impl ReturnLocalFunctionCallVisitor<'_> {
+    fn visit_return_value_expr(&mut self, expr: &syn::Expr) {
+        match expr {
+            Expr::Block(expr) => self.visit_return_value_block(&expr.block),
+            Expr::Unsafe(expr) => self.visit_return_value_block(&expr.block),
+            Expr::If(expr) => {
+                self.visit_return_value_block(&expr.then_branch);
+                if let Some((_, else_branch)) = &expr.else_branch {
+                    self.visit_return_value_expr(else_branch);
+                }
+            }
+            Expr::Match(expr) => {
+                for arm in &expr.arms {
+                    self.visit_return_value_expr(&arm.body);
+                }
+            }
+            Expr::Call(expr) => {
+                if let syn::Expr::Path(func) = expr.func.as_ref() {
+                    if let Some(callable) = resolve_returned_local_function_call(
+                        self.project,
+                        self.package,
+                        self.module_path,
+                        &func.path,
+                    ) {
+                        self.calls.insert(callable);
+                        return;
+                    }
+                    if transparent_return_wrapper_path(&func.path) {
+                        for arg in &expr.args {
+                            self.visit_return_value_expr(arg);
+                        }
+                    }
+                }
+            }
+            Expr::Paren(expr) => self.visit_return_value_expr(&expr.expr),
+            Expr::Group(expr) => self.visit_return_value_expr(&expr.expr),
+            Expr::Try(expr) => self.visit_return_value_expr(&expr.expr),
+            _ => {}
+        }
+    }
+
+    fn visit_return_value_block(&mut self, block: &syn::Block) {
+        self.visit_block(block);
+        if let Some(tail_expr) = block.stmts.iter().rev().find_map(|stmt| match stmt {
+            syn::Stmt::Expr(expr, None) => Some(expr),
+            syn::Stmt::Local(_)
+            | syn::Stmt::Item(_)
+            | syn::Stmt::Expr(_, Some(_))
+            | syn::Stmt::Macro(_) => None,
+        }) {
+            self.visit_return_value_expr(tail_expr);
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for ReturnLocalFunctionCallVisitor<'_> {
+    fn visit_expr_return(&mut self, expr_return: &'ast syn::ExprReturn) {
+        if let Some(expr) = &expr_return.expr {
+            self.visit_return_value_expr(expr);
+        }
+    }
+
+    fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+
+    fn visit_item_fn(&mut self, _item: &'ast syn::ItemFn) {}
+
+    fn visit_impl_item_fn(&mut self, _item: &'ast syn::ImplItemFn) {}
+}
+
+fn resolve_returned_local_function_call(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    path: &syn::Path,
+) -> Option<CallableId> {
+    if path.segments.is_empty() {
+        return None;
+    }
+    let mut segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let name = segments.pop()?;
+    let resolved_module = match segments.split_first() {
+        None => module_path.to_vec(),
+        Some((first, rest)) if first == "self" => {
+            let mut path = module_path.to_vec();
+            path.extend(rest.iter().cloned());
+            path
+        }
+        Some((first, rest)) if first == "crate" => rest.to_vec(),
+        Some((first, rest)) if first == "super" => {
+            let mut path = module_path.to_vec();
+            path.pop();
+            path.extend(rest.iter().cloned());
+            path
+        }
+        Some(_) => {
+            let mut path = module_path.to_vec();
+            path.extend(segments);
+            path
+        }
+    };
+    let callable = CallableId::Free {
+        package: package.to_string(),
+        module_path: resolved_module,
+        name,
+    };
+    project
+        .functions
+        .contains_key(&callable)
+        .then_some(callable)
 }
 
 struct ConstructedLocalTypeVisitor<'types> {
