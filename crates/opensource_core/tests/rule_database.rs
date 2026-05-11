@@ -1957,6 +1957,28 @@ fn prunes_inherent_associated_const_when_only_name_is_mentioned() {
 }
 
 #[test]
+fn prunes_trait_associated_const_when_only_name_is_mentioned() {
+    let workspace = temp_path("rule-trait-associated-const-shadow-workspace");
+    let output = temp_path("rule-trait-associated-const-shadow-output");
+    let target_dir = temp_path("rule-trait-associated-const-shadow-target");
+    write_trait_associated_const_shadow_name_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("shadow-name trait associated const rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("trait_assoc_const_shadow_rule/src/lib.rs"));
+    assert!(lib.contains("pub trait Limits"), "{lib}");
+    assert!(lib.contains("const live: u32 = 7"), "{lib}");
+    assert!(lib.contains("let shadowed = 1"), "{lib}");
+    assert!(!lib.contains("const shadowed: u32 = 99"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_try_from_conversion_impls_for_boundary_types() {
     let workspace = temp_path("rule-try-from-workspace");
     let output = temp_path("rule-try-from-output");
@@ -5341,6 +5363,30 @@ impl Counter {
 pub fn selected() -> u32 {
     let shadowed = 1;
     Counter::live + shadowed
+}
+"#,
+    );
+}
+
+fn write_trait_associated_const_shadow_name_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "trait_assoc_const_shadow_rule",
+        r#"use opensourced::opensourced;
+
+pub trait Limits {
+    const live: u32 = 7;
+    const shadowed: u32 = 99;
+}
+
+pub struct Counter;
+
+impl Limits for Counter {}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    let shadowed = 1;
+    <Counter as Limits>::live + shadowed
 }
 "#,
     );
