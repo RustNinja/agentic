@@ -234,6 +234,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
         return Err(reason.into());
     }
+    if let Some(reason) = record_semantic_proof_gate(&options, &mut validation, &report) {
+        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        return Err(reason.into());
+    }
     record_production_readiness_gate(
         &options,
         &mut validation,
@@ -1043,6 +1047,10 @@ fn run_batch_root(
         let report = session.generate(output_root.to_path_buf(), &[root.clone()], &diagnostics)?;
         write_generate_report(&report, &output_root.join("slice-report.json"))?;
         let rendered_usage_contract = rendered_usage_contract(&report);
+        let semantic_proof_block = options
+            .production_preset
+            .then(|| semantic_proof_block_reason(report.analyzer.semantic.as_ref()))
+            .flatten();
         last_report = Some(report);
         if !rendered_usage_contract.invalid.is_empty() {
             return Ok(batch_row_from_reports(
@@ -1056,6 +1064,17 @@ fn run_batch_root(
                     "rendered source contains invalid usage decisions: {}",
                     rendered_usage_contract.invalid_preview()
                 )),
+            ));
+        }
+        if let Some(reason) = semantic_proof_block {
+            return Ok(batch_row_from_reports(
+                root,
+                output_root,
+                "semantic_proof_failed",
+                last_report.as_ref(),
+                last_preflight.as_ref(),
+                None,
+                Some(reason),
             ));
         }
 
@@ -1347,6 +1366,108 @@ fn semantic_proof_status(semantic: &SemanticReport) -> String {
         return "empty".to_string();
     }
     "complete".to_string()
+}
+
+fn record_semantic_proof_gate(
+    options: &CliOptions,
+    validation: &mut ValidationReport,
+    report: &GenerateReport,
+) -> Option<String> {
+    let semantic = report.analyzer.semantic.as_ref();
+    let status = semantic
+        .map(semantic_proof_status)
+        .unwrap_or_else(|| "not_available".to_string());
+    let reason = semantic_proof_reason(semantic);
+    let blocks = options.production_preset && semantic_proof_status_blocks(&status);
+    validation.gates.push(ValidationGateReport {
+        name: "semantic_proof".to_string(),
+        status: if blocks {
+            "failed".to_string()
+        } else {
+            status.clone()
+        },
+        reason: reason.clone(),
+        report_path: slice_report_path(options),
+        error_count: semantic.map(semantic_proof_error_count),
+        warning_count: semantic.map(semantic_proof_warning_count),
+        semantic_warning_hazards: None,
+        review_warning_hazards: None,
+    });
+    blocks.then_some(reason)
+}
+
+fn semantic_proof_block_reason(semantic: Option<&SemanticReport>) -> Option<String> {
+    let status = semantic
+        .map(semantic_proof_status)
+        .unwrap_or_else(|| "not_available".to_string());
+    semantic_proof_status_blocks(&status).then(|| semantic_proof_reason(semantic))
+}
+
+fn semantic_proof_status_blocks(status: &str) -> bool {
+    matches!(
+        status,
+        "not_available"
+            | "empty"
+            | "selected_root_failed"
+            | "selected_root_limited"
+            | "workspace_failed"
+            | "workspace_limited"
+    )
+}
+
+fn semantic_proof_reason(semantic: Option<&SemanticReport>) -> String {
+    let Some(semantic) = semantic else {
+        return "rust-analyzer semantic proof is not available".to_string();
+    };
+    match semantic_proof_status(semantic).as_str() {
+        "complete" => "rust-analyzer semantic proof covered the selected slice".to_string(),
+        "selected_root_complete_workspace_limited" => format!(
+            "selected root semantic proof is complete; wider workspace budget remains limited ({} skipped file(s), {} unqueried method call(s), {} unqueried path(s))",
+            semantic.skipped_files, semantic.unqueried_method_calls, semantic.unqueried_paths
+        ),
+        "selected_root_failed" => format!(
+            "selected root semantic proof failed in {} root file(s)",
+            semantic.selected_root_failed_files
+        ),
+        "selected_root_limited" => format!(
+            "selected root semantic proof is budget-limited ({} skipped root file(s), {} unqueried root method call(s), {} unqueried root path(s))",
+            semantic.selected_root_skipped_files,
+            semantic.selected_root_unqueried_method_calls,
+            semantic.selected_root_unqueried_paths
+        ),
+        "workspace_failed" => format!(
+            "workspace semantic proof failed in {} file(s)",
+            semantic.failed_files
+        ),
+        "workspace_limited" => format!(
+            "workspace semantic proof is budget-limited ({} skipped file(s), {} unqueried method call(s), {} unqueried path(s))",
+            semantic.skipped_files, semantic.unqueried_method_calls, semantic.unqueried_paths
+        ),
+        "empty" => "rust-analyzer semantic proof did not find Rust source files".to_string(),
+        _ => "rust-analyzer semantic proof state is unknown".to_string(),
+    }
+}
+
+fn semantic_proof_error_count(semantic: &SemanticReport) -> usize {
+    if semantic.selected_root_source_files > 0 {
+        semantic.selected_root_failed_files
+            + semantic.selected_root_skipped_files
+            + semantic.selected_root_unqueried_method_calls
+            + semantic.selected_root_unqueried_paths
+    } else {
+        semantic.failed_files
+            + semantic.skipped_files
+            + semantic.unqueried_method_calls
+            + semantic.unqueried_paths
+    }
+}
+
+fn semantic_proof_warning_count(semantic: &SemanticReport) -> usize {
+    if semantic.selected_root_source_files > 0 {
+        semantic.skipped_files + semantic.unqueried_method_calls + semantic.unqueried_paths
+    } else {
+        semantic.unresolved_method_calls + semantic.unresolved_paths
+    }
 }
 
 fn batch_runs_check(options: &CliOptions) -> bool {
@@ -4291,7 +4412,7 @@ mod tests {
 
     use opensource_core::{
         AnalyzerMode, CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport,
-        GeneratedTargetReport,
+        GeneratedTargetReport, SemanticReport,
     };
 
     use super::{
@@ -4302,10 +4423,55 @@ mod tests {
         production_validation_matrix_entries, record_final_production_readiness,
         record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
         run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count,
-        should_run_deferred_warning_repair, slice_report_path, try_widen_from_feedback,
-        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
-        ValidationGateReport, ValidationReport,
+        semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
+        slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
+        validation_report_path, FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
+
+    #[test]
+    fn semantic_proof_status_allows_selected_root_complete_with_workspace_budget_limits() {
+        let semantic = SemanticReport {
+            source_files: 120,
+            analyzed_files: 48,
+            skipped_files: 72,
+            unqueried_method_calls: 1301,
+            unqueried_paths: 10933,
+            selected_root_source_files: 1,
+            selected_root_analyzed_files: 1,
+            ..SemanticReport::default()
+        };
+
+        assert_eq!(
+            semantic_proof_status(&semantic),
+            "selected_root_complete_workspace_limited"
+        );
+        assert!(semantic_proof_block_reason(Some(&semantic)).is_none());
+    }
+
+    #[test]
+    fn semantic_proof_status_blocks_selected_root_budget_limits() {
+        let semantic = SemanticReport {
+            source_files: 7,
+            analyzed_files: 7,
+            selected_root_source_files: 1,
+            selected_root_analyzed_files: 1,
+            selected_root_unqueried_paths: 3,
+            ..SemanticReport::default()
+        };
+
+        assert_eq!(semantic_proof_status(&semantic), "selected_root_limited");
+        assert!(semantic_proof_block_reason(Some(&semantic))
+            .expect("selected-root limits should block production")
+            .contains("selected root semantic proof is budget-limited"));
+    }
+
+    #[test]
+    fn semantic_proof_status_blocks_missing_ra_semantics() {
+        assert_eq!(
+            semantic_proof_block_reason(None).as_deref(),
+            Some("rust-analyzer semantic proof is not available")
+        );
+    }
 
     #[test]
     fn accepts_warning_bearing_feedback_only_when_warning_denial_is_disabled() {

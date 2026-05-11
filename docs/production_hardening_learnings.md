@@ -1391,6 +1391,12 @@ so mining can rank accepted slices by proof quality instead of only by compiler
 success. The `semantic_proof_status` row label classifies that evidence as
 `complete`, `selected_root_complete_workspace_limited`,
 `selected_root_limited`, or an explicit failure/limited state.
+Production validation now consumes that same classification: missing RA
+semantics, failed selected-root files, skipped selected-root files, or unqueried
+selected-root methods/paths reject a production slice before compiler feedback.
+Workspace-wide budget limits remain non-fatal when the selected root itself was
+fully queried, because the top-down contract is about proving the retained
+closure from the selected roots first.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

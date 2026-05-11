@@ -129,7 +129,10 @@ Rows also include rendered usage contract counts and RA semantic budget coverage
 well-proven slices from accepted slices that still spent or skipped too much
 semantic analysis. `semantic_proof_status` gives the short version:
 `complete`, `selected_root_complete_workspace_limited`,
-`selected_root_limited`, or another explicit failure/limited state.
+`selected_root_limited`, or another explicit failure/limited state. Under
+`--production`, selected-root proof failures or selected-root budget limits
+reject the slice before compiler feedback. Wider workspace limits remain visible
+but non-fatal when the selected-root proof itself is complete.
 
 ```sh
 cargo run -p opensource_cli --bin slicers -- \
@@ -154,7 +157,9 @@ Files containing selected `#[opensourced]` roots are analyzed first so bounded
 semantic budgets are spent on the active slice before wider workspace
 inventory. Batch reports expose the configured file/method/path budgets, the
 unresolved/unqueried selected-root counters, and a `semantic_proof_status` label
-to make budget exhaustion visible in the fast mining loop.
+to make budget exhaustion visible in the fast mining loop. Production validation
+requires selected-root semantic proof to be complete; this keeps top-down
+slicing fail-closed where RA could not inspect the actual selected root.
 
 ```sh
 cargo run -p opensource_cli --bin slicers -- \
