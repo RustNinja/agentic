@@ -1438,6 +1438,12 @@ same-struct impl use, API-surface proof, attributes, or unknown retention.
 Cross-module conversion impls still rely on the broader fallback until their
 type-flow proof is strong enough to narrow safely.
 
+Concrete support-field proof must scan typed function and method parameter
+patterns, not just their bodies. A retained helper can use a dependency field
+entirely in the signature pattern, for example
+`fn read(Record { value, .. }: Record)`, and same-module collision pruning will
+otherwise remove that field while leaving the pattern intact.
+
 Concrete support-field proof must bind typed closure inputs as well as typed
 function and method parameters. Iterator and callback bodies often carry the
 only non-API evidence that a dependency field is live, and a pure struct

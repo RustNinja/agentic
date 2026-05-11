@@ -1,0 +1,4 @@
+[workspace]
+members = ["root", "support_records"]
+resolver = "2"
+

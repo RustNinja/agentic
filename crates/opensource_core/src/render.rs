@@ -17106,6 +17106,17 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
         binding_count
     }
+
+    fn visit_fn_input_patterns<'b, I>(&mut self, inputs: I)
+    where
+        I: IntoIterator<Item = &'b syn::FnArg>,
+    {
+        for input in inputs {
+            if let syn::FnArg::Typed(input) = input {
+                self.visit_pat(&input.pat);
+            }
+        }
+    }
 }
 
 fn type_path_to_struct_item(package: &str, type_path: &[String]) -> Option<ItemId> {
@@ -17273,12 +17284,14 @@ fn rendered_sibling_struct_has_field_name(
 impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
     fn visit_item_fn(&mut self, function: &syn::ItemFn) {
         let binding_count = self.push_fn_input_bindings(function.sig.inputs.iter());
+        self.visit_fn_input_patterns(function.sig.inputs.iter());
         self.visit_block(&function.block);
         self.bindings.truncate(binding_count);
     }
 
     fn visit_impl_item_fn(&mut self, method: &syn::ImplItemFn) {
         let binding_count = self.push_fn_input_bindings(method.sig.inputs.iter());
+        self.visit_fn_input_patterns(method.sig.inputs.iter());
         self.visit_block(&method.block);
         self.bindings.truncate(binding_count);
     }

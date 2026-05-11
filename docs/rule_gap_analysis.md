@@ -297,6 +297,12 @@ dependency::Record` followed by `record.value` retains only that concrete
 dependency field. This keeps cross-package support field pruning precise without
 falling back to broad field-name retention.
 
+`fixture.public_field_typed_param_pattern_prune.support_chain.001` covers the
+pattern side of typed function parameters. Concrete field evidence now visits
+typed fn/method input patterns before scanning retained bodies, so
+`fn read(Record { value, .. }: Record)` keeps the destructured `value` field
+even when same-module same-name sibling fields disable package-wide fallback.
+
 `fixture.public_field_typed_closure_prune.support_chain.001` extends the same
 proof to typed closure parameters. A retained iterator closure such as
 `|record: dependency::Record| record.value` now contributes concrete field
