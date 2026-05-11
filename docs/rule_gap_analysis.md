@@ -158,6 +158,13 @@ Fixture ideas:
 - `static.global_mutex_registry.001`: selected registry operation keeps the
   global mutex and lock/error paths but prunes unrelated registries.
 
+Current coverage note: `static.lazy_regex_constructor.001` now has an
+executable support-chain fixture with a local regex-like dependency crate. The
+selected root descends through an API crate, a parser support crate, and a
+`LazyLock<Regex>` initializer, retaining only the regex constructor, capture,
+match, and error-message methods needed by the live parser while pruning dead
+regex APIs and dead modules from every support package.
+
 ### 7. Platform cfg plus assets plus externs
 
 Evidence:
@@ -256,10 +263,11 @@ Keep the generated 1,200-row catalog for breadth. The next focused batch should
 target the remaining shapes that are not closed above:
 
 1. `serde.adjacent_tag_content_contract.001`
-2. `static.lazy_regex_constructor.001` with external regex-like dependency behavior
-3. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
-4. `uniffi.shared_runtime_once_lock.001`
-5. `uniffi.async_runtime_exported_object.001`
+2. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
+3. `uniffi.shared_runtime_once_lock.001`
+4. `uniffi.async_runtime_exported_object.001`
+5. A real-project Litter mining pass after the focused fixtures above, so new
+   failures become minimized generic fixtures instead of one-off project logic
 
 After those fixtures are executable, rerun five random Litter roots and compare
 failures against this list. Any new failure should become a minimized generic

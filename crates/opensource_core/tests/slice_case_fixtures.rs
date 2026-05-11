@@ -6053,6 +6053,134 @@ fn prunes_lazy_parser_support_chain_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_lazy_regex_support_dependency_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/lazy_regex_prune");
+    let output = temp_path("slice-case-lazy-regex-prune-output");
+    let target_dir = temp_path("slice-case-lazy-regex-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("lazy_regex_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["parser_support", "regex_api", "regex_lite", "root"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_route_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("regex_api/Cargo.toml"));
+    let api_root = read(output.join("regex_api/src/lib.rs"));
+    let api_live = read(output.join("regex_api/src/live.rs"));
+    let parser_manifest = read(output.join("parser_support/Cargo.toml"));
+    let parser_root = read(output.join("parser_support/src/lib.rs"));
+    let parser_live = read(output.join("parser_support/src/live.rs"));
+    let regex_root = read(output.join("regex_lite/src/lib.rs"));
+    let regex_live = read(output.join("regex_lite/src/live.rs"));
+
+    assert!(root_manifest.contains("../regex_api"), "{root_manifest}");
+    assert!(root_source.contains("pub fn selected_route_report"));
+    assert!(root_source.contains("regex_api::selected_route_report"));
+    assert_absent("root/src/lib.rs", &root_source, &["dead_route_report"]);
+
+    assert!(api_manifest.contains("../parser_support"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_route_report"), "{api_root}");
+    assert_absent(
+        "regex_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_route_report"],
+    );
+    assert!(api_live.contains("parser_support::selected_route_id"));
+    assert_absent(
+        "regex_api/src/live.rs",
+        &api_live,
+        &["dead_live_route_report"],
+    );
+    assert!(!output.join("regex_api/src/dead.rs").exists());
+
+    assert!(
+        parser_manifest.contains("../regex_lite"),
+        "{parser_manifest}"
+    );
+    assert!(parser_root.contains("mod live"), "{parser_root}");
+    assert!(parser_root.contains("selected_route_id"), "{parser_root}");
+    assert_absent(
+        "parser_support/src/lib.rs",
+        &parser_root,
+        &["mod dead", "dead_route_id"],
+    );
+    assert!(parser_live.contains("use regex_lite::Regex"));
+    assert!(parser_live.contains("use std::sync::LazyLock"));
+    assert!(parser_live.contains("static ROUTE_RE"));
+    assert!(parser_live.contains("LazyLock::new"));
+    assert!(parser_live.contains("Regex::new(\"/session/\")"));
+    assert!(parser_live.contains("error.message()"));
+    assert!(parser_live.contains(".captures(raw)"));
+    assert!(parser_live.contains("captures.name(\"id\")"));
+    assert!(parser_live.contains("route_match.as_str()"));
+    assert_absent(
+        "parser_support/src/live.rs",
+        &parser_live,
+        &[
+            "dead_live_route_id",
+            "replace_all",
+            "dead_message",
+            "\"/dead/\"",
+        ],
+    );
+    assert!(!output.join("parser_support/src/dead.rs").exists());
+
+    assert!(regex_root.contains("mod live"), "{regex_root}");
+    assert!(regex_root.contains("Regex"), "{regex_root}");
+    assert!(regex_root.contains("Captures"), "{regex_root}");
+    assert!(regex_root.contains("Match"), "{regex_root}");
+    assert!(regex_root.contains("RegexError"), "{regex_root}");
+    assert_absent(
+        "regex_lite/src/lib.rs",
+        &regex_root,
+        &["mod dead", "DeadRegex", "dead_regex_debug"],
+    );
+    assert!(regex_live.contains("pub struct Regex"), "{regex_live}");
+    assert!(regex_live.contains("pub fn new"), "{regex_live}");
+    assert!(regex_live.contains("pub fn captures"), "{regex_live}");
+    assert!(regex_live.contains("pub struct Captures"), "{regex_live}");
+    assert!(regex_live.contains("pub fn name"), "{regex_live}");
+    assert!(regex_live.contains("pub struct Match"), "{regex_live}");
+    assert!(regex_live.contains("pub fn as_str"), "{regex_live}");
+    assert!(regex_live.contains("pub struct RegexError"), "{regex_live}");
+    assert!(regex_live.contains("pub fn message"), "{regex_live}");
+    assert_absent(
+        "regex_lite/src/live.rs",
+        &regex_live,
+        &[
+            "pub fn replace_all",
+            "dead_summary",
+            "dead_value",
+            "dead_message",
+            "dead_live_regex_report",
+            "dead-regex",
+        ],
+    );
+    assert!(!output.join("regex_lite/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_global_mutex_support_chain_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/global_mutex_prune");
     let output = temp_path("slice-case-global-mutex-prune-output");

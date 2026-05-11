@@ -1584,3 +1584,13 @@ unresolved fallback matching. External/std constructors such as
 pulling same-name local methods into the slice. This keeps the support closure
 aligned with the top-down invariant: selected roots expand only through typed
 or explicitly unknown dependencies.
+
+Top-down static support needs dependency-crate proof, not only local static
+proof. The `static.lazy_regex_constructor.001` fixture models a Litter-shaped
+`LazyLock<Regex>` parser with a separate regex-like path dependency. The
+selected root walks through the static initializer, keeps `Regex::new`,
+`Regex::captures`, `Captures::name`, `Match::as_str`, and
+`RegexError::message`, and prunes unrelated `replace_all`/dead-regex APIs.
+This is the important production shape: static singletons can pull a helper
+crate into the slice, but that crate still must be reduced item-by-item under
+the same used/unknown/prunable contract.
