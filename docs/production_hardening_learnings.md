@@ -1555,3 +1555,11 @@ manifest later filters the `[patch]` table. Patch discovery is now driven by the
 dependency package name encountered in retained root/support manifests; retained
 patched transitive dependencies still get copied, while unused patch entries are
 left out of both the root manifest and support tree.
+
+The FFI manifest bundle needs to be tested as one shape, not as isolated
+manifest features. A selected `cfg_attr(feature = "ffi", uniffi::export)` root
+can require `cdylib`/`staticlib` crate types, optional macro/runtime feature
+edges, target-specific version dependencies resolved through `[patch]`,
+lockfiles, and `rust-toolchain.toml` at the same time. The combined fixture now
+checks that all live context is preserved while dead optional dependencies and
+unused patch packages stay out of the generated workspace.

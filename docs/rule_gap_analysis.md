@@ -9,7 +9,7 @@ found from the local Litter checkout at:
 
 The current committed baseline after the fixture expansion pass is:
 
-- 921 focused cargo-checked fixture/rule cases.
+- 922 focused cargo-checked fixture/rule cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
 - The first documented gap batch is now executable in
   `crates/opensource_core/tests/rule_database.rs`.
@@ -178,10 +178,12 @@ Fixture ideas:
   crate type, target deps, features, workspace patches, and lock/toolchain
   context without keeping unrelated packages.
 
-Current coverage note: dependency-driven patch path retention is now covered by
+Current coverage note: dependency-driven patch path retention is covered by
 `manifest.patch_path_dependency_scoped.001`, so unused workspace patch entries no
-longer copy or emit support packages. The larger FFI crate-type/target bundle is
-still listed because it needs one combined fixture.
+longer copy or emit support packages. The combined
+`manifest.cdylib_staticlib_target_patch_bundle.001` fixture now preserves FFI
+crate types, target-specific patched dependencies, feature entries, lockfiles,
+and toolchain context while pruning unrelated patch packages.
 
 ### 8. Serde protocol projection and custom helpers
 
@@ -235,14 +237,13 @@ Do not grow production confidence by adding 1,000 hand-written near-duplicates.
 Keep the generated 1,200-row catalog for breadth. The next focused batch should
 target the remaining shapes that are not closed above:
 
-1. `manifest.cdylib_staticlib_target_patch_bundle.001`
-2. `pattern.external_protocol_variant_projection.001` deeper cross-crate public protocol variant surfaces
-3. `request.json_patch_state_machine.001`
-4. `serde.adjacent_tag_content_contract.001`
-5. `static.lazy_regex_constructor.001` with external regex-like dependency behavior
-6. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
-7. `uniffi.shared_runtime_once_lock.001`
-8. `uniffi.async_runtime_exported_object.001`
+1. `pattern.external_protocol_variant_projection.001` deeper cross-crate public protocol variant surfaces
+2. `request.json_patch_state_machine.001`
+3. `serde.adjacent_tag_content_contract.001`
+4. `static.lazy_regex_constructor.001` with external regex-like dependency behavior
+5. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
+6. `uniffi.shared_runtime_once_lock.001`
+7. `uniffi.async_runtime_exported_object.001`
 
 After those fixtures are executable, rerun five random Litter roots and compare
 failures against this list. Any new failure should become a minimized generic
