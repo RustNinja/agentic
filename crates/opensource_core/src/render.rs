@@ -22,7 +22,9 @@ use crate::{
     include_path::{static_include_path, StaticIncludePath},
     manifest::Package,
     model::{CallableId, ItemId, ItemKind, Project, ReducedProject, RootId, SourceFile},
-    reduce::{is_cfg_test_attr, is_opensourced_attr, is_test_attr},
+    reduce::{
+        callable_signature_resolves_item, is_cfg_test_attr, is_opensourced_attr, is_test_attr,
+    },
     UsageDecisionIndex,
 };
 
@@ -16193,45 +16195,8 @@ fn item_is_root_callable_signature_surface(
         let RootId::Callable(callable) = root else {
             return false;
         };
-        root_callable_signature_references_item(project, callable, item_id)
+        callable_signature_resolves_item(project, callable, item_id)
     })
-}
-
-fn root_callable_signature_references_item(
-    project: &Project,
-    callable: &CallableId,
-    item_id: &ItemId,
-) -> bool {
-    match callable {
-        CallableId::Free { .. } => project.functions.get(callable).is_some_and(|record| {
-            signature_references_item_name_or_path(
-                &record.item.sig.to_token_stream(),
-                item_id,
-                &record.aliases,
-            )
-        }),
-        CallableId::Method { .. } => project.methods.get(callable).is_some_and(|record| {
-            signature_references_item_name_or_path(
-                &record.item.sig.to_token_stream(),
-                item_id,
-                &record.aliases,
-            )
-        }),
-    }
-}
-
-fn signature_references_item_name_or_path(
-    tokens: &TokenStream,
-    item_id: &ItemId,
-    aliases: &HashMap<String, Vec<String>>,
-) -> bool {
-    token_stream_mentions_ident(tokens, &item_id.name)
-        || aliases.iter().any(|(alias, target)| {
-            target
-                .last()
-                .is_some_and(|target_name| target_name == &item_id.name)
-                && token_stream_mentions_ident(tokens, alias)
-        })
 }
 
 fn enum_attrs_require_full_variant_surface(item_enum: &syn::ItemEnum) -> bool {

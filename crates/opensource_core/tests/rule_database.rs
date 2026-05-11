@@ -184,6 +184,7 @@ fn prunes_public_support_enum_variants_outside_root_signature_surface() {
 
     assert_no_error_hazards(&report.production.hazards);
     let app = read(output.join("support_enum_app/src/lib.rs"));
+    assert!(app.contains("pub struct ProtocolEvent"), "{app}");
     assert!(app.contains("pub fn selected"), "{app}");
     let protocol = read(output.join("support_protocol/src/lib.rs"));
     assert!(protocol.contains("pub enum ProtocolEvent"), "{protocol}");
@@ -4023,9 +4024,13 @@ support_protocol = {{ path = "../support_protocol" }}
         root.join("support_enum_app/src/lib.rs"),
         r#"use opensourced::opensourced;
 
+pub struct ProtocolEvent {
+    pub seed: u32,
+}
+
 #[opensourced]
-pub fn selected(seed: u32) -> u32 {
-    support_protocol::live_value(seed)
+pub fn selected(input: ProtocolEvent) -> u32 {
+    support_protocol::live_value(input.seed)
 }
 "#,
     );

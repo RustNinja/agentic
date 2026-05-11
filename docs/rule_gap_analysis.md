@@ -249,7 +249,10 @@ The next focused pass closed an over-retention class behind the
 `enum.public_support_internal_variant_prune.001` rule. Plain `pub enum` items
 inside support packages no longer keep every variant just because the original
 crate exposed them publicly. Full variant surfaces still remain for selected
-root items, selected callable signature types, and macro/serde/FFI-style
-contract attributes, but internal support enums can now prune dead variants and
-payload types. This is directly aligned with the production invariant that
-sub-dependencies contain only used or explicitly unknown code.
+root items, resolver-proven selected callable signature types, and
+macro/serde/FFI-style contract attributes, but internal support enums can now
+prune dead variants and payload types. The fixture intentionally gives the root
+crate a same-named local type in the selected signature, proving the support enum
+surface is not widened by token/name collision. This is directly aligned with
+the production invariant that sub-dependencies contain only used or explicitly
+unknown code.
