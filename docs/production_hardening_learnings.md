@@ -1629,3 +1629,12 @@ edges. Data-contract strings under keys like `tag`, `content`, `rename`, and
 The adjacent-tag fixture also showed that external deserializers such as
 `serde_json::from_str::<T>()` must expose `T` as the `Result::Ok` payload so
 closures like `.map(|value| value.render())` keep only the typed method closure.
+
+Test-only retained-body code is still redundant support code. A support package
+can have a live method whose body contains a `#[cfg(test)]` block with an
+`include_str!` fixture asset. Token-only asset scanning copied that test asset
+even though the generated slice does not build tests. Include discovery is now
+syntax-aware, skips test-only items/statements/expressions, and rendered root
+and restricted support sources strip test-only statements before writing. This
+keeps sub-dependencies closer to the production invariant: only used code or
+explicit unknown/API surfaces remain.

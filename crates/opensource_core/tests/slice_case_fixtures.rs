@@ -2265,11 +2265,18 @@ fn prunes_asset_conversion_support_chain_with_default_analyzer() {
     assert_absent(
         "asset_codec/src/live.rs",
         &codec_live,
-        &["DEAD_ASSET", "dead_live_asset", "dead-asset"],
+        &[
+            "DEAD_ASSET",
+            "dead_live_asset",
+            "dead-asset",
+            "test_only_fixture_asset",
+            "test_only.txt",
+        ],
     );
     assert!(output.join("asset_codec/src/assets/header.txt").exists());
     assert!(output.join("asset_codec/src/assets/body.txt").exists());
     assert!(!output.join("asset_codec/src/assets/dead.txt").exists());
+    assert!(!output.join("asset_codec/src/assets/test_only.txt").exists());
     assert!(!output.join("asset_codec/src/dead.rs").exists());
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);

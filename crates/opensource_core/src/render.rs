@@ -5497,6 +5497,7 @@ fn transform_restricted_support_file(
             }
         })
         .collect();
+    strip_test_only_statements_from_file(&mut transformed);
     transformed
 }
 
@@ -8048,7 +8049,7 @@ fn copy_include_assets_for_support_source(
     };
 
     let mut candidates = BTreeSet::new();
-    collect_include_macro_paths(&syntax.to_token_stream(), &mut candidates);
+    collect_include_macro_paths_from_syntax(syntax, &mut candidates);
 
     let mut copied = 0;
     for candidate in candidates {
@@ -10035,7 +10036,7 @@ fn copy_source_include_assets(
     };
 
     let mut candidates = BTreeSet::new();
-    collect_include_macro_paths(&syntax.to_token_stream(), &mut candidates);
+    collect_include_macro_paths_from_syntax(syntax, &mut candidates);
 
     let mut copied = 0;
     for candidate in candidates {
@@ -10057,7 +10058,89 @@ fn copy_source_include_assets(
     Ok(copied)
 }
 
-fn collect_include_macro_paths(tokens: &TokenStream, candidates: &mut BTreeSet<StaticIncludePath>) {
+fn collect_include_macro_paths_from_syntax(
+    syntax: &syn::File,
+    candidates: &mut BTreeSet<StaticIncludePath>,
+) {
+    let mut collector = IncludeMacroPathCollector { candidates };
+    collector.visit_file(syntax);
+}
+
+struct IncludeMacroPathCollector<'a> {
+    candidates: &'a mut BTreeSet<StaticIncludePath>,
+}
+
+impl<'ast> Visit<'ast> for IncludeMacroPathCollector<'_> {
+    fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
+        if is_cfg_test_attr(attr) || is_test_attr(attr.path()) {
+            return;
+        }
+        collect_include_macro_paths_from_tokens(&attr.to_token_stream(), self.candidates);
+        visit::visit_attribute(self, attr);
+    }
+
+    fn visit_item(&mut self, item: &'ast Item) {
+        if item_is_test(item) {
+            return;
+        }
+        visit::visit_item(self, item);
+    }
+
+    fn visit_impl_item(&mut self, item: &'ast ImplItem) {
+        if impl_item_is_test(item) {
+            return;
+        }
+        visit::visit_impl_item(self, item);
+    }
+
+    fn visit_trait_item(&mut self, item: &'ast TraitItem) {
+        if trait_item_is_test(item) {
+            return;
+        }
+        visit::visit_trait_item(self, item);
+    }
+
+    fn visit_foreign_item(&mut self, item: &'ast ForeignItem) {
+        if foreign_item_is_test(item) {
+            return;
+        }
+        visit::visit_foreign_item(self, item);
+    }
+
+    fn visit_stmt(&mut self, stmt: &'ast syn::Stmt) {
+        if stmt_is_test(stmt) {
+            return;
+        }
+        visit::visit_stmt(self, stmt);
+    }
+
+    fn visit_expr(&mut self, expr: &'ast Expr) {
+        if expr_attrs_are_test(expr) {
+            return;
+        }
+        visit::visit_expr(self, expr);
+    }
+
+    fn visit_macro(&mut self, mac: &'ast syn::Macro) {
+        if mac
+            .path
+            .segments
+            .last()
+            .is_some_and(|segment| is_file_include_macro(&segment.ident.to_string()))
+        {
+            if let Some(path) = static_include_path(&mac.tokens) {
+                self.candidates.insert(path);
+            }
+        }
+        collect_include_macro_paths_from_tokens(&mac.tokens, self.candidates);
+        visit::visit_macro(self, mac);
+    }
+}
+
+fn collect_include_macro_paths_from_tokens(
+    tokens: &TokenStream,
+    candidates: &mut BTreeSet<StaticIncludePath>,
+) {
     let mut tokens = tokens.clone().into_iter().peekable();
     while let Some(token) = tokens.next() {
         match token {
@@ -10075,7 +10158,9 @@ fn collect_include_macro_paths(tokens: &TokenStream, candidates: &mut BTreeSet<S
                     candidates.insert(path);
                 }
             }
-            TokenTree::Group(group) => collect_include_macro_paths(&group.stream(), candidates),
+            TokenTree::Group(group) => {
+                collect_include_macro_paths_from_tokens(&group.stream(), candidates)
+            }
             TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => {}
         }
     }
@@ -12981,6 +13066,9 @@ fn transform_file(
         &syntax.items,
         retain_test_items,
     );
+    if !retain_test_items {
+        strip_test_only_statements_from_file(&mut transformed);
+    }
     transformed
 }
 
@@ -19681,6 +19769,19 @@ fn field_mentions_struct_type_params(item_struct: &syn::ItemStruct, field: &Fiel
     })
 }
 
+fn strip_test_only_statements_from_file(file: &mut syn::File) {
+    TestOnlyStatementPruner.visit_file_mut(file);
+}
+
+struct TestOnlyStatementPruner;
+
+impl VisitMut for TestOnlyStatementPruner {
+    fn visit_block_mut(&mut self, block: &mut Block) {
+        block.stmts.retain(|stmt| !stmt_is_test(stmt));
+        visit_mut::visit_block_mut(self, block);
+    }
+}
+
 fn item_is_test(item: &Item) -> bool {
     match item {
         Item::Const(item) => attrs_are_test(&item.attrs),
@@ -19712,6 +19813,84 @@ fn impl_item_is_test(item: &ImplItem) -> bool {
         ImplItem::Verbatim(_) => false,
         _ => false,
     }
+}
+
+fn trait_item_is_test(item: &TraitItem) -> bool {
+    match item {
+        TraitItem::Const(item) => attrs_are_test(&item.attrs),
+        TraitItem::Fn(item) => attrs_are_test(&item.attrs),
+        TraitItem::Macro(item) => attrs_are_test(&item.attrs),
+        TraitItem::Type(item) => attrs_are_test(&item.attrs),
+        TraitItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn foreign_item_is_test(item: &ForeignItem) -> bool {
+    match item {
+        ForeignItem::Fn(item) => attrs_are_test(&item.attrs),
+        ForeignItem::Macro(item) => attrs_are_test(&item.attrs),
+        ForeignItem::Static(item) => attrs_are_test(&item.attrs),
+        ForeignItem::Type(item) => attrs_are_test(&item.attrs),
+        ForeignItem::Verbatim(_) => false,
+        _ => false,
+    }
+}
+
+fn stmt_is_test(stmt: &syn::Stmt) -> bool {
+    match stmt {
+        syn::Stmt::Local(local) => attrs_are_test(&local.attrs),
+        syn::Stmt::Item(item) => item_is_test(item),
+        syn::Stmt::Expr(expr, _) => expr_attrs_are_test(expr),
+        syn::Stmt::Macro(stmt_macro) => attrs_are_test(&stmt_macro.attrs),
+    }
+}
+
+fn expr_attrs_are_test(expr: &Expr) -> bool {
+    let attrs = match expr {
+        Expr::Array(expr) => &expr.attrs,
+        Expr::Assign(expr) => &expr.attrs,
+        Expr::Async(expr) => &expr.attrs,
+        Expr::Await(expr) => &expr.attrs,
+        Expr::Binary(expr) => &expr.attrs,
+        Expr::Block(expr) => &expr.attrs,
+        Expr::Break(expr) => &expr.attrs,
+        Expr::Call(expr) => &expr.attrs,
+        Expr::Cast(expr) => &expr.attrs,
+        Expr::Closure(expr) => &expr.attrs,
+        Expr::Const(expr) => &expr.attrs,
+        Expr::Continue(expr) => &expr.attrs,
+        Expr::Field(expr) => &expr.attrs,
+        Expr::ForLoop(expr) => &expr.attrs,
+        Expr::Group(expr) => &expr.attrs,
+        Expr::If(expr) => &expr.attrs,
+        Expr::Index(expr) => &expr.attrs,
+        Expr::Infer(expr) => &expr.attrs,
+        Expr::Let(expr) => &expr.attrs,
+        Expr::Lit(expr) => &expr.attrs,
+        Expr::Loop(expr) => &expr.attrs,
+        Expr::Macro(expr) => &expr.attrs,
+        Expr::Match(expr) => &expr.attrs,
+        Expr::MethodCall(expr) => &expr.attrs,
+        Expr::Paren(expr) => &expr.attrs,
+        Expr::Path(expr) => &expr.attrs,
+        Expr::Range(expr) => &expr.attrs,
+        Expr::RawAddr(expr) => &expr.attrs,
+        Expr::Reference(expr) => &expr.attrs,
+        Expr::Repeat(expr) => &expr.attrs,
+        Expr::Return(expr) => &expr.attrs,
+        Expr::Struct(expr) => &expr.attrs,
+        Expr::Try(expr) => &expr.attrs,
+        Expr::TryBlock(expr) => &expr.attrs,
+        Expr::Tuple(expr) => &expr.attrs,
+        Expr::Unary(expr) => &expr.attrs,
+        Expr::Unsafe(expr) => &expr.attrs,
+        Expr::While(expr) => &expr.attrs,
+        Expr::Yield(expr) => &expr.attrs,
+        Expr::Verbatim(_) => return false,
+        _ => return false,
+    };
+    attrs_are_test(attrs)
 }
 
 fn attrs_are_test(attrs: &[syn::Attribute]) -> bool {

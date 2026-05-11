@@ -281,9 +281,11 @@ passed deliberately.
 - `manifest.support_transitive_reexport_pruning.001`: app-to-local-to-support
   reexport chains should keep only the selected upstream symbol and prune dead
   middle-layer reexports.
-- `manifest.support_inline_test_cfg_asset_pruning.001`: retained support files
-  should strip inline `#[cfg(test)]` modules and avoid copying target-gated
-  assets for inactive targets.
+- `manifest.support_inline_test_cfg_asset_pruning.001`: covered for
+  `#[cfg(test)]` items/statements/expressions in retained root and support
+  files. Generated slices strip those test-only statements before rendering and
+  skip their `include_str!`/`include_bytes!` assets. Broader non-test target cfg
+  asset pruning remains under the cfg-oracle track.
 - `protocol.enum_method.compact.001`: enum parser methods like `from_wire` should
   remain compact and keep only live variants/helpers.
 - `bridge.state_constructor.heavy.001`: constructor roots with broad private

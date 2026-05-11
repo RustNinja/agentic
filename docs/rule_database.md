@@ -155,7 +155,7 @@ file.
 | `fixture.import_alias_prune.support_chain.001` | covered | A checked-in four-package support chain fixture slices through grouped imports, aliases, public prelude reexports, and macro receiver calls, proving generated dependency crates keep only used aliases/modules/functions and remove dead support modules, imports, and helper package items |
 | `fixture.proc_macro_surface_prune.support_chain.001` | covered | A checked-in local proc-macro support fixture slices through retained derive and attribute macro surfaces, keeps helper attribute paths such as `model::wire_tag`, prunes unused derive/attribute macro exports, and removes dead API/model modules while cargo-checking the generated workspace |
 | `fixture.litter_conversation_state_serde.support_chain.001` | covered | A checked-in Litter-shaped `codex-ipc` fixture slices a selected conversation-state parsing root through real `serde`, `serde_json`, and `thiserror` dependencies, retaining known derive/helper/error contracts while pruning dead support modules/helpers and cargo-checking the generated workspace |
-| `fixture.asset_conversion_prune.support_chain.001` | covered | A checked-in support fixture slices through `include_str!` literal/`concat!` assets plus `TryFrom` conversion/error surfaces, copies only live assets, prunes dead support assets/modules/functions, and cargo-checks the generated workspace |
+| `fixture.asset_conversion_prune.support_chain.001` | covered | A checked-in support fixture slices through `include_str!` literal/`concat!` assets plus `TryFrom` conversion/error surfaces, copies only live assets, prunes dead support assets/modules/functions, strips retained `#[cfg(test)]` live-body statements, omits test-only assets, and cargo-checks the generated workspace |
 | `fixture.out_dir_generated_prune.support_chain.001` | covered | A checked-in build-script support fixture slices through retained `include!(concat!(env!("OUT_DIR"), ...))` generated Rust, reports retained build-script and OUT_DIR source hazards, keeps the live generated-helper closure, prunes dead support functions, and cargo-checks the generated workspace |
 | `fixture.cfg_attr_uniffi_prune.support_chain.001` | covered | A checked-in cfg/UniFFI-shaped support fixture slices through `cfg_attr(feature = "ffi", ...)` derive/attribute/helper surfaces, reports conditional-compilation and macro hazards, keeps only the live record/status/render closure, prunes dead dependency modules/functions, and cargo-checks the generated workspace |
 | `fixture.callback_boundary_prune.support_chain.001` | covered | A checked-in support fixture slices through a direct `&dyn Trait` and `fn(...)` callback boundary, keeps explicit callback-boundary hazard evidence, prunes dead callback modules/functions, and cargo-checks the generated workspace |
@@ -907,6 +907,7 @@ file.
 | `include.str.inline_module_tree.001` | covered | Inline module script bundles copy only live `include_str!` assets and prune dead sibling assets |
 | `build.option_env.001` | covered | Retained `option_env!` reads of non-Cargo metadata are production-blocking and dead sibling env readers are pruned |
 | `manifest.support_library_module_closure.001` | covered | No-build support path packages copy only the library external-module graph plus live static assets, skipping `#[cfg(test)]` external modules and orphan Rust files |
+| `manifest.support_inline_test_cfg_asset_pruning.001` | covered | Include-asset discovery is syntax-aware and skips `#[cfg(test)]` items/statements/expressions in retained root and support files, so test-only inline blocks do not survive rendered sources or copy their assets |
 | `manifest.support_build_script_hazard_parity.001` | covered | Copied support path packages report build-script, `OUT_DIR` source include, compile-time env, nonliteral include, absolute include, and package-external include hazards with generated support file details |
 | `manifest.local_build_dependency.no_build_script.001` | covered | Local build-dependencies are rendered only when a retained package has a retained build script, so no-build packages do not keep build-only workspace crates |
 | `manifest.local_dependency_edge.pruned_retained_package.001` | covered | A globally retained local package does not force every source package to keep an unused dependency edge or feature entry pointing at it |
@@ -1048,10 +1049,12 @@ contracts.
   whole protocol/app-server support module fanout.
 - Transitive reexport chains through local and copied support crates where dead
   middle-layer names must not pull sibling upstream modules.
-- Support crates with target-gated assets, inline test modules, legacy facade
-  reexports, websocket/remote-control siblings, or monolithic protocol files
-  where the next production gap is item-level support pruning after the current
-  module/file-level copy.
+- Support crates with non-test target-gated assets, legacy facade reexports,
+  websocket/remote-control siblings, or monolithic protocol files where the
+  next production gap is item-level support pruning after the current
+  module/file-level copy. Inline `#[cfg(test)]` retained-body statements and
+  their assets are now covered by
+  `manifest.support_inline_test_cfg_asset_pruning.001`.
 - Support dependency typed locals: a retained root can construct a dependency
   type, store it in a local, and call a method later. The support package must
   keep that associated method but still prune unrelated public methods on the

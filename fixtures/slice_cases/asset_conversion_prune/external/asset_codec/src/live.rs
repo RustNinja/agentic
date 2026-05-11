@@ -19,6 +19,10 @@ pub struct AssetReport {
 
 impl AssetReport {
     pub fn render(self) -> String {
+        #[cfg(test)]
+        {
+            let _test_only_fixture_asset = include_str!("assets/test_only.txt");
+        }
         format!("{}:{}:{}", HEADER.trim(), BODY.trim(), self.label)
     }
 }
