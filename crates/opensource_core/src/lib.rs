@@ -259,17 +259,22 @@ impl Default for RenderedSymbolProofReport {
 pub struct RenderedSymbolProofSummary {
     pub rendered_callables: usize,
     pub rendered_items: usize,
+    pub rendered_members: usize,
     pub rendered_trait_default_methods: usize,
     pub retained_callables: usize,
     pub retained_items: usize,
+    pub retained_members: usize,
     pub retained_trait_default_methods: usize,
     pub macro_blocked_callables: usize,
     pub surface_blocked_callables: usize,
+    pub blocked_members: usize,
     pub blocked_trait_default_methods: usize,
     pub prunable_callables: usize,
     pub prunable_items: usize,
+    pub prunable_members: usize,
     pub unclassified_callables: usize,
     pub unclassified_items: usize,
+    pub unclassified_members: usize,
     pub unproven_trait_default_methods: usize,
     pub source_parse_failures: usize,
 }
@@ -851,10 +856,15 @@ fn generate_loaded(
     let source_map = source_map_report(project, &render_reduced);
     let macro_surfaces = macro_surface_report(project, &render_reduced);
     let semantic_proof = semantic_usage_proof_report(&analyzer, &usage_decisions);
-    let rendered_symbol_proof =
-        rendered_symbol_proof_report(&options.output_root, &usage_decisions);
     let public_reexport_proof =
         public_reexport_proof_report(&options.output_root, &usage_decisions);
+    let member_decisions =
+        render::rendered_member_decision_index(project, &render_reduced, &usage_decisions);
+    let rendered_symbol_proof = rendered_symbol_proof_report_with_members(
+        &options.output_root,
+        &usage_decisions,
+        &member_decisions,
+    );
     let production = production_readiness_report(
         &analyzer,
         project,
@@ -1990,6 +2000,7 @@ struct GeneratedRenderedTraitDefaultMethod {
 struct GeneratedRenderedSymbols {
     callables: BTreeSet<String>,
     items: BTreeSet<String>,
+    members: BTreeSet<String>,
     module_items: BTreeSet<String>,
     structural_module_items: BTreeSet<String>,
     macro_blocked_callables: BTreeSet<String>,
@@ -2002,9 +2013,22 @@ struct GeneratedRenderedSymbols {
     source_parse_failures: usize,
 }
 
+#[cfg(test)]
 fn rendered_symbol_proof_report(
     output_root: &Path,
     decisions: &UsageDecisionIndex,
+) -> RenderedSymbolProofReport {
+    rendered_symbol_proof_report_with_members(
+        output_root,
+        decisions,
+        &render::RenderedMemberDecisionIndex::default(),
+    )
+}
+
+fn rendered_symbol_proof_report_with_members(
+    output_root: &Path,
+    decisions: &UsageDecisionIndex,
+    member_decisions: &render::RenderedMemberDecisionIndex,
 ) -> RenderedSymbolProofReport {
     let rendered = collect_generated_rendered_symbols(output_root, &decisions.retained_packages);
     let retained_callables = decisions
@@ -2035,6 +2059,7 @@ fn rendered_symbol_proof_report(
     let mut summary = RenderedSymbolProofSummary {
         rendered_callables: rendered.callables.len(),
         rendered_items: rendered.items.len(),
+        rendered_members: rendered.members.len(),
         rendered_trait_default_methods: rendered.trait_default_methods.len(),
         source_parse_failures: rendered.source_parse_failures,
         ..RenderedSymbolProofSummary::default()
@@ -2088,6 +2113,27 @@ fn rendered_symbol_proof_report(
         });
     }
 
+    for member in &rendered.members {
+        let classification = if member_decisions.retained.contains(member) {
+            summary.retained_members += 1;
+            "retained"
+        } else if member_decisions.blocked_by_unknown.contains(member) {
+            summary.blocked_members += 1;
+            "blocked_by_unknown"
+        } else if member_decisions.prunable.contains(member) {
+            summary.prunable_members += 1;
+            "prunable"
+        } else {
+            summary.unclassified_members += 1;
+            "unclassified"
+        };
+        entries.push(RenderedSymbolProofEntry {
+            kind: "member".to_string(),
+            id: member.clone(),
+            classification: classification.to_string(),
+        });
+    }
+
     let retained_trait_default_methods =
         generated_retained_trait_default_methods(&rendered, &blocked_items);
     for method in &rendered.trait_default_methods {
@@ -2112,8 +2158,10 @@ fn rendered_symbol_proof_report(
         "incomplete".to_string()
     } else if summary.prunable_callables > 0
         || summary.prunable_items > 0
+        || summary.prunable_members > 0
         || summary.unclassified_callables > 0
         || summary.unclassified_items > 0
+        || summary.unclassified_members > 0
         || summary.unproven_trait_default_methods > 0
     {
         "failed".to_string()
@@ -2192,21 +2240,29 @@ fn collect_generated_rendered_items(
                     .extend(generated_rendered_call_references_in_block(&function.block));
             }
             syn::Item::Struct(item) => {
-                symbols.items.insert(generated_rendered_item_symbol_path(
+                let item_id = generated_rendered_item_symbol_path(
                     package,
                     module_path,
                     &item.ident.to_string(),
                     "Struct",
-                ));
+                );
+                symbols.items.insert(item_id.clone());
+                symbols
+                    .members
+                    .extend(generated_rendered_struct_members(&item_id, &item.fields));
                 record_generated_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Enum(item) => {
-                symbols.items.insert(generated_rendered_item_symbol_path(
+                let item_id = generated_rendered_item_symbol_path(
                     package,
                     module_path,
                     &item.ident.to_string(),
                     "Enum",
-                ));
+                );
+                symbols.items.insert(item_id.clone());
+                symbols
+                    .members
+                    .extend(generated_rendered_enum_members(&item_id, item));
                 record_generated_rendered_structural_modules(package, module_path, symbols);
             }
             syn::Item::Union(item) => {
@@ -2790,6 +2846,41 @@ fn generated_rendered_item_symbol_path(
         "{}({kind})",
         generated_rendered_symbol_path(package, module_path, name)
     )
+}
+
+fn generated_rendered_struct_members(parent: &str, fields: &syn::Fields) -> BTreeSet<String> {
+    let mut members = BTreeSet::new();
+    match fields {
+        syn::Fields::Named(fields) => {
+            for field in &fields.named {
+                let Some(name) = field.ident.as_ref().map(ToString::to_string) else {
+                    continue;
+                };
+                members.insert(generated_rendered_member_symbol_path(parent, &name));
+            }
+        }
+        syn::Fields::Unnamed(fields) => {
+            for index in 0..fields.unnamed.len() {
+                members.insert(generated_rendered_member_symbol_path(
+                    parent,
+                    &index.to_string(),
+                ));
+            }
+        }
+        syn::Fields::Unit => {}
+    }
+    members
+}
+
+fn generated_rendered_enum_members(parent: &str, item: &syn::ItemEnum) -> BTreeSet<String> {
+    item.variants
+        .iter()
+        .map(|variant| generated_rendered_member_symbol_path(parent, &variant.ident.to_string()))
+        .collect()
+}
+
+fn generated_rendered_member_symbol_path(parent: &str, member: &str) -> String {
+    format!("{parent}::{member}")
 }
 
 #[derive(Clone, Debug)]
@@ -3381,19 +3472,25 @@ fn add_rendered_symbol_proof_hazards(
     proof: &RenderedSymbolProofReport,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
-    if proof.summary.prunable_callables > 0 || proof.summary.prunable_items > 0 {
+    if proof.summary.prunable_callables > 0
+        || proof.summary.prunable_items > 0
+        || proof.summary.prunable_members > 0
+    {
         hazards.push(production_hazard_with_details(
             "rendered_prunable_symbols",
             "error",
-            "generated source still declares callables or items classified as prunable",
+            "generated source still declares callables, items, or members classified as prunable",
             rendered_symbol_proof_details(proof, "prunable"),
         ));
     }
-    if proof.summary.unclassified_callables > 0 || proof.summary.unclassified_items > 0 {
+    if proof.summary.unclassified_callables > 0
+        || proof.summary.unclassified_items > 0
+        || proof.summary.unclassified_members > 0
+    {
         hazards.push(production_hazard_with_details(
             "rendered_unclassified_symbols",
             "error",
-            "generated source declares callables or items missing used/unknown classification",
+            "generated source declares callables, items, or members missing used/unknown classification",
             rendered_symbol_proof_details(proof, "unclassified"),
         ));
     }
@@ -8547,17 +8644,22 @@ impl RenderedSymbolProofReportJson {
 struct RenderedSymbolProofSummaryJson {
     rendered_callables: usize,
     rendered_items: usize,
+    rendered_members: usize,
     rendered_trait_default_methods: usize,
     retained_callables: usize,
     retained_items: usize,
+    retained_members: usize,
     retained_trait_default_methods: usize,
     macro_blocked_callables: usize,
     surface_blocked_callables: usize,
+    blocked_members: usize,
     blocked_trait_default_methods: usize,
     prunable_callables: usize,
     prunable_items: usize,
+    prunable_members: usize,
     unclassified_callables: usize,
     unclassified_items: usize,
+    unclassified_members: usize,
     unproven_trait_default_methods: usize,
     source_parse_failures: usize,
 }
@@ -8567,17 +8669,22 @@ impl RenderedSymbolProofSummaryJson {
         Self {
             rendered_callables: summary.rendered_callables,
             rendered_items: summary.rendered_items,
+            rendered_members: summary.rendered_members,
             rendered_trait_default_methods: summary.rendered_trait_default_methods,
             retained_callables: summary.retained_callables,
             retained_items: summary.retained_items,
+            retained_members: summary.retained_members,
             retained_trait_default_methods: summary.retained_trait_default_methods,
             macro_blocked_callables: summary.macro_blocked_callables,
             surface_blocked_callables: summary.surface_blocked_callables,
+            blocked_members: summary.blocked_members,
             blocked_trait_default_methods: summary.blocked_trait_default_methods,
             prunable_callables: summary.prunable_callables,
             prunable_items: summary.prunable_items,
+            prunable_members: summary.prunable_members,
             unclassified_callables: summary.unclassified_callables,
             unclassified_items: summary.unclassified_items,
+            unclassified_members: summary.unclassified_members,
             unproven_trait_default_methods: summary.unproven_trait_default_methods,
             source_parse_failures: summary.source_parse_failures,
         }
@@ -9382,15 +9489,16 @@ mod tests {
         add_semantic_inventory_hazard, default_feature_closure, generate,
         generate_with_analyzer_feedback, generated_package_source_roots,
         production_hazard_with_details, production_readiness_status, public_reexport_proof_report,
-        rendered_symbol_proof_report, semantic_hazard_metrics, semantic_unresolved_details,
-        unknown_surface_category, usage_classification_report, usage_evidence_reason,
-        usage_guarded_render_reduction, write_generate_report, AnalyzerMode, AnalyzerReport,
-        CallableId, CheckDiagnostic, GenerateOptions, ItemId, ProductionHazardDetail,
-        PublicReexportProofEntry, PublicReexportProofReport, PublicReexportProofSummary,
-        RenderedSymbolProofEntry, RenderedSymbolProofReport, RenderedSymbolProofSummary,
-        SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
-        SemanticReport, SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic,
-        SemanticUnresolvedKind, SemanticUsageReport, UsageDecision, UsageDecisionIndex,
+        rendered_symbol_proof_report, rendered_symbol_proof_report_with_members,
+        semantic_hazard_metrics, semantic_unresolved_details, unknown_surface_category,
+        usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
+        write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
+        GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
+        PublicReexportProofReport, PublicReexportProofSummary, RenderedSymbolProofEntry,
+        RenderedSymbolProofReport, RenderedSymbolProofSummary, SemanticFileReport,
+        SemanticHazardScope, SemanticOwnerId, SemanticReductionHints, SemanticReport,
+        SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic, SemanticUnresolvedKind,
+        SemanticUsageReport, UsageDecision, UsageDecisionIndex,
     };
     use super::{manifest, parse, reduce, render};
 
@@ -11009,8 +11117,10 @@ theme = []
             summary: RenderedSymbolProofSummary {
                 prunable_callables: 1,
                 prunable_items: 1,
+                prunable_members: 1,
                 unclassified_callables: 1,
                 unclassified_items: 1,
+                unclassified_members: 1,
                 unproven_trait_default_methods: 1,
                 source_parse_failures: 1,
                 ..RenderedSymbolProofSummary::default()
@@ -11027,6 +11137,11 @@ theme = []
                     classification: "prunable".to_string(),
                 },
                 RenderedSymbolProofEntry {
+                    kind: "member".to_string(),
+                    id: "facade::DeadType(Struct)::dead_field".to_string(),
+                    classification: "prunable".to_string(),
+                },
+                RenderedSymbolProofEntry {
                     kind: "callable".to_string(),
                     id: "facade::escaped_fn".to_string(),
                     classification: "unclassified".to_string(),
@@ -11034,6 +11149,11 @@ theme = []
                 RenderedSymbolProofEntry {
                     kind: "item".to_string(),
                     id: "facade::EscapedType(Struct)".to_string(),
+                    classification: "unclassified".to_string(),
+                },
+                RenderedSymbolProofEntry {
+                    kind: "member".to_string(),
+                    id: "facade::EscapedType(Struct)::escaped_field".to_string(),
                     classification: "unclassified".to_string(),
                 },
                 RenderedSymbolProofEntry {
@@ -11065,7 +11185,7 @@ theme = []
                     detail
                         .blocked_idents
                         .iter()
-                        .any(|ident| ident == "facade::EscapedType(Struct)")
+                        .any(|ident| ident == "facade::EscapedType(Struct)::escaped_field")
                 })
         }));
         assert!(hazards.iter().any(|hazard| {
@@ -11353,6 +11473,104 @@ edition = "2021"
                 && entry.id == "module_case::generated(Mod)"
                 && entry.classification == "retained"
         }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_blocks_prunable_struct_members() {
+        let output = temp_output("rendered-symbol-prunable-struct-member");
+        write(
+            output.join("member_case/Cargo.toml"),
+            r#"[package]
+name = "member_case"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("member_case/src/lib.rs"),
+            r#"pub struct Live {
+    pub keep: u32,
+    pub dead: u32,
+}
+"#,
+        );
+        let live = ItemId {
+            package: "member_case".to_string(),
+            module_path: Vec::new(),
+            name: "Live".to_string(),
+            kind: ItemKind::Struct,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["member_case".to_string()]),
+            used_items: BTreeSet::from([live]),
+            ..UsageDecisionIndex::default()
+        };
+        let member_decisions = render::RenderedMemberDecisionIndex {
+            retained: BTreeSet::from(["member_case::Live(Struct)::keep".to_string()]),
+            prunable: BTreeSet::from(["member_case::Live(Struct)::dead".to_string()]),
+            ..render::RenderedMemberDecisionIndex::default()
+        };
+
+        let proof =
+            rendered_symbol_proof_report_with_members(&output, &decisions, &member_decisions);
+
+        assert_eq!(proof.status, "failed", "{proof:#?}");
+        assert_eq!(proof.summary.rendered_members, 2, "{proof:#?}");
+        assert_eq!(proof.summary.retained_members, 1, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_members, 1, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "member"
+                && entry.id == "member_case::Live(Struct)::dead"
+                && entry.classification == "prunable"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_allows_unknown_blocked_enum_members() {
+        let output = temp_output("rendered-symbol-blocked-enum-member");
+        write(
+            output.join("member_case/Cargo.toml"),
+            r#"[package]
+name = "member_case"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("member_case/src/lib.rs"),
+            r#"pub enum Live {
+    Keep,
+    MaybeMacroUsed,
+}
+"#,
+        );
+        let live = ItemId {
+            package: "member_case".to_string(),
+            module_path: Vec::new(),
+            name: "Live".to_string(),
+            kind: ItemKind::Enum,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["member_case".to_string()]),
+            blocked_by_unknown_items: BTreeSet::from([live]),
+            ..UsageDecisionIndex::default()
+        };
+        let member_decisions = render::RenderedMemberDecisionIndex {
+            blocked_by_unknown: BTreeSet::from([
+                "member_case::Live(Enum)::Keep".to_string(),
+                "member_case::Live(Enum)::MaybeMacroUsed".to_string(),
+            ]),
+            ..render::RenderedMemberDecisionIndex::default()
+        };
+
+        let proof =
+            rendered_symbol_proof_report_with_members(&output, &decisions, &member_decisions);
+
+        assert_eq!(proof.status, "proven", "{proof:#?}");
+        assert_eq!(proof.summary.rendered_members, 2, "{proof:#?}");
+        assert_eq!(proof.summary.blocked_members, 2, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_members, 0, "{proof:#?}");
+        assert_eq!(proof.summary.unclassified_members, 0, "{proof:#?}");
     }
 
     #[test]

@@ -22637,6 +22637,28 @@ fn assert_usage_contract(package_roots: &BTreeMap<String, PathBuf>, report: &Gen
             .intersection(&prunable_items)
             .collect::<Vec<_>>()
     );
+    assert_eq!(
+        report.usage.rendered_symbols.summary.prunable_members, 0,
+        "generated source still declares struct fields or enum variants classified as prunable: {:?}",
+        report
+            .usage
+            .rendered_symbols
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "member" && entry.classification == "prunable")
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        report.usage.rendered_symbols.summary.unclassified_members, 0,
+        "generated source declares struct fields or enum variants missing used/unknown classification: {:?}",
+        report
+            .usage
+            .rendered_symbols
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "member" && entry.classification == "unclassified")
+            .collect::<Vec<_>>()
+    );
     assert_public_reexport_contract(
         &rendered,
         &retained_callables,

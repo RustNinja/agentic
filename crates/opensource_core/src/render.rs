@@ -29,6 +29,13 @@ use crate::{
 const OUTPUT_MARKER: &str = ".slicers-output";
 const SUPPORT_PACKAGE_DIR: &str = "support";
 
+#[derive(Debug, Clone, Default)]
+pub(crate) struct RenderedMemberDecisionIndex {
+    pub(crate) retained: BTreeSet<String>,
+    pub(crate) blocked_by_unknown: BTreeSet<String>,
+    pub(crate) prunable: BTreeSet<String>,
+}
+
 struct RenderPlan {
     usage: UsageDecisionIndex,
     reachable_items: BTreeSet<ItemId>,
@@ -155,6 +162,129 @@ impl RenderPlan {
             .get(package)
             .is_some_and(|idents| idents.contains(ident))
     }
+}
+
+pub(crate) fn rendered_member_decision_index(
+    project: &Project,
+    reduced: &ReducedProject,
+    usage: &UsageDecisionIndex,
+) -> RenderedMemberDecisionIndex {
+    let render_plan = RenderPlan::build(project, reduced, usage);
+    let mut decisions = RenderedMemberDecisionIndex::default();
+
+    for (item_id, record) in &project.items {
+        if !reduced.packages.contains(&item_id.package) || !render_plan.item_should_render(item_id)
+        {
+            continue;
+        }
+        match &record.item {
+            Item::Struct(item_struct) => record_struct_member_decisions(
+                project,
+                reduced,
+                &render_plan,
+                usage,
+                item_id,
+                item_struct,
+                &mut decisions,
+            ),
+            Item::Enum(item_enum) => record_enum_member_decisions(
+                project,
+                reduced,
+                usage,
+                item_id,
+                item_enum,
+                &mut decisions,
+            ),
+            _ => {}
+        }
+    }
+
+    decisions
+}
+
+fn record_struct_member_decisions(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    usage: &UsageDecisionIndex,
+    item_id: &ItemId,
+    item_struct: &syn::ItemStruct,
+    decisions: &mut RenderedMemberDecisionIndex,
+) {
+    let parent_is_blocked = usage.is_blocked_by_unknown_item(item_id);
+    match &item_struct.fields {
+        Fields::Named(fields) => {
+            for field in &fields.named {
+                let Some(name) = field.ident.as_ref().map(ToString::to_string) else {
+                    continue;
+                };
+                let member = rendered_member_symbol_path(item_id, &name);
+                let should_remain = root_item_should_render(reduced, item_id)
+                    || struct_field_should_remain(
+                        project,
+                        reduced,
+                        Some(render_plan),
+                        &item_id.package,
+                        &item_id.module_path,
+                        item_struct,
+                        field,
+                    );
+                record_rendered_member_decision(
+                    decisions,
+                    member,
+                    should_remain,
+                    parent_is_blocked,
+                );
+            }
+        }
+        Fields::Unnamed(fields) => {
+            for (index, _field) in fields.unnamed.iter().enumerate() {
+                let member = rendered_member_symbol_path(item_id, &index.to_string());
+                record_rendered_member_decision(decisions, member, true, parent_is_blocked);
+            }
+        }
+        Fields::Unit => {}
+    }
+}
+
+fn record_enum_member_decisions(
+    project: &Project,
+    reduced: &ReducedProject,
+    usage: &UsageDecisionIndex,
+    item_id: &ItemId,
+    item_enum: &syn::ItemEnum,
+    decisions: &mut RenderedMemberDecisionIndex,
+) {
+    let parent_is_blocked = usage.is_blocked_by_unknown_item(item_id);
+    let preserves_full_surface = enum_preserves_full_variant_surface(reduced, item_id, item_enum);
+    for variant in &item_enum.variants {
+        let name = variant.ident.to_string();
+        let member = rendered_member_symbol_path(item_id, &name);
+        let should_remain = preserves_full_surface
+            || enum_variant_should_remain(project, reduced, &item_id.package, &name);
+        record_rendered_member_decision(decisions, member, should_remain, parent_is_blocked);
+    }
+}
+
+fn record_rendered_member_decision(
+    decisions: &mut RenderedMemberDecisionIndex,
+    member: String,
+    should_remain: bool,
+    parent_is_blocked: bool,
+) {
+    if should_remain {
+        if parent_is_blocked {
+            decisions.blocked_by_unknown.insert(member);
+        } else {
+            decisions.retained.insert(member);
+        }
+    } else {
+        decisions.prunable.insert(member);
+    }
+}
+
+fn rendered_member_symbol_path(item: &ItemId, member: &str) -> String {
+    format!("{item}::{member}")
 }
 
 fn reachable_trait_surface_should_render(
