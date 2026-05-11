@@ -1496,3 +1496,10 @@ scanning must recognize parseable call/method/macro expressions and generic
 type strings in addition to obvious item syntax. Otherwise a helper referenced
 only by generated expression source can be misclassified as unused and pruned
 before compiler feedback has a chance to validate the slice.
+
+Build scripts also assemble source with compile-time string macros. A fragmented
+`concat!("helper", "()", "\n")` payload is one generated Rust expression even
+though none of the individual literal fragments are meaningful Rust. The
+build-script scanner now evaluates literal-only `concat!` payloads before
+blocked-identifier scanning, keeping generated-source blockers scoped to the
+real helper names while still pruning unrelated dead siblings.

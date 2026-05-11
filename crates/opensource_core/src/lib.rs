@@ -7439,24 +7439,67 @@ fn source_text_is_expression_or_type_only(text: &str) -> bool {
 }
 
 fn collect_rust_source_string_literal_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
-    for token in tokens.clone() {
-        match token {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    let mut index = 0;
+    while index < tokens.len() {
+        if let (
+            Some(proc_macro2::TokenTree::Ident(ident)),
+            Some(proc_macro2::TokenTree::Punct(punct)),
+            Some(proc_macro2::TokenTree::Group(group)),
+        ) = (
+            tokens.get(index),
+            tokens.get(index + 1),
+            tokens.get(index + 2),
+        ) {
+            if ident == "concat" && punct.as_char() == '!' {
+                if let Some(value) = concat_macro_string_literal_value(&group.stream()) {
+                    if string_literal_may_contain_rust_source(&value) {
+                        idents.extend(source_text_blocked_idents(&value));
+                    }
+                }
+                collect_rust_source_string_literal_idents(&group.stream(), idents);
+                index += 3;
+                continue;
+            }
+        }
+
+        match &tokens[index] {
             proc_macro2::TokenTree::Literal(literal) => {
                 let Ok(literal) = syn::parse2::<syn::LitStr>(literal.to_token_stream()) else {
+                    index += 1;
                     continue;
                 };
                 let value = literal.value();
-                if !string_literal_may_contain_rust_source(&value) {
-                    continue;
+                if string_literal_may_contain_rust_source(&value) {
+                    idents.extend(source_text_blocked_idents(&value));
                 }
-                idents.extend(source_text_blocked_idents(&value));
             }
             proc_macro2::TokenTree::Group(group) => {
                 collect_rust_source_string_literal_idents(&group.stream(), idents);
             }
             proc_macro2::TokenTree::Ident(_) | proc_macro2::TokenTree::Punct(_) => {}
         }
+        index += 1;
     }
+}
+
+fn concat_macro_string_literal_value(tokens: &TokenStream) -> Option<String> {
+    let mut value = String::new();
+    let mut saw_literal = false;
+    for token in tokens.clone() {
+        match token {
+            proc_macro2::TokenTree::Literal(literal) => {
+                let literal = syn::parse2::<syn::LitStr>(literal.to_token_stream()).ok()?;
+                value.push_str(&literal.value());
+                saw_literal = true;
+            }
+            proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ',' => {}
+            proc_macro2::TokenTree::Group(_)
+            | proc_macro2::TokenTree::Ident(_)
+            | proc_macro2::TokenTree::Punct(_) => return None,
+        }
+    }
+    saw_literal.then_some(value)
 }
 
 fn string_literal_may_contain_rust_source(value: &str) -> bool {
