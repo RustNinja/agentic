@@ -101,6 +101,9 @@ gate, giving batch/mining runs a direct failure signal when a slice leaks a
 rendered `prunable` or `unclassified` symbol.
 Batch JSONL rows also include rendered usage counts and use
 `rendered_usage_failed` for roots rejected by this contract.
+Empty generated root-level `fn main() {}` stubs are classified as structural
+used scaffolding for retained bin targets; non-empty `main` bodies still need
+normal used/unknown proof.
 
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust

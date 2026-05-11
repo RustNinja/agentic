@@ -1378,6 +1378,11 @@ Batch/mining rows now carry `rendered_usage_used`,
 `rendered_usage_blocked_by_unknown`, and `rendered_usage_invalid`, and a root
 returns `rendered_usage_failed` before preflight/check when the final rendered
 contract is broken.
+The first real Litter run through that gate found a generic binary-target
+scaffolding edge: slicing `codex-tui::theme::health_color` needs an empty
+generated `fn main() {}` so the retained bin target remains checkable. That
+synthetic root-level empty `main` is now treated as structural rendered
+scaffolding instead of leaked prunable user logic.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

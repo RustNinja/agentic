@@ -2475,6 +2475,7 @@ struct GeneratedRenderedSymbols {
     assoc_items: BTreeSet<String>,
     module_items: BTreeSet<String>,
     structural_module_items: BTreeSet<String>,
+    structural_callables: BTreeSet<String>,
     macro_blocked_callables: BTreeSet<String>,
     surface_blocked_callables: BTreeSet<String>,
     trait_required_methods: BTreeMap<String, BTreeSet<String>>,
@@ -2541,6 +2542,9 @@ fn rendered_symbol_proof_report_with_members(
 
     for callable in &rendered.callables {
         let classification = if retained_callables.contains(callable) {
+            summary.retained_callables += 1;
+            "retained"
+        } else if rendered.structural_callables.contains(callable) {
             summary.retained_callables += 1;
             "retained"
         } else if rendered.macro_blocked_callables.contains(callable) {
@@ -2732,6 +2736,9 @@ fn collect_generated_rendered_items(
                 );
                 if generated_rendered_fn_is_proc_macro_export(function) {
                     symbols.macro_blocked_callables.insert(callable.clone());
+                }
+                if generated_rendered_fn_is_structural_main(function, module_path) {
+                    symbols.structural_callables.insert(callable.clone());
                 }
                 symbols.callables.insert(callable);
                 symbols
@@ -3061,6 +3068,16 @@ fn generated_rendered_fn_is_proc_macro_export(function: &syn::ItemFn) -> bool {
             || attr.path().is_ident("proc_macro_attribute")
             || attr.path().is_ident("proc_macro_derive")
     })
+}
+
+fn generated_rendered_fn_is_structural_main(
+    function: &syn::ItemFn,
+    module_path: &[String],
+) -> bool {
+    module_path.is_empty()
+        && function.sig.ident == "main"
+        && function.block.stmts.is_empty()
+        && function.sig.inputs.is_empty()
 }
 
 fn generated_rendered_item_macro_is_source_include(item: &syn::ItemMacro) -> bool {
@@ -12620,6 +12637,46 @@ pub fn live_attr(_attr: TokenStream, item: TokenStream) -> TokenStream {
             entry.kind == "callable"
                 && entry.id == "proc_helpers::live_attr"
                 && entry.classification == "blocked_by_unknown"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_treats_empty_binary_main_as_structural() {
+        let output = temp_output("rendered-symbol-empty-main");
+        write(
+            output.join("app/Cargo.toml"),
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "app"
+path = "src/main.rs"
+"#,
+        );
+        write(output.join("app/src/main.rs"), "fn main() {}\n");
+        let main = CallableId::Free {
+            package: "app".to_string(),
+            module_path: Vec::new(),
+            name: "main".to_string(),
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["app".to_string()]),
+            prunable_callables: BTreeSet::from([main]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = rendered_symbol_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "proven", "{proof:#?}");
+        assert_eq!(proof.summary.rendered_callables, 1, "{proof:#?}");
+        assert_eq!(proof.summary.retained_callables, 1, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_callables, 0, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "callable"
+                && entry.id == "app::main"
+                && entry.classification == "retained"
         }));
     }
 
