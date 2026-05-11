@@ -118,6 +118,9 @@ Retained macro-bearing items must carry their macro contract:
 - resolve module-qualified proc-macro helper calls through the local helper
   module graph, so expansion evidence can follow real builder modules without
   broadening to same-named helpers in unrelated modules;
+- resolve local proc-macro helper `use` aliases and globs before following
+  helper calls, because proc-macro crates often re-name builder functions at the
+  export boundary;
 - treat proc-macro attributes on rendered module boundaries and inline impl
   blocks as part of the macro contract when nested reachable code or reachable
   methods force that surface to render;

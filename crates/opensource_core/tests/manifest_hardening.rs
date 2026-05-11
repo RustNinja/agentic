@@ -14532,12 +14532,13 @@ quote = "1"
 use proc_macro::TokenStream;
 
 mod builders;
+use builders::live_tokens as render_live;
 
 #[proc_macro_derive(LiveDerive)]
 pub fn live_derive(_input: TokenStream) -> TokenStream {
     let dead_tokens = proc_macro2::TokenStream::new();
     let _ = dead_tokens;
-    builders::live_tokens().into()
+    render_live().into()
 }
 
 #[proc_macro_derive(DeadDerive)]

@@ -2501,6 +2501,10 @@ fn support_proc_macro_expansions(
     for module in modules.values() {
         collect_proc_macro_function_bodies(module, &mut function_bodies, &mut exports);
     }
+    let mut function_aliases = BTreeMap::<Vec<String>, Vec<String>>::new();
+    for module in modules.values() {
+        collect_proc_macro_helper_aliases(module, &function_bodies, &mut function_aliases);
+    }
 
     let mut expansions = Vec::new();
     for (export_name, function_path, body) in exports {
@@ -2511,6 +2515,7 @@ fn support_proc_macro_expansions(
             &body,
             &current_module_path,
             &function_bodies,
+            &function_aliases,
             &mut visited_functions,
             &mut quote_bodies,
         );
@@ -2569,6 +2574,117 @@ fn collect_proc_macro_function_bodies(
     }
 }
 
+fn collect_proc_macro_helper_aliases(
+    module: &SupportModuleSource,
+    function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+    aliases: &mut BTreeMap<Vec<String>, Vec<String>>,
+) {
+    for item in &module.syntax.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_proc_macro_helper_aliases_from_use_tree(
+            &item_use.tree,
+            Vec::new(),
+            &module.module_path,
+            function_bodies,
+            aliases,
+        );
+    }
+}
+
+fn collect_proc_macro_helper_aliases_from_use_tree(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    current_module_path: &[String],
+    function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+    aliases: &mut BTreeMap<Vec<String>, Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_proc_macro_helper_aliases_from_use_tree(
+                &path.tree,
+                prefix,
+                current_module_path,
+                function_bodies,
+                aliases,
+            );
+        }
+        UseTree::Name(name) => {
+            let mut target_segments = prefix;
+            target_segments.push(name.ident.to_string());
+            record_proc_macro_helper_alias(
+                current_module_path,
+                &target_segments,
+                &name.ident.to_string(),
+                function_bodies,
+                aliases,
+            );
+        }
+        UseTree::Rename(rename) => {
+            let mut target_segments = prefix;
+            target_segments.push(rename.ident.to_string());
+            record_proc_macro_helper_alias(
+                current_module_path,
+                &target_segments,
+                &rename.rename.to_string(),
+                function_bodies,
+                aliases,
+            );
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_proc_macro_helper_aliases_from_use_tree(
+                    nested,
+                    prefix.clone(),
+                    current_module_path,
+                    function_bodies,
+                    aliases,
+                );
+            }
+        }
+        UseTree::Glob(_) => {
+            let Some(target_module_path) =
+                normalize_proc_macro_helper_call_path(current_module_path, &prefix)
+            else {
+                return;
+            };
+            for function_path in function_bodies.keys() {
+                let Some((function_name, function_module_path)) = function_path.split_last() else {
+                    continue;
+                };
+                if function_module_path != target_module_path.as_slice() {
+                    continue;
+                }
+                let mut alias_path = current_module_path.to_vec();
+                alias_path.push(function_name.clone());
+                aliases.insert(alias_path, function_path.clone());
+            }
+        }
+    }
+}
+
+fn record_proc_macro_helper_alias(
+    current_module_path: &[String],
+    target_segments: &[String],
+    visible_name: &str,
+    function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+    aliases: &mut BTreeMap<Vec<String>, Vec<String>>,
+) {
+    let Some(target_path) =
+        normalize_proc_macro_helper_call_path(current_module_path, target_segments)
+    else {
+        return;
+    };
+    if !function_bodies.contains_key(&target_path) {
+        return;
+    }
+    let mut alias_path = current_module_path.to_vec();
+    alias_path.push(visible_name.to_string());
+    aliases.insert(alias_path, target_path);
+}
+
 fn proc_macro_export_name(attr: &syn::Attribute, fn_ident: &syn::Ident) -> Option<String> {
     if attr.path().is_ident("proc_macro") || attr.path().is_ident("proc_macro_attribute") {
         return Some(fn_ident.to_string());
@@ -2622,13 +2738,18 @@ fn collect_reachable_macro_expansion_quote_bodies(
     tokens: &TokenStream,
     current_module_path: &[String],
     function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+    function_aliases: &BTreeMap<Vec<String>, Vec<String>>,
     visited_functions: &mut BTreeSet<Vec<String>>,
     bodies: &mut Vec<TokenStream>,
 ) {
     collect_macro_expansion_quote_bodies(tokens, bodies);
 
-    let function_names =
-        collect_called_proc_macro_helper_names(tokens, current_module_path, function_bodies);
+    let function_names = collect_called_proc_macro_helper_names(
+        tokens,
+        current_module_path,
+        function_bodies,
+        function_aliases,
+    );
 
     for function_path in function_names {
         if !visited_functions.insert(function_path.clone()) {
@@ -2642,6 +2763,7 @@ fn collect_reachable_macro_expansion_quote_bodies(
             body,
             &helper_module_path,
             function_bodies,
+            function_aliases,
             visited_functions,
             bodies,
         );
@@ -2652,6 +2774,7 @@ fn collect_called_proc_macro_helper_names(
     tokens: &TokenStream,
     current_module_path: &[String],
     function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+    function_aliases: &BTreeMap<Vec<String>, Vec<String>>,
 ) -> Vec<Vec<String>> {
     let Ok(block) = syn::parse2::<Block>(tokens.clone()) else {
         return Vec::new();
@@ -2659,6 +2782,7 @@ fn collect_called_proc_macro_helper_names(
     let mut visitor = ProcMacroHelperCallVisitor {
         current_module_path,
         function_bodies,
+        function_aliases,
         names: BTreeSet::new(),
     };
     visitor.visit_block(&block);
@@ -2668,6 +2792,7 @@ fn collect_called_proc_macro_helper_names(
 struct ProcMacroHelperCallVisitor<'a> {
     current_module_path: &'a [String],
     function_bodies: &'a BTreeMap<Vec<String>, TokenStream>,
+    function_aliases: &'a BTreeMap<Vec<String>, Vec<String>>,
     names: BTreeSet<Vec<String>>,
 }
 
@@ -2677,6 +2802,7 @@ impl<'ast> Visit<'ast> for ProcMacroHelperCallVisitor<'_> {
             &node.func,
             self.current_module_path,
             self.function_bodies,
+            self.function_aliases,
         ) {
             self.names.insert(path);
         }
@@ -2688,6 +2814,7 @@ fn local_proc_macro_helper_call_path(
     func: &Expr,
     current_module_path: &[String],
     function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+    function_aliases: &BTreeMap<Vec<String>, Vec<String>>,
 ) -> Option<Vec<String>> {
     let Expr::Path(expr_path) = func else {
         return None;
@@ -2703,9 +2830,10 @@ fn local_proc_macro_helper_call_path(
         .map(|segment| segment.ident.to_string())
         .collect::<Vec<_>>();
     let candidate = normalize_proc_macro_helper_call_path(current_module_path, &segments)?;
-    function_bodies
-        .contains_key(&candidate)
-        .then_some(candidate)
+    if function_bodies.contains_key(&candidate) {
+        return Some(candidate);
+    }
+    function_aliases.get(&candidate).cloned()
 }
 
 fn normalize_proc_macro_helper_call_path(
