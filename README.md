@@ -124,6 +124,10 @@ per selected root under the output directory. Each row is written to
 the generated `cargo check` is scoped to the root package. Batch feedback uses a
 shared target directory under the batch output by default, or the explicit
 `--feedback-target-dir`, so dependency builds are reused across roots.
+Rows also include rendered usage contract counts and RA semantic budget coverage
+(`semantic_*` and `selected_root_*` counters), so mining can separate clean,
+well-proven slices from accepted slices that still spent or skipped too much
+semantic analysis.
 
 ```sh
 cargo run -p opensource_cli --bin slicers -- \
@@ -146,7 +150,9 @@ workspace crates with dependency crates excluded by default; external
 correctness is still checked by Cargo/rustc feedback.
 Files containing selected `#[opensourced]` roots are analyzed first so bounded
 semantic budgets are spent on the active slice before wider workspace
-inventory.
+inventory. Batch reports expose the configured file/method/path budgets and the
+unresolved/unqueried selected-root counters to make budget exhaustion visible in
+the fast mining loop.
 
 ```sh
 cargo run -p opensource_cli --bin slicers -- \

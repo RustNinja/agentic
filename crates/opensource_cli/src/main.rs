@@ -490,6 +490,25 @@ struct BatchRootReport {
     rendered_usage_used: Option<usize>,
     rendered_usage_blocked_by_unknown: Option<usize>,
     rendered_usage_invalid: Option<usize>,
+    semantic_file_budget: Option<usize>,
+    semantic_method_call_budget: Option<usize>,
+    semantic_path_budget: Option<usize>,
+    semantic_source_files: Option<usize>,
+    semantic_analyzed_files: Option<usize>,
+    semantic_failed_files: Option<usize>,
+    semantic_skipped_files: Option<usize>,
+    semantic_unresolved_method_calls: Option<usize>,
+    semantic_unqueried_method_calls: Option<usize>,
+    semantic_unresolved_paths: Option<usize>,
+    semantic_unqueried_paths: Option<usize>,
+    selected_root_semantic_source_files: Option<usize>,
+    selected_root_semantic_analyzed_files: Option<usize>,
+    selected_root_semantic_failed_files: Option<usize>,
+    selected_root_semantic_skipped_files: Option<usize>,
+    selected_root_unresolved_method_calls: Option<usize>,
+    selected_root_unqueried_method_calls: Option<usize>,
+    selected_root_unresolved_paths: Option<usize>,
+    selected_root_unqueried_paths: Option<usize>,
     preflight_errors: Option<usize>,
     preflight_warnings: Option<usize>,
     check_success: Option<bool>,
@@ -951,6 +970,25 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 rendered_usage_used: None,
                 rendered_usage_blocked_by_unknown: None,
                 rendered_usage_invalid: None,
+                semantic_file_budget: None,
+                semantic_method_call_budget: None,
+                semantic_path_budget: None,
+                semantic_source_files: None,
+                semantic_analyzed_files: None,
+                semantic_failed_files: None,
+                semantic_skipped_files: None,
+                semantic_unresolved_method_calls: None,
+                semantic_unqueried_method_calls: None,
+                semantic_unresolved_paths: None,
+                semantic_unqueried_paths: None,
+                selected_root_semantic_source_files: None,
+                selected_root_semantic_analyzed_files: None,
+                selected_root_semantic_failed_files: None,
+                selected_root_semantic_skipped_files: None,
+                selected_root_unresolved_method_calls: None,
+                selected_root_unqueried_method_calls: None,
+                selected_root_unresolved_paths: None,
+                selected_root_unqueried_paths: None,
                 preflight_errors: None,
                 preflight_warnings: None,
                 check_success: None,
@@ -1223,6 +1261,7 @@ fn batch_row_from_reports(
     error: Option<String>,
 ) -> BatchRootReport {
     let rendered_usage = report.map(rendered_usage_contract);
+    let semantic = report.and_then(|report| report.analyzer.semantic.as_ref());
     BatchRootReport {
         root: root.to_string(),
         output_root: output_root.to_path_buf(),
@@ -1237,6 +1276,33 @@ fn batch_row_from_reports(
         rendered_usage_invalid: rendered_usage
             .as_ref()
             .map(|contract| contract.invalid.len()),
+        semantic_file_budget: semantic.map(|semantic| semantic.file_budget),
+        semantic_method_call_budget: semantic.map(|semantic| semantic.method_call_budget),
+        semantic_path_budget: semantic.map(|semantic| semantic.path_budget),
+        semantic_source_files: semantic.map(|semantic| semantic.source_files),
+        semantic_analyzed_files: semantic.map(|semantic| semantic.analyzed_files),
+        semantic_failed_files: semantic.map(|semantic| semantic.failed_files),
+        semantic_skipped_files: semantic.map(|semantic| semantic.skipped_files),
+        semantic_unresolved_method_calls: semantic.map(|semantic| semantic.unresolved_method_calls),
+        semantic_unqueried_method_calls: semantic.map(|semantic| semantic.unqueried_method_calls),
+        semantic_unresolved_paths: semantic.map(|semantic| semantic.unresolved_paths),
+        semantic_unqueried_paths: semantic.map(|semantic| semantic.unqueried_paths),
+        selected_root_semantic_source_files: semantic
+            .map(|semantic| semantic.selected_root_source_files),
+        selected_root_semantic_analyzed_files: semantic
+            .map(|semantic| semantic.selected_root_analyzed_files),
+        selected_root_semantic_failed_files: semantic
+            .map(|semantic| semantic.selected_root_failed_files),
+        selected_root_semantic_skipped_files: semantic
+            .map(|semantic| semantic.selected_root_skipped_files),
+        selected_root_unresolved_method_calls: semantic
+            .map(|semantic| semantic.selected_root_unresolved_method_calls),
+        selected_root_unqueried_method_calls: semantic
+            .map(|semantic| semantic.selected_root_unqueried_method_calls),
+        selected_root_unresolved_paths: semantic
+            .map(|semantic| semantic.selected_root_unresolved_paths),
+        selected_root_unqueried_paths: semantic
+            .map(|semantic| semantic.selected_root_unqueried_paths),
         preflight_errors: preflight.map(PreflightReport::error_count),
         preflight_warnings: preflight.map(PreflightReport::warning_count),
         check_success: check.map(|check| check.success),

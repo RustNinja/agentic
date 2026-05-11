@@ -1383,6 +1383,12 @@ scaffolding edge: slicing `codex-tui::theme::health_color` needs an empty
 generated `fn main() {}` so the retained bin target remains checkable. That
 synthetic root-level empty `main` is now treated as structural rendered
 scaffolding instead of leaked prunable user logic.
+That same Litter run accepted cleanly but also showed that production status can
+hide RA budget pressure: only part of the workspace semantic inventory was
+queried before the slice built. Batch reports now serialize semantic budgets,
+workspace analyzed/skipped counts, and selected-root unresolved/unqueried counts
+so mining can rank accepted slices by proof quality instead of only by compiler
+success.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

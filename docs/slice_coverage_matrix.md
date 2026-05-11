@@ -104,6 +104,11 @@ Batch JSONL rows also include rendered usage counts and use
 Empty generated root-level `fn main() {}` stubs are classified as structural
 used scaffolding for retained bin targets; non-empty `main` bodies still need
 normal used/unknown proof.
+Batch JSONL rows now also expose RA semantic budget coverage, including
+configured file/method/path budgets, analyzed/skipped files, unresolved and
+unqueried method/path counts, and selected-root counters. This lets fixture and
+real-repo mining treat an accepted-but-under-analyzed slice as a next-priority
+production gap instead of a silent success.
 
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust
