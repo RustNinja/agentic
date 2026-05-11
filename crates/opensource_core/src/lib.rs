@@ -1119,8 +1119,11 @@ pub fn generate_with_analyzer_feedback_and_roots(
     feedback_diagnostics: &[feedback::CheckDiagnostic],
     root_selectors: &[String],
 ) -> Result<GenerateReport, Box<dyn std::error::Error>> {
-    let session = GenerateSession::load(&options.workspace_root, analyzer_mode)?;
-    let roots = session.resolve_root_selectors(root_selectors)?;
+    let (session, roots) = GenerateSession::load_with_root_selectors(
+        &options.workspace_root,
+        analyzer_mode,
+        root_selectors,
+    )?;
     session.generate(options.output_root, &roots, feedback_diagnostics)
 }
 
@@ -1129,16 +1132,22 @@ impl GenerateSession {
         workspace_root: &Path,
         analyzer_mode: AnalyzerMode,
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let phase_started = Instant::now();
-        let workspace = manifest::load_workspace(workspace_root)?;
-        let manifest_ms = elapsed_ms(phase_started);
+        Self::load_with_selected_roots(workspace_root, analyzer_mode, &[])
+    }
 
+    pub fn load_with_selected_roots(
+        workspace_root: &Path,
+        analyzer_mode: AnalyzerMode,
+        selected_roots: &[RootId],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (project, manifest_ms, parse_ms) = load_project(workspace_root)?;
         let phase_started = Instant::now();
-        let project = parse::parse_workspace(workspace)?;
-        let parse_ms = elapsed_ms(phase_started);
-
-        let phase_started = Instant::now();
-        let analyzer = analyzer::load_report_for_project(workspace_root, analyzer_mode, &project)?;
+        let analyzer = analyzer::load_report_for_project_and_roots(
+            workspace_root,
+            analyzer_mode,
+            &project,
+            selected_roots,
+        )?;
         let analyzer_ms = elapsed_ms(phase_started);
 
         Ok(Self {
@@ -1151,6 +1160,32 @@ impl GenerateSession {
         })
     }
 
+    pub fn load_with_root_selectors(
+        workspace_root: &Path,
+        analyzer_mode: AnalyzerMode,
+        root_selectors: &[String],
+    ) -> Result<(Self, Vec<RootId>), Box<dyn std::error::Error>> {
+        let (project, manifest_ms, parse_ms) = load_project(workspace_root)?;
+        let roots = resolve_root_selectors_in_project(&project, root_selectors)?;
+        let phase_started = Instant::now();
+        let analyzer = analyzer::load_report_for_project_and_roots(
+            workspace_root,
+            analyzer_mode,
+            &project,
+            &roots,
+        )?;
+        let analyzer_ms = elapsed_ms(phase_started);
+        let session = Self {
+            workspace_root: workspace_root.to_path_buf(),
+            project,
+            analyzer,
+            manifest_ms,
+            parse_ms,
+            analyzer_ms,
+        };
+        Ok((session, roots))
+    }
+
     pub fn workspace_root(&self) -> &Path {
         &self.workspace_root
     }
@@ -1160,70 +1195,21 @@ impl GenerateSession {
     }
 
     pub fn selectable_roots(&self) -> Vec<RootId> {
-        let mut roots = self
-            .project
-            .functions
-            .keys()
-            .cloned()
-            .map(RootId::Callable)
-            .chain(self.project.methods.keys().cloned().map(RootId::Callable))
-            .chain(self.project.items.keys().cloned().map(RootId::Item))
-            .collect::<Vec<_>>();
-        roots.sort();
-        roots.dedup();
-        roots
+        selectable_roots_for_project(&self.project)
     }
 
     pub fn resolve_root_selectors(
         &self,
         selectors: &[String],
     ) -> Result<Vec<RootId>, Box<dyn std::error::Error>> {
-        let mut roots = Vec::new();
-        let mut seen = BTreeSet::new();
-        for selector in selectors {
-            let root = self.resolve_root_selector(selector)?;
-            if seen.insert(root.clone()) {
-                roots.push(root);
-            }
-        }
-        Ok(roots)
+        resolve_root_selectors_in_project(&self.project, selectors)
     }
 
     pub fn resolve_root_selector(
         &self,
         selector: &str,
     ) -> Result<RootId, Box<dyn std::error::Error>> {
-        let selector = selector.trim();
-        if selector.is_empty() {
-            return Err("root selector must not be empty".into());
-        }
-        let mut matches = self
-            .selectable_roots()
-            .into_iter()
-            .filter(|root| root_matches_selector(root, selector))
-            .collect::<Vec<_>>();
-        matches.sort();
-        matches.dedup();
-        match matches.as_slice() {
-            [root] => Ok(root.clone()),
-            [] => Err(format!(
-                "root selector {selector:?} did not match any function, method, or item"
-            )
-            .into()),
-            _ => {
-                let preview = matches
-                    .iter()
-                    .take(12)
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join(", ");
-                Err(format!(
-                    "root selector {selector:?} is ambiguous ({} matches): {preview}",
-                    matches.len()
-                )
-                .into())
-            }
-        }
+        resolve_root_selector_in_project(&self.project, selector)
     }
 
     pub fn generate(
@@ -1245,6 +1231,83 @@ impl GenerateSession {
             feedback_diagnostics,
         )
     }
+}
+
+fn load_project(workspace_root: &Path) -> Result<(Project, u64, u64), Box<dyn std::error::Error>> {
+    let phase_started = Instant::now();
+    let workspace = manifest::load_workspace(workspace_root)?;
+    let manifest_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
+    let project = parse::parse_workspace(workspace)?;
+    let parse_ms = elapsed_ms(phase_started);
+
+    Ok((project, manifest_ms, parse_ms))
+}
+
+fn resolve_root_selectors_in_project(
+    project: &Project,
+    selectors: &[String],
+) -> Result<Vec<RootId>, Box<dyn std::error::Error>> {
+    let mut roots = Vec::new();
+    let mut seen = BTreeSet::new();
+    for selector in selectors {
+        let root = resolve_root_selector_in_project(project, selector)?;
+        if seen.insert(root.clone()) {
+            roots.push(root);
+        }
+    }
+    Ok(roots)
+}
+
+fn resolve_root_selector_in_project(
+    project: &Project,
+    selector: &str,
+) -> Result<RootId, Box<dyn std::error::Error>> {
+    let selector = selector.trim();
+    if selector.is_empty() {
+        return Err("root selector must not be empty".into());
+    }
+    let mut matches = selectable_roots_for_project(project)
+        .into_iter()
+        .filter(|root| root_matches_selector(root, selector))
+        .collect::<Vec<_>>();
+    matches.sort();
+    matches.dedup();
+    match matches.as_slice() {
+        [root] => Ok(root.clone()),
+        [] => Err(format!(
+            "root selector {selector:?} did not match any function, method, or item"
+        )
+        .into()),
+        _ => {
+            let preview = matches
+                .iter()
+                .take(12)
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(format!(
+                "root selector {selector:?} is ambiguous ({} matches): {preview}",
+                matches.len()
+            )
+            .into())
+        }
+    }
+}
+
+fn selectable_roots_for_project(project: &Project) -> Vec<RootId> {
+    let mut roots = project
+        .functions
+        .keys()
+        .cloned()
+        .map(RootId::Callable)
+        .chain(project.methods.keys().cloned().map(RootId::Callable))
+        .chain(project.items.keys().cloned().map(RootId::Item))
+        .collect::<Vec<_>>();
+    roots.sort();
+    roots.dedup();
+    roots
 }
 
 struct GenerateLoadedOptions {
@@ -10836,8 +10899,6 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    #[cfg(feature = "ra-hir")]
-    use super::generate_with_analyzer;
     use super::model::ItemKind;
     use super::non_benign_unresolved_count;
     use super::{
@@ -10856,6 +10917,8 @@ mod tests {
         SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic, SemanticUnresolvedKind,
         SemanticUsageReport, UsageDecision, UsageDecisionIndex,
     };
+    #[cfg(feature = "ra-hir")]
+    use super::{generate_with_analyzer, generate_with_analyzer_roots};
     use super::{manifest, parse, reduce, render};
 
     #[test]
@@ -13568,6 +13631,58 @@ pub fn entry(service: Service) -> u32 {
             .hazards
             .iter()
             .any(|hazard| hazard.code == "semantic_inventory_not_applied"));
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
+    fn explicit_root_selectors_focus_ra_selected_root_inventory() {
+        let root = temp_output("ra-explicit-root-source");
+        let output = temp_output("ra-explicit-root-output");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"
+pub struct Service;
+
+impl Service {
+    pub fn selected(&self) -> u32 {
+        1
+    }
+}
+
+pub fn entry(service: Service) -> u32 {
+    service.selected()
+}
+"#,
+        );
+
+        let report = generate_with_analyzer_roots(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output,
+            },
+            AnalyzerMode::RustAnalyzerHir,
+            &["app::entry".to_string()],
+        )
+        .expect("RA-backed explicit-root generation should succeed");
+        let semantic = report
+            .analyzer
+            .semantic
+            .as_ref()
+            .expect("RA-backed generation should report semantic inventory");
+
+        assert_eq!(semantic.selected_root_source_files, 1);
+        assert_eq!(semantic.selected_root_analyzed_files, 1);
+        assert_eq!(semantic.selected_root_skipped_files, 0);
+        assert_eq!(semantic.selected_root_unqueried_method_calls, 0);
+        assert_eq!(semantic.selected_root_unqueried_paths, 0);
     }
 
     #[test]

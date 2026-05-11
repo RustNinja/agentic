@@ -1397,6 +1397,15 @@ selected-root methods/paths reject a production slice before compiler feedback.
 Workspace-wide budget limits remain non-fatal when the selected root itself was
 fully queried, because the top-down contract is about proving the retained
 closure from the selected roots first.
+Real Litter production batch then exposed the next workflow gap: rootless batch
+selectors were resolved after the shared RA analyzer had already run, so
+selected-root semantic proof stayed empty and production failed with a generic
+workspace budget limit. Explicit selectors now flow into RA semantic indexing
+before analysis, including batch mode, so selected-root files are prioritized
+and reported for rootless CLI slices. The same probe exposed batch-only locked
+validation drift; batch roots now reconcile their generated lockfiles before
+`--locked` feedback, trying Cargo's offline resolver first so cached real-project
+deps can validate without network.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

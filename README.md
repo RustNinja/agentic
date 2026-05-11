@@ -124,6 +124,9 @@ per selected root under the output directory. Each row is written to
 the generated `cargo check` is scoped to the root package. Batch feedback uses a
 shared target directory under the batch output by default, or the explicit
 `--feedback-target-dir`, so dependency builds are reused across roots.
+Production batch validation also reconciles each generated `Cargo.lock` before
+running locked checks, using Cargo's offline resolver first and falling back to
+online resolution only when the user did not request `--offline`/`--frozen`.
 Rows also include rendered usage contract counts and RA semantic budget coverage
 (`semantic_*` and `selected_root_*` counters), so mining can separate clean,
 well-proven slices from accepted slices that still spent or skipped too much

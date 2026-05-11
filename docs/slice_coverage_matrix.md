@@ -114,6 +114,11 @@ selected-root-limited, or explicit failed/limited states.
 The production preset now gates on that selected-root proof: a slice can pass
 with wider workspace budget limits only when the selected root files were
 analyzed and have no unqueried selected-root methods or paths.
+Rootless explicit selectors now participate in that proof before RA analysis,
+including batch mode, so selected-root files are visible even when the source
+does not contain `#[opensourced]` markers. Batch production validation also
+reconciles generated lockfiles before locked feedback, preferring offline lock
+resolution and falling back online only when allowed.
 
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust

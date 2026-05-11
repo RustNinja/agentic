@@ -915,20 +915,14 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
         None
     };
 
-    let session = GenerateSession::load(&options.workspace_root, options.analyzer_mode)?;
-    println!(
-        "analyzer: {} ({})",
-        session.analyzer().mode.as_str(),
-        session.analyzer().engine
-    );
-    for note in &session.analyzer().notes {
-        println!("  analyzer note: {note}");
-    }
-
-    let mut roots = session.resolve_root_selectors(&options.root_selectors)?;
+    let resolver_session = GenerateSession::load(&options.workspace_root, AnalyzerMode::Syn)?;
+    let mut roots = resolver_session.resolve_root_selectors(&options.root_selectors)?;
     if let Some(count) = options.random_roots {
         roots.extend(select_random_roots(
-            random_root_candidates(session.selectable_roots(), &options.random_root_packages),
+            random_root_candidates(
+                resolver_session.selectable_roots(),
+                &options.random_root_packages,
+            ),
             count,
             options.random_seed,
         ));
@@ -940,6 +934,24 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
             "--batch-roots requires at least one --root, --roots-file entry, or --random-roots"
                 .into(),
         );
+    }
+
+    let session = if options.analyzer_mode == AnalyzerMode::Syn {
+        resolver_session
+    } else {
+        GenerateSession::load_with_selected_roots(
+            &options.workspace_root,
+            options.analyzer_mode,
+            &roots,
+        )?
+    };
+    println!(
+        "analyzer: {} ({})",
+        session.analyzer().mode.as_str(),
+        session.analyzer().engine
+    );
+    for note in &session.analyzer().notes {
+        println!("  analyzer note: {note}");
     }
 
     println!(
@@ -1075,6 +1087,17 @@ fn run_batch_root(
                 last_preflight.as_ref(),
                 None,
                 Some(reason),
+            ));
+        }
+        if let Err(error) = refresh_generated_lockfile_for_output(options, output_root) {
+            return Ok(batch_row_from_reports(
+                root,
+                output_root,
+                "lockfile_failed",
+                last_report.as_ref(),
+                last_preflight.as_ref(),
+                None,
+                Some(error.to_string()),
             ));
         }
 
@@ -1818,74 +1841,90 @@ fn refresh_generated_lockfile_for_locked_validation(
     options: &CliOptions,
     validation: &mut ValidationReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    match refresh_generated_lockfile_for_output(options, &options.output_root) {
+        Ok(Some(lockfile_path)) => {
+            println!("lockfile: generated Cargo.lock reconciled before locked validation");
+            validation.gates.push(ValidationGateReport {
+                name: "lockfile".to_string(),
+                status: "passed".to_string(),
+                reason: "generated Cargo.lock was reconciled before locked validation".to_string(),
+                report_path: Some(lockfile_path),
+                error_count: None,
+                warning_count: None,
+                semantic_warning_hazards: None,
+                review_warning_hazards: None,
+            });
+            Ok(())
+        }
+        Ok(None) => Ok(()),
+        Err(error) => {
+            let reason = error.to_string();
+            validation.gates.push(ValidationGateReport {
+                name: "lockfile".to_string(),
+                status: "failed".to_string(),
+                reason: reason.clone(),
+                report_path: Some(options.output_root.join("Cargo.lock")),
+                error_count: None,
+                warning_count: None,
+                semantic_warning_hazards: None,
+                review_warning_hazards: None,
+            });
+            Err(reason.into())
+        }
+    }
+}
+
+fn refresh_generated_lockfile_for_output(
+    options: &CliOptions,
+    output_root: &Path,
+) -> Result<Option<PathBuf>, Box<dyn std::error::Error>> {
     if !locked_validation_requested(&options.cargo_check_args)
         || !options.workspace_root.join("Cargo.lock").exists()
     {
-        return Ok(());
+        return Ok(None);
     }
 
-    let lockfile_path = options.output_root.join("Cargo.lock");
+    let lockfile_path = output_root.join("Cargo.lock");
     if !lockfile_path.exists() {
-        let reason = "generated Cargo.lock is missing before locked validation";
-        validation.gates.push(ValidationGateReport {
-            name: "lockfile".to_string(),
-            status: "failed".to_string(),
-            reason: reason.to_string(),
-            report_path: Some(lockfile_path),
-            error_count: None,
-            warning_count: None,
-            semantic_warning_hazards: None,
-            review_warning_hazards: None,
-        });
-        return Err(reason.into());
+        return Err("generated Cargo.lock is missing before locked validation".into());
     }
 
-    let manifest_path = absolute_path(&options.output_root.join("Cargo.toml"))?;
+    let manifest_path = absolute_path(&output_root.join("Cargo.toml"))?;
     let working_dir = manifest_working_dir(&manifest_path);
+    let offline_requested = options
+        .cargo_check_args
+        .iter()
+        .any(|arg| matches!(arg.as_str(), "--offline" | "--frozen"));
+    let mut output = run_generate_lockfile(&manifest_path, &working_dir, true)?;
+    if !output.status.success() && !offline_requested {
+        output = run_generate_lockfile(&manifest_path, &working_dir, false)?;
+    }
+    if !output.status.success() {
+        return Err(format!(
+            "generated Cargo.lock could not be reconciled before locked validation\n{}",
+            String::from_utf8_lossy(&output.stderr)
+        )
+        .into());
+    }
+
+    Ok(Some(lockfile_path))
+}
+
+fn run_generate_lockfile(
+    manifest_path: &Path,
+    working_dir: &Path,
+    offline: bool,
+) -> Result<std::process::Output, Box<dyn std::error::Error>> {
     let mut command = Command::new("cargo");
     command
         .arg("generate-lockfile")
         .arg("--manifest-path")
-        .arg(&manifest_path)
-        .current_dir(&working_dir);
-    if options
-        .cargo_check_args
-        .iter()
-        .any(|arg| matches!(arg.as_str(), "--offline" | "--frozen"))
-    {
+        .arg(manifest_path)
+        .current_dir(working_dir);
+    if offline {
         command.arg("--offline");
     }
-    let output = command.output()?;
-    if !output.status.success() {
-        let reason = format!(
-            "generated Cargo.lock could not be reconciled before locked validation\n{}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-        validation.gates.push(ValidationGateReport {
-            name: "lockfile".to_string(),
-            status: "failed".to_string(),
-            reason: reason.clone(),
-            report_path: Some(lockfile_path),
-            error_count: None,
-            warning_count: None,
-            semantic_warning_hazards: None,
-            review_warning_hazards: None,
-        });
-        return Err(reason.into());
-    }
-
-    println!("lockfile: generated Cargo.lock reconciled before locked validation");
-    validation.gates.push(ValidationGateReport {
-        name: "lockfile".to_string(),
-        status: "passed".to_string(),
-        reason: "generated Cargo.lock was reconciled before locked validation".to_string(),
-        report_path: Some(lockfile_path),
-        error_count: None,
-        warning_count: None,
-        semantic_warning_hazards: None,
-        review_warning_hazards: None,
-    });
-    Ok(())
+    Ok(command.output()?)
 }
 
 fn locked_validation_requested(cargo_check_args: &[String]) -> bool {

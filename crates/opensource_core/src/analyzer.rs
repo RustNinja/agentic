@@ -3,7 +3,7 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::model::{CallableId, ItemId, Project, SemanticOwnerId, SemanticReductionHints};
+use crate::model::{CallableId, ItemId, Project, RootId, SemanticOwnerId, SemanticReductionHints};
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
 pub enum AnalyzerMode {
@@ -323,21 +323,32 @@ pub fn load_report(
     workspace_root: &Path,
     mode: AnalyzerMode,
 ) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
-    load_report_with_project(workspace_root, mode, None)
+    load_report_with_project(workspace_root, mode, None, &[])
 }
 
+#[allow(dead_code)]
 pub fn load_report_for_project(
     workspace_root: &Path,
     mode: AnalyzerMode,
     project: &Project,
 ) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
-    load_report_with_project(workspace_root, mode, Some(project))
+    load_report_with_project(workspace_root, mode, Some(project), &[])
+}
+
+pub fn load_report_for_project_and_roots(
+    workspace_root: &Path,
+    mode: AnalyzerMode,
+    project: &Project,
+    selected_roots: &[RootId],
+) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
+    load_report_with_project(workspace_root, mode, Some(project), selected_roots)
 }
 
 fn load_report_with_project(
     workspace_root: &Path,
     mode: AnalyzerMode,
     project: Option<&Project>,
+    selected_roots: &[RootId],
 ) -> Result<AnalyzerReport, Box<dyn std::error::Error>> {
     match mode {
         AnalyzerMode::Syn => {
@@ -347,6 +358,7 @@ fn load_report_with_project(
         AnalyzerMode::RustAnalyzerHir => rust_analyzer::load_report(
             workspace_root,
             project,
+            selected_roots,
             AnalyzerMode::RustAnalyzerHir,
             rust_analyzer::ProcMacroExpansionMode::Disabled,
             rust_analyzer::RaFeedbackMode::Disabled,
@@ -354,6 +366,7 @@ fn load_report_with_project(
         AnalyzerMode::RustAnalyzerFeedback => rust_analyzer::load_report(
             workspace_root,
             project,
+            selected_roots,
             AnalyzerMode::RustAnalyzerFeedback,
             rust_analyzer::ProcMacroExpansionMode::Disabled,
             rust_analyzer::RaFeedbackMode::Enabled,
@@ -361,6 +374,7 @@ fn load_report_with_project(
         AnalyzerMode::RustAnalyzerHirProcMacros => rust_analyzer::load_report(
             workspace_root,
             project,
+            selected_roots,
             AnalyzerMode::RustAnalyzerHirProcMacros,
             rust_analyzer::ProcMacroExpansionMode::Enabled,
             rust_analyzer::RaFeedbackMode::Enabled,
@@ -427,6 +441,7 @@ mod rust_analyzer {
         fn load(
             workspace_root: &Path,
             project: Option<&Project>,
+            selected_roots: &[RootId],
             requested_mode: AnalyzerMode,
             proc_macro_mode: ProcMacroExpansionMode,
             feedback_mode: RaFeedbackMode,
@@ -437,6 +452,7 @@ mod rust_analyzer {
                 let mut provider = Self::load_once(
                     workspace_root,
                     project,
+                    selected_roots,
                     requested_mode,
                     ProcMacroExpansionMode::Disabled,
                     feedback_mode,
@@ -451,6 +467,7 @@ mod rust_analyzer {
             match Self::load_once(
                 workspace_root,
                 project,
+                selected_roots,
                 requested_mode,
                 proc_macro_mode,
                 feedback_mode,
@@ -460,6 +477,7 @@ mod rust_analyzer {
                     let mut provider = Self::load_once(
                         workspace_root,
                         project,
+                        selected_roots,
                         requested_mode,
                         ProcMacroExpansionMode::Disabled,
                         feedback_mode,
@@ -476,6 +494,7 @@ mod rust_analyzer {
         fn load_once(
             workspace_root: &Path,
             project: Option<&Project>,
+            selected_roots: &[RootId],
             requested_mode: AnalyzerMode,
             proc_macro_mode: ProcMacroExpansionMode,
             feedback_mode: RaFeedbackMode,
@@ -532,8 +551,14 @@ mod rust_analyzer {
             let loaded = loaded.map_err(|_| "rust-analyzer workspace load panicked")?;
             let (database, vfs, proc_macro_client) = loaded?;
 
-            let semantic =
-                collect_semantic_report(&database, &vfs, workspace_root, project, feedback_mode);
+            let semantic = collect_semantic_report(
+                &database,
+                &vfs,
+                workspace_root,
+                project,
+                selected_roots,
+                feedback_mode,
+            );
             let mut notes = vec![
                 "rust-analyzer RootDatabase loaded".to_string(),
                 "HIR Semantics initialized".to_string(),
@@ -678,6 +703,7 @@ mod rust_analyzer {
     pub fn load_report(
         workspace_root: &Path,
         project: Option<&Project>,
+        selected_roots: &[RootId],
         requested_mode: AnalyzerMode,
         proc_macro_mode: ProcMacroExpansionMode,
         feedback_mode: RaFeedbackMode,
@@ -685,6 +711,7 @@ mod rust_analyzer {
         let provider = RustAnalyzerSemanticProvider::load(
             workspace_root,
             project,
+            selected_roots,
             requested_mode,
             proc_macro_mode,
             feedback_mode,
@@ -697,10 +724,18 @@ mod rust_analyzer {
         vfs: &ra_ap_vfs::Vfs,
         workspace_root: &Path,
         project: Option<&Project>,
+        selected_roots: &[RootId],
         feedback_mode: RaFeedbackMode,
     ) -> SemanticCollection {
         ra_ap_hir::attach_db(database, || {
-            collect_semantic_report_attached(database, vfs, workspace_root, project, feedback_mode)
+            collect_semantic_report_attached(
+                database,
+                vfs,
+                workspace_root,
+                project,
+                selected_roots,
+                feedback_mode,
+            )
         })
     }
 
@@ -740,6 +775,7 @@ mod rust_analyzer {
         vfs: &ra_ap_vfs::Vfs,
         workspace_root: &Path,
         project: Option<&Project>,
+        selected_roots: &[RootId],
         feedback_mode: RaFeedbackMode,
     ) -> SemanticCollection {
         let canonical_workspace_root = workspace_root
@@ -762,7 +798,8 @@ mod rust_analyzer {
             remaining_method_calls: report.method_call_budget,
             remaining_paths: report.path_budget,
         };
-        let mut semantic_index = project.map(ProjectSemanticIndex::build);
+        let mut semantic_index =
+            project.map(|project| ProjectSemanticIndex::build(project, selected_roots));
         let mut hints = SemanticReductionHints::default();
         let ra_feedback = if feedback_mode == RaFeedbackMode::Enabled {
             project
@@ -1863,17 +1900,19 @@ mod rust_analyzer {
         root_files: BTreeSet<PathBuf>,
         retained_files: BTreeSet<PathBuf>,
         retained_owners: BTreeSet<SemanticOwnerId>,
+        selected_roots: Vec<RootId>,
         local_idents: BTreeSet<String>,
         method_names: BTreeSet<String>,
     }
 
     impl ProjectSemanticIndex {
-        fn build(project: &Project) -> Self {
+        fn build(project: &Project, selected_roots: &[RootId]) -> Self {
             let mut files = HashMap::new();
             let mut root_files = BTreeSet::new();
             let mut local_idents = BTreeSet::new();
             let mut method_names = BTreeSet::new();
-            let retention = retained_scope(project, &SemanticReductionHints::default());
+            let retention =
+                retained_scope(project, &SemanticReductionHints::default(), selected_roots);
             for source in project.files.values() {
                 let path = normalize_fs_path(&source.path);
                 files.entry(path).or_insert_with(|| IndexedSourceFile {
@@ -1884,7 +1923,9 @@ mod rust_analyzer {
             }
 
             for (id, record) in &project.functions {
-                if has_opensourced_attr(&record.item.attrs) {
+                if has_opensourced_attr(&record.item.attrs)
+                    || selected_roots.contains(&RootId::Callable(id.clone()))
+                {
                     root_files.insert(normalize_fs_path(&record.span.file));
                 }
                 local_idents.insert(callable_name(id).to_string());
@@ -1896,7 +1937,9 @@ mod rust_analyzer {
                 }
             }
             for (id, record) in &project.methods {
-                if has_opensourced_attr(&record.item.attrs) {
+                if has_opensourced_attr(&record.item.attrs)
+                    || selected_roots.contains(&RootId::Callable(id.clone()))
+                {
                     root_files.insert(normalize_fs_path(&record.span.file));
                 }
                 local_idents.insert(callable_name(id).to_string());
@@ -1912,7 +1955,9 @@ mod rust_analyzer {
                 }
             }
             for (id, record) in &project.items {
-                if item_has_opensourced_attr(&record.item) {
+                if item_has_opensourced_attr(&record.item)
+                    || selected_roots.contains(&RootId::Item(id.clone()))
+                {
                     root_files.insert(normalize_fs_path(&record.span.file));
                 }
                 local_idents.insert(id.name.clone());
@@ -1935,6 +1980,7 @@ mod rust_analyzer {
                 root_files,
                 retained_files: retention.files,
                 retained_owners: retention.owners,
+                selected_roots: selected_roots.to_vec(),
                 local_idents,
                 method_names,
             }
@@ -1945,7 +1991,7 @@ mod rust_analyzer {
             project: &Project,
             semantic_hints: &SemanticReductionHints,
         ) {
-            let retention = retained_scope(project, semantic_hints);
+            let retention = retained_scope(project, semantic_hints, &self.selected_roots);
             self.retained_files = retention.files;
             self.retained_owners = retention.owners;
         }
@@ -2119,8 +2165,12 @@ mod rust_analyzer {
         owners: BTreeSet<SemanticOwnerId>,
     }
 
-    fn retained_scope(project: &Project, semantic_hints: &SemanticReductionHints) -> RetainedScope {
-        reduce::reduce_with_extra_roots_and_semantics(project, &[], semantic_hints)
+    fn retained_scope(
+        project: &Project,
+        semantic_hints: &SemanticReductionHints,
+        selected_roots: &[RootId],
+    ) -> RetainedScope {
+        reduce::reduce_with_extra_roots_and_semantics(project, selected_roots, semantic_hints)
             .map(|reduced| RetainedScope {
                 files: retained_file_paths(project, &reduced),
                 owners: retained_owners(&reduced),
@@ -2729,7 +2779,7 @@ pub fn entry(worker: Worker) -> u32 {
 mod rust_analyzer {
     use std::path::Path;
 
-    use crate::model::Project;
+    use crate::model::{Project, RootId};
 
     use super::{AnalyzerMode, AnalyzerReport};
 
@@ -2748,6 +2798,7 @@ mod rust_analyzer {
     pub fn load_report(
         _workspace_root: &Path,
         _project: Option<&Project>,
+        _selected_roots: &[RootId],
         _requested_mode: AnalyzerMode,
         _proc_macro_mode: ProcMacroExpansionMode,
         _feedback_mode: RaFeedbackMode,
