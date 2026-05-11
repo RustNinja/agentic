@@ -1638,3 +1638,13 @@ syntax-aware, skips test-only items/statements/expressions, and rendered root
 and restricted support sources strip test-only statements before writing. This
 keeps sub-dependencies closer to the production invariant: only used code or
 explicit unknown/API surfaces remain.
+
+Pruned enum variants must not keep their payload items alive by name alone. A
+protocol-style dispatch fixture exposed a top-down leak: the selected enum kept
+only `Start` and `Unknown`, but dead variants like `Stop(StopParams)` still made
+`StopParams` look like reachable surface, which in turn kept a same-name
+`pub use dead::StopParams` and the dead child module. The render plan now builds
+a package-level set of payload names that are mentioned only by pruned variants,
+filters them out of reachable item/import surface unless another reachable root
+or unknown blocker needs them, and restricted support rendering applies the same
+rule before pruning empty modules.

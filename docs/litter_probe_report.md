@@ -275,9 +275,11 @@ passed deliberately.
 - `manifest.support_facade_export_pruning.001`: covered for simple and
   transitive copied support facades, including local glob facades, that
   reexport concrete child-module leaves or explicit dependency-crate symbols.
-- `manifest.support_monolith_item_pruning.001`: support crates with large
-  protocol files should not retain unrelated request/notification siblings when
-  one symbol is referenced.
+- `manifest.support_monolith_item_pruning.001`: covered for protocol-shaped
+  support crates where dead enum variants mention sibling payload structs/enums.
+  The render plan now treats those payload names as droppable unless another
+  reachable item, root surface, or unknown blocker really uses them, so same-name
+  dead facade reexports and now-empty child modules are pruned.
 - `manifest.support_transitive_reexport_pruning.001`: app-to-local-to-support
   reexport chains should keep only the selected upstream symbol and prune dead
   middle-layer reexports.
@@ -286,8 +288,9 @@ passed deliberately.
   files. Generated slices strip those test-only statements before rendering and
   skip their `include_str!`/`include_bytes!` assets. Broader non-test target cfg
   asset pruning remains under the cfg-oracle track.
-- `protocol.enum_method.compact.001`: enum parser methods like `from_wire` should
-  remain compact and keep only live variants/helpers.
+- `protocol.enum_method.compact.001`: covered for enum parser/render methods
+  like `from_wire` that retain live variants/helpers while dropping payload-only
+  items introduced by pruned variants.
 - `bridge.state_constructor.heavy.001`: constructor roots with broad private
   state should expose exactly which fields/types force large support closure.
 - `async_io.generic_root.001`: generic async I/O functions with `AsyncRead` /

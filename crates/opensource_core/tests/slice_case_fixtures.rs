@@ -5972,7 +5972,17 @@ fn prunes_method_dispatch_support_chain_with_default_analyzer() {
     assert_absent(
         "dispatch_model/src/live.rs",
         &model_live,
-        &["dead_method", "dead_live_dispatch", "dead-dispatch"],
+        &[
+            "Stop(StopParams)",
+            "List(ListParams)",
+            "Notify(DeadNotification)",
+            "pub struct StopParams",
+            "pub struct ListParams",
+            "pub enum DeadNotification",
+            "dead_method",
+            "dead_live_dispatch",
+            "dead-dispatch",
+        ],
     );
     assert!(!output.join("dispatch_model/src/dead.rs").exists());
 

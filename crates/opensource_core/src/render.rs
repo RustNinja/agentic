@@ -44,6 +44,7 @@ pub(crate) struct RenderedMemberDecisionIndex {
 struct RenderPlan {
     usage: UsageDecisionIndex,
     reachable_items: BTreeSet<ItemId>,
+    pruned_enum_payload_item_names: BTreeMap<String, BTreeSet<String>>,
     callable_idents_by_package: BTreeMap<String, BTreeSet<String>>,
     mentions: ReachableMentionIndex,
     import_scope_mentions: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
@@ -54,14 +55,29 @@ impl RenderPlan {
     fn build(project: &Project, reduced: &ReducedProject, usage: &UsageDecisionIndex) -> Self {
         let mut reachable_items = BTreeSet::new();
         let mut rendered_item_idents = BTreeSet::new();
+        let pruned_enum_payload_item_names =
+            droppable_pruned_enum_payload_item_names_by_package(project, reduced, usage);
         let callable_idents = reachable_reduced_callable_ident_index(project, reduced);
-        let reachable_token_idents = ReachableTokenIdentIndex::build(project, reduced);
+        let reachable_token_idents = ReachableTokenIdentIndex::build(
+            project,
+            reduced,
+            usage,
+            &pruned_enum_payload_item_names,
+        );
         let retained_surface_idents =
             retained_surface_idents_by_package(project, reduced, &reachable_token_idents);
         let referenced_reexport_target_items =
             referenced_public_reexport_target_items(project, reduced, &reachable_token_idents);
 
         for item in &reduced.reachable_items {
+            if item_name_is_droppable_pruned_enum_payload(
+                &pruned_enum_payload_item_names,
+                usage,
+                reduced,
+                item,
+            ) {
+                continue;
+            }
             if root_item_should_render(reduced, item)
                 || !package_has_reachable_callables(reduced, &item.package)
                 || matches!(item.kind, ItemKind::Const | ItemKind::Static)
@@ -82,6 +98,14 @@ impl RenderPlan {
             }
         }
         for item in &referenced_reexport_target_items {
+            if item_name_is_droppable_pruned_enum_payload(
+                &pruned_enum_payload_item_names,
+                usage,
+                reduced,
+                item,
+            ) {
+                continue;
+            }
             insert_render_plan_item(
                 project,
                 reduced,
@@ -91,6 +115,14 @@ impl RenderPlan {
             );
         }
         for item in usage.blocked_by_unknown_items() {
+            if item_name_is_droppable_pruned_enum_payload(
+                &pruned_enum_payload_item_names,
+                usage,
+                reduced,
+                &item,
+            ) {
+                continue;
+            }
             insert_render_plan_item(
                 project,
                 reduced,
@@ -103,6 +135,14 @@ impl RenderPlan {
         loop {
             let mut added = false;
             for item in &reduced.reachable_items {
+                if item_name_is_droppable_pruned_enum_payload(
+                    &pruned_enum_payload_item_names,
+                    usage,
+                    reduced,
+                    item,
+                ) {
+                    continue;
+                }
                 if reachable_items.contains(item) {
                     continue;
                 }
@@ -131,6 +171,7 @@ impl RenderPlan {
                 &reachable_token_idents,
             ),
             reachable_items,
+            pruned_enum_payload_item_names,
             callable_idents_by_package: callable_idents.by_package,
             import_scope_mentions: RefCell::new(BTreeMap::new()),
             import_scope_uses: RefCell::new(BTreeMap::new()),
@@ -142,6 +183,9 @@ impl RenderPlan {
     }
 
     fn item_should_render(&self, item: &ItemId) -> bool {
+        if self.is_droppable_pruned_enum_payload(item) {
+            return false;
+        }
         self.reachable_items.contains(item) || self.usage.is_blocked_by_unknown_item(item)
     }
 
@@ -166,6 +210,14 @@ impl RenderPlan {
         self.callable_idents_by_package
             .get(package)
             .is_some_and(|idents| idents.contains(ident))
+    }
+
+    fn is_droppable_pruned_enum_payload(&self, item: &ItemId) -> bool {
+        !self.usage.is_blocked_by_unknown_item(item)
+            && self
+                .pruned_enum_payload_item_names
+                .get(&item.package)
+                .is_some_and(|names| names.contains(&item.name))
     }
 }
 
@@ -742,7 +794,12 @@ struct ReachableTokenIdentIndex {
 }
 
 impl ReachableTokenIdentIndex {
-    fn build(project: &Project, reduced: &ReducedProject) -> Self {
+    fn build(
+        project: &Project,
+        reduced: &ReducedProject,
+        usage: &UsageDecisionIndex,
+        pruned_enum_payload_item_names: &BTreeMap<String, BTreeSet<String>>,
+    ) -> Self {
         let mut index = Self::default();
         for callable in &reduced.reachable {
             let package = callable.package();
@@ -763,6 +820,14 @@ impl ReachableTokenIdentIndex {
         }
 
         for item in &reduced.reachable_items {
+            if item_name_is_droppable_pruned_enum_payload(
+                pruned_enum_payload_item_names,
+                usage,
+                reduced,
+                item,
+            ) {
+                continue;
+            }
             let idents = rendered_item_surface_idents(project, reduced, item);
             index.add(&item.package, &item.module_path, idents);
         }
@@ -3383,7 +3448,6 @@ fn build_restricted_support_sources(
         }
     }
 
-    let mut live_usage_by_file = BTreeMap::<PathBuf, TokenUsage>::new();
     let mut changed = true;
     while changed {
         changed = false;
@@ -3579,7 +3643,8 @@ fn build_restricted_support_sources(
                 changed |= inserted;
             }
 
-            let mut macro_probe_usage = live_usage.clone();
+            let mut live_import_usage = support_live_non_use_item_usage(&module.syntax, &live_set);
+            let mut macro_probe_usage = live_import_usage.clone();
             let live_assoc_import_items = support_combined_assoc_items(
                 &live_set.assoc_item_names,
                 &live_usage.dependency_public_names,
@@ -3591,7 +3656,7 @@ fn build_restricted_support_sources(
                 if support_use_tree_imports_live_name(
                     &item_use.tree,
                     Vec::new(),
-                    &live_usage.idents,
+                    &live_import_usage.idents,
                     &live_set.public_exports,
                 ) {
                     macro_probe_usage.record_use(item_use);
@@ -3602,10 +3667,10 @@ fn build_restricted_support_sources(
                     &item_use.tree,
                     Vec::new(),
                     SupportUseNeeds {
-                        live_idents: &live_usage.idents,
+                        live_idents: &live_import_usage.idents,
                         live_exports: &live_set.public_exports,
                         live_assoc_items: &live_assoc_import_items,
-                        live_paths: &live_usage.path_candidates,
+                        live_paths: &live_import_usage.path_candidates,
                     },
                     &mut live,
                 ) else {
@@ -3626,6 +3691,7 @@ fn build_restricted_support_sources(
                     continue;
                 }
                 live_usage.merge(&expansion.usage);
+                live_import_usage.merge(&expansion.usage);
                 macro_probe_usage.merge(&expansion.usage);
                 for segments in &expansion.paths {
                     let Some(inserted) =
@@ -3658,10 +3724,10 @@ fn build_restricted_support_sources(
                     &item_use.tree,
                     Vec::new(),
                     SupportUseNeeds {
-                        live_idents: &live_usage.idents,
+                        live_idents: &live_import_usage.idents,
                         live_exports: &live_set.public_exports,
                         live_assoc_items: &live_assoc_import_items,
-                        live_paths: &live_usage.path_candidates,
+                        live_paths: &live_import_usage.path_candidates,
                     },
                     &mut live,
                 ) else {
@@ -3676,7 +3742,6 @@ fn build_restricted_support_sources(
                 };
                 changed |= inserted;
             }
-            live_usage_by_file.insert(source_file.clone(), live_usage);
         }
 
         let live_snapshot = live.clone();
@@ -3727,6 +3792,18 @@ fn build_restricted_support_sources(
         }
     }
 
+    let pruned_variant_payload_drop_names =
+        support_droppable_pruned_enum_variant_payload_item_names(&ctx, &live);
+    if !pruned_variant_payload_drop_names.is_empty() {
+        debug_support_prune(
+            package_root,
+            &format!(
+                "restricted pruned enum payload drops: {:?}",
+                pruned_variant_payload_drop_names
+            ),
+        );
+    }
+
     let mut transformed_sources = BTreeMap::new();
     for (source_file, module) in &modules {
         if module.inline {
@@ -3744,12 +3821,63 @@ fn build_restricted_support_sources(
                 source_file,
                 &module.syntax,
                 &live_set,
-                live_usage_by_file.get(source_file),
+                &pruned_variant_payload_drop_names,
             ),
         );
     }
+    prune_empty_restricted_support_modules(&ctx, &mut transformed_sources);
 
     Ok(Some(transformed_sources))
+}
+
+fn prune_empty_restricted_support_modules(
+    ctx: &SupportResolveContext<'_>,
+    transformed_sources: &mut BTreeMap<PathBuf, syn::File>,
+) {
+    loop {
+        let empty_sources = transformed_sources
+            .iter()
+            .filter_map(|(source_file, syntax)| {
+                (source_file != ctx.root_file && syntax.items.is_empty())
+                    .then_some(source_file.clone())
+            })
+            .collect::<BTreeSet<_>>();
+        if empty_sources.is_empty() {
+            return;
+        }
+
+        let mut removed_module_declaration = false;
+        for (source_file, syntax) in transformed_sources.iter_mut() {
+            syntax.items = syntax
+                .items
+                .iter()
+                .filter_map(|item| {
+                    let Item::Mod(item_mod) = item else {
+                        return Some(item.clone());
+                    };
+                    let module_name = item_mod.ident.to_string();
+                    let Some(child_file) =
+                        support_child_module_file(ctx.modules, source_file, &module_name)
+                    else {
+                        return Some(item.clone());
+                    };
+                    if empty_sources.contains(&child_file) {
+                        removed_module_declaration = true;
+                        None
+                    } else {
+                        Some(item.clone())
+                    }
+                })
+                .collect();
+        }
+
+        for source_file in &empty_sources {
+            transformed_sources.remove(source_file);
+        }
+        if !removed_module_declaration {
+            return;
+        }
+    }
 }
 
 fn support_item_dependency_tokens(item: &Item, live_set: &SupportLiveSet) -> TokenStream {
@@ -5385,7 +5513,7 @@ fn transform_restricted_support_file(
     source_file: &Path,
     syntax: &syn::File,
     live_set: &SupportLiveSet,
-    live_usage_override: Option<&TokenUsage>,
+    pruned_variant_payload_drop_names: &BTreeSet<String>,
 ) -> syn::File {
     let named_items = support_named_item_names(&syntax.items);
     let pruned_struct_fields = support_pruned_struct_fields(
@@ -5396,10 +5524,8 @@ fn transform_restricted_support_file(
         live_set,
         &named_items,
     );
-    let live_usage = live_usage_override
-        .cloned()
-        .unwrap_or_else(|| support_live_item_usage(syntax, live_set));
-    let mut live_import_names = support_live_import_names(&live_usage);
+    let live_import_usage = support_live_non_use_item_usage(syntax, live_set);
+    let mut live_import_names = support_live_import_names(&live_import_usage);
     let non_enum_usage = support_live_non_enum_usage_across_live_files(ctx, live_by_file);
     let retained_enum_variants = support_retained_enum_variants(syntax, live_set, &non_enum_usage);
     let enum_variant_type_usage =
@@ -5420,19 +5546,21 @@ fn transform_restricted_support_file(
         }
     }
     let live_derive_idents = support_live_derive_idents(syntax, live_set);
-    let public_use_names = live_set
-        .public_exports
-        .union(&live_usage.idents)
-        .cloned()
-        .collect::<BTreeSet<_>>();
+    let mut public_use_names = live_set.public_exports.clone();
+    public_use_names.retain(|name| !pruned_variant_payload_drop_names.contains(name));
     let mut transformed = syntax.clone();
     transformed.items = syntax
         .items
         .iter()
         .filter_map(|item| match item {
-            Item::Mod(item_mod) if item_mod.content.is_some() => {
-                transform_support_inline_module(ctx, live_by_file, source_file, item_mod, live_set)
-            }
+            Item::Mod(item_mod) if item_mod.content.is_some() => transform_support_inline_module(
+                ctx,
+                live_by_file,
+                source_file,
+                item_mod,
+                live_set,
+                pruned_variant_payload_drop_names,
+            ),
             Item::Use(item_use) if use_is_public_api_reexport(&item_use.vis) => {
                 let mut item_use = item_use.clone();
                 item_use.tree = prune_support_public_use_tree(
@@ -5460,12 +5588,20 @@ fn transform_restricted_support_file(
             }
             Item::ExternCrate(_) => Some(item.clone()),
             Item::Impl(item_impl) => {
+                if support_impl_self_named_item(item_impl)
+                    .is_some_and(|name| pruned_variant_payload_drop_names.contains(&name))
+                {
+                    return None;
+                }
                 transform_support_impl(item_impl, &named_items, live_set).map(|mut item_impl| {
                     prune_support_struct_literals_in_impl(&mut item_impl, &pruned_struct_fields);
                     Item::Impl(item_impl)
                 })
             }
             Item::Struct(item_struct) => {
+                if pruned_variant_payload_drop_names.contains(&item_struct.ident.to_string()) {
+                    return None;
+                }
                 if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
                     Some(Item::Struct(transform_support_struct(
                         item_struct,
@@ -5476,6 +5612,9 @@ fn transform_restricted_support_file(
                 }
             }
             Item::Enum(item_enum) => {
+                if pruned_variant_payload_drop_names.contains(&item_enum.ident.to_string()) {
+                    return None;
+                }
                 if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
                     Some(Item::Enum(transform_support_enum(
                         item_enum,
@@ -5487,7 +5626,13 @@ fn transform_restricted_support_file(
                 }
             }
             _ => {
-                if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
+                if support_item_name(item)
+                    .is_some_and(|name| pruned_variant_payload_drop_names.contains(&name))
+                {
+                    None
+                } else if support_item_name(item)
+                    .is_none_or(|name| live_set.item_names.contains(&name))
+                {
                     let mut item = item.clone();
                     prune_support_struct_literals_in_item(&mut item, &pruned_struct_fields);
                     Some(item)
@@ -5875,6 +6020,7 @@ fn transform_support_inline_module(
     source_file: &Path,
     item_mod: &syn::ItemMod,
     parent_live_set: &SupportLiveSet,
+    pruned_variant_payload_drop_names: &BTreeSet<String>,
 ) -> Option<Item> {
     let name = item_mod.ident.to_string();
     if !parent_live_set.item_names.contains(&name) {
@@ -5889,7 +6035,7 @@ fn transform_support_inline_module(
         &child_file,
         &child_module.syntax,
         &child_live_set,
-        None,
+        pruned_variant_payload_drop_names,
     );
     let mut item_mod = item_mod.clone();
     item_mod.content = item_mod
@@ -5941,12 +6087,40 @@ fn support_live_enum_variant_names(
         .collect()
 }
 
-fn support_live_item_usage(syntax: &syn::File, live_set: &SupportLiveSet) -> TokenUsage {
+fn support_live_non_use_item_usage(syntax: &syn::File, live_set: &SupportLiveSet) -> TokenUsage {
     let mut usage = TokenUsage::default();
     let named_items = support_named_item_names(&syntax.items);
     for item in &syntax.items {
+        if matches!(item, Item::Use(_)) {
+            continue;
+        }
         if support_item_should_collect_live_usage(item, &named_items, live_set) {
             collect_token_usage(&item.to_token_stream(), &mut usage);
+        }
+    }
+    usage
+}
+
+fn support_live_non_pruned_payload_usage(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+    pruned_payload_item_names: &BTreeSet<String>,
+) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+    let named_items = support_named_item_names(&syntax.items);
+    for item in &syntax.items {
+        if matches!(item, Item::Use(_)) {
+            continue;
+        }
+        if support_item_name(item).is_some_and(|name| pruned_payload_item_names.contains(&name)) {
+            continue;
+        }
+        if matches!(item, Item::Impl(item_impl) if support_impl_self_named_item(item_impl).is_some_and(|name| pruned_payload_item_names.contains(&name)))
+        {
+            continue;
+        }
+        if support_item_should_collect_live_usage(item, &named_items, live_set) {
+            collect_token_usage(&support_item_dependency_tokens(item, live_set), &mut usage);
         }
     }
     usage
@@ -6076,6 +6250,93 @@ fn support_retained_enum_variants(
         retained.insert(enum_name, variants);
     }
     retained
+}
+
+fn support_pruned_enum_variant_payload_item_names(
+    syntax: &syn::File,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
+    named_items: &BTreeMap<String, Item>,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for item in &syntax.items {
+        let Item::Enum(item_enum) = item else {
+            continue;
+        };
+        let enum_name = item_enum.ident.to_string();
+        let Some(retained_variants) = retained_enum_variants.get(&enum_name) else {
+            continue;
+        };
+        for variant in &item_enum.variants {
+            if retained_variants.contains(&variant.ident.to_string()) {
+                continue;
+            }
+            let tokens = variant.fields.to_token_stream();
+            for name in named_items.keys() {
+                if token_stream_mentions_ident(&tokens, name) {
+                    names.insert(name.clone());
+                }
+            }
+        }
+    }
+    names
+}
+
+fn support_droppable_pruned_enum_variant_payload_item_names(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+) -> BTreeSet<String> {
+    let non_enum_usage = support_live_non_enum_usage_across_live_files(ctx, live_by_file);
+    let mut pruned_payload_item_names = BTreeSet::new();
+    let mut retained_variant_type_usage = TokenUsage::default();
+
+    for (source_file, live_set) in live_by_file {
+        let Some(module) = ctx.modules.get(source_file) else {
+            continue;
+        };
+        let named_items = support_named_item_names(&module.syntax.items);
+        let retained_enum_variants =
+            support_retained_enum_variants(&module.syntax, live_set, &non_enum_usage);
+        pruned_payload_item_names.extend(support_pruned_enum_variant_payload_item_names(
+            &module.syntax,
+            &retained_enum_variants,
+            &named_items,
+        ));
+        retained_variant_type_usage.merge(&support_live_enum_variant_type_usage(
+            &module.syntax,
+            live_set,
+            &retained_enum_variants,
+        ));
+    }
+
+    if pruned_payload_item_names.is_empty() {
+        return BTreeSet::new();
+    }
+
+    let mut required_usage = TokenUsage::default();
+    let mut surface_item_names = BTreeSet::new();
+    let mut assoc_item_names = BTreeSet::new();
+    for (source_file, live_set) in live_by_file {
+        let Some(module) = ctx.modules.get(source_file) else {
+            continue;
+        };
+        required_usage.merge(&support_live_non_pruned_payload_usage(
+            &module.syntax,
+            live_set,
+            &pruned_payload_item_names,
+        ));
+        surface_item_names.extend(live_set.surface_item_names.iter().cloned());
+        assoc_item_names.extend(live_set.assoc_item_names.keys().cloned());
+    }
+
+    pruned_payload_item_names
+        .into_iter()
+        .filter(|name| {
+            !surface_item_names.contains(name)
+                && !assoc_item_names.contains(name)
+                && !support_usage_mentions_variant(&required_usage, name)
+                && !support_usage_mentions_variant(&retained_variant_type_usage, name)
+        })
+        .collect()
 }
 
 fn support_usage_mentions_variant(usage: &TokenUsage, variant_name: &str) -> bool {
@@ -8254,6 +8515,125 @@ fn rendered_item_surface_idents(
     }
     expand_alias_surface_idents(&record.aliases, &mut idents);
     idents
+}
+
+fn droppable_pruned_enum_payload_item_names_by_package(
+    project: &Project,
+    reduced: &ReducedProject,
+    usage: &UsageDecisionIndex,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let item_names_by_package = project.items.keys().fold(
+        BTreeMap::<String, BTreeSet<String>>::new(),
+        |mut acc, item| {
+            acc.entry(item.package.clone())
+                .or_default()
+                .insert(item.name.clone());
+            acc
+        },
+    );
+    let mut candidates = BTreeMap::<String, BTreeSet<String>>::new();
+    let mut required_idents = BTreeMap::<String, BTreeSet<String>>::new();
+
+    for item_id in &reduced.reachable_items {
+        let Some(record) = project.items.get(item_id) else {
+            continue;
+        };
+        if root_item_should_render(reduced, item_id) || usage.is_blocked_by_unknown_item(item_id) {
+            collect_token_idents(
+                &record.item.to_token_stream(),
+                required_idents.entry(item_id.package.clone()).or_default(),
+            );
+            continue;
+        }
+        let Item::Enum(item_enum) = &record.item else {
+            continue;
+        };
+        if enum_preserves_full_variant_surface(project, reduced, item_id, item_enum) {
+            collect_token_idents(
+                &item_enum.to_token_stream(),
+                required_idents.entry(item_id.package.clone()).or_default(),
+            );
+            continue;
+        }
+        let package_item_names = item_names_by_package
+            .get(&item_id.package)
+            .cloned()
+            .unwrap_or_default();
+        let package_candidates = candidates.entry(item_id.package.clone()).or_default();
+        for variant in &item_enum.variants {
+            if enum_variant_should_remain(
+                project,
+                reduced,
+                &item_id.package,
+                &variant.ident.to_string(),
+            ) {
+                collect_token_idents(
+                    &variant.to_token_stream(),
+                    required_idents.entry(item_id.package.clone()).or_default(),
+                );
+            } else {
+                let payload_tokens = variant.fields.to_token_stream();
+                for name in &package_item_names {
+                    if token_stream_mentions_ident(&payload_tokens, name) {
+                        package_candidates.insert(name.clone());
+                    }
+                }
+            }
+        }
+    }
+
+    if candidates.values().all(BTreeSet::is_empty) {
+        return BTreeMap::new();
+    }
+
+    for callable in &reduced.reachable {
+        let package = callable.package().to_string();
+        let idents = required_idents.entry(package).or_default();
+        collect_callable_idents(callable, idents);
+        if let Some(record) = project.functions.get(callable) {
+            collect_token_idents(&record.item.to_token_stream(), idents);
+            expand_alias_surface_idents(&record.aliases, idents);
+        }
+        if let Some(record) = project.methods.get(callable) {
+            collect_token_idents(&record.item.to_token_stream(), idents);
+            expand_alias_surface_idents(&record.aliases, idents);
+        }
+    }
+
+    for item_id in &reduced.reachable_items {
+        if item_name_is_droppable_pruned_enum_payload(&candidates, usage, reduced, item_id) {
+            continue;
+        }
+        required_idents
+            .entry(item_id.package.clone())
+            .or_default()
+            .extend(rendered_item_surface_idents(project, reduced, item_id));
+    }
+
+    candidates
+        .into_iter()
+        .filter_map(|(package, names)| {
+            let required = required_idents.get(&package);
+            let names = names
+                .into_iter()
+                .filter(|name| !required.is_some_and(|idents| idents.contains(name)))
+                .collect::<BTreeSet<_>>();
+            (!names.is_empty()).then_some((package, names))
+        })
+        .collect()
+}
+
+fn item_name_is_droppable_pruned_enum_payload(
+    pruned_enum_payload_item_names: &BTreeMap<String, BTreeSet<String>>,
+    usage: &UsageDecisionIndex,
+    reduced: &ReducedProject,
+    item: &ItemId,
+) -> bool {
+    !root_item_should_render(reduced, item)
+        && !usage.is_blocked_by_unknown_item(item)
+        && pruned_enum_payload_item_names
+            .get(&item.package)
+            .is_some_and(|names| names.contains(&item.name))
 }
 
 fn collect_struct_surface_idents(
