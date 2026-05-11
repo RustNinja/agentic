@@ -34,6 +34,9 @@ pub(crate) struct RenderedMemberDecisionIndex {
     pub(crate) retained: BTreeSet<String>,
     pub(crate) blocked_by_unknown: BTreeSet<String>,
     pub(crate) prunable: BTreeSet<String>,
+    pub(crate) retained_assoc_items: BTreeSet<String>,
+    pub(crate) blocked_by_unknown_assoc_items: BTreeSet<String>,
+    pub(crate) prunable_assoc_items: BTreeSet<String>,
 }
 
 struct RenderPlan {
@@ -198,6 +201,21 @@ pub(crate) fn rendered_member_decision_index(
             _ => {}
         }
     }
+    for source in project.files.values() {
+        if !reduced.packages.contains(&source.package) {
+            continue;
+        }
+        record_assoc_item_decisions_for_items(
+            project,
+            reduced,
+            &render_plan,
+            usage,
+            &source.package,
+            &source.module_path,
+            &source.syntax.items,
+            &mut decisions,
+        );
+    }
 
     decisions
 }
@@ -285,6 +303,265 @@ fn record_rendered_member_decision(
 
 fn rendered_member_symbol_path(item: &ItemId, member: &str) -> String {
     format!("{item}::{member}")
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_assoc_item_decisions_for_items(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    usage: &UsageDecisionIndex,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+    decisions: &mut RenderedMemberDecisionIndex,
+) {
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+
+    for item in items {
+        match item {
+            Item::Trait(item_trait) => {
+                let Some(trait_id) = item_id(package, module_path, item) else {
+                    continue;
+                };
+                if !render_plan.item_should_render(&trait_id) {
+                    continue;
+                }
+                let parent_is_blocked = usage.is_blocked_by_unknown_item(&trait_id);
+                for trait_item in &item_trait.items {
+                    let Some((name, kind)) = trait_item_assoc_name_kind(trait_item) else {
+                        continue;
+                    };
+                    let should_remain = root_item_should_render(reduced, &trait_id)
+                        || trait_item_should_remain_for_type_surface(
+                            project,
+                            reduced,
+                            package,
+                            module_path,
+                            &item_trait.ident.to_string(),
+                            trait_item,
+                        );
+                    record_rendered_assoc_item_decision(
+                        decisions,
+                        rendered_assoc_item_symbol_path(&trait_id.to_string(), &name, kind),
+                        should_remain,
+                        parent_is_blocked,
+                    );
+                }
+            }
+            Item::Impl(item_impl) => {
+                record_impl_assoc_item_decisions(
+                    project,
+                    reduced,
+                    render_plan,
+                    usage,
+                    package,
+                    module_path,
+                    &aliases,
+                    item_impl,
+                    decisions,
+                );
+            }
+            Item::Mod(item_mod) => {
+                if let Some((_, nested)) = &item_mod.content {
+                    let mut nested_module_path = module_path.to_vec();
+                    nested_module_path.push(item_mod.ident.to_string());
+                    record_assoc_item_decisions_for_items(
+                        project,
+                        reduced,
+                        render_plan,
+                        usage,
+                        package,
+                        &nested_module_path,
+                        nested,
+                        decisions,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn record_impl_assoc_item_decisions(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    usage: &UsageDecisionIndex,
+    package: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    item_impl: &syn::ItemImpl,
+    decisions: &mut RenderedMemberDecisionIndex,
+) {
+    let trait_path = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| normalized_path(module_path, path, aliases));
+    let trait_input_type_paths = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| trait_input_type_paths(module_path, path, aliases))
+        .unwrap_or_default();
+    let Some(type_path) =
+        resolved_local_type_path(project, package, module_path, &item_impl.self_ty, aliases)
+    else {
+        return;
+    };
+    let trait_item = trait_path
+        .as_ref()
+        .and_then(|trait_path| trait_item_for_path(project, package, trait_path));
+    let impl_surface_renders = impl_surface_should_render(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        &type_path,
+        trait_path.as_deref(),
+        trait_input_type_paths.as_slice(),
+        trait_item.as_ref(),
+        item_impl,
+    );
+    let parent_is_blocked =
+        path_item_is_blocked_by_unknown(usage, package, &type_path, type_surface_item_kinds())
+            || trait_path.as_ref().is_some_and(|trait_path| {
+                path_item_is_blocked_by_unknown(usage, package, trait_path, &[ItemKind::Trait])
+            });
+
+    for impl_item in &item_impl.items {
+        let Some((name, kind)) = impl_item_assoc_name_kind(impl_item) else {
+            continue;
+        };
+        let should_remain = impl_surface_renders
+            && if trait_path.is_some() {
+                impl_item_should_render_for_trait_surface(
+                    project,
+                    reduced,
+                    package,
+                    &type_path,
+                    trait_path.as_deref(),
+                    trait_input_type_paths.as_slice(),
+                    trait_item.as_ref(),
+                    item_impl,
+                    impl_item,
+                )
+            } else {
+                inherent_impl_assoc_item_should_render(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    item_impl,
+                    impl_item,
+                )
+            };
+        record_rendered_assoc_item_decision(
+            decisions,
+            rendered_impl_assoc_item_symbol_path(
+                package,
+                &type_path,
+                trait_path.as_deref(),
+                trait_input_type_paths.as_slice(),
+                &name,
+                kind,
+            ),
+            should_remain,
+            parent_is_blocked,
+        );
+    }
+}
+
+fn record_rendered_assoc_item_decision(
+    decisions: &mut RenderedMemberDecisionIndex,
+    assoc_item: String,
+    should_remain: bool,
+    parent_is_blocked: bool,
+) {
+    if should_remain {
+        if parent_is_blocked {
+            decisions.blocked_by_unknown_assoc_items.insert(assoc_item);
+        } else {
+            decisions.retained_assoc_items.insert(assoc_item);
+        }
+    } else {
+        decisions.prunable_assoc_items.insert(assoc_item);
+    }
+}
+
+fn trait_item_assoc_name_kind(item: &TraitItem) -> Option<(String, &'static str)> {
+    match item {
+        TraitItem::Const(item) => Some((item.ident.to_string(), "Const")),
+        TraitItem::Type(item) => Some((item.ident.to_string(), "Type")),
+        _ => None,
+    }
+}
+
+fn impl_item_assoc_name_kind(item: &ImplItem) -> Option<(String, &'static str)> {
+    match item {
+        ImplItem::Const(item) => Some((item.ident.to_string(), "Const")),
+        ImplItem::Type(item) => Some((item.ident.to_string(), "Type")),
+        _ => None,
+    }
+}
+
+fn rendered_assoc_item_symbol_path(parent: &str, name: &str, kind: &str) -> String {
+    format!("{parent}::{name}({kind})")
+}
+
+fn rendered_impl_assoc_item_symbol_path(
+    package: &str,
+    type_path: &[String],
+    trait_path: Option<&[String]>,
+    trait_input_type_paths: &[Vec<String>],
+    name: &str,
+    kind: &str,
+) -> String {
+    let parent = if let Some(trait_path) = trait_path {
+        let mut path = format!("{package}::<");
+        push_rendered_path_segments(&mut path, type_path);
+        path.push_str(" as ");
+        push_rendered_path_segments(&mut path, trait_path);
+        if !trait_input_type_paths.is_empty() {
+            path.push('<');
+            for (index, input_path) in trait_input_type_paths.iter().enumerate() {
+                if index > 0 {
+                    path.push_str(", ");
+                }
+                push_rendered_path_segments(&mut path, input_path);
+            }
+            path.push('>');
+        }
+        path.push('>');
+        path
+    } else {
+        rendered_segments_path(package, type_path)
+    };
+    rendered_assoc_item_symbol_path(&parent, name, kind)
+}
+
+fn push_rendered_path_segments(output: &mut String, segments: &[String]) {
+    for (index, segment) in segments.iter().enumerate() {
+        if index > 0 {
+            output.push_str("::");
+        }
+        output.push_str(segment);
+    }
+}
+
+fn rendered_segments_path(package: &str, segments: &[String]) -> String {
+    let mut path = package.to_string();
+    for segment in segments {
+        path.push_str("::");
+        path.push_str(segment);
+    }
+    path
 }
 
 fn reachable_trait_surface_should_render(
@@ -10379,8 +10656,22 @@ fn transform_items(
                         }
                     }
                 }
+                let kept_inherent_assoc_item = trait_path.is_none()
+                    && item_impl.items.iter().any(|impl_item| {
+                        (retain_test_items || !impl_item_is_test(impl_item))
+                            && inherent_impl_assoc_item_should_render(
+                                project,
+                                reduced,
+                                render_plan,
+                                package,
+                                module_path,
+                                item_impl,
+                                impl_item,
+                            )
+                    });
 
                 if kept_method
+                    || kept_inherent_assoc_item
                     || trait_impl_is_required
                     || default_trait_impl_is_required
                     || marker_trait_impl_is_required
@@ -10430,6 +10721,16 @@ fn transform_items(
                         for impl_item in &item_impl.items {
                             if !matches!(impl_item, ImplItem::Fn(_))
                                 && (retain_test_items || !impl_item_is_test(impl_item))
+                                && (matches!(impl_item, ImplItem::Macro(_) | ImplItem::Verbatim(_))
+                                    || inherent_impl_assoc_item_should_render(
+                                        project,
+                                        reduced,
+                                        render_plan,
+                                        package,
+                                        module_path,
+                                        item_impl,
+                                        impl_item,
+                                    ))
                             {
                                 kept_impl_items.push(impl_item.clone());
                             }
@@ -12236,6 +12537,88 @@ fn impl_should_render(
 }
 
 #[allow(clippy::too_many_arguments)]
+fn impl_surface_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    type_path: &[String],
+    trait_path: Option<&[String]>,
+    trait_input_type_paths: &[Vec<String>],
+    trait_item: Option<&ItemId>,
+    item_impl: &syn::ItemImpl,
+) -> bool {
+    let kept_method = item_impl.items.iter().any(|impl_item| {
+        let ImplItem::Fn(method) = impl_item else {
+            return false;
+        };
+        if impl_item_is_test(impl_item) {
+            return false;
+        }
+        let id = CallableId::Method {
+            package: package.to_string(),
+            type_path: type_path.to_vec(),
+            trait_path: trait_path.map(<[String]>::to_vec),
+            trait_input_type_paths: trait_input_type_paths.to_vec(),
+            method: method.sig.ident.to_string(),
+        };
+        render_plan.callable_should_render(&id)
+            || retained_impl_surfaces_call_inherent_associated_function(
+                project,
+                reduced,
+                package,
+                type_path,
+                &method.sig.ident.to_string(),
+            )
+    });
+    let kept_inherent_assoc_item = trait_path.is_none()
+        && item_impl.items.iter().any(|impl_item| {
+            inherent_impl_assoc_item_should_render(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                item_impl,
+                impl_item,
+            )
+        });
+    let trait_impl_is_required = trait_path.is_some_and(|trait_path| {
+        trait_impl_items_are_reachable(reduced, package, type_path, trait_path)
+    });
+    let default_trait_impl_is_required = trait_item.is_some_and(|trait_item| {
+        reduced.reachable_items.contains(trait_item)
+            && trait_default_method_is_referenced_by_reachable_callables(
+                project, reduced, trait_item,
+            )
+            && trait_impl_self_type_is_referenced_by_reachable_surface(
+                project, reduced, package, type_path,
+            )
+    });
+    let marker_trait_impl_is_required =
+        trait_path
+            .and_then(|path| path.last())
+            .is_some_and(|trait_name| {
+                marker_trait_impl_should_remain(reduced, package, type_path, trait_name)
+            })
+            && item_impl
+                .items
+                .iter()
+                .filter(|impl_item| !impl_item_is_test(impl_item))
+                .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
+    let root_macro_impl_surface_is_required =
+        root_item_impl_surface_should_render(project, reduced, package, type_path, item_impl);
+
+    kept_method
+        || kept_inherent_assoc_item
+        || trait_impl_is_required
+        || default_trait_impl_is_required
+        || marker_trait_impl_is_required
+        || root_macro_impl_surface_is_required
+}
+
+#[allow(clippy::too_many_arguments)]
 fn impl_item_should_render_for_trait_surface(
     project: &Project,
     reduced: &ReducedProject,
@@ -12276,6 +12659,42 @@ fn impl_item_should_render_for_trait_surface(
         method: method.sig.ident.to_string(),
     };
     reduced.reachable.contains(&id)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn inherent_impl_assoc_item_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    item_impl: &syn::ItemImpl,
+    impl_item: &ImplItem,
+) -> bool {
+    if impl_item_is_test(impl_item) {
+        return false;
+    }
+    let Some((name, _kind)) = impl_item_assoc_name_kind(impl_item) else {
+        return false;
+    };
+    if item_impl
+        .attrs
+        .iter()
+        .any(attr_requires_impl_surface_retention)
+        || impl_item_attrs_require_surface_retention(impl_item)
+    {
+        return true;
+    }
+    render_plan.package_mentions_ident(package, &name)
+        || render_plan.module_mentions_ident(package, module_path, &name)
+        || reachable_reduced_callables_mention_ident(project, reduced, &name)
+        || retained_root_macro_impl_items_mention_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            &name,
+        )
 }
 
 fn trait_item_for_path(project: &Project, package: &str, trait_path: &[String]) -> Option<ItemId> {
@@ -12577,6 +12996,34 @@ fn path_item_is_reachable(
             kind: *kind,
         })
     })
+}
+
+fn path_item_is_blocked_by_unknown(
+    usage: &UsageDecisionIndex,
+    package: &str,
+    path: &[String],
+    kinds: &[ItemKind],
+) -> bool {
+    let Some((name, module_path)) = path.split_last() else {
+        return false;
+    };
+    kinds.iter().any(|kind| {
+        usage.is_blocked_by_unknown_item(&ItemId {
+            package: package.to_string(),
+            module_path: module_path.to_vec(),
+            name: name.clone(),
+            kind: *kind,
+        })
+    })
+}
+
+fn type_surface_item_kinds() -> &'static [ItemKind] {
+    &[
+        ItemKind::Struct,
+        ItemKind::Enum,
+        ItemKind::Union,
+        ItemKind::Type,
+    ]
 }
 
 fn path_item_is_root(

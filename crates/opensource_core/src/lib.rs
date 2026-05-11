@@ -2142,11 +2142,26 @@ fn rendered_symbol_proof_report_with_members(
     }
 
     for assoc_item in &rendered.assoc_items {
-        summary.blocked_assoc_items += 1;
+        let classification = if member_decisions.retained_assoc_items.contains(assoc_item) {
+            summary.retained_assoc_items += 1;
+            "retained"
+        } else if member_decisions
+            .blocked_by_unknown_assoc_items
+            .contains(assoc_item)
+        {
+            summary.blocked_assoc_items += 1;
+            "blocked_by_unknown"
+        } else if member_decisions.prunable_assoc_items.contains(assoc_item) {
+            summary.prunable_assoc_items += 1;
+            "prunable"
+        } else {
+            summary.blocked_assoc_items += 1;
+            "blocked_by_unknown"
+        };
         entries.push(RenderedSymbolProofEntry {
             kind: "assoc_item".to_string(),
             id: assoc_item.clone(),
-            classification: "blocked_by_unknown".to_string(),
+            classification: classification.to_string(),
         });
     }
 
@@ -11560,6 +11575,63 @@ impl Spec for Live {
             entry.kind == "assoc_item"
                 && entry.id == "assoc_case::<Live as Spec>::VERSION(Const)"
                 && entry.classification == "blocked_by_unknown"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_uses_assoc_item_decision_index() {
+        let output = temp_output("rendered-symbol-associated-item-decisions");
+        write(
+            output.join("assoc_case/Cargo.toml"),
+            r#"[package]
+name = "assoc_case"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("assoc_case/src/lib.rs"),
+            r#"pub struct Live;
+
+impl Live {
+    pub const LIVE: u32 = 1;
+    pub const DEAD: u32 = 2;
+}
+"#,
+        );
+        let live = ItemId {
+            package: "assoc_case".to_string(),
+            module_path: Vec::new(),
+            name: "Live".to_string(),
+            kind: ItemKind::Struct,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["assoc_case".to_string()]),
+            used_items: BTreeSet::from([live]),
+            ..UsageDecisionIndex::default()
+        };
+        let member_decisions = render::RenderedMemberDecisionIndex {
+            retained_assoc_items: BTreeSet::from(["assoc_case::Live::LIVE(Const)".to_string()]),
+            prunable_assoc_items: BTreeSet::from(["assoc_case::Live::DEAD(Const)".to_string()]),
+            ..render::RenderedMemberDecisionIndex::default()
+        };
+
+        let proof =
+            rendered_symbol_proof_report_with_members(&output, &decisions, &member_decisions);
+
+        assert_eq!(proof.status, "failed", "{proof:#?}");
+        assert_eq!(proof.summary.rendered_assoc_items, 2, "{proof:#?}");
+        assert_eq!(proof.summary.retained_assoc_items, 1, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_assoc_items, 1, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "assoc_item"
+                && entry.id == "assoc_case::Live::LIVE(Const)"
+                && entry.classification == "retained"
+        }));
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "assoc_item"
+                && entry.id == "assoc_case::Live::DEAD(Const)"
+                && entry.classification == "prunable"
         }));
     }
 

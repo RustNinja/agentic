@@ -1892,6 +1892,27 @@ fn retains_associated_type_const_and_projection_impls() {
 }
 
 #[test]
+fn prunes_unused_inherent_associated_consts_without_dropping_used_const() {
+    let workspace = temp_path("rule-inherent-associated-const-workspace");
+    let output = temp_path("rule-inherent-associated-const-output");
+    let target_dir = temp_path("rule-inherent-associated-const-target");
+    write_inherent_associated_const_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("inherent associated const rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("inherent_assoc_const_rule/src/lib.rs"));
+    assert!(lib.contains("pub const LIVE: u32 = 7"), "{lib}");
+    assert!(!lib.contains("DEAD"), "{lib}");
+    assert!(!lib.contains("unused"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_try_from_conversion_impls_for_boundary_types() {
     let workspace = temp_path("rule-try-from-workspace");
     let output = temp_path("rule-try-from-output");
@@ -5204,6 +5225,31 @@ pub fn selected(value: u32) -> (<LiveDecoder as Decoder>::Output, &'static str) 
         <LiveDecoder as Decoder>::decode(value),
         <LiveDecoder as Decoder>::KIND,
     )
+}
+"#,
+    );
+}
+
+fn write_inherent_associated_const_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "inherent_assoc_const_rule",
+        r#"use opensourced::opensourced;
+
+pub struct Counter;
+
+impl Counter {
+    pub const LIVE: u32 = 7;
+    pub const DEAD: u32 = 99;
+
+    pub fn unused(&self) -> u32 {
+        Self::DEAD
+    }
+}
+
+#[opensourced]
+pub fn selected() -> u32 {
+    Counter::LIVE
 }
 "#,
     );
