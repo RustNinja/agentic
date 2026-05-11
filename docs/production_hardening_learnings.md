@@ -1429,6 +1429,15 @@ be referenced by retained code, protected by field/struct attributes, or remain
 blocked by an unknown surface. This closes another over-retention path in the
 used/unused/unknown split without hard-coding Litter symbols.
 
+Package-wide field-name fallback is only safe when it is unambiguous. A retained
+`.value` access on `LiveRecord` must not keep `AuditRecord.value` in the same
+support module. Struct fields now get concrete-owner evidence first; if another
+rendered public struct in the same module has the same public field name, the
+broad fallback is disabled and the field must be kept by concrete use,
+same-struct impl use, API-surface proof, attributes, or unknown retention.
+Cross-module conversion impls still rely on the broader fallback until their
+type-flow proof is strong enough to narrow safely.
+
 Concrete support-field proof must bind typed closure inputs as well as typed
 function and method parameters. Iterator and callback bodies often carry the
 only non-API evidence that a dependency field is live, and a pure struct

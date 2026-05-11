@@ -281,6 +281,15 @@ dead `value` field. The same fix extends struct-literal field pruning across
 package boundaries, so removed dependency fields are also removed from retained
 caller initializers.
 
+`fixture.public_field_same_package_collision_prune.support_chain.001` closes the
+remaining same-module version of that bug. After concrete-owner checks run, the
+package-wide field-name fallback is disabled when another rendered public struct
+in the same module has the same public field name. This prevents
+`LiveRecord.value` from keeping `AuditRecord.value` unless the audit field has
+its own concrete use, same-struct impl use, API-surface proof, attribute guard,
+or unknown blocker. Cross-module conversion impl surfaces still keep the broader
+fallback until their type-flow proof is strong enough to remove it safely.
+
 `fixture.public_field_typed_param_prune.support_chain.001` covers the inverse
 under-retention risk. Concrete field evidence now binds typed function and
 method parameters before scanning retained bodies, so `record:

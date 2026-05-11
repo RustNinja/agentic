@@ -16486,16 +16486,36 @@ fn struct_field_should_remain(
         return true;
     };
     let name = name.to_string();
+    let item_id = ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name: item_struct.ident.to_string(),
+        kind: ItemKind::Struct,
+    };
+    if reachable_callables_need_concrete_struct_field(
+        project,
+        reduced,
+        render_plan,
+        &item_id,
+        &name,
+    ) || retained_impl_items_mention_struct_field(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        item_struct,
+        &name,
+    ) {
+        return true;
+    }
+    if matches!(item_struct.vis, syn::Visibility::Public(_))
+        && matches!(field.vis, syn::Visibility::Public(_))
+        && rendered_sibling_struct_has_field_name(project, reduced, render_plan, &item_id, &name)
+    {
+        return false;
+    }
     reachable_callables_need_struct_field(project, reduced, render_plan, package, &name)
-        || retained_impl_items_mention_struct_field(
-            project,
-            reduced,
-            render_plan,
-            package,
-            module_path,
-            item_struct,
-            &name,
-        )
 }
 
 fn field_provides_required_struct_type_param_usage(
@@ -17217,6 +17237,37 @@ fn type_like_item_kind(item: &ItemId) -> bool {
         item.kind,
         ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type | ItemKind::Trait
     )
+}
+
+fn rendered_sibling_struct_has_field_name(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
+    item_id: &ItemId,
+    field_name: &str,
+) -> bool {
+    project.items.iter().any(|(candidate_id, record)| {
+        if candidate_id == item_id
+            || candidate_id.package != item_id.package
+            || candidate_id.module_path != item_id.module_path
+            || candidate_id.kind != ItemKind::Struct
+        {
+            return false;
+        }
+        let candidate_should_render = render_plan
+            .map(|render_plan| render_plan.item_should_render(candidate_id))
+            .unwrap_or_else(|| {
+                reduced.reachable_items.contains(candidate_id)
+                    || root_item_should_render(reduced, candidate_id)
+            });
+        if !candidate_should_render {
+            return false;
+        }
+        let Item::Struct(candidate) = &record.item else {
+            return false;
+        };
+        named_struct_field(candidate, field_name).is_some()
+    })
 }
 
 impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {

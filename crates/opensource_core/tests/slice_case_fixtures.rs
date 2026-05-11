@@ -291,6 +291,55 @@ fn prunes_public_support_field_name_collisions_to_concrete_struct_use() {
 }
 
 #[test]
+fn prunes_public_support_field_name_collisions_inside_same_package() {
+    let fixture =
+        repo_root().join("fixtures/slice_cases/public_field_same_package_collision_prune");
+    let output = temp_path("slice-case-public-field-same-package-collision-prune-output");
+    let target_dir = temp_path("slice-case-public-field-same-package-collision-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("public_field_same_package_collision_prune fixture should slice");
+
+    assert_eq!(report.packages, ["root", "support_records"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_summary"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    let support = read(output.join("support_records/src/lib.rs"));
+
+    assert!(
+        root_source.contains("pub fn selected_summary"),
+        "{root_source}"
+    );
+    assert!(!root_source.contains("dead_summary"), "{root_source}");
+
+    assert!(support.contains("pub struct LiveRecord"), "{support}");
+    assert!(support.contains("pub value: u32"), "{support}");
+    assert!(!support.contains("dead_note"), "{support}");
+    assert!(support.contains("pub struct AuditRecord"), "{support}");
+    assert!(
+        support.contains("pub struct AuditRecord {\n    pub label: String,\n}"),
+        "same-package support record should keep only concrete live label field\n{support}"
+    );
+    assert!(!support.contains("pub fn dead_value"), "{support}");
+    assert!(!support.contains("pub fn dead_summary"), "{support}");
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn retains_public_support_fields_used_through_typed_params() {
     let fixture = repo_root().join("fixtures/slice_cases/public_field_typed_param_prune");
     let output = temp_path("slice-case-public-field-typed-param-prune-output");
