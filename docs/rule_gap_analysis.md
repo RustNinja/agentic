@@ -9,7 +9,7 @@ found from the local Litter checkout at:
 
 The current committed baseline after the fixture expansion pass is:
 
-- 922 focused cargo-checked fixture/rule cases.
+- 923 focused cargo-checked fixture/rule cases.
 - 1,200 generated catalog rows executed as real batched `generate()` slices.
 - The first documented gap batch is now executable in
   `crates/opensource_core/tests/rule_database.rs`.
@@ -207,6 +207,13 @@ Fixture ideas:
   keeps external enum variants, conversion helpers, and JSON mutation helpers
   used by reachable match arms while pruning unrelated protocol variants.
 
+Current coverage note: `pattern.external_protocol_variant_projection.001` now
+has an executable support-package fixture. The reducer carries enum variant
+requirements through root usage, support facade reexports, and support-to-support
+type aliases; dependency enum match payloads seed the precise payload methods
+called by retained state reducers. Dead external protocol variants and their
+payload structs are pruned instead of kept as public support surface.
+
 ## Closed In First Gap Pass
 
 The first implementation pass converted the top gap list into executable,
@@ -237,13 +244,12 @@ Do not grow production confidence by adding 1,000 hand-written near-duplicates.
 Keep the generated 1,200-row catalog for breadth. The next focused batch should
 target the remaining shapes that are not closed above:
 
-1. `pattern.external_protocol_variant_projection.001` deeper cross-crate public protocol variant surfaces
-2. `request.json_patch_state_machine.001`
-3. `serde.adjacent_tag_content_contract.001`
-4. `static.lazy_regex_constructor.001` with external regex-like dependency behavior
-5. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
-6. `uniffi.shared_runtime_once_lock.001`
-7. `uniffi.async_runtime_exported_object.001`
+1. `request.json_patch_state_machine.001`
+2. `serde.adjacent_tag_content_contract.001`
+3. `static.lazy_regex_constructor.001` with external regex-like dependency behavior
+4. `static.global_mutex_registry.001` with multi-operation mutation/query APIs
+5. `uniffi.shared_runtime_once_lock.001`
+6. `uniffi.async_runtime_exported_object.001`
 
 After those fixtures are executable, rerun five random Litter roots and compare
 failures against this list. Any new failure should become a minimized generic

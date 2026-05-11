@@ -2409,9 +2409,11 @@ fn build_support_source_plan(
         return Ok(SupportSourcePlan::default());
     };
 
+    let dependency_enum_payloads =
+        support_dependency_enum_payloads_for_manifest(&package_root, manifest, workspace)?;
     let mut usage = TokenUsage::default();
     for syntax in transformed_sources.values() {
-        usage.record_file(syntax);
+        usage.record_file_with_dependency_enum_payloads(syntax, &dependency_enum_payloads);
     }
     record_required_external_reexport_usage(&syntax, &dependency_roots, required_names, &mut usage);
     for expansion in &macro_expansions {
@@ -2476,6 +2478,285 @@ fn collect_support_source_dependency_roots(
         }
     }
     Ok(())
+}
+
+fn support_dependency_enum_payloads_for_manifest(
+    package_root: &Path,
+    manifest: &Value,
+    workspace: Option<&SupportWorkspace>,
+) -> Result<DependencyEnumPayloadMap, Box<dyn std::error::Error>> {
+    let mut payloads = DependencyEnumPayloadMap::new();
+    let mut visited = BTreeSet::new();
+    if let Some(manifest) = manifest.as_table() {
+        collect_support_dependency_enum_payloads(
+            package_root,
+            workspace,
+            manifest,
+            &mut visited,
+            &mut payloads,
+        )?;
+    }
+
+    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            collect_support_dependency_enum_payloads(
+                package_root,
+                workspace,
+                target,
+                &mut visited,
+                &mut payloads,
+            )?;
+        }
+    }
+    Ok(payloads)
+}
+
+fn collect_support_dependency_enum_payloads(
+    package_root: &Path,
+    workspace: Option<&SupportWorkspace>,
+    table_parent: &Table,
+    visited: &mut BTreeSet<(PathBuf, String)>,
+    payloads: &mut DependencyEnumPayloadMap,
+) -> Result<(), Box<dyn std::error::Error>> {
+    for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        let Some(dependencies) = table_parent.get(table_name).and_then(Value::as_table) else {
+            continue;
+        };
+        for (alias, value) in dependencies {
+            let (value, manifest_dir) =
+                materialized_dependency_value_for_workspace(package_root, workspace, alias, value)?;
+            let dependency_package = dependency_package_name(alias, &value);
+            if is_marker_dependency(alias, &dependency_package) {
+                continue;
+            }
+            let Some(root) = dependency_path_root(&value, &manifest_dir)? else {
+                continue;
+            };
+            let root = root.canonicalize().unwrap_or(root);
+            for dependency_root in [alias.clone(), dependency_code_name(alias)] {
+                if visited.insert((root.clone(), dependency_root.clone())) {
+                    collect_dependency_root_enum_payloads(&root, &dependency_root, payloads)?;
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn collect_dependency_root_enum_payloads(
+    root: &Path,
+    dependency_root: &str,
+    payloads: &mut DependencyEnumPayloadMap,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let manifest = read_toml_value(&root.join("Cargo.toml"))?;
+    let Some(lib_path) = support_library_source_path_from(root, &manifest) else {
+        return Ok(());
+    };
+    let Ok(package_root) = root.canonicalize() else {
+        return Ok(());
+    };
+    let Ok(lib_path) = lib_path.canonicalize() else {
+        return Ok(());
+    };
+    let text = match fs::read_to_string(&lib_path) {
+        Ok(text) => text,
+        Err(_) => return Ok(()),
+    };
+    let syntax = match syn::parse_file(&text) {
+        Ok(syntax) => syntax,
+        Err(_) => return Ok(()),
+    };
+    let mut modules = BTreeMap::new();
+    let root_module_dir = lib_path.parent().unwrap_or(&package_root).to_path_buf();
+    if !collect_support_module_sources_with_syntax(
+        &package_root,
+        &lib_path,
+        &root_module_dir,
+        None,
+        Vec::new(),
+        syntax,
+        &mut modules,
+    )? {
+        return Ok(());
+    }
+    let item_type_paths = support_dependency_item_type_paths(&modules);
+    for module in modules.values() {
+        for item in &module.syntax.items {
+            let Item::Enum(item_enum) = item else {
+                continue;
+            };
+            let mut enum_path = module.module_path.clone();
+            enum_path.push(item_enum.ident.to_string());
+            for variant in &item_enum.variants {
+                let mut variant_payloads = DependencyEnumVariantPayloadTypes::default();
+                match &variant.fields {
+                    Fields::Unnamed(fields) => {
+                        variant_payloads.unnamed = fields
+                            .unnamed
+                            .iter()
+                            .map(|field| {
+                                support_dependency_field_type_path(
+                                    field,
+                                    &module.module_path,
+                                    &item_type_paths,
+                                )
+                                .map(|path| (dependency_root.to_string(), path))
+                            })
+                            .collect();
+                    }
+                    Fields::Named(fields) => {
+                        for field in &fields.named {
+                            let Some(field_name) = field.ident.as_ref().map(ToString::to_string)
+                            else {
+                                continue;
+                            };
+                            if let Some(path) = support_dependency_field_type_path(
+                                field,
+                                &module.module_path,
+                                &item_type_paths,
+                            ) {
+                                variant_payloads
+                                    .named
+                                    .insert(field_name, (dependency_root.to_string(), path));
+                            }
+                        }
+                    }
+                    Fields::Unit => {}
+                }
+                if !variant_payloads.unnamed.is_empty() || !variant_payloads.named.is_empty() {
+                    payloads.insert(
+                        (
+                            dependency_root.to_string(),
+                            enum_path.clone(),
+                            variant.ident.to_string(),
+                        ),
+                        variant_payloads,
+                    );
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+fn support_dependency_item_type_paths(
+    modules: &BTreeMap<PathBuf, SupportModuleSource>,
+) -> BTreeMap<String, Vec<Vec<String>>> {
+    let mut paths = BTreeMap::<String, Vec<Vec<String>>>::new();
+    for module in modules.values() {
+        for item in &module.syntax.items {
+            let Some(name) = support_item_name(item) else {
+                continue;
+            };
+            if !matches!(
+                item,
+                Item::Struct(_) | Item::Enum(_) | Item::Trait(_) | Item::Type(_) | Item::Union(_)
+            ) {
+                continue;
+            }
+            let mut path = module.module_path.clone();
+            path.push(name.clone());
+            paths.entry(name).or_default().push(path);
+        }
+    }
+    paths
+}
+
+fn support_dependency_field_type_path(
+    field: &Field,
+    module_path: &[String],
+    item_type_paths: &BTreeMap<String, Vec<Vec<String>>>,
+) -> Option<Vec<String>> {
+    support_dependency_type_path(&field.ty, module_path, item_type_paths)
+}
+
+fn support_dependency_type_path(
+    ty: &Type,
+    module_path: &[String],
+    item_type_paths: &BTreeMap<String, Vec<Vec<String>>>,
+) -> Option<Vec<String>> {
+    match ty {
+        Type::Path(type_path) => {
+            if let Some(inner) = single_container_type_argument(type_path) {
+                if let Some(path) =
+                    support_dependency_type_path(inner, module_path, item_type_paths)
+                {
+                    return Some(path);
+                }
+            }
+            let segments = type_path
+                .path
+                .segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>();
+            support_dependency_type_segments_path(&segments, module_path, item_type_paths)
+        }
+        Type::Reference(reference) => {
+            support_dependency_type_path(&reference.elem, module_path, item_type_paths)
+        }
+        Type::Paren(paren) => {
+            support_dependency_type_path(&paren.elem, module_path, item_type_paths)
+        }
+        Type::Group(group) => {
+            support_dependency_type_path(&group.elem, module_path, item_type_paths)
+        }
+        _ => None,
+    }
+}
+
+fn single_container_type_argument(type_path: &syn::TypePath) -> Option<&Type> {
+    if type_path.qself.is_some() || type_path.path.segments.len() != 1 {
+        return None;
+    }
+    let segment = type_path.path.segments.first()?;
+    if !matches!(
+        segment.ident.to_string().as_str(),
+        "Arc" | "Box" | "Option" | "Rc" | "Vec"
+    ) {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    if arguments.args.len() != 1 {
+        return None;
+    }
+    match arguments.args.first()? {
+        GenericArgument::Type(ty) => Some(ty),
+        _ => None,
+    }
+}
+
+fn support_dependency_type_segments_path(
+    segments: &[String],
+    module_path: &[String],
+    item_type_paths: &BTreeMap<String, Vec<Vec<String>>>,
+) -> Option<Vec<String>> {
+    let (first, rest) = segments.split_first()?;
+    match first.as_str() {
+        "crate" => return Some(rest.to_vec()),
+        "self" => {
+            let mut path = module_path.to_vec();
+            path.extend(rest.iter().cloned());
+            return Some(path);
+        }
+        "super" => {
+            let mut path = module_path.to_vec();
+            path.pop();
+            path.extend(rest.iter().cloned());
+            return Some(path);
+        }
+        _ => {}
+    }
+
+    let type_name = segments.last()?;
+    item_type_paths
+        .get(type_name)
+        .and_then(|paths| (paths.len() == 1).then(|| paths[0].clone()))
 }
 
 fn support_macro_expansions_for_manifest(
@@ -2990,6 +3271,7 @@ struct SupportLiveSet {
     surface_item_names: BTreeSet<String>,
     public_exports: BTreeSet<String>,
     assoc_item_names: BTreeMap<String, BTreeSet<String>>,
+    required_enum_variants: BTreeMap<String, BTreeSet<String>>,
 }
 
 struct SupportUseNeeds<'a> {
@@ -3017,6 +3299,15 @@ struct SupportEnumVariantPayloads {
     unnamed: Vec<Option<SupportMethodCandidate>>,
     named: BTreeMap<String, SupportMethodCandidate>,
 }
+
+#[derive(Clone, Default)]
+struct DependencyEnumVariantPayloadTypes {
+    unnamed: Vec<Option<(String, Vec<String>)>>,
+    named: BTreeMap<String, (String, Vec<String>)>,
+}
+
+type DependencyEnumPayloadMap =
+    BTreeMap<(String, Vec<String>, String), DependencyEnumVariantPayloadTypes>;
 
 struct SupportResolveContext<'a> {
     modules: &'a BTreeMap<PathBuf, SupportModuleSource>,
@@ -3124,7 +3415,7 @@ fn build_restricted_support_sources(
                 let Some(inserted) = mark_support_token_dependencies(
                     &ctx,
                     &source_file,
-                    &support_item_dependency_tokens(item),
+                    &support_item_dependency_tokens(item, &live_set),
                     &named_items,
                     &mut live,
                     &mut live_usage,
@@ -3387,6 +3678,18 @@ fn build_restricted_support_sources(
             }
             live_usage_by_file.insert(source_file.clone(), live_usage);
         }
+
+        let live_snapshot = live.clone();
+        let Some(inserted) =
+            mark_support_live_enum_variant_payload_dependencies(&ctx, &live_snapshot, &mut live)
+        else {
+            debug_support_prune(
+                package_root,
+                "restricted fail: enum variant payload dependency unsupported",
+            );
+            return Ok(None);
+        };
+        changed |= inserted;
     }
 
     for (source_file, live_set) in &live {
@@ -3449,16 +3752,22 @@ fn build_restricted_support_sources(
     Ok(Some(transformed_sources))
 }
 
-fn support_item_dependency_tokens(item: &Item) -> TokenStream {
-    let Item::Mod(item_mod) = item else {
-        return item.to_token_stream();
-    };
-    if item_mod.content.is_none() {
-        return item.to_token_stream();
+fn support_item_dependency_tokens(item: &Item, live_set: &SupportLiveSet) -> TokenStream {
+    match item {
+        Item::Mod(item_mod) if item_mod.content.is_some() => {
+            let mut item_mod = item_mod.clone();
+            item_mod.content = item_mod.content.map(|(brace, _items)| (brace, Vec::new()));
+            item_mod.to_token_stream()
+        }
+        Item::Enum(item_enum)
+            if !support_enum_preserves_full_variant_surface(item_enum, live_set) =>
+        {
+            let mut item_enum = item_enum.clone();
+            item_enum.variants = Punctuated::new();
+            item_enum.to_token_stream()
+        }
+        _ => item.to_token_stream(),
     }
-    let mut item_mod = item_mod.clone();
-    item_mod.content = item_mod.content.map(|(brace, _items)| (brace, Vec::new()));
-    item_mod.to_token_stream()
 }
 
 fn mark_support_token_dependencies(
@@ -3757,6 +4066,50 @@ fn seed_support_required_name(
         );
     }
     if let Some((prefix, target_name)) = support_required_path(required_name) {
+        if mark_support_required_enum_variant_path(ctx, ctx.root_file, &prefix, &target_name, live)
+            .unwrap_or(false)
+        {
+            return true;
+        }
+        if let Some(enum_name) = prefix.last() {
+            for item in &root_module.syntax.items {
+                let Item::Use(item_use) = item else {
+                    continue;
+                };
+                if !use_is_reexport(&item_use.vis) {
+                    continue;
+                }
+                let mut visited = BTreeSet::new();
+                match mark_support_required_reexport(
+                    ctx,
+                    ctx.root_file,
+                    &item_use.tree,
+                    Vec::new(),
+                    enum_name,
+                    None,
+                    live,
+                    &mut visited,
+                ) {
+                    SupportReexportMark::Matched(_) => {
+                        live.entry(ctx.root_file.to_path_buf())
+                            .or_default()
+                            .public_exports
+                            .insert(enum_name.to_string());
+                        mark_support_surface_name(live, enum_name);
+                        if mark_support_required_enum_variant_by_name(
+                            ctx,
+                            live,
+                            enum_name,
+                            &target_name,
+                        ) {
+                            return true;
+                        }
+                    }
+                    SupportReexportMark::Unsupported => return false,
+                    SupportReexportMark::NotMatched => {}
+                }
+            }
+        }
         let mut visited = BTreeSet::new();
         let matched = matches!(
             mark_support_use_target(
@@ -3771,6 +4124,9 @@ fn seed_support_required_name(
         );
         if matched {
             mark_support_surface_name(live, &target_name);
+            if let Some(enum_name) = prefix.last() {
+                mark_support_required_enum_variant_by_name(ctx, live, enum_name, &target_name);
+            }
         }
         return matched;
     }
@@ -3826,6 +4182,109 @@ fn mark_support_surface_name(live: &mut BTreeMap<PathBuf, SupportLiveSet>, requi
                 .insert(required_name.to_string());
         }
     }
+}
+
+fn mark_support_required_enum_variant_by_name(
+    ctx: &SupportResolveContext<'_>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+    enum_name: &str,
+    variant_name: &str,
+) -> bool {
+    let mut changed = false;
+    for (source_file, module) in ctx.modules {
+        if !live
+            .get(source_file)
+            .is_some_and(|live_set| live_set.item_names.contains(enum_name))
+        {
+            continue;
+        }
+        let Some(item_enum) = module.syntax.items.iter().find_map(|item| {
+            let Item::Enum(item_enum) = item else {
+                return None;
+            };
+            (item_enum.ident == enum_name).then_some(item_enum)
+        }) else {
+            continue;
+        };
+        if !item_enum
+            .variants
+            .iter()
+            .any(|variant| variant.ident == variant_name)
+        {
+            continue;
+        }
+        changed |= live
+            .entry(source_file.clone())
+            .or_default()
+            .required_enum_variants
+            .entry(enum_name.to_string())
+            .or_default()
+            .insert(variant_name.to_string());
+    }
+    changed
+}
+
+fn mark_support_required_enum_variant_path(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    enum_path: &[String],
+    variant_name: &str,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let (enum_name, module_prefix) = enum_path.split_last()?;
+    let enum_file = support_module_file_for_prefix(ctx, source_file, module_prefix)?;
+    let module = ctx.modules.get(&enum_file)?;
+    let item_enum = module.syntax.items.iter().find_map(|item| {
+        let Item::Enum(item_enum) = item else {
+            return None;
+        };
+        (item_enum.ident == enum_name.as_str()).then_some(item_enum)
+    })?;
+    if !item_enum
+        .variants
+        .iter()
+        .any(|variant| variant.ident == variant_name)
+    {
+        return None;
+    }
+    let mut changed = mark_support_live_item_name(ctx, &enum_file, enum_name, live);
+    changed |= live
+        .entry(enum_file)
+        .or_default()
+        .required_enum_variants
+        .entry(enum_name.to_string())
+        .or_default()
+        .insert(variant_name.to_string());
+    Some(changed)
+}
+
+fn support_module_file_for_prefix(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    prefix: &[String],
+) -> Option<PathBuf> {
+    let mut current_file = source_file.to_path_buf();
+    let mut segments = prefix;
+    if let Some(first) = segments.first() {
+        match first.as_str() {
+            "crate" => {
+                current_file = ctx.root_file.to_path_buf();
+                segments = &segments[1..];
+            }
+            "self" => {
+                segments = &segments[1..];
+            }
+            "super" => {
+                current_file = support_parent_module_file(ctx.modules, &current_file)?.clone();
+                segments = &segments[1..];
+            }
+            _ => {}
+        }
+    }
+    for segment in segments {
+        current_file = support_child_module_file(ctx.modules, &current_file, segment)?;
+    }
+    Some(current_file)
 }
 
 fn support_required_path(required_name: &str) -> Option<(Vec<String>, String)> {
@@ -4941,9 +5400,11 @@ fn transform_restricted_support_file(
         .cloned()
         .unwrap_or_else(|| support_live_item_usage(syntax, live_set));
     let mut live_import_names = support_live_import_names(&live_usage);
-    let non_enum_usage = support_live_non_enum_item_usage(syntax, live_set);
-    let enum_variant_type_usage = support_live_enum_variant_type_usage(syntax, live_set);
-    for variant_name in support_live_enum_variant_names(syntax, live_set) {
+    let non_enum_usage = support_live_non_enum_usage_across_live_files(ctx, live_by_file);
+    let retained_enum_variants = support_retained_enum_variants(syntax, live_set, &non_enum_usage);
+    let enum_variant_type_usage =
+        support_live_enum_variant_type_usage(syntax, live_set, &retained_enum_variants);
+    for variant_name in support_live_enum_variant_names(syntax, live_set, &retained_enum_variants) {
         if !non_enum_usage.bare_idents.contains(&variant_name)
             && !non_enum_usage.path_roots.contains(&variant_name)
             && !non_enum_usage
@@ -5009,6 +5470,17 @@ fn transform_restricted_support_file(
                     Some(Item::Struct(transform_support_struct(
                         item_struct,
                         &pruned_struct_fields,
+                    )))
+                } else {
+                    None
+                }
+            }
+            Item::Enum(item_enum) => {
+                if support_item_name(item).is_none_or(|name| live_set.item_names.contains(&name)) {
+                    Some(Item::Enum(transform_support_enum(
+                        item_enum,
+                        live_set,
+                        &retained_enum_variants,
                     )))
                 } else {
                     None
@@ -5254,6 +5726,29 @@ fn transform_support_struct(
     item_struct
 }
 
+fn transform_support_enum(
+    item_enum: &syn::ItemEnum,
+    live_set: &SupportLiveSet,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
+) -> syn::ItemEnum {
+    if support_enum_preserves_full_variant_surface(item_enum, live_set) {
+        return item_enum.clone();
+    }
+    let mut item_enum = item_enum.clone();
+    let enum_name = item_enum.ident.to_string();
+    let Some(retained_variants) = retained_enum_variants.get(&enum_name) else {
+        item_enum.variants = Punctuated::new();
+        return item_enum;
+    };
+    item_enum.variants = item_enum
+        .variants
+        .iter()
+        .filter(|variant| retained_variants.contains(&variant.ident.to_string()))
+        .cloned()
+        .collect();
+    item_enum
+}
+
 fn prune_support_struct_literals_in_item(
     item: &mut Item,
     pruned_struct_fields: &BTreeMap<String, BTreeSet<String>>,
@@ -5415,6 +5910,7 @@ fn support_live_import_names(usage: &TokenUsage) -> BTreeSet<String> {
 fn support_live_enum_variant_names(
     syntax: &syn::File,
     live_set: &SupportLiveSet,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
 ) -> BTreeSet<String> {
     syntax
         .items
@@ -5429,10 +5925,17 @@ fn support_live_enum_variant_names(
                 .then_some(item_enum)
         })
         .flat_map(|item_enum| {
-            item_enum
-                .variants
-                .iter()
-                .map(|variant| variant.ident.to_string())
+            let enum_name = item_enum.ident.to_string();
+            retained_enum_variants
+                .get(&enum_name)
+                .cloned()
+                .unwrap_or_else(|| {
+                    item_enum
+                        .variants
+                        .iter()
+                        .map(|variant| variant.ident.to_string())
+                        .collect()
+                })
         })
         .collect()
 }
@@ -5462,19 +5965,157 @@ fn support_live_non_enum_item_usage(syntax: &syn::File, live_set: &SupportLiveSe
     usage
 }
 
+fn support_live_non_enum_usage_across_live_files(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+) -> TokenUsage {
+    let mut usage = TokenUsage::default();
+    for (source_file, live_set) in live_by_file {
+        let Some(module) = ctx.modules.get(source_file) else {
+            continue;
+        };
+        usage.merge(&support_live_non_enum_item_usage(&module.syntax, live_set));
+    }
+    usage
+}
+
+fn mark_support_live_enum_variant_payload_dependencies(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+    live: &mut BTreeMap<PathBuf, SupportLiveSet>,
+) -> Option<bool> {
+    let mut changed = false;
+    let non_enum_usage = support_live_non_enum_usage_across_live_files(ctx, live_by_file);
+    for (source_file, live_set) in live_by_file {
+        let Some(module) = ctx.modules.get(source_file) else {
+            continue;
+        };
+        let named_items = support_named_item_names(&module.syntax.items);
+        let retained_enum_variants =
+            support_retained_enum_variants(&module.syntax, live_set, &non_enum_usage);
+        for item in &module.syntax.items {
+            let Item::Enum(item_enum) = item else {
+                continue;
+            };
+            if !live_set.item_names.contains(&item_enum.ident.to_string()) {
+                continue;
+            }
+            let tokens =
+                support_retained_enum_variant_dependency_tokens(item_enum, &retained_enum_variants);
+            if tokens.is_empty() {
+                continue;
+            }
+            let mut scratch_usage = TokenUsage::default();
+            changed |= mark_support_token_dependencies(
+                ctx,
+                source_file,
+                &tokens,
+                &named_items,
+                live,
+                &mut scratch_usage,
+                true,
+            )?;
+        }
+    }
+    Some(changed)
+}
+
+fn support_retained_enum_variant_dependency_tokens(
+    item_enum: &syn::ItemEnum,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
+) -> TokenStream {
+    let enum_name = item_enum.ident.to_string();
+    let Some(retained_variants) = retained_enum_variants.get(&enum_name) else {
+        return TokenStream::new();
+    };
+    let mut tokens = TokenStream::new();
+    for variant in &item_enum.variants {
+        if retained_variants.contains(&variant.ident.to_string()) {
+            variant.to_tokens(&mut tokens);
+        }
+    }
+    tokens
+}
+
+fn support_retained_enum_variants(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+    non_enum_usage: &TokenUsage,
+) -> BTreeMap<String, BTreeSet<String>> {
+    let mut retained = BTreeMap::new();
+    for item in &syntax.items {
+        let Item::Enum(item_enum) = item else {
+            continue;
+        };
+        let enum_name = item_enum.ident.to_string();
+        if !live_set.item_names.contains(&enum_name) {
+            continue;
+        }
+        let mut variants: BTreeSet<String> =
+            if support_enum_preserves_full_variant_surface(item_enum, live_set) {
+                item_enum
+                    .variants
+                    .iter()
+                    .map(|variant| variant.ident.to_string())
+                    .collect()
+            } else {
+                item_enum
+                    .variants
+                    .iter()
+                    .filter_map(|variant| {
+                        let variant_name = variant.ident.to_string();
+                        support_usage_mentions_variant(non_enum_usage, &variant_name)
+                            .then_some(variant_name)
+                    })
+                    .collect()
+            };
+        if let Some(required_variants) = live_set.required_enum_variants.get(&enum_name) {
+            variants.extend(required_variants.iter().cloned());
+        }
+        retained.insert(enum_name, variants);
+    }
+    retained
+}
+
+fn support_usage_mentions_variant(usage: &TokenUsage, variant_name: &str) -> bool {
+    usage.bare_idents.contains(variant_name)
+        || usage.use_idents.contains(variant_name)
+        || usage.path_roots.contains(variant_name)
+        || usage.local_path_leaf_idents.contains(variant_name)
+        || usage
+            .path_candidates
+            .iter()
+            .any(|segments| segments.last().is_some_and(|leaf| leaf == variant_name))
+}
+
+fn support_enum_preserves_full_variant_surface(
+    item_enum: &syn::ItemEnum,
+    _live_set: &SupportLiveSet,
+) -> bool {
+    enum_attrs_require_full_variant_surface(item_enum)
+}
+
 fn support_live_enum_variant_type_usage(
     syntax: &syn::File,
     live_set: &SupportLiveSet,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
 ) -> TokenUsage {
     let mut usage = TokenUsage::default();
     for item in &syntax.items {
         let Item::Enum(item_enum) = item else {
             continue;
         };
-        if !live_set.item_names.contains(&item_enum.ident.to_string()) {
+        let enum_name = item_enum.ident.to_string();
+        if !live_set.item_names.contains(&enum_name) {
             continue;
         }
+        let Some(retained_variants) = retained_enum_variants.get(&enum_name) else {
+            continue;
+        };
         for variant in &item_enum.variants {
+            if !retained_variants.contains(&variant.ident.to_string()) {
+                continue;
+            }
             for field in &variant.fields {
                 collect_token_usage(&field.ty.to_token_stream(), &mut usage);
                 for attr in &field.attrs {
@@ -10521,9 +11162,18 @@ struct TokenUsage {
 
 impl TokenUsage {
     fn record_file(&mut self, file: &syn::File) {
+        let dependency_enum_payloads = DependencyEnumPayloadMap::new();
+        self.record_file_with_dependency_enum_payloads(file, &dependency_enum_payloads);
+    }
+
+    fn record_file_with_dependency_enum_payloads(
+        &mut self,
+        file: &syn::File,
+        dependency_enum_payloads: &DependencyEnumPayloadMap,
+    ) {
         collect_token_usage(&file.to_token_stream(), self);
         self.record_dependency_method_calls(file);
-        self.record_dependency_methods_through_typed_values(file);
+        self.record_dependency_methods_through_typed_values(file, dependency_enum_payloads);
         self.record_dependency_assoc_calls_through_imports(file);
         for item in &file.items {
             if let Item::Use(item_use) = item {
@@ -10555,9 +11205,14 @@ impl TokenUsage {
         }
     }
 
-    fn record_dependency_methods_through_typed_values(&mut self, file: &syn::File) {
+    fn record_dependency_methods_through_typed_values(
+        &mut self,
+        file: &syn::File,
+        dependency_enum_payloads: &DependencyEnumPayloadMap,
+    ) {
         let mut visitor = DependencyTypedValueMethodVisitor {
             type_imports: dependency_type_imports(file),
+            enum_variant_payload_types: dependency_enum_payloads.clone(),
             macro_method_requirements: support_macro_metavariable_method_requirements_from_items(
                 &file.items,
             ),
@@ -10707,14 +11362,12 @@ impl TokenUsage {
                 }
                 if let Some(target_name) = dependency_required_path_string(&target[1..]) {
                     names.insert(target_name.clone());
-                    if dependency_alias_target_is_module_like(local, target) {
-                        if let Some(local_names) = self.dependency_public_names.get(local) {
-                            for local_name in local_names {
-                                let mut path = target[1..].to_vec();
-                                path.extend(local_name.split("::").map(str::to_string));
-                                if let Some(path) = dependency_required_path_string(&path) {
-                                    names.insert(path);
-                                }
+                    if let Some(local_names) = self.dependency_public_names.get(local) {
+                        for local_name in local_names {
+                            let mut path = target[1..].to_vec();
+                            path.extend(local_name.split("::").map(str::to_string));
+                            if let Some(path) = dependency_required_path_string(&path) {
+                                names.insert(path);
                             }
                         }
                     }
@@ -10746,6 +11399,7 @@ struct DependencyTypedValueMethodVisitor {
     scopes: Vec<BTreeMap<String, (String, Vec<String>)>>,
     calls: Vec<(String, Vec<String>, String)>,
     type_imports: BTreeMap<String, (String, Vec<String>)>,
+    enum_variant_payload_types: DependencyEnumPayloadMap,
     macro_method_requirements: BTreeMap<String, MacroMetavariableMethodRequirement>,
 }
 
@@ -10939,6 +11593,118 @@ impl DependencyTypedValueMethodVisitor {
         }
         calls
     }
+
+    fn record_dependency_enum_pattern_bindings(
+        &mut self,
+        pat: &Pat,
+        root: &str,
+        type_path: &[String],
+    ) {
+        match pat {
+            Pat::Struct(pat_struct) => {
+                let Some(variant_name) =
+                    self.dependency_enum_pattern_variant_name(&pat_struct.path, root, type_path)
+                else {
+                    return;
+                };
+                let Some(payloads) = self.enum_variant_payload_types.get(&(
+                    root.to_string(),
+                    type_path.to_vec(),
+                    variant_name,
+                )) else {
+                    return;
+                };
+                let named_payloads = payloads.named.clone();
+                for field in &pat_struct.fields {
+                    let Some(field_name) = member_name(&field.member) else {
+                        continue;
+                    };
+                    let Some(dependency_type) = named_payloads.get(&field_name) else {
+                        continue;
+                    };
+                    self.bind_pattern_to_dependency_type(&field.pat, dependency_type.clone());
+                }
+            }
+            Pat::TupleStruct(pat_tuple) => {
+                let Some(variant_name) =
+                    self.dependency_enum_pattern_variant_name(&pat_tuple.path, root, type_path)
+                else {
+                    return;
+                };
+                let Some(payloads) = self.enum_variant_payload_types.get(&(
+                    root.to_string(),
+                    type_path.to_vec(),
+                    variant_name,
+                )) else {
+                    return;
+                };
+                let unnamed_payloads = payloads.unnamed.clone();
+                for (index, nested) in pat_tuple.elems.iter().enumerate() {
+                    let Some(Some(dependency_type)) = unnamed_payloads.get(index) else {
+                        continue;
+                    };
+                    self.bind_pattern_to_dependency_type(nested, dependency_type.clone());
+                }
+            }
+            Pat::Or(pat_or) => {
+                for case in &pat_or.cases {
+                    self.record_dependency_enum_pattern_bindings(case, root, type_path);
+                }
+            }
+            Pat::Reference(reference) => {
+                self.record_dependency_enum_pattern_bindings(&reference.pat, root, type_path)
+            }
+            Pat::Paren(paren) => {
+                self.record_dependency_enum_pattern_bindings(&paren.pat, root, type_path)
+            }
+            _ => {}
+        }
+    }
+
+    fn dependency_enum_pattern_variant_name(
+        &self,
+        path: &syn::Path,
+        root: &str,
+        type_path: &[String],
+    ) -> Option<String> {
+        let segments = path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        let (variant_name, enum_prefix) = segments.split_last()?;
+        if enum_prefix.is_empty() {
+            return self
+                .enum_variant_payload_types
+                .contains_key(&(root.to_string(), type_path.to_vec(), variant_name.clone()))
+                .then(|| variant_name.clone());
+        }
+        dependency_pattern_prefix_matches_type(enum_prefix, root, type_path, &self.type_imports)
+            .then(|| variant_name.clone())
+    }
+
+    fn bind_pattern_to_dependency_type(
+        &mut self,
+        pat: &Pat,
+        dependency_type: (String, Vec<String>),
+    ) {
+        match pat {
+            Pat::Ident(ident) => {
+                self.insert_binding(ident.ident.to_string(), dependency_type);
+            }
+            Pat::Reference(reference) => {
+                self.bind_pattern_to_dependency_type(&reference.pat, dependency_type)
+            }
+            Pat::Paren(paren) => self.bind_pattern_to_dependency_type(&paren.pat, dependency_type),
+            Pat::Type(typed) => self.bind_pattern_to_dependency_type(&typed.pat, dependency_type),
+            Pat::Or(pat_or) => {
+                for case in &pat_or.cases {
+                    self.bind_pattern_to_dependency_type(case, dependency_type.clone());
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 impl Visit<'_> for DependencyTypedValueMethodVisitor {
@@ -10992,11 +11758,56 @@ impl Visit<'_> for DependencyTypedValueMethodVisitor {
         visit::visit_macro(self, node);
     }
 
+    fn visit_expr_match(&mut self, node: &syn::ExprMatch) {
+        let scrutinee_type = self.scoped_receiver_type_path(&node.expr);
+        self.visit_expr(&node.expr);
+        for arm in &node.arms {
+            self.push_scope();
+            if let Some((root, type_path)) = &scrutinee_type {
+                self.record_dependency_enum_pattern_bindings(&arm.pat, root, type_path);
+            }
+            if let Some((_if_token, guard)) = &arm.guard {
+                self.visit_expr(guard);
+            }
+            self.visit_expr(&arm.body);
+            self.pop_scope();
+        }
+    }
+
     fn visit_block(&mut self, node: &syn::Block) {
         self.push_scope();
         visit::visit_block(self, node);
         self.pop_scope();
     }
+}
+
+fn dependency_pattern_prefix_matches_type(
+    enum_prefix: &[String],
+    root: &str,
+    type_path: &[String],
+    type_imports: &BTreeMap<String, (String, Vec<String>)>,
+) -> bool {
+    if enum_prefix == type_path {
+        return true;
+    }
+    if enum_prefix
+        .split_first()
+        .is_some_and(|(first, rest)| first == root && rest == type_path)
+    {
+        return true;
+    }
+    let Some((first, rest)) = enum_prefix.split_first() else {
+        return false;
+    };
+    let Some((import_root, imported_type_path)) = type_imports.get(first) else {
+        return false;
+    };
+    if import_root != root {
+        return false;
+    }
+    let mut expanded = imported_type_path.clone();
+    expanded.extend(rest.iter().cloned());
+    expanded == type_path
 }
 
 fn dependency_receiver_type_path(expr: &Expr) -> Option<(String, Vec<String>)> {
@@ -11510,12 +12321,27 @@ fn collect_use_tree_dependency_root_aliases(
                 .or_default()
                 .insert(target_root);
         }
+        UseTree::Name(name) => {
+            let visible_name = if name.ident == "self" {
+                prefix
+                    .last()
+                    .cloned()
+                    .unwrap_or_else(|| name.ident.to_string())
+            } else {
+                name.ident.to_string()
+            };
+            let Some(target_root) = dependency_root_alias_target(&prefix, &name.ident.to_string())
+            else {
+                return;
+            };
+            aliases.entry(visible_name).or_default().insert(target_root);
+        }
         UseTree::Group(group) => {
             for item in &group.items {
                 collect_use_tree_dependency_root_aliases(item, prefix.clone(), aliases);
             }
         }
-        UseTree::Name(_) | UseTree::Glob(_) => {}
+        UseTree::Glob(_) => {}
     }
 }
 
@@ -11575,6 +12401,11 @@ fn dependency_required_path_string(path: &[String]) -> Option<String> {
             if path
                 .get(retained_len)
                 .is_some_and(|segment| support_assoc_item_name_is_precise(segment))
+            {
+                retained_len += 1;
+            } else if path
+                .get(retained_len)
+                .is_some_and(|segment| support_type_like_ident(segment))
             {
                 retained_len += 1;
             }

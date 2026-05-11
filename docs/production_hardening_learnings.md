@@ -1563,3 +1563,13 @@ edges, target-specific version dependencies resolved through `[patch]`,
 lockfiles, and `rust-toolchain.toml` at the same time. The combined fixture now
 checks that all live context is preserved while dead optional dependencies and
 unused patch packages stay out of the generated workspace.
+
+External protocol enum projection needs variant requirements, not whole-enum
+support retention. Root code and copied support packages can mention
+`DependencyEnum::Variant` through direct imports, public glob facades, renamed
+type aliases, or another support crate. Those variant names now become
+first-class support live-set requirements, and match patterns over dependency
+enums bind payload variables back to their concrete dependency payload types.
+That lets the slicer retain exact payload methods such as `session_id()` or
+`text()` while pruning dead variants, dead payload structs, and dead payload
+methods from transitive support packages.

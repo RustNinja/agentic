@@ -2379,6 +2379,102 @@ fn preserves_ffi_crate_types_target_patch_dependencies_and_workspace_context() {
 }
 
 #[test]
+fn prunes_external_protocol_variant_projection_support_chain() {
+    let workspace = temp_path("external-protocol-projection-workspace");
+    let output = temp_path("external-protocol-projection-output");
+    let target_dir = temp_path("external-protocol-projection-target");
+    let api_root = temp_path("external-protocol-projection-api");
+    let state_root = temp_path("external-protocol-projection-state");
+    let wire_root = temp_path("external-protocol-projection-wire");
+    write_external_protocol_projection_fixture(&workspace, &api_root, &state_root, &wire_root);
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let root_source = read(output.join("app/src/lib.rs"));
+    let api_source = read(output.join("support/protocol-api/src/lib.rs"));
+    let state_source = read(output.join("support/protocol-state/src/lib.rs"));
+    let wire_source = read(output.join("support/protocol-wire/src/lib.rs"));
+    assert!(
+        root_source.contains("selected_protocol_state"),
+        "{root_source}"
+    );
+    assert_absent_all("app/src/lib.rs", &root_source, &["dead_protocol_state"]);
+    assert!(
+        api_source.contains("selected_state_summary"),
+        "{api_source}"
+    );
+    assert!(
+        api_source.contains("protocol_wire::selected_event"),
+        "{api_source}"
+    );
+    assert_absent_all(
+        "protocol-api/src/lib.rs",
+        &api_source,
+        &["dead_state_summary", "dead_event"],
+    );
+    assert!(
+        state_source.contains("WireEvent::SessionConfigured"),
+        "{state_source}"
+    );
+    assert!(
+        state_source.contains("WireEvent::MessageDelta"),
+        "{state_source}"
+    );
+    assert!(state_source.contains("state.set"), "{state_source}");
+    assert_absent_all(
+        "protocol-state/src/lib.rs",
+        &state_source,
+        &["dead_state_summary", "VoiceCommand", "TelemetryPayload"],
+    );
+    assert!(wire_source.contains("pub enum WireEvent"), "{wire_source}");
+    assert!(wire_source.contains("SessionConfigured"), "{wire_source}");
+    assert!(wire_source.contains("MessageDelta"), "{wire_source}");
+    assert!(wire_source.contains("SessionConfig"), "{wire_source}");
+    assert!(
+        wire_source.contains("pub fn selected_event"),
+        "{wire_source}"
+    );
+    assert_absent_all(
+        "protocol-wire/src/lib.rs",
+        &wire_source,
+        &[
+            "VoiceCommand",
+            "Telemetry",
+            "TelemetryPayload",
+            "dead_event",
+            "dead_config",
+            "dead_message",
+        ],
+    );
+
+    fs::rename(&api_root, api_root.with_extension("moved")).unwrap();
+    fs::rename(&state_root, state_root.with_extension("moved")).unwrap();
+    fs::rename(&wire_root, wire_root.with_extension("moved")).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated external protocol projection slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\napi:\n{}\nstate:\n{}\nwire:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        api_source,
+        state_source,
+        wire_source,
+    );
+}
+
+#[test]
 fn retains_local_build_dependencies_for_retained_build_scripts() {
     let workspace = temp_path("build-dependency-workspace");
     let output = temp_path("build-dependency-output");
@@ -10979,6 +11075,265 @@ edition = "2021"
     );
 }
 
+fn write_external_protocol_projection_fixture(
+    root: &Path,
+    api_root: &Path,
+    state_root: &Path,
+    wire_root: &Path,
+) {
+    for path in [root, api_root, state_root, wire_root] {
+        if path.exists() {
+            fs::remove_dir_all(path).unwrap();
+        }
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+    write(
+        root.join("Cargo.toml"),
+        &format!(
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies]
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path)
+        ),
+    );
+    write(
+        root.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced.workspace = true
+protocol_api = {{ package = "protocol-api", path = "{}" }}
+"#,
+            manifest_path(api_root)
+        ),
+    );
+    write(
+        root.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected_protocol_state(raw: &str) -> String {
+    protocol_api::selected_state_summary(raw)
+}
+
+pub fn dead_protocol_state(raw: &str) -> String {
+    protocol_api::dead_state_summary(raw)
+}
+"#,
+    );
+
+    write(
+        api_root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "protocol-api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+protocol_state = {{ package = "protocol-state", path = "{}" }}
+protocol_wire = {{ package = "protocol-wire", path = "{}" }}
+"#,
+            manifest_path(state_root),
+            manifest_path(wire_root),
+        ),
+    );
+    write(
+        api_root.join("src/lib.rs"),
+        r#"pub fn selected_state_summary(raw: &str) -> String {
+    let event = protocol_wire::selected_event(raw);
+    protocol_state::selected_state_summary(event)
+}
+
+pub fn dead_state_summary(raw: &str) -> String {
+    let event = protocol_wire::dead_event(raw);
+    protocol_state::dead_state_summary(event)
+}
+"#,
+    );
+
+    write(
+        state_root.join("Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "protocol-state"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+protocol_wire = {{ package = "protocol-wire", path = "{}" }}
+"#,
+            manifest_path(wire_root),
+        ),
+    );
+    write(
+        state_root.join("src/lib.rs"),
+        r#"use protocol_wire::WireEvent;
+
+pub struct StateJson {
+    parts: Vec<String>,
+}
+
+impl StateJson {
+    pub fn new() -> Self {
+        Self { parts: Vec::new() }
+    }
+
+    pub fn set(&mut self, key: &str, value: &str) {
+        self.parts.push(format!("{key}={value}"));
+    }
+
+    pub fn render(self) -> String {
+        self.parts.join(";")
+    }
+
+    pub fn dead_clear(&mut self) {
+        self.parts.clear();
+    }
+}
+
+pub fn selected_state_summary(event: WireEvent) -> String {
+    let mut state = StateJson::new();
+    match event {
+        WireEvent::SessionConfigured { config } => state.set("session", config.session_id()),
+        WireEvent::MessageDelta(delta) => state.set("message", delta.text()),
+        _ => state.set("unknown", "ignored"),
+    }
+    state.render()
+}
+
+pub fn dead_state_summary(event: WireEvent) -> String {
+    match event {
+        WireEvent::VoiceCommand(command) => command.action().to_string(),
+        WireEvent::Telemetry { metric } => metric.name().to_string(),
+        _ => "dead".to_string(),
+    }
+}
+"#,
+    );
+
+    write(
+        wire_root.join("Cargo.toml"),
+        r#"[package]
+name = "protocol-wire"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        wire_root.join("src/lib.rs"),
+        r#"pub enum WireEvent {
+    SessionConfigured { config: SessionConfig },
+    MessageDelta(MessageDelta),
+    VoiceCommand(VoiceCommand),
+    Telemetry { metric: TelemetryPayload },
+}
+
+pub struct SessionConfig {
+    id: String,
+    dead_note: String,
+}
+
+impl SessionConfig {
+    pub fn new(raw: &str) -> Self {
+        Self {
+            id: raw.trim().to_string(),
+            dead_note: "dead".to_string(),
+        }
+    }
+
+    pub fn session_id(&self) -> &str {
+        &self.id
+    }
+
+    pub fn dead_config(&self) -> &str {
+        &self.dead_note
+    }
+}
+
+pub struct MessageDelta {
+    text: String,
+}
+
+impl MessageDelta {
+    pub fn new(raw: &str) -> Self {
+        Self {
+            text: raw.to_uppercase(),
+        }
+    }
+
+    pub fn text(&self) -> &str {
+        &self.text
+    }
+
+    pub fn dead_message(&self) -> String {
+        format!("dead:{}", self.text)
+    }
+}
+
+pub struct VoiceCommand {
+    action: String,
+}
+
+impl VoiceCommand {
+    pub fn new(raw: &str) -> Self {
+        Self {
+            action: raw.to_string(),
+        }
+    }
+
+    pub fn action(&self) -> &str {
+        &self.action
+    }
+}
+
+pub struct TelemetryPayload {
+    name: String,
+}
+
+impl TelemetryPayload {
+    pub fn new(raw: &str) -> Self {
+        Self {
+            name: raw.to_string(),
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+}
+
+pub fn selected_event(raw: &str) -> WireEvent {
+    if raw.starts_with("msg:") {
+        WireEvent::MessageDelta(MessageDelta::new(raw))
+    } else {
+        WireEvent::SessionConfigured {
+            config: SessionConfig::new(raw),
+        }
+    }
+}
+
+pub fn dead_event(raw: &str) -> WireEvent {
+    if raw.starts_with("voice:") {
+        WireEvent::VoiceCommand(VoiceCommand::new(raw))
+    } else {
+        WireEvent::Telemetry {
+            metric: TelemetryPayload::new(raw),
+        }
+    }
+}
+"#,
+    );
+}
+
 fn write_build_dependency_fixture(root: &Path) {
     if root.exists() {
         fs::remove_dir_all(root).unwrap();
@@ -14906,6 +15261,15 @@ fn write(path: PathBuf, contents: &str) {
 
 fn read(path: PathBuf) -> String {
     fs::read_to_string(path).unwrap()
+}
+
+fn assert_absent_all(label: &str, contents: &str, needles: &[&str]) {
+    for needle in needles {
+        assert!(
+            !contents.contains(needle),
+            "{label} should not contain {needle:?}\n{contents}"
+        );
+    }
 }
 
 #[cfg(unix)]
