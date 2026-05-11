@@ -17073,6 +17073,19 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
         binding_count
     }
+
+    fn push_closure_input_bindings<'b, I>(&mut self, inputs: I) -> usize
+    where
+        I: IntoIterator<Item = &'b Pat>,
+    {
+        let binding_count = self.bindings.len();
+        for input in inputs {
+            if let Pat::Type(input) = input {
+                self.record_binding_from_typed_pat(&input.pat, &input.ty);
+            }
+        }
+        binding_count
+    }
 }
 
 fn type_path_to_struct_item(package: &str, type_path: &[String]) -> Option<ItemId> {
@@ -17216,6 +17229,12 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
     fn visit_impl_item_fn(&mut self, method: &syn::ImplItemFn) {
         let binding_count = self.push_fn_input_bindings(method.sig.inputs.iter());
         self.visit_block(&method.block);
+        self.bindings.truncate(binding_count);
+    }
+
+    fn visit_expr_closure(&mut self, closure: &syn::ExprClosure) {
+        let binding_count = self.push_closure_input_bindings(closure.inputs.iter());
+        self.visit_expr(&closure.body);
         self.bindings.truncate(binding_count);
     }
 

@@ -1428,3 +1428,9 @@ signature resolver proves are input/return API types; other support fields must
 be referenced by retained code, protected by field/struct attributes, or remain
 blocked by an unknown surface. This closes another over-retention path in the
 used/unused/unknown split without hard-coding Litter symbols.
+
+Concrete support-field proof must bind typed closure inputs as well as typed
+function and method parameters. Iterator and callback bodies often carry the
+only non-API evidence that a dependency field is live, and a pure struct
+initializer is not enough reason to keep that field. Binding closure inputs keeps
+those fields precise without reopening package-wide field-name retention.

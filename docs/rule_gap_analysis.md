@@ -287,3 +287,10 @@ method parameters before scanning retained bodies, so `record:
 dependency::Record` followed by `record.value` retains only that concrete
 dependency field. This keeps cross-package support field pruning precise without
 falling back to broad field-name retention.
+
+`fixture.public_field_typed_closure_prune.support_chain.001` extends the same
+proof to typed closure parameters. A retained iterator closure such as
+`|record: dependency::Record| record.value` now contributes concrete field
+evidence for the dependency record, even when the field initializer itself is
+otherwise pure and would be pruned. Dead sibling fields and dead closure helpers
+remain removable.

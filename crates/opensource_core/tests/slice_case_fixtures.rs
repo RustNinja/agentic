@@ -347,6 +347,58 @@ fn retains_public_support_fields_used_through_typed_params() {
 }
 
 #[test]
+fn retains_public_support_fields_used_through_typed_closure_params() {
+    let fixture = repo_root().join("fixtures/slice_cases/public_field_typed_closure_prune");
+    let output = temp_path("slice-case-public-field-typed-closure-prune-output");
+    let target_dir = temp_path("slice-case-public-field-typed-closure-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("public_field_typed_closure_prune fixture should slice");
+
+    assert_eq!(report.packages, ["audit_record", "field_api", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_sum"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    let field_api = read(output.join("field_api/src/lib.rs"));
+    let audit_record = read(output.join("audit_record/src/lib.rs"));
+
+    assert!(root_source.contains("pub fn selected_sum"), "{root_source}");
+    assert!(!root_source.contains("dead_sum"), "{root_source}");
+
+    assert!(field_api.contains("pub fn selected_sum"), "{field_api}");
+    assert!(field_api.contains("record.value"), "{field_api}");
+    assert!(!field_api.contains("dead_note"), "{field_api}");
+    assert!(!field_api.contains("pub fn dead_sum"), "{field_api}");
+
+    assert!(
+        audit_record.contains("pub struct AuditRecord"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub value: u32"), "{audit_record}");
+    assert!(!audit_record.contains("dead_note"), "{audit_record}");
+    assert!(
+        audit_record.contains("pub fn placeholder"),
+        "{audit_record}"
+    );
+    assert!(!audit_record.contains("dead_record"), "{audit_record}");
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 #[cfg(feature = "ra-hir")]
 fn ra_hir_proves_support_sub_dependency_pruning_contract() {
     let (output, target_dir, report) = generate_slice_case_fixture(
