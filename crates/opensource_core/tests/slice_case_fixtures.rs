@@ -2887,6 +2887,116 @@ fn prunes_static_registry_support_chain_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_global_mutex_multi_registry_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/global_mutex_multi_registry_prune");
+    let output = temp_path("slice-case-global-mutex-multi-registry-prune-output");
+    let target_dir = temp_path("slice-case-global-mutex-multi-registry-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("global_mutex_multi_registry_prune fixture should slice");
+
+    assert_eq!(report.packages, ["registry_api", "registry_store", "root"]);
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_registry_lookup"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("registry_api/Cargo.toml"));
+    let api_root = read(output.join("registry_api/src/lib.rs"));
+    let api_live = read(output.join("registry_api/src/live.rs"));
+    let store_root = read(output.join("registry_store/src/lib.rs"));
+    let store_live = read(output.join("registry_store/src/live.rs"));
+
+    assert!(root_manifest.contains("../registry_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub fn selected_registry_lookup"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("registry_api::selected_registry_lookup"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_registry_lookup"]);
+
+    assert!(api_manifest.contains("../registry_store"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(api_root.contains("selected_registry_lookup"), "{api_root}");
+    assert_absent(
+        "registry_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_registry_lookup"],
+    );
+    assert!(api_live.contains("registry_store::register_entry"));
+    assert!(api_live.contains("registry_store::lookup_entry"));
+    assert!(api_live.contains(".map(|entry| entry.render())"));
+    assert_absent(
+        "registry_api/src/live.rs",
+        &api_live,
+        &[
+            "dead_live_registry_lookup",
+            "remove_entry",
+            "list_entries",
+            "dead_render",
+        ],
+    );
+    assert!(!output.join("registry_api/src/dead.rs").exists());
+
+    assert!(store_root.contains("mod live"), "{store_root}");
+    assert!(store_root.contains("register_entry"), "{store_root}");
+    assert!(store_root.contains("lookup_entry"), "{store_root}");
+    assert!(store_root.contains("RegistryEntry"), "{store_root}");
+    assert_absent(
+        "registry_store/src/lib.rs",
+        &store_root,
+        &[
+            "mod dead",
+            "DeadRegistryEntry",
+            "dead_registry_metric",
+            "remove_entry",
+            "list_entries",
+        ],
+    );
+    assert!(store_live.contains("use std::collections::BTreeMap"));
+    assert!(store_live.contains("use std::sync::{Arc, Mutex, OnceLock}"));
+    assert!(store_live.contains("static REGISTRY"));
+    assert!(
+        store_live.contains("pub struct RegistryEntry"),
+        "{store_live}"
+    );
+    assert!(store_live.contains("pub fn new"), "{store_live}");
+    assert!(store_live.contains("pub fn render"), "{store_live}");
+    assert!(store_live.contains("fn registry"), "{store_live}");
+    assert!(store_live.contains("pub fn register_entry"), "{store_live}");
+    assert!(store_live.contains("pub fn lookup_entry"), "{store_live}");
+    assert_absent(
+        "registry_store/src/live.rs",
+        &store_live,
+        &[
+            "pub fn remove_entry",
+            "pub fn list_entries",
+            "dead_live_registry",
+            "dead_render",
+            "dead-registry-entry",
+        ],
+    );
+    assert!(!output.join("registry_store/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_patch_state_support_chain_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/patch_state_prune");
     let output = temp_path("slice-case-patch-state-prune-output");

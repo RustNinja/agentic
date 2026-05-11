@@ -1594,3 +1594,13 @@ selected root walks through the static initializer, keeps `Regex::new`,
 This is the important production shape: static singletons can pull a helper
 crate into the slice, but that crate still must be reduced item-by-item under
 the same used/unknown/prunable contract.
+
+Global registries need operation-level proof. The
+`static.global_mutex_registry.001` fixture models an
+`OnceLock<Mutex<BTreeMap<String, Arc<_>>>>` registry with register, lookup,
+remove, and list APIs. A selected register-plus-lookup root keeps the static,
+lock helper, entry constructor, lookup return surface, and `render` method, but
+still prunes remove/list/dead render APIs. This guards against a tempting but
+wrong whole-registry retention rule: the static registry itself is live, but
+each operation hanging off it still needs top-down evidence or a scoped unknown
+blocker.
