@@ -487,6 +487,9 @@ struct BatchRootReport {
     files_written: Option<usize>,
     production_status: Option<String>,
     production_hazards: Option<usize>,
+    rendered_usage_used: Option<usize>,
+    rendered_usage_blocked_by_unknown: Option<usize>,
+    rendered_usage_invalid: Option<usize>,
     preflight_errors: Option<usize>,
     preflight_warnings: Option<usize>,
     check_success: Option<bool>,
@@ -945,6 +948,9 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 files_written: None,
                 production_status: None,
                 production_hazards: None,
+                rendered_usage_used: None,
+                rendered_usage_blocked_by_unknown: None,
+                rendered_usage_invalid: None,
                 preflight_errors: None,
                 preflight_warnings: None,
                 check_success: None,
@@ -996,7 +1002,22 @@ fn run_batch_root(
     for attempt in 1..=attempts {
         let report = session.generate(output_root.to_path_buf(), &[root.clone()], &diagnostics)?;
         write_generate_report(&report, &output_root.join("slice-report.json"))?;
+        let rendered_usage_contract = rendered_usage_contract(&report);
         last_report = Some(report);
+        if !rendered_usage_contract.invalid.is_empty() {
+            return Ok(batch_row_from_reports(
+                root,
+                output_root,
+                "rendered_usage_failed",
+                last_report.as_ref(),
+                last_preflight.as_ref(),
+                None,
+                Some(format!(
+                    "rendered source contains invalid usage decisions: {}",
+                    rendered_usage_contract.invalid_preview()
+                )),
+            ));
+        }
 
         if options.run_preflight || attempts > 1 {
             let preflight = preflight_workspace(PreflightOptions {
@@ -1201,6 +1222,7 @@ fn batch_row_from_reports(
     check: Option<&CheckReport>,
     error: Option<String>,
 ) -> BatchRootReport {
+    let rendered_usage = report.map(rendered_usage_contract);
     BatchRootReport {
         root: root.to_string(),
         output_root: output_root.to_path_buf(),
@@ -1208,6 +1230,13 @@ fn batch_row_from_reports(
         files_written: report.map(|report| report.files_written),
         production_status: report.map(|report| report.production.status.clone()),
         production_hazards: report.map(|report| report.production.hazards.len()),
+        rendered_usage_used: rendered_usage.as_ref().map(|contract| contract.used),
+        rendered_usage_blocked_by_unknown: rendered_usage
+            .as_ref()
+            .map(|contract| contract.blocked_by_unknown),
+        rendered_usage_invalid: rendered_usage
+            .as_ref()
+            .map(|contract| contract.invalid.len()),
         preflight_errors: preflight.map(PreflightReport::error_count),
         preflight_warnings: preflight.map(PreflightReport::warning_count),
         check_success: check.map(|check| check.success),

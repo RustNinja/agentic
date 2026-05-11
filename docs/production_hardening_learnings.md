@@ -1374,6 +1374,10 @@ items, or trait default methods.
 The CLI validation flow has the same check as a `rendered_usage_contract` gate,
 so a generated slice is rejected before compiler feedback if the final rendered
 decision map contains any invalid retained symbol classification.
+Batch/mining rows now carry `rendered_usage_used`,
+`rendered_usage_blocked_by_unknown`, and `rendered_usage_invalid`, and a root
+returns `rendered_usage_failed` before preflight/check when the final rendered
+contract is broken.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

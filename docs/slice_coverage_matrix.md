@@ -99,6 +99,8 @@ default method must be classified only as `used` or `blocked_by_unknown`.
 The CLI mirrors that assertion through the `rendered_usage_contract` validation
 gate, giving batch/mining runs a direct failure signal when a slice leaks a
 rendered `prunable` or `unclassified` symbol.
+Batch JSONL rows also include rendered usage counts and use
+`rendered_usage_failed` for roots rejected by this contract.
 
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust

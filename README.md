@@ -309,7 +309,9 @@ records the pre-render graph decision used to explain why symbols were initially
 kept or rejected. During CLI validation, the `rendered_usage_contract` gate
 fails the slice if any generated callable, item, member, associated item, or
 trait default method is classified as anything other than `used` or
-`blocked_by_unknown`. Cfg-gated root hazards include the affected root, package,
+`blocked_by_unknown`. Batch/mining rows include the same rendered usage counts
+and stop a root as `rendered_usage_failed` before preflight or compiler feedback
+when that contract is violated. Cfg-gated root hazards include the affected root, package,
 module path, source span, cfg expression, and feature-oriented Cargo argument
 hints where those can be derived. It also records phase timings for analyzer
 loading, manifest loading, parsing, reduction, rendering, and total generation
