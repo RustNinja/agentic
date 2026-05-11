@@ -306,7 +306,10 @@ files written, and a source map for parsed callables/items with file spans and
 reachability flags. The `usage.rendered_decision_map` object is the final
 generated-source used/blocked/prunable map; the older `usage.decision_map`
 records the pre-render graph decision used to explain why symbols were initially
-kept or rejected. Cfg-gated root hazards include the affected root, package,
+kept or rejected. During CLI validation, the `rendered_usage_contract` gate
+fails the slice if any generated callable, item, member, associated item, or
+trait default method is classified as anything other than `used` or
+`blocked_by_unknown`. Cfg-gated root hazards include the affected root, package,
 module path, source span, cfg expression, and feature-oriented Cargo argument
 hints where those can be derived. It also records phase timings for analyzer
 loading, manifest loading, parsing, reduction, rendering, and total generation

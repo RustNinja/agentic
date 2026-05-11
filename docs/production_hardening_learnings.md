@@ -1371,6 +1371,9 @@ The slice-case fixture harness now asserts that this final rendered map exactly
 matches generated source callables/items and contains no rendered
 `prunable`/`unclassified` decisions for callables, items, members, associated
 items, or trait default methods.
+The CLI validation flow has the same check as a `rendered_usage_contract` gate,
+so a generated slice is rejected before compiler feedback if the final rendered
+decision map contains any invalid retained symbol classification.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

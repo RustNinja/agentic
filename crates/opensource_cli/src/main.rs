@@ -181,6 +181,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     println!("packages: {}", report.packages.join(", "));
     print_rendered_symbol_summary(&report, "callable", "rendered callables");
     print_rendered_symbol_summary(&report, "item", "rendered items");
+    let rendered_usage_contract = rendered_usage_contract(&report);
+    println!(
+        "rendered usage contract: used={} blocked_by_unknown={} invalid={}",
+        rendered_usage_contract.used,
+        rendered_usage_contract.blocked_by_unknown,
+        rendered_usage_contract.invalid.len()
+    );
     if let Some(report_path) = slice_report_path(&options) {
         write_generate_report(&report, &report_path)?;
         println!("slice report: {}", report_path.display());
@@ -195,6 +202,38 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         semantic_warning_hazards: None,
         review_warning_hazards: None,
     });
+    if rendered_usage_contract.invalid.is_empty() {
+        validation.gates.push(ValidationGateReport {
+            name: "rendered_usage_contract".to_string(),
+            status: "passed".to_string(),
+            reason: format!(
+                "rendered source contains {} used and {} blocked_by_unknown symbols",
+                rendered_usage_contract.used, rendered_usage_contract.blocked_by_unknown
+            ),
+            report_path: slice_report_path(&options),
+            error_count: Some(0),
+            warning_count: Some(rendered_usage_contract.blocked_by_unknown),
+            semantic_warning_hazards: None,
+            review_warning_hazards: None,
+        });
+    } else {
+        let reason = format!(
+            "rendered source contains invalid usage decisions: {}",
+            rendered_usage_contract.invalid_preview()
+        );
+        validation.gates.push(ValidationGateReport {
+            name: "rendered_usage_contract".to_string(),
+            status: "failed".to_string(),
+            reason: reason.clone(),
+            report_path: slice_report_path(&options),
+            error_count: Some(rendered_usage_contract.invalid.len()),
+            warning_count: Some(rendered_usage_contract.blocked_by_unknown),
+            semantic_warning_hazards: None,
+            review_warning_hazards: None,
+        });
+        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        return Err(reason.into());
+    }
     record_production_readiness_gate(
         &options,
         &mut validation,
@@ -328,6 +367,52 @@ fn print_rendered_symbol_summary(report: &GenerateReport, kind: &str, label: &st
             .and_then(|decisions| decisions.get(&entry.id))
             .unwrap_or(&entry.classification);
         println!("  {} [{}]", entry.id, classification);
+    }
+}
+
+#[derive(Debug, Default)]
+struct RenderedUsageContract {
+    used: usize,
+    blocked_by_unknown: usize,
+    invalid: Vec<String>,
+}
+
+impl RenderedUsageContract {
+    fn invalid_preview(&self) -> String {
+        let mut preview = self.invalid.iter().take(5).cloned().collect::<Vec<_>>();
+        if self.invalid.len() > preview.len() {
+            preview.push(format!("... {} more", self.invalid.len() - preview.len()));
+        }
+        preview.join(", ")
+    }
+}
+
+fn rendered_usage_contract(report: &GenerateReport) -> RenderedUsageContract {
+    let mut contract = RenderedUsageContract::default();
+    let decisions = &report.usage.rendered_decision_map;
+    accumulate_rendered_usage_decisions("callable", &decisions.callables, &mut contract);
+    accumulate_rendered_usage_decisions("item", &decisions.items, &mut contract);
+    accumulate_rendered_usage_decisions("member", &decisions.members, &mut contract);
+    accumulate_rendered_usage_decisions("assoc_item", &decisions.assoc_items, &mut contract);
+    accumulate_rendered_usage_decisions(
+        "trait_default_method",
+        &decisions.trait_default_methods,
+        &mut contract,
+    );
+    contract
+}
+
+fn accumulate_rendered_usage_decisions(
+    kind: &str,
+    decisions: &BTreeMap<String, String>,
+    contract: &mut RenderedUsageContract,
+) {
+    for (id, decision) in decisions {
+        match decision.as_str() {
+            "used" => contract.used += 1,
+            "blocked_by_unknown" => contract.blocked_by_unknown += 1,
+            _ => contract.invalid.push(format!("{kind} {id} [{decision}]")),
+        }
     }
 }
 

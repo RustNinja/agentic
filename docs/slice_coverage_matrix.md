@@ -96,6 +96,9 @@ The slice-case fixture harness now treats `usage.rendered_decision_map` as a
 hard contract: every generated callable/item key must match the source scanner,
 and every rendered callable, item, member, associated item, and retained trait
 default method must be classified only as `used` or `blocked_by_unknown`.
+The CLI mirrors that assertion through the `rendered_usage_contract` validation
+gate, giving batch/mining runs a direct failure signal when a slice leaks a
+rendered `prunable` or `unclassified` symbol.
 
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust
