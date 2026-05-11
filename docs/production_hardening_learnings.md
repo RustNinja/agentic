@@ -1374,3 +1374,20 @@ declaration as well; otherwise the slice can either fail to compile with an impl
 member that no longer exists in the trait, or worse, compile after falling back
 to a default value and silently change behavior. This is a generic type-path
 resolution rule, not a project-specific fixture string.
+
+The same rule must cross package boundaries. A root crate can implement a trait
+from a support package for a local type, then read the associated const through
+`LocalType::CONST`. That path is resolved through the local type, while the trait
+declaration and import live behind a dependency edge. The renderer now resolves
+impl trait headers to their real package/path, keeps the rendered impl header
+import, and uses that resolved trait target when deciding whether the support
+trait's associated const declaration is live.
+
+Generated Rust source is an unknown boundary, but the method closure for that
+boundary must be scoped. A retained `include!` in one module does not justify
+retaining same-named methods on every type in the package. The slicer now treats
+method calls as generated-source roots only when the receiver expression flows
+through the include/generated module, then keeps the local receiver method
+closure from that point. This preserves OUT_DIR-style `generated::factory().run()`
+chains without reintroducing unrelated prunable methods such as enum helper
+methods on ordinary DTO surfaces.

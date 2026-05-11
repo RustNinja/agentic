@@ -67,6 +67,7 @@ file.
 | `build.rustc_env.001` | covered | Retained `env!` fed by build script state is production-blocking |
 | `trait.default_method_assoc_const.001` | covered | Receiver calls to trait default methods retain the trait item and the concrete impl associated const/type surface needed to compile |
 | `trait.default_assoc_const_type_path.001` | covered | Trait associated const overrides stay with the trait item when selected code reads them through `Type::CONST`, not only explicit `<Type as Trait>::CONST` UFCS paths |
+| `trait.external_assoc_const_type_path.001` | covered | Root crates implementing a dependency trait for a local type keep the dependency trait const declaration, local impl override, and trait import when selected code reads `LocalType::CONST` |
 | `dyn.callback.inline_future_field.001` | covered | Inline `Arc<dyn Fn(...) -> Pin<Box<dyn Future...>>>` callback fields report hard dynamic-dispatch hazards without requiring a type alias |
 | `static.lazy_lock_closure.001` | covered | `LazyLock::new(|| helper())` static initializers retain helper calls made only inside initializer closures |
 | `static.once_lock_get_or_init.001` | covered | `OnceLock::get_or_init(|| Arc::new(T::new()))` singleton helpers retain init guards, constructor calls, and imports while pruning dead singleton builders |

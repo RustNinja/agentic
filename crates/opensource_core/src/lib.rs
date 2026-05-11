@@ -22,8 +22,8 @@ use proc_macro2::TokenStream;
 use quote::ToTokens;
 use serde::Serialize;
 use syn::{
-    parse::Parser, punctuated::Punctuated, spanned::Spanned, visit::Visit, Attribute, Item, Macro,
-    Meta, UseTree,
+    parse::Parser, punctuated::Punctuated, spanned::Spanned, visit::Visit, Attribute, Expr, Item,
+    Macro, Meta, UseTree,
 };
 
 pub use analyzer::{
@@ -560,6 +560,11 @@ impl UnknownRetentionPlan {
             roots.extend(semantic_usage_unknown_extra_roots(
                 project, &current, analyzer,
             ));
+            roots.extend(generated_source_unknown_method_extra_roots(
+                project,
+                &current,
+                pre_render_production,
+            ));
             roots.sort();
             roots.dedup();
             if roots.len() == before {
@@ -568,6 +573,340 @@ impl UnknownRetentionPlan {
         }
 
         Ok(Self { roots })
+    }
+}
+
+fn generated_source_unknown_method_extra_roots(
+    project: &Project,
+    reduced: &ReducedProject,
+    production: &ProductionReadinessReport,
+) -> Vec<RootId> {
+    let packages = generated_source_unknown_packages(production);
+    if packages.is_empty() {
+        return Vec::new();
+    }
+
+    let mut roots = Vec::new();
+    for package in packages {
+        if !reduced.packages.contains(&package) {
+            continue;
+        }
+        let method_roots = generated_source_reachable_method_names(project, reduced, &package);
+        if method_roots.is_empty() {
+            continue;
+        }
+
+        let mut methods_by_type =
+            BTreeMap::<Vec<String>, BTreeMap<String, &syn::ImplItemFn>>::new();
+        for (id, record) in &project.methods {
+            let CallableId::Method {
+                package: method_package,
+                type_path,
+                trait_path,
+                method,
+                ..
+            } = id
+            else {
+                continue;
+            };
+            if method_package != &package
+                || trait_path.is_some()
+                || !rendered_type_path_is_reachable(reduced, &package, type_path)
+            {
+                continue;
+            }
+            methods_by_type
+                .entry(type_path.clone())
+                .or_default()
+                .insert(method.clone(), &record.item);
+        }
+
+        for (type_path, methods) in methods_by_type {
+            let mut pending = method_roots
+                .iter()
+                .filter(|method| methods.contains_key(*method))
+                .cloned()
+                .collect::<Vec<_>>();
+            let mut seen = BTreeSet::new();
+            while let Some(method) = pending.pop() {
+                if !seen.insert(method.clone()) {
+                    continue;
+                }
+                let id = CallableId::Method {
+                    package: package.clone(),
+                    type_path: type_path.clone(),
+                    trait_path: None,
+                    trait_input_type_paths: Vec::new(),
+                    method: method.clone(),
+                };
+                if !reduced.reachable.contains(&id) {
+                    roots.push(RootId::Callable(id));
+                }
+                let Some(item_fn) = methods.get(&method) else {
+                    continue;
+                };
+                for called in generated_method_call_names_from_tokens(&item_fn.to_token_stream()) {
+                    if !seen.contains(&called) && methods.contains_key(&called) {
+                        pending.push(called);
+                    }
+                }
+            }
+        }
+    }
+    roots
+}
+
+fn generated_source_unknown_packages(production: &ProductionReadinessReport) -> BTreeSet<String> {
+    production
+        .hazards
+        .iter()
+        .filter(|hazard| {
+            matches!(
+                hazard.code.as_str(),
+                "source_include_macros"
+                    | "out_dir_source_include_macros"
+                    | "retained_build_scripts"
+            )
+        })
+        .flat_map(|hazard| {
+            hazard
+                .details
+                .iter()
+                .filter_map(|detail| detail.package.clone())
+        })
+        .collect()
+}
+
+fn rendered_type_path_is_reachable(
+    reduced: &ReducedProject,
+    package: &str,
+    type_path: &[String],
+) -> bool {
+    let Some((name, module_path)) = type_path.split_last() else {
+        return false;
+    };
+    reduced.reachable_items.iter().any(|item| {
+        item.package == package && item.module_path == module_path && item.name == *name
+    })
+}
+
+fn generated_source_reachable_method_names(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+) -> BTreeSet<String> {
+    let mut methods = BTreeSet::new();
+    let source_include_modules = generated_source_include_module_names(project, package);
+    let package_has_build_script = project
+        .workspace
+        .packages
+        .get(package)
+        .is_some_and(generated_package_has_build_script);
+    for callable in &reduced.reachable {
+        if callable.package() != package {
+            continue;
+        }
+        if let Some(record) = project.functions.get(callable) {
+            methods.extend(generated_source_method_names_from_item_fn(
+                &record.item,
+                &source_include_modules,
+                package_has_build_script,
+            ));
+        } else if let Some(record) = project.methods.get(callable) {
+            methods.extend(generated_source_method_names_from_impl_item_fn(
+                &record.item,
+                &source_include_modules,
+                package_has_build_script,
+            ));
+        }
+    }
+    for item in &reduced.reachable_items {
+        if item.package != package {
+            continue;
+        }
+        if let Some(record) = project.items.get(item) {
+            methods.extend(generated_source_method_names_from_item(
+                &record.item,
+                &source_include_modules,
+                package_has_build_script,
+            ));
+        }
+    }
+    methods
+}
+
+fn generated_source_method_names_from_item_fn(
+    item: &syn::ItemFn,
+    source_include_modules: &BTreeSet<String>,
+    package_has_build_script: bool,
+) -> BTreeSet<String> {
+    if source_include_modules.is_empty() {
+        return package_has_build_script
+            .then(|| generated_method_call_names_from_tokens(&item.to_token_stream()))
+            .unwrap_or_default();
+    }
+    let mut visitor = GeneratedSourceReceiverMethodVisitor {
+        source_include_modules,
+        method_names: BTreeSet::new(),
+    };
+    visitor.visit_item_fn(item);
+    visitor.method_names
+}
+
+fn generated_source_method_names_from_impl_item_fn(
+    item: &syn::ImplItemFn,
+    source_include_modules: &BTreeSet<String>,
+    package_has_build_script: bool,
+) -> BTreeSet<String> {
+    if source_include_modules.is_empty() {
+        return package_has_build_script
+            .then(|| generated_method_call_names_from_tokens(&item.to_token_stream()))
+            .unwrap_or_default();
+    }
+    let mut visitor = GeneratedSourceReceiverMethodVisitor {
+        source_include_modules,
+        method_names: BTreeSet::new(),
+    };
+    visitor.visit_impl_item_fn(item);
+    visitor.method_names
+}
+
+fn generated_source_method_names_from_item(
+    item: &Item,
+    source_include_modules: &BTreeSet<String>,
+    package_has_build_script: bool,
+) -> BTreeSet<String> {
+    if source_include_modules.is_empty() {
+        return package_has_build_script
+            .then(|| generated_method_call_names_from_tokens(&item.to_token_stream()))
+            .unwrap_or_default();
+    }
+    let mut visitor = GeneratedSourceReceiverMethodVisitor {
+        source_include_modules,
+        method_names: BTreeSet::new(),
+    };
+    visitor.visit_item(item);
+    visitor.method_names
+}
+
+struct GeneratedSourceReceiverMethodVisitor<'a> {
+    source_include_modules: &'a BTreeSet<String>,
+    method_names: BTreeSet<String>,
+}
+
+impl Visit<'_> for GeneratedSourceReceiverMethodVisitor<'_> {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        if generated_expr_mentions_any_path_root(&node.receiver, self.source_include_modules) {
+            self.method_names.insert(node.method.to_string());
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn generated_expr_mentions_any_path_root(expr: &Expr, roots: &BTreeSet<String>) -> bool {
+    let mut visitor = GeneratedPathRootVisitor {
+        roots,
+        found: false,
+    };
+    visitor.visit_expr(expr);
+    visitor.found
+}
+
+struct GeneratedPathRootVisitor<'a> {
+    roots: &'a BTreeSet<String>,
+    found: bool,
+}
+
+impl Visit<'_> for GeneratedPathRootVisitor<'_> {
+    fn visit_path(&mut self, path: &syn::Path) {
+        if path
+            .segments
+            .first()
+            .is_some_and(|segment| self.roots.contains(&segment.ident.to_string()))
+        {
+            self.found = true;
+            return;
+        }
+        syn::visit::visit_path(self, path);
+    }
+}
+
+fn generated_source_include_module_names(project: &Project, package: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for source in project.files.values().filter(|source| source.package == package) {
+        for item in &source.syntax.items {
+            let Item::Mod(item_mod) = item else {
+                continue;
+            };
+            let module_name = item_mod.ident.to_string();
+            let mut child_path = source.module_path.clone();
+            child_path.push(module_name.clone());
+            let inline_contains = item_mod
+                .content
+                .as_ref()
+                .is_some_and(|(_, items)| items.iter().any(generated_item_contains_source_include));
+            let child_contains = project
+                .source_files_by_module
+                .get(&(package.to_string(), child_path))
+                .and_then(|path| project.files.get(path))
+                .is_some_and(|child| {
+                    child
+                        .syntax
+                        .items
+                        .iter()
+                        .any(generated_item_contains_source_include)
+                });
+            if inline_contains || child_contains {
+                names.insert(module_name);
+            }
+        }
+    }
+    names
+}
+
+fn generated_package_has_build_script(package: &crate::manifest::Package) -> bool {
+    package.root.join("build.rs").exists()
+        || package
+            .manifest
+            .get("package")
+            .and_then(toml::Value::as_table)
+            .is_some_and(|package| package.contains_key("build"))
+}
+
+fn generated_item_contains_source_include(item: &Item) -> bool {
+    match item {
+        Item::Macro(item_macro) => {
+            item_macro.ident.is_none() && item_macro.mac.path.is_ident("include")
+        }
+        Item::Mod(item_mod) => item_mod.content.as_ref().is_some_and(|(_, items)| {
+            items.iter().any(generated_item_contains_source_include)
+        }),
+        _ => false,
+    }
+}
+
+fn generated_method_call_names_from_tokens(tokens: &TokenStream) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    collect_generated_method_call_names_from_tokens(tokens, &mut names);
+    names
+}
+
+fn collect_generated_method_call_names_from_tokens(
+    tokens: &TokenStream,
+    names: &mut BTreeSet<String>,
+) {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    for token in &tokens {
+        if let proc_macro2::TokenTree::Group(group) = token {
+            collect_generated_method_call_names_from_tokens(&group.stream(), names);
+        }
+    }
+    for pair in tokens.windows(2) {
+        if matches!(&pair[0], proc_macro2::TokenTree::Punct(punct) if punct.as_char() == '.') {
+            if let proc_macro2::TokenTree::Ident(ident) = &pair[1] {
+                names.insert(ident.to_string());
+            }
+        }
     }
 }
 
@@ -1724,7 +2063,6 @@ fn hazard_blocks_unused_pruning(code: &str) -> bool {
             | "function_pointer_surfaces"
             | "trait_object_surfaces"
             | "dynamic_callback_boundaries"
-            | "syntactic_method_fallback_cap"
     )
 }
 

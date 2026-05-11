@@ -348,6 +348,36 @@ fn retains_default_trait_associated_const_override_referenced_by_type_path() {
 }
 
 #[test]
+fn retains_external_trait_associated_const_override_referenced_by_type_path() {
+    let workspace = temp_path("rule-external-trait-const-type-path-workspace");
+    let output = temp_path("rule-external-trait-const-type-path-output");
+    let target_dir = temp_path("rule-external-trait-const-type-path-target");
+    write_external_trait_associated_const_type_path_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("external trait associated const type-path rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("cross_trait_const_app/src/lib.rs"));
+    let contract = read(output.join("trait_contract/src/lib.rs"));
+    assert!(app.contains("use trait_contract::Fragment"), "{app}");
+    assert!(app.contains("impl Fragment for LiveFragment"), "{app}");
+    assert!(app.contains("const KIND: &'static str = \"env\""), "{app}");
+    assert!(app.contains("LiveFragment::KIND"), "{app}");
+    assert!(!app.contains("DeadFragment"), "{app}");
+    assert!(!app.contains("\"dead\""), "{app}");
+    assert!(contract.contains("pub trait Fragment"), "{contract}");
+    assert!(
+        contract.contains("const KIND: &'static str = \"default\""),
+        "{contract}"
+    );
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
 fn reports_inline_callback_future_fields_as_dynamic_hazards() {
     let workspace = temp_path("rule-inline-callback-future-workspace");
     let output = temp_path("rule-inline-callback-future-output");
@@ -4310,6 +4340,73 @@ impl Fragment for DeadFragment {
 #[opensourced]
 pub fn selected() -> &'static str {
     EnvFragment::KIND
+}
+"#,
+    );
+}
+
+fn write_external_trait_associated_const_type_path_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["cross_trait_const_app", "trait_contract"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("cross_trait_const_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "cross_trait_const_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+trait_contract = {{ path = "../trait_contract" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("cross_trait_const_app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use trait_contract::Fragment;
+
+pub struct LiveFragment;
+
+impl Fragment for LiveFragment {
+    const KIND: &'static str = "env";
+}
+
+pub struct DeadFragment;
+
+impl Fragment for DeadFragment {
+    const KIND: &'static str = "dead";
+}
+
+#[opensourced]
+pub fn selected() -> &'static str {
+    LiveFragment::KIND
+}
+"#,
+    );
+    write(
+        root.join("trait_contract/Cargo.toml"),
+        r#"[package]
+name = "trait_contract"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("trait_contract/src/lib.rs"),
+        r#"pub trait Fragment {
+    const KIND: &'static str = "default";
+}
+
+pub trait DeadContract {
+    const KIND: &'static str = "dead-contract";
 }
 "#,
     );

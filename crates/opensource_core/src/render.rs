@@ -403,6 +403,9 @@ fn record_impl_assoc_item_decisions(
         .trait_
         .as_ref()
         .map(|(_, path, _)| normalized_path(module_path, path, aliases));
+    let resolved_trait = item_impl.trait_.as_ref().and_then(|(_, path, _)| {
+        resolve_trait_path_for_impl(project, package, module_path, path, aliases)
+    });
     let trait_input_type_paths = item_impl
         .trait_
         .as_ref()
@@ -415,7 +418,14 @@ fn record_impl_assoc_item_decisions(
     };
     let trait_item = trait_path
         .as_ref()
-        .and_then(|trait_path| trait_item_for_path(project, package, trait_path));
+        .and_then(|trait_path| trait_item_for_path(project, package, trait_path))
+        .or_else(|| {
+            resolved_trait
+                .as_ref()
+                .and_then(|(trait_package, trait_path)| {
+                    trait_item_for_package_path(project, trait_package, trait_path)
+                })
+        });
     let impl_surface_renders = impl_surface_should_render(
         project,
         reduced,
@@ -424,6 +434,9 @@ fn record_impl_assoc_item_decisions(
         module_path,
         &type_path,
         trait_path.as_deref(),
+        resolved_trait
+            .as_ref()
+            .map(|(trait_package, trait_path)| (trait_package.as_str(), trait_path.as_slice())),
         trait_input_type_paths.as_slice(),
         trait_item.as_ref(),
         item_impl,
@@ -446,6 +459,9 @@ fn record_impl_assoc_item_decisions(
                     package,
                     &type_path,
                     trait_path.as_deref(),
+                    resolved_trait.as_ref().map(|(trait_package, trait_path)| {
+                        (trait_package.as_str(), trait_path.as_slice())
+                    }),
                     trait_input_type_paths.as_slice(),
                     trait_item.as_ref(),
                     item_impl,
@@ -2781,8 +2797,13 @@ fn build_restricted_support_sources(
                     return Ok(None);
                 };
                 changed |= inserted;
-                changed |=
-                    mark_support_method_fallback_dependencies(&ctx, &method_index, item, &mut live);
+                changed |= mark_support_method_fallback_dependencies(
+                    &ctx,
+                    &method_index,
+                    &source_file,
+                    item,
+                    &mut live,
+                );
                 changed |= mark_support_enum_variant_method_dependencies(
                     &ctx,
                     &method_index,
@@ -2861,6 +2882,7 @@ fn build_restricted_support_sources(
                     changed |= mark_support_method_fallback_dependencies(
                         &ctx,
                         &method_index,
+                        &source_file,
                         &rendered_item,
                         &mut live,
                     );
@@ -4924,6 +4946,7 @@ fn mark_support_item_attribute_dependencies(
 fn mark_support_method_fallback_dependencies(
     ctx: &SupportResolveContext<'_>,
     method_index: &BTreeMap<String, Vec<SupportMethodCandidate>>,
+    source_file: &Path,
     item: &Item,
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
 ) -> bool {
@@ -4934,15 +4957,23 @@ fn mark_support_method_fallback_dependencies(
     visitor
         .names
         .extend(token_method_call_names(&item.to_token_stream()));
+    let generated_source_receiver_methods =
+        support_generated_source_receiver_method_names(ctx, source_file, item);
+    let package_has_source_include = support_package_contains_source_include(ctx);
     let mut changed = false;
     for method in visitor.names {
         let Some(candidates) = method_index.get(&method) else {
             continue;
         };
-        if candidates.len() > SUPPORT_METHOD_FALLBACK_CAP {
-            continue;
-        }
-        for candidate in candidates {
+        let candidates = if candidates.len() > SUPPORT_METHOD_FALLBACK_CAP {
+            if !generated_source_receiver_methods.contains(&method) && !package_has_source_include {
+                continue;
+            }
+            candidates.clone()
+        } else {
+            candidates.clone()
+        };
+        for candidate in &candidates {
             changed |= mark_support_live_item_name(
                 ctx,
                 &candidate.source_file,
@@ -4958,6 +4989,82 @@ fn mark_support_method_fallback_dependencies(
         }
     }
     changed
+}
+
+fn support_generated_source_receiver_method_names(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+    item: &Item,
+) -> BTreeSet<String> {
+    let source_include_modules = support_source_include_module_names(ctx, source_file);
+    if source_include_modules.is_empty() {
+        return BTreeSet::new();
+    }
+    let mut visitor = SupportGeneratedSourceReceiverMethodVisitor {
+        source_include_modules: &source_include_modules,
+        method_names: BTreeSet::new(),
+    };
+    visitor.visit_item(item);
+    visitor.method_names
+}
+
+fn support_package_contains_source_include(ctx: &SupportResolveContext<'_>) -> bool {
+    ctx.modules
+        .values()
+        .any(|module| support_module_contains_source_include(&module.syntax))
+}
+
+fn support_source_include_module_names(
+    ctx: &SupportResolveContext<'_>,
+    source_file: &Path,
+) -> BTreeSet<String> {
+    let Some(module) = ctx.modules.get(source_file) else {
+        return BTreeSet::new();
+    };
+    module
+        .syntax
+        .items
+        .iter()
+        .filter_map(|item| {
+            let Item::Mod(item_mod) = item else {
+                return None;
+            };
+            let name = item_mod.ident.to_string();
+            let child_file = support_child_module_file(ctx.modules, source_file, &name)?;
+            let child_module = ctx.modules.get(&child_file)?;
+            support_module_contains_source_include(&child_module.syntax).then_some(name)
+        })
+        .collect()
+}
+
+fn support_module_contains_source_include(syntax: &syn::File) -> bool {
+    syntax.items.iter().any(|item| {
+        matches!(
+            item,
+            Item::Macro(item_macro)
+                if item_macro.ident.is_none() && item_macro.mac.path.is_ident("include")
+        )
+    })
+}
+
+struct SupportGeneratedSourceReceiverMethodVisitor<'a> {
+    source_include_modules: &'a BTreeSet<String>,
+    method_names: BTreeSet<String>,
+}
+
+impl<'ast> Visit<'ast> for SupportGeneratedSourceReceiverMethodVisitor<'_> {
+    fn visit_expr_method_call(&mut self, node: &'ast syn::ExprMethodCall) {
+        if expr_mentions_any_path_root(&node.receiver, self.source_include_modules) {
+            self.method_names.insert(node.method.to_string());
+        }
+        syn::visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn expr_mentions_any_path_root(expr: &Expr, roots: &BTreeSet<String>) -> bool {
+    token_path_candidates(&expr.to_token_stream())
+        .iter()
+        .any(|segments| segments.first().is_some_and(|root| roots.contains(root)))
 }
 
 fn mark_support_enum_variant_method_dependencies(
@@ -7057,65 +7164,77 @@ fn trait_assoc_item_impl_override_should_remain_for_references(
         return false;
     };
 
-    project_module_paths(project, package)
-        .iter()
-        .any(|impl_module_path| {
-            let Some(items) = module_items_for_path(project, package, impl_module_path) else {
-                return false;
-            };
-            let aliases = project
-                .module_aliases
-                .get(&(package.to_string(), impl_module_path.to_vec()))
-                .cloned()
-                .unwrap_or_default();
-            items.iter().any(|item| {
-                let Item::Impl(item_impl) = item else {
-                    return false;
-                };
-                let Some(impl_trait_path) = item_impl
-                    .trait_
-                    .as_ref()
-                    .map(|(_, path, _)| normalized_path(impl_module_path, path, &aliases))
+    reduced.packages.iter().any(|impl_package| {
+        project_module_paths(project, impl_package)
+            .iter()
+            .any(|impl_module_path| {
+                let Some(items) = module_items_for_path(project, impl_package, impl_module_path)
                 else {
                     return false;
                 };
-                if impl_trait_path != trait_path {
-                    return false;
-                }
-                let has_matching_override = item_impl.items.iter().any(|impl_item| {
-                    !impl_item_is_test(impl_item)
-                        && impl_item_assoc_name_kind(impl_item)
-                            .is_some_and(|(name, _kind)| name == assoc_name)
-                });
-                if !has_matching_override {
-                    return false;
-                }
-                let Some(type_path) = resolved_local_type_path(
-                    project,
-                    package,
-                    impl_module_path,
-                    &item_impl.self_ty,
-                    &aliases,
-                ) else {
-                    return false;
-                };
-                trait_impl_assoc_item_should_remain_for_references(
-                    project,
-                    reduced,
-                    package,
-                    &type_path,
-                    &trait_path,
-                    assoc_name,
-                ) || trait_default_method_assoc_item_override_should_render(
-                    project,
-                    reduced,
-                    package,
-                    &type_path,
-                    &trait_item,
-                    assoc_name,
-                )
+                let aliases = project
+                    .module_aliases
+                    .get(&(impl_package.to_string(), impl_module_path.to_vec()))
+                    .cloned()
+                    .unwrap_or_default();
+                items.iter().any(|item| {
+                    let Item::Impl(item_impl) = item else {
+                        return false;
+                    };
+                    let Some((_, impl_trait_syn_path, _)) = item_impl.trait_.as_ref() else {
+                        return false;
+                    };
+                    let Some((impl_trait_package, impl_trait_path)) = resolve_trait_path_for_impl(
+                        project,
+                        impl_package,
+                        impl_module_path,
+                        impl_trait_syn_path,
+                        &aliases,
+                    ) else {
+                        return false;
+                    };
+                    if impl_trait_package != package || impl_trait_path != trait_path {
+                        return false;
+                    }
+                    let impl_trait_input_type_paths =
+                        trait_input_type_paths(impl_module_path, impl_trait_syn_path, &aliases);
+                    let has_matching_override = item_impl.items.iter().any(|impl_item| {
+                        !impl_item_is_test(impl_item)
+                            && impl_item_assoc_name_kind(impl_item)
+                                .is_some_and(|(name, _kind)| name == assoc_name)
+                    });
+                    if !has_matching_override {
+                        return false;
+                    }
+                    let Some(type_path) = resolved_local_type_path(
+                        project,
+                        impl_package,
+                        impl_module_path,
+                        &item_impl.self_ty,
+                        &aliases,
+                    ) else {
+                        return false;
+                    };
+                    trait_impl_assoc_item_should_remain_for_references_to_trait(
+                        project,
+                        reduced,
+                        impl_package,
+                        &type_path,
+                        package,
+                        &trait_path,
+                        &impl_trait_input_type_paths,
+                        assoc_name,
+                    ) || trait_default_method_assoc_item_override_should_render(
+                        project,
+                        reduced,
+                        impl_package,
+                        &type_path,
+                        &trait_item,
+                        assoc_name,
+                    )
+                })
             })
-        })
+    })
 }
 
 fn reachable_reduced_callables_reference_trait_assoc_item(
@@ -7580,9 +7699,11 @@ struct TraitImplAssocPathReferenceVisitor<'a> {
     aliases: &'a HashMap<String, Vec<String>>,
     target_package: &'a str,
     target_type_path: &'a [String],
+    target_trait_package: &'a str,
     target_trait_path: &'a [String],
+    target_trait_input_type_paths: &'a [Vec<String>],
     assoc_name: &'a str,
-    self_impl: Option<(&'a str, &'a [String], &'a [String])>,
+    self_impl: Option<(String, Vec<String>, String, Vec<String>, Vec<Vec<String>>)>,
     found: bool,
 }
 
@@ -7595,9 +7716,11 @@ impl<'a> TraitImplAssocPathReferenceVisitor<'a> {
         aliases: &'a HashMap<String, Vec<String>>,
         target_package: &'a str,
         target_type_path: &'a [String],
+        target_trait_package: &'a str,
         target_trait_path: &'a [String],
+        target_trait_input_type_paths: &'a [Vec<String>],
         assoc_name: &'a str,
-        self_impl: Option<(&'a str, &'a [String], &'a [String])>,
+        self_impl: Option<(String, Vec<String>, String, Vec<String>, Vec<Vec<String>>)>,
     ) -> Self {
         Self {
             project,
@@ -7606,7 +7729,9 @@ impl<'a> TraitImplAssocPathReferenceVisitor<'a> {
             aliases,
             target_package,
             target_type_path,
+            target_trait_package,
             target_trait_path,
+            target_trait_input_type_paths,
             assoc_name,
             self_impl,
             found: false,
@@ -7627,22 +7752,38 @@ impl<'a> TraitImplAssocPathReferenceVisitor<'a> {
             .map(|segment| segment.ident.to_string())
             .collect::<Vec<_>>();
         if let Some(qself) = qself {
-            return self.qself_path_references_target(qself, &segments);
+            return self.qself_path_references_target(qself, path, &segments);
         }
         self.segments_reference_target(&segments)
     }
 
-    fn qself_path_references_target(&self, qself: &syn::QSelf, segments: &[String]) -> bool {
+    fn qself_path_references_target(
+        &self,
+        qself: &syn::QSelf,
+        path: &syn::Path,
+        segments: &[String],
+    ) -> bool {
         if qself.position == 0 || segments.is_empty() {
             return false;
         }
         let trait_segment_count = qself.position.min(segments.len().saturating_sub(1));
-        self.type_references_target_type(&qself.ty)
-            && self
-                .resolve_segments(&segments[..trait_segment_count])
-                .is_some_and(|(package, path)| {
-                    package == self.target_package && path == self.target_trait_path
-                })
+        if !self.type_references_target_type(&qself.ty) {
+            return false;
+        }
+        let Some((package, resolved_path)) =
+            self.resolve_segments(&segments[..trait_segment_count])
+        else {
+            return false;
+        };
+        if package != self.target_trait_package || resolved_path != self.target_trait_path {
+            return false;
+        }
+        let trait_input_type_paths = trait_input_type_paths_from_path_segments(
+            self.module_path,
+            path.segments.iter().take(trait_segment_count),
+            self.aliases,
+        );
+        trait_input_type_paths == self.target_trait_input_type_paths
     }
 
     fn segments_reference_target(&self, segments: &[String]) -> bool {
@@ -7682,12 +7823,15 @@ impl<'a> TraitImplAssocPathReferenceVisitor<'a> {
     }
 
     fn self_impl_is_target(&self) -> bool {
-        self.self_impl
-            .is_some_and(|(package, type_path, trait_path)| {
+        self.self_impl.as_ref().is_some_and(
+            |(package, type_path, trait_package, trait_path, trait_input_type_paths)| {
                 package == self.target_package
                     && type_path == self.target_type_path
+                    && trait_package == self.target_trait_package
                     && trait_path == self.target_trait_path
-            })
+                    && trait_input_type_paths == self.target_trait_input_type_paths
+            },
+        )
     }
 
     fn resolve_segments(&self, segments: &[String]) -> Option<(String, Vec<String>)> {
@@ -11134,13 +11278,21 @@ fn transform_items(
     retain_test_items: bool,
 ) -> Vec<Item> {
     let preserve_uniffi_surface = package_preserves_uniffi_surface(project, reduced, package);
-    let retained_macro_definitions = retained_macro_definitions_for_generated_items(
+    let mut retained_macro_definitions = retained_macro_definitions_for_generated_items(
         project,
         reduced,
         package,
         module_path,
         items,
     );
+    retained_macro_definitions.extend(retained_local_macro_self_reexport_definitions(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        items,
+    ));
 
     let mut transformed = Vec::new();
     for item in items {
@@ -11338,6 +11490,9 @@ fn transform_items(
                     .trait_
                     .as_ref()
                     .map(|(_, path, _)| normalized_path(module_path, path, &aliases));
+                let resolved_trait = item_impl.trait_.as_ref().and_then(|(_, path, _)| {
+                    resolve_trait_path_for_impl(project, package, module_path, path, &aliases)
+                });
                 let trait_input_type_paths = item_impl
                     .trait_
                     .as_ref()
@@ -11379,6 +11534,9 @@ fn transform_items(
                                 package,
                                 &[],
                                 trait_path.as_deref(),
+                                resolved_trait.as_ref().map(|(trait_package, trait_path)| {
+                                    (trait_package.as_str(), trait_path.as_slice())
+                                }),
                                 trait_input_type_paths.as_slice(),
                                 Some(&trait_item),
                                 item_impl,
@@ -11409,7 +11567,14 @@ fn transform_items(
                 });
                 let trait_item = trait_path
                     .as_ref()
-                    .and_then(|trait_path| trait_item_for_path(project, package, trait_path));
+                    .and_then(|trait_path| trait_item_for_path(project, package, trait_path))
+                    .or_else(|| {
+                        resolved_trait
+                            .as_ref()
+                            .and_then(|(trait_package, trait_path)| {
+                                trait_item_for_package_path(project, trait_package, trait_path)
+                            })
+                    });
                 let default_trait_impl_is_required =
                     trait_item.as_ref().is_some_and(|trait_item| {
                         reduced.reachable_items.contains(trait_item)
@@ -11420,6 +11585,30 @@ fn transform_items(
                                 project, reduced, package, &type_path,
                             )
                     });
+                let kept_trait_assoc_item =
+                    resolved_trait
+                        .as_ref()
+                        .is_some_and(|(trait_package, trait_path)| {
+                            item_impl.items.iter().any(|impl_item| {
+                                if !retain_test_items && impl_item_is_test(impl_item) {
+                                    return false;
+                                }
+                                let Some((name, _kind)) = impl_item_assoc_name_kind(impl_item)
+                                else {
+                                    return false;
+                                };
+                                trait_impl_assoc_item_should_remain_for_references_to_trait(
+                                    project,
+                                    reduced,
+                                    package,
+                                    &type_path,
+                                    trait_package,
+                                    trait_path,
+                                    trait_input_type_paths.as_slice(),
+                                    &name,
+                                )
+                            })
+                        });
                 let marker_trait_impl_is_required = trait_path
                     .as_ref()
                     .and_then(|path| path.last())
@@ -11447,14 +11636,29 @@ fn transform_items(
                             trait_input_type_paths: trait_input_type_paths.clone(),
                             method: method.sig.ident.to_string(),
                         };
-                        if render_plan.callable_should_render(&id)
-                            || retained_impl_surfaces_call_inherent_associated_function(
+                        let callable_should_render = render_plan.callable_should_render(&id);
+                        let assoc_fn_surface_should_render =
+                            retained_impl_surfaces_call_inherent_associated_function(
                                 project,
                                 reduced,
                                 package,
                                 &type_path,
                                 &method.sig.ident.to_string(),
-                            )
+                            );
+                        let inherent_method_should_render = trait_path.is_none()
+                            && inherent_impl_method_should_render(
+                                project,
+                                reduced,
+                                render_plan,
+                                package,
+                                module_path,
+                                &type_path,
+                                item_impl,
+                                &method.sig.ident.to_string(),
+                            );
+                        if callable_should_render
+                            || assoc_fn_surface_should_render
+                            || inherent_method_should_render
                         {
                             let mut method = method.clone();
                             strip_opensourced_attrs(&mut method.attrs);
@@ -11493,6 +11697,7 @@ fn transform_items(
 
                 if kept_method
                     || kept_inherent_assoc_item
+                    || kept_trait_assoc_item
                     || trait_impl_is_required
                     || default_trait_impl_is_required
                     || marker_trait_impl_is_required
@@ -11508,6 +11713,9 @@ fn transform_items(
                                     package,
                                     &type_path,
                                     trait_path.as_deref(),
+                                    resolved_trait.as_ref().map(|(trait_package, trait_path)| {
+                                        (trait_package.as_str(), trait_path.as_slice())
+                                    }),
                                     trait_input_type_paths.as_slice(),
                                     trait_item.as_ref(),
                                     item_impl,
@@ -12109,6 +12317,36 @@ fn macro_definition_should_remain(
         .ident
         .as_ref()
         .is_some_and(|ident| retained_macro_definitions.contains(&ident.to_string()))
+}
+
+fn retained_local_macro_self_reexport_definitions(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+) -> BTreeSet<String> {
+    items
+        .iter()
+        .filter_map(|item| {
+            let Item::Use(item_use) = item else {
+                return None;
+            };
+            if !local_macro_self_reexport_should_remain(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                items,
+                item_use,
+            ) {
+                return None;
+            }
+            single_use_name(&item_use.tree).map(ToString::to_string)
+        })
+        .collect()
 }
 
 fn macro_invocation_feeds_reachable_code(
@@ -13352,9 +13590,40 @@ fn impl_should_render(
         .trait_
         .as_ref()
         .map(|(_, path, _)| normalized_path(module_path, path, aliases));
+    let resolved_trait = item_impl.trait_.as_ref().and_then(|(_, path, _)| {
+        resolve_trait_path_for_impl(project, package, module_path, path, aliases)
+    });
+    let trait_input_type_paths = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| trait_input_type_paths(module_path, path, aliases))
+        .unwrap_or_default();
     let trait_impl_is_required = trait_path.as_ref().is_some_and(|trait_path| {
         trait_impl_items_are_reachable(reduced, package, &type_path, trait_path)
     });
+    let kept_trait_assoc_item =
+        resolved_trait
+            .as_ref()
+            .is_some_and(|(trait_package, trait_path)| {
+                item_impl.items.iter().any(|impl_item| {
+                    if impl_item_is_test(impl_item) {
+                        return false;
+                    }
+                    let Some((name, _kind)) = impl_item_assoc_name_kind(impl_item) else {
+                        return false;
+                    };
+                    trait_impl_assoc_item_should_remain_for_references_to_trait(
+                        project,
+                        reduced,
+                        package,
+                        &type_path,
+                        trait_package,
+                        trait_path,
+                        &trait_input_type_paths,
+                        &name,
+                    )
+                })
+            });
     let marker_trait_impl_is_required = trait_path
         .as_ref()
         .and_then(|path| path.last())
@@ -13367,7 +13636,7 @@ fn impl_should_render(
             .filter(|impl_item| !impl_item_is_test(impl_item))
             .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
 
-    trait_impl_is_required || marker_trait_impl_is_required
+    trait_impl_is_required || kept_trait_assoc_item || marker_trait_impl_is_required
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -13379,6 +13648,7 @@ fn impl_surface_should_render(
     module_path: &[String],
     type_path: &[String],
     trait_path: Option<&[String]>,
+    resolved_trait: Option<(&str, &[String])>,
     trait_input_type_paths: &[Vec<String>],
     trait_item: Option<&ItemId>,
     item_impl: &syn::ItemImpl,
@@ -13419,6 +13689,26 @@ fn impl_surface_should_render(
                 impl_item,
             )
         });
+    let kept_trait_assoc_item = resolved_trait.is_some_and(|(trait_package, trait_path)| {
+        item_impl.items.iter().any(|impl_item| {
+            if impl_item_is_test(impl_item) {
+                return false;
+            }
+            let Some((name, _kind)) = impl_item_assoc_name_kind(impl_item) else {
+                return false;
+            };
+            trait_impl_assoc_item_should_remain_for_references_to_trait(
+                project,
+                reduced,
+                package,
+                type_path,
+                trait_package,
+                trait_path,
+                trait_input_type_paths,
+                &name,
+            )
+        })
+    });
     let trait_impl_is_required = trait_path.is_some_and(|trait_path| {
         trait_impl_items_are_reachable(reduced, package, type_path, trait_path)
     });
@@ -13447,6 +13737,7 @@ fn impl_surface_should_render(
 
     kept_method
         || kept_inherent_assoc_item
+        || kept_trait_assoc_item
         || trait_impl_is_required
         || default_trait_impl_is_required
         || marker_trait_impl_is_required
@@ -13460,6 +13751,7 @@ fn impl_item_should_render_for_trait_surface(
     package: &str,
     type_path: &[String],
     trait_path: Option<&[String]>,
+    resolved_trait: Option<(&str, &[String])>,
     trait_input_type_paths: &[Vec<String>],
     trait_item: Option<&ItemId>,
     item_impl: &syn::ItemImpl,
@@ -13478,24 +13770,50 @@ fn impl_item_should_render_for_trait_surface(
     if impl_item_attrs_require_surface_retention(impl_item) {
         return true;
     }
-    if trait_item.is_some_and(|trait_item| {
+    let resolved_trait_item = resolved_trait.and_then(|(trait_package, trait_path)| {
+        trait_item_for_package_path(project, trait_package, trait_path)
+    });
+    let trait_contract = trait_item.or(resolved_trait_item.as_ref());
+    if trait_contract.is_some_and(|trait_item| {
         trait_impl_item_is_required_by_trait(project, trait_item, impl_item)
     }) {
         return true;
     }
-    if let (Some(trait_item), Some(trait_path), Some((name, _kind))) =
-        (trait_item, trait_path, impl_item_assoc_name_kind(impl_item))
+    if let (Some((trait_package, resolved_trait_path)), Some((name, _kind))) =
+        (resolved_trait, impl_item_assoc_name_kind(impl_item))
     {
-        if trait_impl_assoc_item_should_remain_for_references(
-            project, reduced, package, type_path, trait_path, &name,
-        ) || trait_default_method_assoc_item_override_should_render(
+        if trait_impl_assoc_item_should_remain_for_references_to_trait(
+            project,
+            reduced,
+            package,
+            type_path,
+            trait_package,
+            resolved_trait_path,
+            trait_input_type_paths,
+            &name,
+        ) {
+            return true;
+        }
+    }
+    if let (Some(trait_item), Some(_trait_path), Some((name, _kind))) = (
+        trait_contract,
+        trait_path,
+        impl_item_assoc_name_kind(impl_item),
+    ) {
+        if trait_default_method_assoc_item_override_should_render(
             project, reduced, package, type_path, trait_item, &name,
         ) {
             return true;
         }
     }
+    if trait_path.is_some()
+        && trait_contract.is_none()
+        && impl_item_assoc_name_kind(impl_item).is_some()
+    {
+        return true;
+    }
     let (Some(trait_path), ImplItem::Fn(method)) = (trait_path, impl_item) else {
-        return trait_item.is_none();
+        return trait_contract.is_none() && resolved_trait.is_none();
     };
     let id = CallableId::Method {
         package: package.to_string(),
@@ -13535,6 +13853,17 @@ fn inherent_impl_assoc_item_should_render(
     {
         return true;
     }
+    if source_include_blocked_impl_method_should_render(
+        project,
+        reduced,
+        render_plan,
+        package,
+        type_path,
+        item_impl,
+        &name,
+    ) {
+        return true;
+    }
     reachable_reduced_callables_reference_inherent_assoc_item(
         project, reduced, package, type_path, &name,
     ) || rendered_items_reference_inherent_assoc_item(
@@ -13554,7 +13883,301 @@ fn inherent_impl_assoc_item_should_render(
         )
 }
 
+fn inherent_impl_method_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    _module_path: &[String],
+    type_path: &[String],
+    item_impl: &syn::ItemImpl,
+    name: &str,
+) -> bool {
+    if !path_item_should_render(render_plan, package, type_path, type_surface_item_kinds()) {
+        return false;
+    }
+    source_include_blocked_impl_method_should_render(
+        project,
+        reduced,
+        render_plan,
+        package,
+        type_path,
+        item_impl,
+        name,
+    )
+}
+
+fn source_include_blocked_impl_method_should_render(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    type_path: &[String],
+    item_impl: &syn::ItemImpl,
+    assoc_name: &str,
+) -> bool {
+    if !path_item_should_render(render_plan, package, type_path, type_surface_item_kinds())
+        || !package_has_generated_source_unknown_surface(project, package)
+    {
+        return false;
+    }
+    let method_roots =
+        generated_source_unknown_method_roots(project, reduced, render_plan, package);
+    if method_roots.is_empty() {
+        return false;
+    }
+    let impl_methods = item_impl
+        .items
+        .iter()
+        .filter_map(|impl_item| {
+            let ImplItem::Fn(method) = impl_item else {
+                return None;
+            };
+            (!impl_item_is_test(impl_item)).then_some((method.sig.ident.to_string(), method))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if !impl_methods.contains_key(assoc_name) {
+        return false;
+    }
+    let mut pending = method_roots
+        .iter()
+        .filter(|method| impl_methods.contains_key(*method))
+        .cloned()
+        .collect::<Vec<_>>();
+    pending.extend(impl_methods.keys().filter_map(|method| {
+        (reachable_reduced_callables_reference_inherent_assoc_item(
+            project, reduced, package, type_path, method,
+        ) || rendered_items_reference_inherent_assoc_item(
+            project,
+            render_plan,
+            package,
+            type_path,
+            method,
+        ))
+        .then_some(method.clone())
+    }));
+    let mut seen = BTreeSet::new();
+    while let Some(method_name) = pending.pop() {
+        if !seen.insert(method_name.clone()) {
+            continue;
+        }
+        if method_name == assoc_name {
+            return true;
+        }
+        let Some(method) = impl_methods.get(&method_name) else {
+            continue;
+        };
+        for candidate in impl_methods.keys() {
+            if !seen.contains(candidate.as_str())
+                && (impl_item_fn_has_method_call(method, candidate)
+                    || token_method_call_names(&method.to_token_stream()).contains(candidate))
+            {
+                pending.push(candidate.clone());
+            }
+        }
+    }
+    false
+}
+
+fn generated_source_unknown_method_roots(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    let source_include_modules = package_source_include_module_names(project, package);
+    let package_has_build_script = project
+        .workspace
+        .packages
+        .get(package)
+        .and_then(build_script_path)
+        .is_some();
+    for callable in &reduced.reachable {
+        if callable.package() != package {
+            continue;
+        }
+        if let Some(record) = project.functions.get(callable) {
+            roots.extend(generated_source_method_roots_from_item_fn(
+                &record.item,
+                &source_include_modules,
+                package_has_build_script,
+            ));
+        } else if let Some(record) = project.methods.get(callable) {
+            roots.extend(generated_source_method_roots_from_impl_item_fn(
+                &record.item,
+                &source_include_modules,
+                package_has_build_script,
+            ));
+        }
+    }
+    for (item_id, record) in &project.items {
+        if item_id.package != package || !render_plan.item_should_render(item_id) {
+            continue;
+        }
+        roots.extend(generated_source_method_roots_from_item(
+            &record.item,
+            &source_include_modules,
+            package_has_build_script,
+        ));
+    }
+    if source_include_modules.is_empty() && package_has_build_script {
+        roots.extend(
+            reduced
+                .evidence
+                .capped_unresolved_method_details
+                .iter()
+                .filter(|detail| {
+                    detail
+                        .package
+                        .as_deref()
+                        .is_none_or(|candidate| candidate == package)
+                })
+                .map(|detail| detail.method_name.clone()),
+        );
+    }
+    roots
+}
+
+fn generated_source_method_roots_from_item_fn(
+    item: &syn::ItemFn,
+    source_include_modules: &BTreeSet<String>,
+    package_has_build_script: bool,
+) -> BTreeSet<String> {
+    if source_include_modules.is_empty() {
+        return package_has_build_script
+            .then(|| token_method_call_names(&item.to_token_stream()))
+            .unwrap_or_default();
+    }
+    let mut visitor = SourceIncludeReceiverMethodVisitor {
+        source_include_modules,
+        method_names: BTreeSet::new(),
+    };
+    visitor.visit_item_fn(item);
+    visitor.method_names
+}
+
+fn generated_source_method_roots_from_impl_item_fn(
+    item: &syn::ImplItemFn,
+    source_include_modules: &BTreeSet<String>,
+    package_has_build_script: bool,
+) -> BTreeSet<String> {
+    if source_include_modules.is_empty() {
+        return package_has_build_script
+            .then(|| token_method_call_names(&item.to_token_stream()))
+            .unwrap_or_default();
+    }
+    let mut visitor = SourceIncludeReceiverMethodVisitor {
+        source_include_modules,
+        method_names: BTreeSet::new(),
+    };
+    visitor.visit_impl_item_fn(item);
+    visitor.method_names
+}
+
+fn generated_source_method_roots_from_item(
+    item: &Item,
+    source_include_modules: &BTreeSet<String>,
+    package_has_build_script: bool,
+) -> BTreeSet<String> {
+    if source_include_modules.is_empty() {
+        return package_has_build_script
+            .then(|| token_method_call_names(&item.to_token_stream()))
+            .unwrap_or_default();
+    }
+    let mut visitor = SourceIncludeReceiverMethodVisitor {
+        source_include_modules,
+        method_names: BTreeSet::new(),
+    };
+    visitor.visit_item(item);
+    visitor.method_names
+}
+
+struct SourceIncludeReceiverMethodVisitor<'a> {
+    source_include_modules: &'a BTreeSet<String>,
+    method_names: BTreeSet<String>,
+}
+
+impl Visit<'_> for SourceIncludeReceiverMethodVisitor<'_> {
+    fn visit_expr_method_call(&mut self, node: &syn::ExprMethodCall) {
+        if expr_mentions_any_path_root(&node.receiver, self.source_include_modules) {
+            self.method_names.insert(node.method.to_string());
+        }
+        visit::visit_expr_method_call(self, node);
+    }
+}
+
+fn package_contains_source_include_macro(project: &Project, package: &str) -> bool {
+    project_module_paths(project, package)
+        .iter()
+        .any(|module_path| {
+            module_items_for_path(project, package, module_path).is_some_and(|items| {
+                items.iter().any(item_contains_source_include_macro)
+            })
+        })
+}
+
+fn package_source_include_module_names(project: &Project, package: &str) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for module_path in project_module_paths(project, package) {
+        let Some(items) = module_items_for_path(project, package, &module_path) else {
+            continue;
+        };
+        for item in items {
+            let Item::Mod(item_mod) = item else {
+                continue;
+            };
+            let module_name = item_mod.ident.to_string();
+            let mut child_path = module_path.clone();
+            child_path.push(module_name.clone());
+            let inline_contains = item_mod
+                .content
+                .as_ref()
+                .is_some_and(|(_, items)| items.iter().any(item_contains_source_include_macro));
+            let child_contains =
+                module_items_for_path(project, package, &child_path).is_some_and(|items| {
+                    items.iter().any(item_contains_source_include_macro)
+                });
+            if inline_contains || child_contains {
+                names.insert(module_name);
+            }
+        }
+    }
+    names
+}
+
+fn item_contains_source_include_macro(item: &Item) -> bool {
+    match item {
+        Item::Macro(item_macro) => {
+            item_macro.ident.is_none() && item_macro.mac.path.is_ident("include")
+        }
+        Item::Mod(item_mod) => item_mod
+            .content
+            .as_ref()
+            .is_some_and(|(_, items)| items.iter().any(item_contains_source_include_macro)),
+        _ => false,
+    }
+}
+
+fn package_has_generated_source_unknown_surface(project: &Project, package: &str) -> bool {
+    package_contains_source_include_macro(project, package)
+        || project
+            .workspace
+            .packages
+            .get(package)
+            .and_then(build_script_path)
+            .is_some()
+}
+
 fn trait_item_for_path(project: &Project, package: &str, trait_path: &[String]) -> Option<ItemId> {
+    trait_item_for_package_path(project, package, trait_path)
+}
+
+fn trait_item_for_package_path(
+    project: &Project,
+    package: &str,
+    trait_path: &[String],
+) -> Option<ItemId> {
     let (name, module_path) = trait_path.split_last()?;
     let item = ItemId {
         package: package.to_string(),
@@ -13563,6 +14186,55 @@ fn trait_item_for_path(project: &Project, package: &str, trait_path: &[String]) 
         kind: ItemKind::Trait,
     };
     project.items.contains_key(&item).then_some(item)
+}
+
+fn resolve_trait_path_for_impl(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    path: &syn::Path,
+    aliases: &HashMap<String, Vec<String>>,
+) -> Option<(String, Vec<String>)> {
+    let segments = apply_alias(
+        path.segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect(),
+        aliases,
+    );
+    let (trait_package, trait_path) =
+        resolve_macro_invocation_segments(project, package, module_path, &segments)?;
+    let canonical_module_path = if trait_package == package {
+        module_path
+    } else {
+        &[]
+    };
+    let trait_path =
+        canonical_type_path(project, &trait_package, canonical_module_path, trait_path);
+    Some((trait_package, trait_path))
+}
+
+fn resolve_callable_trait_path(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    trait_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+) -> Option<(String, Vec<String>)> {
+    if trait_item_for_package_path(project, package, trait_path).is_some() {
+        return Some((package.to_string(), trait_path.to_vec()));
+    }
+    let segments = apply_alias(trait_path.to_vec(), aliases);
+    let (trait_package, trait_path) =
+        resolve_macro_invocation_segments(project, package, module_path, &segments)?;
+    let canonical_module_path = if trait_package == package {
+        module_path
+    } else {
+        &[]
+    };
+    let trait_path =
+        canonical_type_path(project, &trait_package, canonical_module_path, trait_path);
+    Some((trait_package, trait_path))
 }
 
 fn trait_default_method_is_referenced_by_reachable_callables(
@@ -13638,12 +14310,14 @@ fn trait_default_method_assoc_item_override_should_render(
     })
 }
 
-fn trait_impl_assoc_item_should_remain_for_references(
+fn trait_impl_assoc_item_should_remain_for_references_to_trait(
     project: &Project,
     reduced: &ReducedProject,
     target_package: &str,
     target_type_path: &[String],
+    target_trait_package: &str,
     target_trait_path: &[String],
+    target_trait_input_type_paths: &[Vec<String>],
     assoc_name: &str,
 ) -> bool {
     reachable_reduced_callables_reference_trait_impl_assoc_item(
@@ -13651,14 +14325,18 @@ fn trait_impl_assoc_item_should_remain_for_references(
         reduced,
         target_package,
         target_type_path,
+        target_trait_package,
         target_trait_path,
+        target_trait_input_type_paths,
         assoc_name,
     ) || reachable_items_reference_trait_impl_assoc_item(
         project,
         reduced,
         target_package,
         target_type_path,
+        target_trait_package,
         target_trait_path,
+        target_trait_input_type_paths,
         assoc_name,
     ) || reachable_reduced_callables_macro_tokens_mention_ident(project, reduced, assoc_name)
         || reachable_items_macro_tokens_mention_ident(project, reduced, assoc_name)
@@ -13669,7 +14347,9 @@ fn reachable_reduced_callables_reference_trait_impl_assoc_item(
     reduced: &ReducedProject,
     target_package: &str,
     target_type_path: &[String],
+    target_trait_package: &str,
     target_trait_path: &[String],
+    target_trait_input_type_paths: &[Vec<String>],
     assoc_name: &str,
 ) -> bool {
     reduced.reachable.iter().any(|callable| {
@@ -13681,7 +14361,9 @@ fn reachable_reduced_callables_reference_trait_impl_assoc_item(
                 &record.aliases,
                 target_package,
                 target_type_path,
+                target_trait_package,
                 target_trait_path,
+                target_trait_input_type_paths,
                 assoc_name,
                 None,
             );
@@ -13696,13 +14378,25 @@ fn reachable_reduced_callables_reference_trait_impl_assoc_item(
             CallableId::Method {
                 package,
                 type_path,
+                trait_input_type_paths,
                 trait_path: Some(trait_path),
                 ..
-            } => Some((
-                package.as_str(),
-                type_path.as_slice(),
-                trait_path.as_slice(),
-            )),
+            } => resolve_callable_trait_path(
+                project,
+                package,
+                &record.module_path,
+                trait_path,
+                &record.aliases,
+            )
+            .map(|(trait_package, trait_path)| {
+                (
+                    package.to_string(),
+                    type_path.clone(),
+                    trait_package,
+                    trait_path,
+                    trait_input_type_paths.clone(),
+                )
+            }),
             _ => None,
         };
         let mut visitor = TraitImplAssocPathReferenceVisitor::new(
@@ -13712,7 +14406,9 @@ fn reachable_reduced_callables_reference_trait_impl_assoc_item(
             &record.aliases,
             target_package,
             target_type_path,
+            target_trait_package,
             target_trait_path,
+            target_trait_input_type_paths,
             assoc_name,
             self_impl,
         );
@@ -13726,7 +14422,9 @@ fn reachable_items_reference_trait_impl_assoc_item(
     reduced: &ReducedProject,
     target_package: &str,
     target_type_path: &[String],
+    target_trait_package: &str,
     target_trait_path: &[String],
+    target_trait_input_type_paths: &[Vec<String>],
     assoc_name: &str,
 ) -> bool {
     reduced.reachable_items.iter().any(|item_id| {
@@ -13740,7 +14438,9 @@ fn reachable_items_reference_trait_impl_assoc_item(
             &record.aliases,
             target_package,
             target_type_path,
+            target_trait_package,
             target_trait_path,
+            target_trait_input_type_paths,
             assoc_name,
             None,
         );
@@ -15221,7 +15921,14 @@ fn callable_mentions_ident(callable: &CallableId, ident: &str) -> bool {
 }
 
 fn strip_opensourced_attrs(attrs: &mut Vec<syn::Attribute>) {
-    attrs.retain(|attribute| !is_opensourced_attr(attribute.path()));
+    attrs.retain(|attribute| {
+        !is_opensourced_attr(attribute.path()) && !is_unused_macros_allow_attr(attribute)
+    });
+}
+
+fn is_unused_macros_allow_attr(attribute: &syn::Attribute) -> bool {
+    attribute.path().is_ident("allow")
+        && token_stream_mentions_ident(&attribute.to_token_stream(), "unused_macros")
 }
 
 fn strip_uniffi_attrs(attrs: &mut Vec<syn::Attribute>) {
@@ -16403,6 +17110,12 @@ fn local_macro_self_reexport_should_prune(
     let Some(name) = single_use_name(&item_use.tree) else {
         return false;
     };
+    let macro_id = ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name: name.to_string(),
+        kind: ItemKind::Macro,
+    };
     let macro_is_local = items.iter().any(|item| {
         matches!(
             item,
@@ -16414,14 +17127,15 @@ fn local_macro_self_reexport_should_prune(
         )
     });
     macro_is_local
-        && !local_macro_self_reexport_is_used_by_rendered_module(
-            project,
-            reduced,
-            render_plan,
-            package,
-            module_path,
-            &name.to_string(),
-        )
+        && (render_plan.can_remove_item(&macro_id)
+            || !local_macro_self_reexport_is_used_by_rendered_module(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &name.to_string(),
+            ))
 }
 
 fn local_macro_self_reexport_should_remain(
@@ -16439,6 +17153,15 @@ fn local_macro_self_reexport_should_remain(
     let Some(name) = single_use_name(&item_use.tree) else {
         return false;
     };
+    let macro_id = ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name: name.to_string(),
+        kind: ItemKind::Macro,
+    };
+    if render_plan.can_remove_item(&macro_id) {
+        return false;
+    }
     let macro_is_local = items.iter().any(|item| {
         matches!(
             item,
@@ -19890,8 +20613,19 @@ fn trait_input_type_paths(
     path: &syn::Path,
     aliases: &std::collections::HashMap<String, Vec<String>>,
 ) -> Vec<Vec<String>> {
+    trait_input_type_paths_from_path_segments(module_path, path.segments.iter(), aliases)
+}
+
+fn trait_input_type_paths_from_path_segments<'a, I>(
+    module_path: &[String],
+    segments: I,
+    aliases: &std::collections::HashMap<String, Vec<String>>,
+) -> Vec<Vec<String>>
+where
+    I: Iterator<Item = &'a syn::PathSegment>,
+{
     let mut type_paths = Vec::new();
-    for segment in &path.segments {
+    for segment in segments {
         if let PathArguments::AngleBracketed(arguments) = &segment.arguments {
             for argument in &arguments.args {
                 if let GenericArgument::Type(ty) = argument {
