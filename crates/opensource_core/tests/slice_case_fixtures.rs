@@ -23565,6 +23565,34 @@ fn assert_usage_contract(package_roots: &BTreeMap<String, PathBuf>, report: &Gen
     );
 
     let rendered = collect_rendered_symbols(package_roots, &report.packages);
+    let rendered_decisions = &report.usage.rendered_decision_map;
+    let rendered_decision_callables = rendered_decisions
+        .callables
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    let rendered_decision_items = rendered_decisions
+        .items
+        .keys()
+        .cloned()
+        .collect::<BTreeSet<_>>();
+    assert_eq!(
+        rendered_decision_callables, rendered.callables,
+        "final rendered callable decision map must match generated source symbols"
+    );
+    assert_eq!(
+        rendered_decision_items, rendered.items,
+        "final rendered item decision map must match generated source symbols"
+    );
+    assert_rendered_decisions_only_used_or_unknown("callables", &rendered_decisions.callables);
+    assert_rendered_decisions_only_used_or_unknown("items", &rendered_decisions.items);
+    assert_rendered_decisions_only_used_or_unknown("members", &rendered_decisions.members);
+    assert_rendered_decisions_only_used_or_unknown("assoc_items", &rendered_decisions.assoc_items);
+    assert_rendered_decisions_only_used_or_unknown(
+        "trait_default_methods",
+        &rendered_decisions.trait_default_methods,
+    );
+
     let retained_rendered_items = retained_items
         .union(&rendered.structural_module_items)
         .cloned()
@@ -23675,6 +23703,23 @@ fn assert_usage_contract(package_roots: &BTreeMap<String, PathBuf>, report: &Gen
         "generated source retained trait default methods that are not referenced by retained code \
          and not blocked_by_unknown: {:?}",
         unproven_trait_default_methods
+    );
+}
+
+fn assert_rendered_decisions_only_used_or_unknown(
+    label: &str,
+    decisions: &BTreeMap<String, String>,
+) {
+    let invalid = decisions
+        .iter()
+        .filter(|(_, decision)| {
+            decision.as_str() != "used" && decision.as_str() != "blocked_by_unknown"
+        })
+        .collect::<Vec<_>>();
+    assert!(
+        invalid.is_empty(),
+        "final rendered {label} decision map must contain only used or blocked_by_unknown entries: {:?}",
+        invalid
     );
 }
 

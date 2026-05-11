@@ -361,14 +361,13 @@ impl RenderedUsageDecisionMap {
         let mut map = Self::default();
         for entry in &report.entries {
             let classification = match entry.kind.as_str() {
-                "callable" => callable_decisions
-                    .get(&entry.id)
-                    .cloned()
-                    .unwrap_or_else(|| normalize_rendered_decision(&entry.classification)),
-                "item" => item_decisions
-                    .get(&entry.id)
-                    .cloned()
-                    .unwrap_or_else(|| normalize_rendered_decision(&entry.classification)),
+                "callable" => final_rendered_decision(
+                    &entry.classification,
+                    callable_decisions.get(&entry.id),
+                ),
+                "item" => {
+                    final_rendered_decision(&entry.classification, item_decisions.get(&entry.id))
+                }
                 _ => normalize_rendered_decision(&entry.classification),
             };
             let target = match entry.kind.as_str() {
@@ -428,6 +427,20 @@ fn normalize_rendered_decision(classification: &str) -> String {
         "used".to_string()
     } else {
         classification.to_string()
+    }
+}
+
+fn final_rendered_decision(classification: &str, graph_decision: Option<&String>) -> String {
+    match classification {
+        "retained" => {
+            if graph_decision.is_some_and(|decision| decision == "blocked_by_unknown") {
+                "blocked_by_unknown".to_string()
+            } else {
+                "used".to_string()
+            }
+        }
+        "blocked_by_unknown" => "blocked_by_unknown".to_string(),
+        _ => classification.to_string(),
     }
 }
 

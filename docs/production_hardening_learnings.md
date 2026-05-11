@@ -1367,6 +1367,10 @@ source. The report also includes `usage.rendered_decision_map`, a final
 generated-source map that normalizes rendered `retained` symbols back to
 `used`, keeps scoped unknowns as `blocked_by_unknown`, and leaves
 `prunable`/`unclassified` entries visible as production-contract failures.
+The slice-case fixture harness now asserts that this final rendered map exactly
+matches generated source callables/items and contains no rendered
+`prunable`/`unclassified` decisions for callables, items, members, associated
+items, or trait default methods.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

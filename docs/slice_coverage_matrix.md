@@ -92,6 +92,10 @@ from internal graph reachability. Inspect the rendered lists when proving that
 dependency packages contain only used or unknown symbols. For machine checks,
 use `usage.rendered_decision_map`; it is derived from actual generated source,
 while `usage.decision_map` remains the explanatory pre-render graph map.
+The slice-case fixture harness now treats `usage.rendered_decision_map` as a
+hard contract: every generated callable/item key must match the source scanner,
+and every rendered callable, item, member, associated item, and retained trait
+default method must be classified only as `used` or `blocked_by_unknown`.
 
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust
