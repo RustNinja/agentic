@@ -1503,3 +1503,10 @@ though none of the individual literal fragments are meaningful Rust. The
 build-script scanner now evaluates literal-only `concat!` payloads before
 blocked-identifier scanning, keeping generated-source blockers scoped to the
 real helper names while still pruning unrelated dead siblings.
+
+The same issue appears in format-style build-script writes. A generated file can
+be produced by `writeln!(file, "{}{}", "helper", "()")`, where no individual
+string literal parses as Rust source but the formatted output does. The scanner
+now evaluates literal-only `format!`, `format_args!`, `write!`, and `writeln!`
+payloads, including escaped braces and simple positional/named placeholders,
+before source-blocker extraction.

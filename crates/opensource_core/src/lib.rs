@@ -7451,8 +7451,11 @@ fn collect_rust_source_string_literal_idents(tokens: &TokenStream, idents: &mut 
             tokens.get(index + 1),
             tokens.get(index + 2),
         ) {
-            if ident == "concat" && punct.as_char() == '!' {
-                if let Some(value) = concat_macro_string_literal_value(&group.stream()) {
+            if punct.as_char() == '!' {
+                let macro_name = ident.to_string();
+                if let Some(value) =
+                    generated_source_macro_string_value(&macro_name, &group.stream())
+                {
                     if string_literal_may_contain_rust_source(&value) {
                         idents.extend(source_text_blocked_idents(&value));
                     }
@@ -7483,6 +7486,16 @@ fn collect_rust_source_string_literal_idents(tokens: &TokenStream, idents: &mut 
     }
 }
 
+fn generated_source_macro_string_value(name: &str, tokens: &TokenStream) -> Option<String> {
+    match name {
+        "concat" => concat_macro_string_literal_value(tokens),
+        "format" | "format_args" => format_macro_string_literal_value(tokens, 0, false),
+        "write" => format_macro_string_literal_value(tokens, 1, false),
+        "writeln" => format_macro_string_literal_value(tokens, 1, true),
+        _ => None,
+    }
+}
+
 fn concat_macro_string_literal_value(tokens: &TokenStream) -> Option<String> {
     let mut value = String::new();
     let mut saw_literal = false;
@@ -7500,6 +7513,136 @@ fn concat_macro_string_literal_value(tokens: &TokenStream) -> Option<String> {
         }
     }
     saw_literal.then_some(value)
+}
+
+fn format_macro_string_literal_value(
+    tokens: &TokenStream,
+    skipped_args: usize,
+    append_newline: bool,
+) -> Option<String> {
+    let args = split_top_level_comma_args(tokens);
+    let format_arg = args.get(skipped_args)?;
+    let format_string = literal_string_arg_value(format_arg)?;
+    let mut positional = Vec::new();
+    let mut named = BTreeMap::new();
+    for arg in args.iter().skip(skipped_args + 1) {
+        if let Some((name, value)) = named_literal_string_arg_value(arg) {
+            named.insert(name, value);
+        } else if let Some(value) = literal_string_arg_value(arg) {
+            positional.push(value);
+        } else {
+            return None;
+        }
+    }
+    evaluate_literal_format_string(&format_string, &positional, &named, append_newline)
+}
+
+fn split_top_level_comma_args(tokens: &TokenStream) -> Vec<TokenStream> {
+    let mut args = Vec::new();
+    let mut current = TokenStream::new();
+    for token in tokens.clone() {
+        if matches!(&token, proc_macro2::TokenTree::Punct(punct) if punct.as_char() == ',') {
+            if !token_stream_is_empty(&current) {
+                args.push(current);
+                current = TokenStream::new();
+            }
+            continue;
+        }
+        current.extend([token]);
+    }
+    if !token_stream_is_empty(&current) {
+        args.push(current);
+    }
+    args
+}
+
+fn token_stream_is_empty(tokens: &TokenStream) -> bool {
+    tokens.clone().into_iter().next().is_none()
+}
+
+fn literal_string_arg_value(tokens: &TokenStream) -> Option<String> {
+    if let Ok(literal) = syn::parse2::<syn::LitStr>(tokens.clone()) {
+        return Some(literal.value());
+    }
+    stringify_macro_value(tokens)
+}
+
+fn named_literal_string_arg_value(tokens: &TokenStream) -> Option<(String, String)> {
+    let mut iter = tokens.clone().into_iter();
+    let proc_macro2::TokenTree::Ident(name) = iter.next()? else {
+        return None;
+    };
+    let proc_macro2::TokenTree::Punct(eq) = iter.next()? else {
+        return None;
+    };
+    if eq.as_char() != '=' {
+        return None;
+    }
+    let value = iter.collect::<TokenStream>();
+    Some((name.to_string(), literal_string_arg_value(&value)?))
+}
+
+fn stringify_macro_value(tokens: &TokenStream) -> Option<String> {
+    let tokens: Vec<_> = tokens.clone().into_iter().collect();
+    let [proc_macro2::TokenTree::Ident(ident), proc_macro2::TokenTree::Punct(punct), proc_macro2::TokenTree::Group(group)] =
+        tokens.as_slice()
+    else {
+        return None;
+    };
+    (ident == "stringify" && punct.as_char() == '!').then(|| group.stream().to_string())
+}
+
+fn evaluate_literal_format_string(
+    format_string: &str,
+    positional: &[String],
+    named: &BTreeMap<String, String>,
+    append_newline: bool,
+) -> Option<String> {
+    let mut output = String::new();
+    let mut chars = format_string.chars().peekable();
+    let mut next_positional = 0;
+    while let Some(ch) = chars.next() {
+        match ch {
+            '{' if chars.peek() == Some(&'{') => {
+                chars.next();
+                output.push('{');
+            }
+            '}' if chars.peek() == Some(&'}') => {
+                chars.next();
+                output.push('}');
+            }
+            '{' => {
+                let mut placeholder = String::new();
+                loop {
+                    let next = chars.next()?;
+                    if next == '}' {
+                        break;
+                    }
+                    placeholder.push(next);
+                }
+                let name = placeholder
+                    .split_once(':')
+                    .map(|(name, _)| name)
+                    .unwrap_or(&placeholder)
+                    .trim();
+                if name.is_empty() {
+                    let value = positional.get(next_positional)?;
+                    output.push_str(value);
+                    next_positional += 1;
+                } else if let Ok(index) = name.parse::<usize>() {
+                    output.push_str(positional.get(index)?);
+                } else {
+                    output.push_str(named.get(name)?);
+                }
+            }
+            '}' => return None,
+            _ => output.push(ch),
+        }
+    }
+    if append_newline {
+        output.push('\n');
+    }
+    Some(output)
 }
 
 fn string_literal_may_contain_rust_source(value: &str) -> bool {

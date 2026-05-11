@@ -2047,6 +2047,40 @@ fn retains_helpers_referenced_by_out_dir_concat_generated_expression_source() {
 }
 
 #[test]
+fn retains_helpers_referenced_by_out_dir_format_generated_expression_source() {
+    let workspace = temp_path("rule-out-dir-format-expr-source-workspace");
+    let output = temp_path("rule-out-dir-format-expr-source-output");
+    let target_dir = temp_path("rule-out-dir-format-expr-source-target");
+    write_out_dir_format_expression_source_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("OUT_DIR format expression include rule should reduce");
+
+    assert_eq!(report.production.status, "hazards_detected");
+    let out_dir_include = report
+        .production
+        .hazards
+        .iter()
+        .find(|hazard| hazard.code == "out_dir_source_include_macros" && hazard.severity == "error")
+        .expect("OUT_DIR format expression include should remain production-blocking");
+    assert!(out_dir_include.details.iter().any(|detail| {
+        detail
+            .blocked_idents
+            .iter()
+            .any(|ident| ident == "out_dir_format_generated_helper")
+    }));
+
+    let lib = read(output.join("out_dir_format_expr_source_rule/src/lib.rs"));
+    assert!(lib.contains("include!(concat!(env!(\"OUT_DIR\"), \"/generated_format_expr.rs\"))"));
+    assert!(lib.contains("out_dir_format_generated_helper"), "{lib}");
+    assert!(!lib.contains("dead_out_dir_format_helper"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_macro_generated_items_used_by_live_code() {
     let workspace = temp_path("rule-macro-generated-item-workspace");
     let output = temp_path("rule-macro-generated-item-output");
@@ -5892,6 +5926,51 @@ fn main() {
         concat!("out_dir", "_concat", "_generated", "_helper", "()", "\n"),
     )
         .expect("generated concat expression source should be writable");
+}
+"#,
+    );
+}
+
+fn write_out_dir_format_expression_source_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "out_dir_format_expr_source_rule",
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> u32 {
+    include!(concat!(env!("OUT_DIR"), "/generated_format_expr.rs"))
+}
+
+pub fn out_dir_format_generated_helper() -> u32 {
+    42
+}
+
+pub fn dead_out_dir_format_helper() -> u32 {
+    99
+}
+"#,
+    );
+    let manifest = root.join("out_dir_format_expr_source_rule/Cargo.toml");
+    let manifest_text = read(&manifest);
+    fs::write(
+        &manifest,
+        manifest_text.replace(
+            "edition = \"2021\"\n\n[dependencies]",
+            "edition = \"2021\"\nbuild = \"build.rs\"\n\n[dependencies]",
+        ),
+    )
+    .expect("manifest should be writable");
+    write(
+        root.join("out_dir_format_expr_source_rule/build.rs"),
+        r#"use std::{env, fs::File, io::Write, path::PathBuf};
+
+fn main() {
+    let out_dir = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR should be set"));
+    let mut file = File::create(out_dir.join("generated_format_expr.rs"))
+        .expect("generated format expression source should be created");
+    writeln!(file, "{}{}", "out_dir_format_generated_helper", "()")
+        .expect("generated format expression source should be writable");
 }
 "#,
     );
