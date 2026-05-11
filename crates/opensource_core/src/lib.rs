@@ -169,6 +169,7 @@ pub struct UsageClassificationReport {
     pub summary: UsageClassificationSummary,
     pub semantic_proof: SemanticUsageProofReport,
     pub rendered_symbols: RenderedSymbolProofReport,
+    pub rendered_decision_map: RenderedUsageDecisionMap,
     pub public_reexports: PublicReexportProofReport,
     pub used: UsageClassifiedItems,
     pub unused_candidate: UsageClassifiedItems,
@@ -324,6 +325,110 @@ pub struct SemanticUsageProofSummary {
 pub struct UsageClassifiedItems {
     pub callables: Vec<CallableId>,
     pub items: Vec<ItemId>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct RenderedUsageDecisionMap {
+    pub callables: BTreeMap<String, String>,
+    pub items: BTreeMap<String, String>,
+    pub members: BTreeMap<String, String>,
+    pub assoc_items: BTreeMap<String, String>,
+    pub trait_default_methods: BTreeMap<String, String>,
+}
+
+impl RenderedUsageDecisionMap {
+    pub fn from_rendered_symbols(report: &RenderedSymbolProofReport) -> Self {
+        Self::from_rendered_symbols_with_decisions(report, None)
+    }
+
+    fn from_rendered_symbols_and_decisions(
+        report: &RenderedSymbolProofReport,
+        decisions: &UsageDecisionIndex,
+    ) -> Self {
+        Self::from_rendered_symbols_with_decisions(report, Some(decisions))
+    }
+
+    fn from_rendered_symbols_with_decisions(
+        report: &RenderedSymbolProofReport,
+        decisions: Option<&UsageDecisionIndex>,
+    ) -> Self {
+        let callable_decisions = decisions
+            .map(rendered_callable_decision_strings)
+            .unwrap_or_default();
+        let item_decisions = decisions
+            .map(rendered_item_decision_strings)
+            .unwrap_or_default();
+        let mut map = Self::default();
+        for entry in &report.entries {
+            let classification = match entry.kind.as_str() {
+                "callable" => callable_decisions
+                    .get(&entry.id)
+                    .cloned()
+                    .unwrap_or_else(|| normalize_rendered_decision(&entry.classification)),
+                "item" => item_decisions
+                    .get(&entry.id)
+                    .cloned()
+                    .unwrap_or_else(|| normalize_rendered_decision(&entry.classification)),
+                _ => normalize_rendered_decision(&entry.classification),
+            };
+            let target = match entry.kind.as_str() {
+                "callable" => &mut map.callables,
+                "item" => &mut map.items,
+                "member" => &mut map.members,
+                "assoc_item" => &mut map.assoc_items,
+                "trait_default_method" => &mut map.trait_default_methods,
+                _ => continue,
+            };
+            target.insert(entry.id.clone(), classification);
+        }
+        map
+    }
+}
+
+fn rendered_callable_decision_strings(decisions: &UsageDecisionIndex) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    insert_rendered_decision_strings(&mut map, &decisions.used_callables, UsageDecision::Used);
+    insert_rendered_decision_strings(
+        &mut map,
+        &decisions.blocked_by_unknown_callables,
+        UsageDecision::BlockedByUnknown,
+    );
+    insert_rendered_decision_strings(
+        &mut map,
+        &decisions.prunable_callables,
+        UsageDecision::Prunable,
+    );
+    map
+}
+
+fn rendered_item_decision_strings(decisions: &UsageDecisionIndex) -> BTreeMap<String, String> {
+    let mut map = BTreeMap::new();
+    insert_rendered_decision_strings(&mut map, &decisions.used_items, UsageDecision::Used);
+    insert_rendered_decision_strings(
+        &mut map,
+        &decisions.blocked_by_unknown_items,
+        UsageDecision::BlockedByUnknown,
+    );
+    insert_rendered_decision_strings(&mut map, &decisions.prunable_items, UsageDecision::Prunable);
+    map
+}
+
+fn insert_rendered_decision_strings<T: ToString>(
+    map: &mut BTreeMap<String, String>,
+    ids: &BTreeSet<T>,
+    decision: UsageDecision,
+) {
+    for id in ids {
+        map.insert(id.to_string(), decision.as_str().to_string());
+    }
+}
+
+fn normalize_rendered_decision(classification: &str) -> String {
+    if classification == "retained" {
+        "used".to_string()
+    } else {
+        classification.to_string()
+    }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq)]
@@ -2291,6 +2396,8 @@ fn usage_classification_report(
     };
     let evidence = usage_classification_evidence(project, reduced, &evidence_input);
     let semantic_proof = semantic_usage_proof_report(analyzer, decisions);
+    let rendered_decision_map =
+        RenderedUsageDecisionMap::from_rendered_symbols_and_decisions(&rendered_symbols, decisions);
 
     UsageClassificationReport {
         status,
@@ -2314,6 +2421,7 @@ fn usage_classification_report(
         },
         semantic_proof,
         rendered_symbols,
+        rendered_decision_map,
         public_reexports,
         used: UsageClassifiedItems {
             callables: used_callables,
@@ -9767,6 +9875,7 @@ struct UsageClassificationReportJson {
     summary: UsageClassificationSummaryJson,
     semantic_proof: SemanticUsageProofReportJson,
     rendered_symbols: RenderedSymbolProofReportJson,
+    rendered_decision_map: RenderedUsageDecisionMapJson,
     public_reexports: PublicReexportProofReportJson,
     decision_map: UsageDecisionMapJson,
     used: UsageClassifiedItemsJson,
@@ -9785,6 +9894,9 @@ impl UsageClassificationReportJson {
             summary: UsageClassificationSummaryJson::from_report(&report.summary),
             semantic_proof: SemanticUsageProofReportJson::from_report(&report.semantic_proof),
             rendered_symbols: RenderedSymbolProofReportJson::from_report(&report.rendered_symbols),
+            rendered_decision_map: RenderedUsageDecisionMapJson::from_report(
+                &report.rendered_decision_map,
+            ),
             public_reexports: PublicReexportProofReportJson::from_report(&report.public_reexports),
             decision_map: UsageDecisionMapJson::from_report(report),
             used: UsageClassifiedItemsJson::from_report(&report.used),
@@ -9897,6 +10009,27 @@ impl RenderedSymbolProofEntryJson {
             kind: entry.kind.clone(),
             id: entry.id.clone(),
             classification: entry.classification.clone(),
+        }
+    }
+}
+
+#[derive(Serialize)]
+struct RenderedUsageDecisionMapJson {
+    callables: BTreeMap<String, String>,
+    items: BTreeMap<String, String>,
+    members: BTreeMap<String, String>,
+    assoc_items: BTreeMap<String, String>,
+    trait_default_methods: BTreeMap<String, String>,
+}
+
+impl RenderedUsageDecisionMapJson {
+    fn from_report(report: &RenderedUsageDecisionMap) -> Self {
+        Self {
+            callables: report.callables.clone(),
+            items: report.items.clone(),
+            members: report.members.clone(),
+            assoc_items: report.assoc_items.clone(),
+            trait_default_methods: report.trait_default_methods.clone(),
         }
     }
 }
@@ -12197,6 +12330,20 @@ theme = []
             report.usage.rendered_symbols.summary.rendered_items
         );
         assert_eq!(
+            value["usage"]["rendered_decision_map"]["callables"]
+                .as_object()
+                .unwrap()
+                .len(),
+            report.usage.rendered_symbols.summary.rendered_callables
+        );
+        assert_eq!(
+            value["usage"]["rendered_decision_map"]["items"]
+                .as_object()
+                .unwrap()
+                .len(),
+            report.usage.rendered_symbols.summary.rendered_items
+        );
+        assert_eq!(
             value["usage"]["public_reexports"]["status"],
             report.usage.public_reexports.status
         );
@@ -12248,6 +12395,10 @@ theme = []
             .any(|callable| callable == "a::open_source_entry"));
         assert_eq!(
             value["usage"]["decision_map"]["callables"]["a::open_source_entry"],
+            "used"
+        );
+        assert_eq!(
+            value["usage"]["rendered_decision_map"]["callables"]["a::open_source_entry"],
             "used"
         );
         assert!(value["usage"]["unused"]["callables"]

@@ -1363,7 +1363,10 @@ console summary prints rendered callables/items with their classification, and
 `--slice-report` includes top-level `rendered_callables` and `rendered_items`
 next to the internal graph reachability lists. This avoids confusing
 pre-render support anchors with symbols that actually survived in generated
-source.
+source. The report also includes `usage.rendered_decision_map`, a final
+generated-source map that normalizes rendered `retained` symbols back to
+`used`, keeps scoped unknowns as `blocked_by_unknown`, and leaves
+`prunable`/`unclassified` entries visible as production-contract failures.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

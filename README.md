@@ -303,7 +303,10 @@ mode/notes, production-readiness hazards and hazard details, roots, packages,
 internal graph-reachable callables/items, rendered callables/items that actually
 survived in generated source, generated target metadata, feedback-widened roots,
 files written, and a source map for parsed callables/items with file spans and
-reachability flags. Cfg-gated root hazards include the affected root, package,
+reachability flags. The `usage.rendered_decision_map` object is the final
+generated-source used/blocked/prunable map; the older `usage.decision_map`
+records the pre-render graph decision used to explain why symbols were initially
+kept or rejected. Cfg-gated root hazards include the affected root, package,
 module path, source span, cfg expression, and feature-oriented Cargo argument
 hints where those can be derived. It also records phase timings for analyzer
 loading, manifest loading, parsing, reduction, rendering, and total generation
