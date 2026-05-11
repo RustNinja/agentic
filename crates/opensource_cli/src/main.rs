@@ -179,14 +179,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         report.timings.render_ms
     );
     println!("packages: {}", report.packages.join(", "));
-    println!("reachable callables:");
-    for callable in &report.reachable {
-        println!("  {callable}");
-    }
-    println!("reachable items:");
-    for item in &report.reachable_items {
-        println!("  {item}");
-    }
+    print_rendered_symbol_summary(&report, "callable", "rendered callables");
+    print_rendered_symbol_summary(&report, "item", "rendered items");
     if let Some(report_path) = slice_report_path(&options) {
         write_generate_report(&report, &report_path)?;
         println!("slice report: {}", report_path.display());
@@ -314,6 +308,19 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     record_final_production_readiness(&options, &mut validation);
     finish_validation(&options, &mut validation, "accepted", None)?;
     Ok(())
+}
+
+fn print_rendered_symbol_summary(report: &GenerateReport, kind: &str, label: &str) {
+    println!("{label}:");
+    for entry in report
+        .usage
+        .rendered_symbols
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == kind)
+    {
+        println!("  {} [{}]", entry.id, entry.classification);
+    }
 }
 
 struct CliOptions {

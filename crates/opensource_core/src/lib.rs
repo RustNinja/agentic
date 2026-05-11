@@ -9590,6 +9590,8 @@ struct GenerateReportJson {
     targets: Vec<GeneratedTargetReportJson>,
     reachable: Vec<String>,
     reachable_items: Vec<String>,
+    rendered_callables: Vec<String>,
+    rendered_items: Vec<String>,
     macro_surfaces: MacroSurfaceReportJson,
     usage: UsageClassificationReportJson,
     source_map: SourceMapReportJson,
@@ -9621,12 +9623,23 @@ impl GenerateReportJson {
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
+            rendered_callables: rendered_symbol_ids(&report.usage.rendered_symbols, "callable"),
+            rendered_items: rendered_symbol_ids(&report.usage.rendered_symbols, "item"),
             macro_surfaces: MacroSurfaceReportJson::from_report(&report.macro_surfaces),
             usage: UsageClassificationReportJson::from_report(&report.usage),
             source_map: SourceMapReportJson::from_report(&report.source_map),
             files_written: report.files_written,
         }
     }
+}
+
+fn rendered_symbol_ids(report: &RenderedSymbolProofReport, kind: &str) -> Vec<String> {
+    report
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == kind)
+        .map(|entry| entry.id.clone())
+        .collect()
 }
 
 #[derive(Serialize)]
@@ -12175,6 +12188,14 @@ theme = []
                 .unproven_trait_default_methods
         );
         assert!(value["usage"]["rendered_symbols"]["entries"].is_array());
+        assert_eq!(
+            value["rendered_callables"].as_array().unwrap().len(),
+            report.usage.rendered_symbols.summary.rendered_callables
+        );
+        assert_eq!(
+            value["rendered_items"].as_array().unwrap().len(),
+            report.usage.rendered_symbols.summary.rendered_items
+        );
         assert_eq!(
             value["usage"]["public_reexports"]["status"],
             report.usage.public_reexports.status

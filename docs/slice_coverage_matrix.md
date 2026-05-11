@@ -86,6 +86,11 @@ stale file-backed or inline module shells cannot survive outside the used/unknow
 decision map. Modules whose body is an item-level `include!` remain as scoped
 unknown/generated-source surfaces and still produce the existing source-include
 production hazards.
+
+The CLI summary and slice report now list rendered callables/items separately
+from internal graph reachability. Inspect the rendered lists when proving that
+dependency packages contain only used or unknown symbols.
+
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust
 source. This keeps copied support packages under the same used/unknown and

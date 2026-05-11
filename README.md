@@ -300,7 +300,8 @@ default configuration.
 
 `--slice-report <path>` writes machine-readable generation metrics: analyzer
 mode/notes, production-readiness hazards and hazard details, roots, packages,
-reachable callables/items, generated target metadata, feedback-widened roots,
+internal graph-reachable callables/items, rendered callables/items that actually
+survived in generated source, generated target metadata, feedback-widened roots,
 files written, and a source map for parsed callables/items with file spans and
 reachability flags. Cfg-gated root hazards include the affected root, package,
 module path, source span, cfg expression, and feature-oriented Cargo argument

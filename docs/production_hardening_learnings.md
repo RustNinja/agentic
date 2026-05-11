@@ -1358,6 +1358,13 @@ macro expansion surfaces rather than normal Rust references. This keeps retained
 proc-macro packages conservative while still proving that ordinary support
 package functions and items do not leak as redundant code.
 
+The CLI and JSON report now make that rendered-output proof first-class. The
+console summary prints rendered callables/items with their classification, and
+`--slice-report` includes top-level `rendered_callables` and `rendered_items`
+next to the internal graph reachability lists. This avoids confusing
+pre-render support anchors with symbols that actually survived in generated
+source.
+
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases
 when the rendered scanner reconstructs impl receiver paths, otherwise local
