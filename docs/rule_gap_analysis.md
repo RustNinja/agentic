@@ -256,3 +256,10 @@ crate a same-named local type in the selected signature, proving the support enu
 surface is not widened by token/name collision. This is directly aligned with
 the production invariant that sub-dependencies contain only used or explicitly
 unknown code.
+
+The same pass was extended to macro-bearing inherent impl surfaces with
+`macro.impl_signature_surface_collision.001`. Root callable signatures now prove
+impl receiver surfaces through resolved signature dependencies, not by matching
+the receiver type's final segment against raw signature tokens. This prevents a
+same-named internal support type from retaining dead exported impl methods just
+because a different API type appears in the selected signature.

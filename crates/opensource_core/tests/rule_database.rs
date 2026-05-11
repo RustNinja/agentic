@@ -197,6 +197,29 @@ fn prunes_public_support_enum_variants_outside_root_signature_surface() {
 }
 
 #[test]
+fn prunes_macro_impl_surface_for_same_name_type_outside_root_signature() {
+    let workspace = temp_path("rule-root-signature-impl-collision-workspace");
+    let output = temp_path("rule-root-signature-impl-collision-output");
+    let target_dir = temp_path("rule-root-signature-impl-collision-target");
+    write_root_signature_impl_collision_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("root signature impl collision rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("root_signature_impl_collision_rule/src/lib.rs"));
+    assert!(lib.contains("pub fn selected"), "{lib}");
+    assert!(lib.contains("pub fn live_export"), "{lib}");
+    assert!(lib.contains("fn helper"), "{lib}");
+    assert!(!lib.contains("pub fn dead_export"), "{lib}");
+    assert!(!lib.contains("fn dead_helper"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn prunes_module_scoped_imports_used_only_by_dead_items() {
     let workspace = temp_path("rule-module-import-liveness-workspace");
     let output = temp_path("rule-module-import-liveness-output");
@@ -4070,6 +4093,58 @@ pub fn live_value(seed: u32) -> u32 {
         ProtocolEvent::Live(payload) => payload.value,
         _ => 0,
     }
+}
+"#,
+    );
+}
+
+fn write_root_signature_impl_collision_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "root_signature_impl_collision_rule",
+        r#"use opensourced::opensourced;
+
+pub mod api {
+    pub struct Client {
+        pub seed: u32,
+    }
+}
+
+pub mod model {
+    pub struct Client {
+        seed: u32,
+    }
+
+    impl Client {
+        pub fn new(seed: u32) -> Self {
+            Self { seed }
+        }
+
+        fn helper(&self) -> u32 {
+            self.seed
+        }
+
+        fn dead_helper(&self) -> u32 {
+            99
+        }
+    }
+
+    #[cfg_attr(feature = "ffi", uniffi::export)]
+    impl Client {
+        pub fn live_export(&self) -> u32 {
+            self.helper()
+        }
+
+        pub fn dead_export(&self) -> u32 {
+            self.dead_helper()
+        }
+    }
+}
+
+#[opensourced]
+pub fn selected(client: api::Client) -> u32 {
+    let model = model::Client::new(client.seed);
+    model.live_export()
 }
 "#,
     );

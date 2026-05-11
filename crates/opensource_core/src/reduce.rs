@@ -3461,18 +3461,8 @@ fn item_is_root_callable_signature_surface(
         let RootId::Callable(callable) = root else {
             return false;
         };
-        callable_signature_references_item(project, callable, item)
+        callable_signature_resolves_item(project, callable, item)
     })
-}
-
-fn callable_signature_references_item(
-    project: &Project,
-    callable: &CallableId,
-    item: &ItemId,
-) -> bool {
-    let dependencies = callable_signature_dependency_items(project, callable);
-    dependencies.items.contains(item)
-        || callable_signature_mentions_item_name_without_resolution(project, callable, item)
 }
 
 pub(crate) fn callable_signature_resolves_item(
@@ -3528,24 +3518,6 @@ fn callable_signature_dependency_items(project: &Project, callable: &CallableId)
             visitor.visit_signature(&record.item.sig);
             visitor.dependencies
         }
-    }
-}
-
-fn callable_signature_mentions_item_name_without_resolution(
-    project: &Project,
-    callable: &CallableId,
-    item: &ItemId,
-) -> bool {
-    if callable.package() != item.package {
-        return false;
-    }
-    match callable {
-        CallableId::Free { .. } => project.functions.get(callable).is_some_and(|record| {
-            token_stream_mentions_ident(&record.item.sig.to_token_stream(), &item.name)
-        }),
-        CallableId::Method { .. } => project.methods.get(callable).is_some_and(|record| {
-            token_stream_mentions_ident(&record.item.sig.to_token_stream(), &item.name)
-        }),
     }
 }
 

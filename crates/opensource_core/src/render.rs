@@ -14791,19 +14791,25 @@ fn type_path_is_root_callable_signature_surface(
     package: &str,
     type_path: &[String],
 ) -> bool {
-    let Some(name) = type_path.last() else {
+    let Some((name, module_path)) = type_path.split_last() else {
         return false;
     };
     reduced.roots.iter().any(|root| {
         let RootId::Callable(callable) = root else {
             return false;
         };
-        callable.package() == package
-            && (project.functions.get(callable).is_some_and(|record| {
-                token_stream_mentions_ident(&record.item.sig.to_token_stream(), name)
-            }) || project.methods.get(callable).is_some_and(|record| {
-                token_stream_mentions_ident(&record.item.sig.to_token_stream(), name)
-            }))
+        type_surface_item_kinds().iter().any(|kind| {
+            callable_signature_resolves_item(
+                project,
+                callable,
+                &ItemId {
+                    package: package.to_string(),
+                    module_path: module_path.to_vec(),
+                    name: name.clone(),
+                    kind: *kind,
+                },
+            )
+        })
     })
 }
 

@@ -1403,3 +1403,11 @@ survive merely because they are `pub` in the original crate. The signature check
 uses the reducer's path resolver rather than token/name matching, so an app-local
 type with the same name as a support enum does not accidentally promote the
 support enum to full public-surface retention.
+
+The same resolver rule applies to macro-bearing inherent impl surfaces. A
+selected function signature that mentions `api::Client` must not make every
+same-named `model::Client` impl block with `#[cfg_attr(..., uniffi::export)]`
+retain all exported methods. Root signature surface checks now ask the reducer's
+signature dependency resolver whether the concrete impl receiver item is part of
+the selected API surface before preserving a whole macro-contract impl; otherwise
+normal method reachability keeps only the used methods.
