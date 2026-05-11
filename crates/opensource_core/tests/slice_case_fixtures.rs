@@ -22659,6 +22659,34 @@ fn assert_usage_contract(package_roots: &BTreeMap<String, PathBuf>, report: &Gen
             .filter(|entry| entry.kind == "member" && entry.classification == "unclassified")
             .collect::<Vec<_>>()
     );
+    assert_eq!(
+        report.usage.rendered_symbols.summary.prunable_assoc_items,
+        0,
+        "generated source still declares associated items classified as prunable: {:?}",
+        report
+            .usage
+            .rendered_symbols
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "assoc_item" && entry.classification == "prunable")
+            .collect::<Vec<_>>()
+    );
+    assert_eq!(
+        report
+            .usage
+            .rendered_symbols
+            .summary
+            .unclassified_assoc_items,
+        0,
+        "generated source declares associated items missing used/unknown classification: {:?}",
+        report
+            .usage
+            .rendered_symbols
+            .entries
+            .iter()
+            .filter(|entry| entry.kind == "assoc_item" && entry.classification == "unclassified")
+            .collect::<Vec<_>>()
+    );
     assert_public_reexport_contract(
         &rendered,
         &retained_callables,
