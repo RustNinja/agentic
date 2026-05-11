@@ -2489,24 +2489,27 @@ fn support_proc_macro_expansions(
         &lib_path,
         &root_module_dir,
         None,
+        Vec::new(),
         syntax,
         &mut modules,
     )? {
         return Ok(Vec::new());
     }
 
-    let mut function_bodies = BTreeMap::<String, Vec<TokenStream>>::new();
-    let mut exports = Vec::<(String, String, TokenStream)>::new();
+    let mut function_bodies = BTreeMap::<Vec<String>, TokenStream>::new();
+    let mut exports = Vec::<(String, Vec<String>, TokenStream)>::new();
     for module in modules.values() {
-        collect_proc_macro_function_bodies(&module.syntax, &mut function_bodies, &mut exports);
+        collect_proc_macro_function_bodies(module, &mut function_bodies, &mut exports);
     }
 
     let mut expansions = Vec::new();
-    for (export_name, function_name, body) in exports {
+    for (export_name, function_path, body) in exports {
         let mut quote_bodies = Vec::new();
-        let mut visited_functions = BTreeSet::from([function_name]);
+        let current_module_path = function_path[..function_path.len().saturating_sub(1)].to_vec();
+        let mut visited_functions = BTreeSet::from([function_path]);
         collect_reachable_macro_expansion_quote_bodies(
             &body,
+            &current_module_path,
             &function_bodies,
             &mut visited_functions,
             &mut quote_bodies,
@@ -2545,23 +2548,22 @@ fn manifest_is_proc_macro_crate(manifest: &Value) -> bool {
 }
 
 fn collect_proc_macro_function_bodies(
-    syntax: &syn::File,
-    function_bodies: &mut BTreeMap<String, Vec<TokenStream>>,
-    exports: &mut Vec<(String, String, TokenStream)>,
+    module: &SupportModuleSource,
+    function_bodies: &mut BTreeMap<Vec<String>, TokenStream>,
+    exports: &mut Vec<(String, Vec<String>, TokenStream)>,
 ) {
-    for item in &syntax.items {
+    for item in &module.syntax.items {
         let Item::Fn(item_fn) = item else {
             continue;
         };
         let function_name = item_fn.sig.ident.to_string();
+        let mut function_path = module.module_path.clone();
+        function_path.push(function_name);
         let body = item_fn.block.to_token_stream();
-        function_bodies
-            .entry(function_name.clone())
-            .or_default()
-            .push(body.clone());
+        function_bodies.insert(function_path.clone(), body.clone());
         for attr in &item_fn.attrs {
             if let Some(export_name) = proc_macro_export_name(attr, &item_fn.sig.ident) {
-                exports.push((export_name, function_name.clone(), body.clone()));
+                exports.push((export_name, function_path.clone(), body.clone()));
             }
         }
     }
@@ -2618,40 +2620,44 @@ fn collect_macro_expansion_quote_bodies(tokens: &TokenStream, bodies: &mut Vec<T
 
 fn collect_reachable_macro_expansion_quote_bodies(
     tokens: &TokenStream,
-    function_bodies: &BTreeMap<String, Vec<TokenStream>>,
-    visited_functions: &mut BTreeSet<String>,
+    current_module_path: &[String],
+    function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+    visited_functions: &mut BTreeSet<Vec<String>>,
     bodies: &mut Vec<TokenStream>,
 ) {
     collect_macro_expansion_quote_bodies(tokens, bodies);
 
-    let function_names = collect_called_proc_macro_helper_names(tokens, function_bodies);
+    let function_names =
+        collect_called_proc_macro_helper_names(tokens, current_module_path, function_bodies);
 
-    for function_name in function_names {
-        if !visited_functions.insert(function_name.clone()) {
+    for function_path in function_names {
+        if !visited_functions.insert(function_path.clone()) {
             continue;
         }
-        let Some(candidates) = function_bodies.get(&function_name) else {
+        let Some(body) = function_bodies.get(&function_path) else {
             continue;
         };
-        for body in candidates {
-            collect_reachable_macro_expansion_quote_bodies(
-                body,
-                function_bodies,
-                visited_functions,
-                bodies,
-            );
-        }
+        let helper_module_path = function_path[..function_path.len().saturating_sub(1)].to_vec();
+        collect_reachable_macro_expansion_quote_bodies(
+            body,
+            &helper_module_path,
+            function_bodies,
+            visited_functions,
+            bodies,
+        );
     }
 }
 
 fn collect_called_proc_macro_helper_names(
     tokens: &TokenStream,
-    function_bodies: &BTreeMap<String, Vec<TokenStream>>,
-) -> Vec<String> {
+    current_module_path: &[String],
+    function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+) -> Vec<Vec<String>> {
     let Ok(block) = syn::parse2::<Block>(tokens.clone()) else {
         return Vec::new();
     };
     let mut visitor = ProcMacroHelperCallVisitor {
+        current_module_path,
         function_bodies,
         names: BTreeSet::new(),
     };
@@ -2660,23 +2666,29 @@ fn collect_called_proc_macro_helper_names(
 }
 
 struct ProcMacroHelperCallVisitor<'a> {
-    function_bodies: &'a BTreeMap<String, Vec<TokenStream>>,
-    names: BTreeSet<String>,
+    current_module_path: &'a [String],
+    function_bodies: &'a BTreeMap<Vec<String>, TokenStream>,
+    names: BTreeSet<Vec<String>>,
 }
 
 impl<'ast> Visit<'ast> for ProcMacroHelperCallVisitor<'_> {
     fn visit_expr_call(&mut self, node: &'ast syn::ExprCall) {
-        if let Some(name) = local_proc_macro_helper_call_name(&node.func, self.function_bodies) {
-            self.names.insert(name);
+        if let Some(path) = local_proc_macro_helper_call_path(
+            &node.func,
+            self.current_module_path,
+            self.function_bodies,
+        ) {
+            self.names.insert(path);
         }
         visit::visit_expr_call(self, node);
     }
 }
 
-fn local_proc_macro_helper_call_name(
+fn local_proc_macro_helper_call_path(
     func: &Expr,
-    function_bodies: &BTreeMap<String, Vec<TokenStream>>,
-) -> Option<String> {
+    current_module_path: &[String],
+    function_bodies: &BTreeMap<Vec<String>, TokenStream>,
+) -> Option<Vec<String>> {
     let Expr::Path(expr_path) = func else {
         return None;
     };
@@ -2684,17 +2696,48 @@ fn local_proc_macro_helper_call_name(
         return None;
     }
 
-    let segments = expr_path.path.segments.iter().collect::<Vec<_>>();
-    let candidate = match segments.as_slice() {
-        [segment] => segment.ident.to_string(),
-        [prefix, segment] if matches!(prefix.ident.to_string().as_str(), "self" | "crate") => {
-            segment.ident.to_string()
-        }
-        _ => return None,
-    };
+    let segments = expr_path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let candidate = normalize_proc_macro_helper_call_path(current_module_path, &segments)?;
     function_bodies
         .contains_key(&candidate)
         .then_some(candidate)
+}
+
+fn normalize_proc_macro_helper_call_path(
+    current_module_path: &[String],
+    segments: &[String],
+) -> Option<Vec<String>> {
+    let Some((first, rest)) = segments.split_first() else {
+        return None;
+    };
+    let mut path = match first.as_str() {
+        "crate" => Vec::new(),
+        "self" => current_module_path.to_vec(),
+        "super" => {
+            let mut path = current_module_path.to_vec();
+            path.pop()?;
+            path
+        }
+        _ => {
+            let mut path = current_module_path.to_vec();
+            path.push(first.clone());
+            path.extend(rest.iter().cloned());
+            return Some(path);
+        }
+    };
+    for segment in rest {
+        if segment == "super" {
+            path.pop()?;
+        } else if segment != "self" {
+            path.push(segment.clone());
+        }
+    }
+    Some(path)
 }
 
 fn support_macro_expansion_is_live(
@@ -2718,6 +2761,7 @@ fn support_macro_expansion_is_live(
 struct SupportModuleSource {
     module_dir: PathBuf,
     parent_file: Option<PathBuf>,
+    module_path: Vec<String>,
     syntax: syn::File,
     inline: bool,
 }
@@ -2800,6 +2844,7 @@ fn build_restricted_support_sources(
         lib_path,
         &root_module_dir,
         None,
+        Vec::new(),
         syntax.clone(),
         &mut modules,
     )? {
@@ -3297,6 +3342,7 @@ fn collect_support_module_sources_with_syntax(
     source_file: &Path,
     module_dir: &Path,
     parent_file: Option<PathBuf>,
+    module_path: Vec<String>,
     syntax: syn::File,
     modules: &mut BTreeMap<PathBuf, SupportModuleSource>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -3314,6 +3360,7 @@ fn collect_support_module_sources_with_syntax(
         SupportModuleSource {
             module_dir: module_dir.to_path_buf(),
             parent_file,
+            module_path: module_path.clone(),
             syntax: syntax.clone(),
             inline: false,
         },
@@ -3330,11 +3377,14 @@ fn collect_support_module_sources_with_syntax(
             let inline_file = support_inline_module_file(&source_file, &item_mod.ident.to_string());
             let inline_module_dir =
                 module_dir.join(module_source_name(&item_mod.ident.to_string()));
+            let mut child_module_path = module_path.clone();
+            child_module_path.push(item_mod.ident.to_string());
             if !collect_support_inline_module_sources_with_syntax(
                 package_root,
                 &inline_file,
                 &inline_module_dir,
                 source_file.clone(),
+                child_module_path,
                 syn::File {
                     shebang: None,
                     attrs: Vec::new(),
@@ -3364,6 +3414,11 @@ fn collect_support_module_sources_with_syntax(
             &child_file,
             &child_dir,
             Some(source_file.clone()),
+            {
+                let mut child_module_path = module_path.clone();
+                child_module_path.push(item_mod.ident.to_string());
+                child_module_path
+            },
             child_syntax,
             modules,
         )? {
@@ -3379,6 +3434,7 @@ fn collect_support_inline_module_sources_with_syntax(
     source_file: &Path,
     module_dir: &Path,
     parent_file: PathBuf,
+    module_path: Vec<String>,
     syntax: syn::File,
     modules: &mut BTreeMap<PathBuf, SupportModuleSource>,
 ) -> Result<bool, Box<dyn std::error::Error>> {
@@ -3390,6 +3446,7 @@ fn collect_support_inline_module_sources_with_syntax(
         SupportModuleSource {
             module_dir: module_dir.to_path_buf(),
             parent_file: Some(parent_file.clone()),
+            module_path: module_path.clone(),
             syntax: syntax.clone(),
             inline: true,
         },
@@ -3406,11 +3463,14 @@ fn collect_support_inline_module_sources_with_syntax(
             let inline_file = support_inline_module_file(source_file, &item_mod.ident.to_string());
             let inline_module_dir =
                 module_dir.join(module_source_name(&item_mod.ident.to_string()));
+            let mut child_module_path = module_path.clone();
+            child_module_path.push(item_mod.ident.to_string());
             if !collect_support_inline_module_sources_with_syntax(
                 package_root,
                 &inline_file,
                 &inline_module_dir,
                 source_file.to_path_buf(),
+                child_module_path,
                 syn::File {
                     shebang: None,
                     attrs: Vec::new(),
@@ -3440,6 +3500,11 @@ fn collect_support_inline_module_sources_with_syntax(
             &child_file,
             &child_dir,
             Some(source_file.to_path_buf()),
+            {
+                let mut child_module_path = module_path.clone();
+                child_module_path.push(item_mod.ident.to_string());
+                child_module_path
+            },
             child_syntax,
             modules,
         )? {

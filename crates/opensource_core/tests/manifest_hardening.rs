@@ -14530,16 +14530,27 @@ quote = "1"
         r#"extern crate proc_macro;
 
 use proc_macro::TokenStream;
-use quote::quote;
+
+mod builders;
 
 #[proc_macro_derive(LiveDerive)]
 pub fn live_derive(_input: TokenStream) -> TokenStream {
     let dead_tokens = proc_macro2::TokenStream::new();
     let _ = dead_tokens;
-    live_tokens().into()
+    builders::live_tokens().into()
 }
 
-fn live_tokens() -> proc_macro2::TokenStream {
+#[proc_macro_derive(DeadDerive)]
+pub fn dead_derive(_input: TokenStream) -> TokenStream {
+    builders::dead_tokens().into()
+}
+"#,
+    );
+    write(
+        macros.join("src/builders.rs"),
+        r#"use quote::quote;
+
+pub fn live_tokens() -> proc_macro2::TokenStream {
     quote! {
         impl LiveRecord {
             pub fn live_generated() -> u32 {
@@ -14549,12 +14560,7 @@ fn live_tokens() -> proc_macro2::TokenStream {
     }
 }
 
-#[proc_macro_derive(DeadDerive)]
-pub fn dead_derive(_input: TokenStream) -> TokenStream {
-    dead_tokens().into()
-}
-
-fn dead_tokens() -> proc_macro2::TokenStream {
+pub fn dead_tokens() -> proc_macro2::TokenStream {
     quote! {
         impl DeadRecord {
             pub fn dead_generated() -> u32 {

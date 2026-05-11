@@ -115,6 +115,9 @@ Retained macro-bearing items must carry their macro contract:
 - when scanning support proc-macro exports, follow actual helper function calls
   from the AST rather than every matching identifier token, because local
   variables can share names with dead helper functions;
+- resolve module-qualified proc-macro helper calls through the local helper
+  module graph, so expansion evidence can follow real builder modules without
+  broadening to same-named helpers in unrelated modules;
 - treat proc-macro attributes on rendered module boundaries and inline impl
   blocks as part of the macro contract when nested reachable code or reachable
   methods force that surface to render;
