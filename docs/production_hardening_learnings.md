@@ -42,6 +42,10 @@ and block unsafe claims.
   proof. Public fields and enum variants can be dead even when their parent type
   is retained for an impl or helper surface, so the renderer must classify and
   prune members with concrete owner evidence.
+- Concrete member evidence must include cross-package typed bindings. A retained
+  helper can receive `dependency::Type` as a parameter and access one field; the
+  slicer must retain that field without promoting every same-named field in the
+  dependency graph.
 
 ## What Did Not Work
 

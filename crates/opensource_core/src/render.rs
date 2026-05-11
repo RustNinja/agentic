@@ -17044,6 +17044,35 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             self.bindings.push((name, item));
         }
     }
+
+    fn record_binding_from_typed_pat(&mut self, pat: &Pat, ty: &Type) {
+        let Some(name) = local_binding_name(pat) else {
+            return;
+        };
+        if let Some(item) = type_to_type_like_item(
+            self.project,
+            self.package,
+            self.module_path,
+            ty,
+            self.aliases,
+        ) {
+            self.bindings.push((name, item));
+        }
+    }
+
+    fn push_fn_input_bindings<'b, I>(&mut self, inputs: I) -> usize
+    where
+        I: IntoIterator<Item = &'b syn::FnArg>,
+    {
+        let binding_count = self.bindings.len();
+        for input in inputs {
+            let syn::FnArg::Typed(input) = input else {
+                continue;
+            };
+            self.record_binding_from_typed_pat(&input.pat, &input.ty);
+        }
+        binding_count
+    }
 }
 
 fn type_path_to_struct_item(package: &str, type_path: &[String]) -> Option<ItemId> {
@@ -17178,6 +17207,18 @@ fn type_like_item_kind(item: &ItemId) -> bool {
 }
 
 impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
+    fn visit_item_fn(&mut self, function: &syn::ItemFn) {
+        let binding_count = self.push_fn_input_bindings(function.sig.inputs.iter());
+        self.visit_block(&function.block);
+        self.bindings.truncate(binding_count);
+    }
+
+    fn visit_impl_item_fn(&mut self, method: &syn::ImplItemFn) {
+        let binding_count = self.push_fn_input_bindings(method.sig.inputs.iter());
+        self.visit_block(&method.block);
+        self.bindings.truncate(binding_count);
+    }
+
     fn visit_block(&mut self, block: &Block) {
         let binding_count = self.bindings.len();
         visit::visit_block(self, block);

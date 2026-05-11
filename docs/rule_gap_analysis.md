@@ -280,3 +280,10 @@ one dependency's live `value` field does not keep an unrelated support struct's
 dead `value` field. The same fix extends struct-literal field pruning across
 package boundaries, so removed dependency fields are also removed from retained
 caller initializers.
+
+`fixture.public_field_typed_param_prune.support_chain.001` covers the inverse
+under-retention risk. Concrete field evidence now binds typed function and
+method parameters before scanning retained bodies, so `record:
+dependency::Record` followed by `record.value` retains only that concrete
+dependency field. This keeps cross-package support field pruning precise without
+falling back to broad field-name retention.
