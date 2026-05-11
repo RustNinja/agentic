@@ -833,7 +833,11 @@ impl Visit<'_> for GeneratedPathRootVisitor<'_> {
 
 fn generated_source_include_module_names(project: &Project, package: &str) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
-    for source in project.files.values().filter(|source| source.package == package) {
+    for source in project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+    {
         for item in &source.syntax.items {
             let Item::Mod(item_mod) = item else {
                 continue;
@@ -878,9 +882,10 @@ fn generated_item_contains_source_include(item: &Item) -> bool {
         Item::Macro(item_macro) => {
             item_macro.ident.is_none() && item_macro.mac.path.is_ident("include")
         }
-        Item::Mod(item_mod) => item_mod.content.as_ref().is_some_and(|(_, items)| {
-            items.iter().any(generated_item_contains_source_include)
-        }),
+        Item::Mod(item_mod) => item_mod
+            .content
+            .as_ref()
+            .is_some_and(|(_, items)| items.iter().any(generated_item_contains_source_include)),
         _ => false,
     }
 }

@@ -170,6 +170,32 @@ fn retains_multi_hop_dependency_barrel_reexports_without_dead_support_code() {
 }
 
 #[test]
+fn prunes_public_support_enum_variants_outside_root_signature_surface() {
+    let workspace = temp_path("rule-public-support-enum-prune-workspace");
+    let output = temp_path("rule-public-support-enum-prune-output");
+    let target_dir = temp_path("rule-public-support-enum-prune-target");
+    write_public_support_enum_prune_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("public support enum prune rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("support_enum_app/src/lib.rs"));
+    assert!(app.contains("pub fn selected"), "{app}");
+    let protocol = read(output.join("support_protocol/src/lib.rs"));
+    assert!(protocol.contains("pub enum ProtocolEvent"), "{protocol}");
+    assert!(protocol.contains("Live(LivePayload)"), "{protocol}");
+    assert!(protocol.contains("pub struct LivePayload"), "{protocol}");
+    assert!(!protocol.contains("Dead(DeadPayload)"), "{protocol}");
+    assert!(!protocol.contains("pub struct DeadPayload"), "{protocol}");
+    assert!(!protocol.contains("dead_event"), "{protocol}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
 fn prunes_module_scoped_imports_used_only_by_dead_items() {
     let workspace = temp_path("rule-module-import-liveness-workspace");
     let output = temp_path("rule-module-import-liveness-output");
@@ -3965,6 +3991,80 @@ pub struct DeadRecord;
 
 pub fn dead_shared() -> u32 {
     99
+}
+"#,
+    );
+}
+
+fn write_public_support_enum_prune_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["support_enum_app", "support_protocol"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("support_enum_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "support_enum_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+support_protocol = {{ path = "../support_protocol" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("support_enum_app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(seed: u32) -> u32 {
+    support_protocol::live_value(seed)
+}
+"#,
+    );
+    write(
+        root.join("support_protocol/Cargo.toml"),
+        r#"[package]
+name = "support_protocol"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support_protocol/src/lib.rs"),
+        r#"pub enum ProtocolEvent {
+    Live(LivePayload),
+    Dead(DeadPayload),
+}
+
+pub struct LivePayload {
+    pub value: u32,
+}
+
+pub struct DeadPayload {
+    pub value: u32,
+}
+
+pub fn live_event(seed: u32) -> ProtocolEvent {
+    ProtocolEvent::Live(LivePayload { value: seed + 1 })
+}
+
+pub fn dead_event(seed: u32) -> ProtocolEvent {
+    ProtocolEvent::Dead(DeadPayload { value: seed + 99 })
+}
+
+pub fn live_value(seed: u32) -> u32 {
+    match live_event(seed) {
+        ProtocolEvent::Live(payload) => payload.value,
+        _ => 0,
+    }
 }
 "#,
     );

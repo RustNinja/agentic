@@ -1391,3 +1391,12 @@ through the include/generated module, then keeps the local receiver method
 closure from that point. This preserves OUT_DIR-style `generated::factory().run()`
 chains without reintroducing unrelated prunable methods such as enum helper
 methods on ordinary DTO surfaces.
+
+Public visibility in a support crate is not enough to prove a variant is part of
+the selected slice contract. Full enum variant surfaces are still preserved for
+selected root items, selected callable signature types, and macro/serde/FFI-style
+contract attributes, but a plain `pub enum` used only as an internal support
+implementation detail can now be narrowed to the variants mentioned by retained
+code. This directly supports the used/unknown invariant for sub-dependencies:
+dead support variants and their payload types should not survive merely because
+they are `pub` in the original crate.

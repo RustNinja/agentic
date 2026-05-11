@@ -274,7 +274,8 @@ fn record_enum_member_decisions(
     decisions: &mut RenderedMemberDecisionIndex,
 ) {
     let parent_is_blocked = usage.is_blocked_by_unknown_item(item_id);
-    let preserves_full_surface = enum_preserves_full_variant_surface(reduced, item_id, item_enum);
+    let preserves_full_surface =
+        enum_preserves_full_variant_surface(project, reduced, item_id, item_enum);
     for variant in &item_enum.variants {
         let name = variant.ident.to_string();
         let member = rendered_member_symbol_path(item_id, &name);
@@ -6880,7 +6881,7 @@ fn collect_enum_surface_idents(
     item_enum: &syn::ItemEnum,
     idents: &mut BTreeSet<String>,
 ) {
-    if enum_preserves_full_variant_surface(reduced, item_id, item_enum) {
+    if enum_preserves_full_variant_surface(project, reduced, item_id, item_enum) {
         collect_token_idents(&item_enum.to_token_stream(), idents);
         return;
     }
@@ -11454,7 +11455,7 @@ fn transform_items(
                             strip_uniffi_attrs_from_variant(variant);
                         }
                     }
-                    if !enum_preserves_full_variant_surface(reduced, &id, &item_enum) {
+                    if !enum_preserves_full_variant_surface(project, reduced, &id, &item_enum) {
                         prune_private_enum_variants(
                             project,
                             reduced,
@@ -14111,9 +14112,8 @@ fn package_contains_source_include_macro(project: &Project, package: &str) -> bo
     project_module_paths(project, package)
         .iter()
         .any(|module_path| {
-            module_items_for_path(project, package, module_path).is_some_and(|items| {
-                items.iter().any(item_contains_source_include_macro)
-            })
+            module_items_for_path(project, package, module_path)
+                .is_some_and(|items| items.iter().any(item_contains_source_include_macro))
         })
 }
 
@@ -14134,10 +14134,8 @@ fn package_source_include_module_names(project: &Project, package: &str) -> BTre
                 .content
                 .as_ref()
                 .is_some_and(|(_, items)| items.iter().any(item_contains_source_include_macro));
-            let child_contains =
-                module_items_for_path(project, package, &child_path).is_some_and(|items| {
-                    items.iter().any(item_contains_source_include_macro)
-                });
+            let child_contains = module_items_for_path(project, package, &child_path)
+                .is_some_and(|items| items.iter().any(item_contains_source_include_macro));
             if inline_contains || child_contains {
                 names.insert(module_name);
             }
@@ -16166,13 +16164,74 @@ fn allow_dead_code_for_non_public_impl_item(item: &mut ImplItem) {
 }
 
 fn enum_preserves_full_variant_surface(
+    project: &Project,
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+    item_enum: &syn::ItemEnum,
+) -> bool {
+    root_item_should_render(reduced, item_id)
+        || public_enum_is_root_callable_signature_surface(project, reduced, item_id, item_enum)
+        || enum_attrs_require_full_variant_surface(item_enum)
+}
+
+fn public_enum_is_root_callable_signature_surface(
+    project: &Project,
     reduced: &ReducedProject,
     item_id: &ItemId,
     item_enum: &syn::ItemEnum,
 ) -> bool {
     matches!(item_enum.vis, syn::Visibility::Public(_))
-        || root_item_should_render(reduced, item_id)
-        || enum_attrs_require_full_variant_surface(item_enum)
+        && item_is_root_callable_signature_surface(project, reduced, item_id)
+}
+
+fn item_is_root_callable_signature_surface(
+    project: &Project,
+    reduced: &ReducedProject,
+    item_id: &ItemId,
+) -> bool {
+    reduced.roots.iter().any(|root| {
+        let RootId::Callable(callable) = root else {
+            return false;
+        };
+        root_callable_signature_references_item(project, callable, item_id)
+    })
+}
+
+fn root_callable_signature_references_item(
+    project: &Project,
+    callable: &CallableId,
+    item_id: &ItemId,
+) -> bool {
+    match callable {
+        CallableId::Free { .. } => project.functions.get(callable).is_some_and(|record| {
+            signature_references_item_name_or_path(
+                &record.item.sig.to_token_stream(),
+                item_id,
+                &record.aliases,
+            )
+        }),
+        CallableId::Method { .. } => project.methods.get(callable).is_some_and(|record| {
+            signature_references_item_name_or_path(
+                &record.item.sig.to_token_stream(),
+                item_id,
+                &record.aliases,
+            )
+        }),
+    }
+}
+
+fn signature_references_item_name_or_path(
+    tokens: &TokenStream,
+    item_id: &ItemId,
+    aliases: &HashMap<String, Vec<String>>,
+) -> bool {
+    token_stream_mentions_ident(tokens, &item_id.name)
+        || aliases.iter().any(|(alias, target)| {
+            target
+                .last()
+                .is_some_and(|target_name| target_name == &item_id.name)
+                && token_stream_mentions_ident(tokens, alias)
+        })
 }
 
 fn enum_attrs_require_full_variant_surface(item_enum: &syn::ItemEnum) -> bool {

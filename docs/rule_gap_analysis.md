@@ -242,3 +242,14 @@ target the remaining shapes that are not closed above:
 After those fixtures are executable, rerun five random Litter roots and compare
 failures against this list. Any new failure should become a minimized generic
 fixture before adding more generated catalog rows.
+
+## Closed In Public Support Enum Pass
+
+The next focused pass closed an over-retention class behind the
+`enum.public_support_internal_variant_prune.001` rule. Plain `pub enum` items
+inside support packages no longer keep every variant just because the original
+crate exposed them publicly. Full variant surfaces still remain for selected
+root items, selected callable signature types, and macro/serde/FFI-style
+contract attributes, but internal support enums can now prune dead variants and
+payload types. This is directly aligned with the production invariant that
+sub-dependencies contain only used or explicitly unknown code.
