@@ -307,6 +307,8 @@ impl Parser {
                     MethodRecord {
                         module_path: module_path.to_vec(),
                         span: source_span(file_path, method.span()),
+                        impl_span: source_span(file_path, item_impl.span()),
+                        impl_attrs: item_impl.attrs.clone(),
                         item: method.clone(),
                         impl_generics: item_impl.generics.clone(),
                         impl_items: item_impl.items.clone(),

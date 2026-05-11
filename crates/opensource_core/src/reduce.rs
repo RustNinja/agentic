@@ -4492,6 +4492,7 @@ impl<'a> DependencyVisitor<'a> {
             Expr::Unsafe(expr) => {
                 final_block_expression(&expr.block).and_then(|expr| self.receiver_type(expr))
             }
+            Expr::Await(expr) => self.receiver_type(&expr.base),
             Expr::Reference(reference) => self.receiver_type(&reference.expr),
             Expr::Paren(paren) => self.receiver_type(&paren.expr),
             _ => None,
@@ -4581,6 +4582,7 @@ impl<'a> DependencyVisitor<'a> {
                     candidates.extend(self.receiver_type_candidates(tail));
                 }
             }
+            Expr::Await(expr) => candidates.extend(self.receiver_type_candidates(&expr.base)),
             Expr::Reference(reference) => {
                 candidates.extend(self.receiver_type_candidates(&reference.expr))
             }
@@ -5067,6 +5069,7 @@ impl<'a> DependencyVisitor<'a> {
             Expr::Unsafe(expr) => {
                 final_block_expression(&expr.block).and_then(|expr| self.infer_expr_type(expr))
             }
+            Expr::Await(expr) => self.infer_expr_type(&expr.base),
             Expr::Reference(reference) => self.infer_expr_type(&reference.expr),
             Expr::Paren(paren) => self.infer_expr_type(&paren.expr),
             _ => None,
@@ -6595,6 +6598,7 @@ impl<'a> DependencyVisitor<'a> {
             Expr::Unsafe(expr) => final_block_expression(&expr.block)
                 .map(|expr| self.expression_type_arguments(expr))
                 .unwrap_or_default(),
+            Expr::Await(expr) => self.expression_type_arguments(&expr.base),
             Expr::Reference(reference) => self.expression_type_arguments(&reference.expr),
             Expr::Paren(paren) => self.expression_type_arguments(&paren.expr),
             _ => Vec::new(),
@@ -6771,6 +6775,7 @@ impl<'a> DependencyVisitor<'a> {
                 .and_then(|expr| self.expression_result_ok_type(expr)),
             Expr::Unsafe(expr) => final_block_expression(&expr.block)
                 .and_then(|expr| self.expression_result_ok_type(expr)),
+            Expr::Await(expr) => self.expression_result_ok_type(&expr.base),
             Expr::Reference(reference) => self.expression_result_ok_type(&reference.expr),
             Expr::Paren(paren) => self.expression_result_ok_type(&paren.expr),
             _ => None,
@@ -6944,6 +6949,7 @@ impl<'a> DependencyVisitor<'a> {
                 .and_then(|expr| self.expression_result_error_type(expr)),
             Expr::Unsafe(expr) => final_block_expression(&expr.block)
                 .and_then(|expr| self.expression_result_error_type(expr)),
+            Expr::Await(expr) => self.expression_result_error_type(&expr.base),
             Expr::Reference(reference) => self.expression_result_error_type(&reference.expr),
             Expr::Paren(paren) => self.expression_result_error_type(&paren.expr),
             _ => None,

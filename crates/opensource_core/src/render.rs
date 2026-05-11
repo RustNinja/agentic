@@ -14760,10 +14760,10 @@ fn package_preserves_uniffi_surface(
                 .functions
                 .get(callable)
                 .is_some_and(|record| attrs_include_uniffi_export(&record.item.attrs))
-                || project
-                    .methods
-                    .get(callable)
-                    .is_some_and(|record| attrs_include_uniffi_export(&record.item.attrs))
+                || project.methods.get(callable).is_some_and(|record| {
+                    attrs_include_uniffi_export(&record.item.attrs)
+                        || attrs_include_uniffi_export(&record.impl_attrs)
+                })
         })
         || reduced
             .reachable_items

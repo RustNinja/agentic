@@ -42,6 +42,8 @@ pub struct FunctionRecord {
 pub struct MethodRecord {
     pub module_path: Vec<String>,
     pub span: SourceSpan,
+    pub impl_span: SourceSpan,
+    pub impl_attrs: Vec<syn::Attribute>,
     pub item: ImplItemFn,
     pub impl_generics: syn::Generics,
     pub impl_items: Vec<ImplItem>,

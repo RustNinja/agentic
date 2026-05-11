@@ -269,12 +269,10 @@ Keep the generated 1,200-row catalog for breadth. The next focused batch should
 target the remaining shapes that are not closed above:
 
 1. `serde.adjacent_tag_content_contract.001`
-2. `uniffi.shared_runtime_once_lock.001`
-3. `uniffi.async_runtime_exported_object.001`
-4. A real-project Litter mining pass after the focused fixtures above, so new
+2. A real-project Litter mining pass after the focused fixture above, so new
    failures become minimized generic fixtures instead of one-off project logic
 
-After those fixtures are executable, rerun five random Litter roots and compare
+After that fixture is executable, rerun five random Litter roots and compare
 failures against this list. Any new failure should become a minimized generic
 fixture before adding more generated catalog rows.
 
@@ -380,3 +378,16 @@ visits closure input patterns after binding typed closure arguments, so
 `|dependency::Record { value, .. }: dependency::Record| value` keeps only the
 destructured live field instead of treating the closure override as body-only
 evidence.
+
+`fixture.uniffi_async_runtime_object_prune.support_chain.001` closes the
+combined UniFFI async-runtime object gap. Retained parent impl attributes are
+now part of the method record, so `#[cfg_attr(feature = "ffi",
+uniffi::export(async_runtime = "tokio"))] impl Type` is visible to macro hazard
+classification and manifest dependency retention whenever any method in that
+impl survives. Awaited receiver chains such as
+`RuntimeBridge::shared().current_status(raw).await.render()` now preserve the
+base receiver type through `.await`, so the reducer keeps only the live async
+method/result-render closure and does not fall back to broad same-name method
+retention. The fixture also proves the generated support runtime crate prunes
+dead registry/runtime operations while keeping the live `OnceLock<Arc<_>>`
+shared runtime closure.

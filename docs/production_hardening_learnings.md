@@ -1604,3 +1604,19 @@ still prunes remove/list/dead render APIs. This guards against a tempting but
 wrong whole-registry retention rule: the static registry itself is live, but
 each operation hanging off it still needs top-down evidence or a scoped unknown
 blocker.
+
+Impl-level macro surfaces are part of retained methods. A UniFFI export often
+lives on the `impl` block, not on each method, so scanning only retained
+`ImplItemFn` attributes misses `cfg_attr(..., uniffi::export(...))` and can
+prune the optional proc-macro dependency while preserving source that still
+mentions it. Method records now carry parent impl attributes/span, production
+hazards scan each retained impl surface once, and UniFFI surface preservation
+uses those parent attrs when deciding whether to keep `uniffi` manifest edges.
+
+Await must be a transparent receiver wrapper for top-down slicing. In an async
+chain like `Factory::new().load().await.render()`, the `.await` expression does
+not change the source-level item closure we need for the following method call.
+Treating it as opaque created avoidable syntactic method fallback hazards. The
+reducer now carries receiver/type-argument/result-type inference through
+`Expr::Await`, allowing async support chains to stay typed and prune unrelated
+methods.

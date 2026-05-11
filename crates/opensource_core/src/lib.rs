@@ -6303,6 +6303,8 @@ impl SyntacticHazardCounts {
 
 fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> SyntacticHazardCounts {
     let mut counts = SyntacticHazardCounts::default();
+    let mut scanned_impl_attrs =
+        BTreeSet::<(String, Vec<String>, PathBuf, usize, usize, usize, usize)>::new();
     counts.add(retained_module_boundary_hazard_counts(project, reduced));
     counts.add(retained_top_level_out_dir_macro_hazard_counts(
         project, reduced,
@@ -6328,6 +6330,20 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
                 &record.module_path,
                 Some(callable_name(callable)),
             );
+            let impl_attr_key = (
+                callable.package().to_string(),
+                record.module_path.clone(),
+                record.impl_span.file.clone(),
+                record.impl_span.start_line,
+                record.impl_span.start_column,
+                record.impl_span.end_line,
+                record.impl_span.end_column,
+            );
+            if scanned_impl_attrs.insert(impl_attr_key) {
+                for attribute in &record.impl_attrs {
+                    visitor.visit_attribute(attribute);
+                }
+            }
             visitor.visit_impl_item_fn(&record.item);
             counts.add(visitor.counts);
         }

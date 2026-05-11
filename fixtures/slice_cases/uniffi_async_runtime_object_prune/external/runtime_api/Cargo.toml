@@ -1,0 +1,11 @@
+[package]
+name = "runtime_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+runtime_support = { path = "../runtime_support" }
+uniffi = { path = "../uniffi", optional = true }
+
+[features]
+ffi = ["dep:uniffi"]

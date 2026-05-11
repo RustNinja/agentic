@@ -3309,6 +3309,145 @@ fn prunes_uniffi_runtime_support_chain_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_uniffi_async_runtime_object_support_chain_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/uniffi_async_runtime_object_prune");
+    let output = temp_path("slice-case-uniffi-async-runtime-object-prune-output");
+    let target_dir = temp_path("slice-case-uniffi-async-runtime-object-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("uniffi_async_runtime_object_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["root", "runtime_api", "runtime_support", "uniffi"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_async_runtime_status"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+    assert_production_hazard(&report, "conditional_compilation_attrs", "warning");
+    assert_production_hazard(&report, "custom_attribute_macros", "warning");
+    assert_production_hazard(&report, "custom_derive_macros", "warning");
+
+    let root_manifest = read(output.join("root/Cargo.toml"));
+    let root_source = read(output.join("root/src/lib.rs"));
+    let api_manifest = read(output.join("runtime_api/Cargo.toml"));
+    let api_root = read(output.join("runtime_api/src/lib.rs"));
+    let api_live = read(output.join("runtime_api/src/live.rs"));
+    let support_root = read(output.join("runtime_support/src/lib.rs"));
+    let support_live = read(output.join("runtime_support/src/live.rs"));
+
+    assert!(root_manifest.contains("../runtime_api"), "{root_manifest}");
+    assert!(
+        root_source.contains("pub async fn selected_async_runtime_status"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("runtime_api::selected_async_runtime_status(raw).await"),
+        "{root_source}"
+    );
+    assert_absent(
+        "root/src/lib.rs",
+        &root_source,
+        &["dead_async_runtime_status"],
+    );
+
+    assert!(
+        api_manifest.contains("../runtime_support"),
+        "{api_manifest}"
+    );
+    assert!(api_manifest.contains("../uniffi"), "{api_manifest}");
+    assert!(api_root.contains("mod live"), "{api_root}");
+    assert!(
+        api_root.contains("selected_async_runtime_status"),
+        "{api_root}"
+    );
+    assert_absent(
+        "runtime_api/src/lib.rs",
+        &api_root,
+        &["mod dead", "dead_async_runtime_status"],
+    );
+    assert!(api_live.contains("derive(uniffi::Object)"), "{api_live}");
+    assert!(api_live.contains("derive(uniffi::Record)"), "{api_live}");
+    assert!(
+        api_live.contains("uniffi::export(async_runtime = \"tokio\")"),
+        "{api_live}"
+    );
+    assert!(api_live.contains("pub struct RuntimeBridge"), "{api_live}");
+    assert!(
+        api_live.contains("pub struct RuntimeStatusDto"),
+        "{api_live}"
+    );
+    assert!(api_live.contains("pub fn from_snapshot"), "{api_live}");
+    assert!(api_live.contains("pub fn render"), "{api_live}");
+    assert!(api_live.contains("pub fn shared"), "{api_live}");
+    assert!(
+        api_live.contains("pub async fn current_status"),
+        "{api_live}"
+    );
+    assert!(
+        api_live.contains("pub async fn selected_async_runtime_status"),
+        "{api_live}"
+    );
+    assert_absent(
+        "runtime_api/src/live.rs",
+        &api_live,
+        &[
+            "dead_exported_status",
+            "dead_local_bridge",
+            "dead_live_async_runtime_status",
+            "dead_render",
+            "dead-status",
+            "dead-bridge",
+        ],
+    );
+    assert!(!output.join("runtime_api/src/dead.rs").exists());
+
+    assert!(support_root.contains("mod live"), "{support_root}");
+    assert!(support_root.contains("shared_runtime"), "{support_root}");
+    assert!(support_root.contains("RuntimeCore"), "{support_root}");
+    assert!(support_root.contains("RuntimeSnapshot"), "{support_root}");
+    assert_absent(
+        "runtime_support/src/lib.rs",
+        &support_root,
+        &["mod dead", "DeadRuntime", "dead_runtime_report"],
+    );
+    assert!(support_live.contains("use std::sync::{Arc, OnceLock}"));
+    assert!(support_live.contains("static SHARED_RUNTIME"));
+    assert!(support_live.contains("pub struct RuntimeCore"));
+    assert!(support_live.contains("pub fn new"));
+    assert!(support_live.contains("pub async fn status"));
+    assert!(support_live.contains("pub struct RuntimeSnapshot"));
+    assert!(support_live.contains("pub fn label"));
+    assert!(support_live.contains("pub fn ready"));
+    assert!(support_live.contains("pub fn shared_runtime"));
+    assert_absent(
+        "runtime_support/src/live.rs",
+        &support_live,
+        &[
+            "dead_status",
+            "dead_snapshot",
+            "dead_live_runtime_report",
+            "dead-runtime-status",
+            "dead-snapshot",
+        ],
+    );
+    assert!(!output.join("runtime_support/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_async_command_support_chain_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/async_command_prune");
     let output = temp_path("slice-case-async-command-prune-output");
