@@ -16439,9 +16439,17 @@ fn struct_field_should_remain(
     item_struct: &syn::ItemStruct,
     field: &Field,
 ) -> bool {
-    if matches!(item_struct.vis, syn::Visibility::Public(_))
-        && matches!(field.vis, syn::Visibility::Public(_))
-    {
+    if struct_item_is_blocked_by_unknown(render_plan, package, module_path, item_struct) {
+        return true;
+    }
+    if public_struct_field_surface_should_remain(
+        project,
+        reduced,
+        package,
+        module_path,
+        item_struct,
+        field,
+    ) {
         return true;
     }
     if field_mentions_struct_type_params(item_struct, field)
@@ -16554,9 +16562,17 @@ fn struct_field_should_remain_without_type_param_guard(
     item_struct: &syn::ItemStruct,
     field: &Field,
 ) -> bool {
-    if matches!(item_struct.vis, syn::Visibility::Public(_))
-        && matches!(field.vis, syn::Visibility::Public(_))
-    {
+    if struct_item_is_blocked_by_unknown(render_plan, package, module_path, item_struct) {
+        return true;
+    }
+    if public_struct_field_surface_should_remain(
+        project,
+        reduced,
+        package,
+        module_path,
+        item_struct,
+        field,
+    ) {
         return true;
     }
     if field_attrs_require_field(field) {
@@ -16592,6 +16608,88 @@ fn struct_field_should_remain_without_type_param_guard(
             item_struct,
             &name,
         )
+}
+
+fn struct_item_is_blocked_by_unknown(
+    render_plan: Option<&RenderPlan>,
+    package: &str,
+    module_path: &[String],
+    item_struct: &syn::ItemStruct,
+) -> bool {
+    render_plan.is_some_and(|render_plan| {
+        render_plan.usage.is_blocked_by_unknown_item(&ItemId {
+            package: package.to_string(),
+            module_path: module_path.to_vec(),
+            name: item_struct.ident.to_string(),
+            kind: ItemKind::Struct,
+        })
+    })
+}
+
+fn public_struct_field_surface_should_remain(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    item_struct: &syn::ItemStruct,
+    field: &Field,
+) -> bool {
+    if !matches!(item_struct.vis, syn::Visibility::Public(_))
+        || !matches!(field.vis, syn::Visibility::Public(_))
+    {
+        return false;
+    }
+    let item_id = ItemId {
+        package: package.to_string(),
+        module_path: module_path.to_vec(),
+        name: item_struct.ident.to_string(),
+        kind: ItemKind::Struct,
+    };
+    root_item_should_render(reduced, &item_id)
+        || item_is_root_callable_signature_surface(project, reduced, &item_id)
+        || struct_attrs_require_public_field_surface(item_struct)
+        || reachable_callables_need_struct_field_in_any_package(
+            project,
+            reduced,
+            None,
+            None,
+            field.ident.as_ref().map(ToString::to_string).as_deref(),
+        )
+}
+
+fn struct_attrs_require_public_field_surface(item_struct: &syn::ItemStruct) -> bool {
+    item_struct
+        .attrs
+        .iter()
+        .any(struct_attr_requires_public_field_surface)
+}
+
+fn struct_attr_requires_public_field_surface(attr: &syn::Attribute) -> bool {
+    let path = attr.path();
+    if path.is_ident("derive") {
+        let mut derives = BTreeSet::new();
+        collect_derive_attr_idents(std::slice::from_ref(attr), &mut derives);
+        return derives
+            .iter()
+            .any(|derive| !builtin_field_shape_preserving_derive(derive));
+    }
+    path.is_ident("serde")
+        || path.is_ident("clap")
+        || path.is_ident("command")
+        || path.is_ident("arg")
+        || path_starts_with(path, "uniffi")
+        || (path.is_ident("cfg_attr")
+            && (token_stream_mentions_ident(&attr.to_token_stream(), "derive")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "serde")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "clap")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "uniffi")))
+}
+
+fn builtin_field_shape_preserving_derive(name: &str) -> bool {
+    matches!(
+        name,
+        "Clone" | "Copy" | "Debug" | "Default" | "Eq" | "Hash" | "Ord" | "PartialEq" | "PartialOrd"
+    )
 }
 
 fn retained_impl_items_mention_struct_field(
@@ -16653,10 +16751,29 @@ fn reachable_callables_need_struct_field(
     package: &str,
     field_name: &str,
 ) -> bool {
+    reachable_callables_need_struct_field_in_any_package(
+        project,
+        reduced,
+        render_plan,
+        Some(package),
+        Some(field_name),
+    )
+}
+
+fn reachable_callables_need_struct_field_in_any_package(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
+    package: Option<&str>,
+    field_name: Option<&str>,
+) -> bool {
+    let Some(field_name) = field_name else {
+        return false;
+    };
     reduced
         .reachable
         .iter()
-        .filter(|callable| callable.package() == package)
+        .filter(|callable| package.is_none_or(|package| callable.package() == package))
         .filter(|callable| {
             render_plan.is_none_or(|render_plan| render_plan.callable_should_render(callable))
         })

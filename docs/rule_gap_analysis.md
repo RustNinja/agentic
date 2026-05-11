@@ -263,3 +263,12 @@ impl receiver surfaces through resolved signature dependencies, not by matching
 the receiver type's final segment against raw signature tokens. This prevents a
 same-named internal support type from retaining dead exported impl methods just
 because a different API type appears in the selected signature.
+
+The public support surface pass now covers struct fields as well as enum
+variants. `struct.public_support_internal_field_prune.001` proves that retained
+support records prune dead public fields when the record is only an internal
+helper type. `struct.public_signature_field_surface.001` proves the opposite
+boundary case: when a selected callable signature resolves to that support
+record, its public field surface stays intact. This keeps the slicer aligned
+with the production invariant that generated sub-dependencies contain only used
+or explicitly API/unknown-retained code.

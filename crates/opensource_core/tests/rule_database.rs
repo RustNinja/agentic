@@ -197,6 +197,60 @@ fn prunes_public_support_enum_variants_outside_root_signature_surface() {
 }
 
 #[test]
+fn prunes_public_support_struct_fields_outside_root_signature_surface() {
+    let workspace = temp_path("rule-public-support-struct-field-prune-workspace");
+    let output = temp_path("rule-public-support-struct-field-prune-output");
+    let target_dir = temp_path("rule-public-support-struct-field-prune-target");
+    write_public_support_struct_field_prune_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("public support struct field prune rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("support_struct_app/src/lib.rs"));
+    let support = read(output.join("support_record/src/lib.rs"));
+    assert!(app.contains("pub fn selected"), "{app}");
+    assert!(support.contains("pub struct Report"), "{support}");
+    assert!(support.contains("pub title: String"), "{support}");
+    assert!(support.contains("pub fn render"), "{support}");
+    assert!(support.contains("fn normalize"), "{support}");
+    assert!(!support.contains("dead_note"), "{support}");
+    assert!(!support.contains("dead_render"), "{support}");
+    assert!(!support.contains("dead_report"), "{support}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
+fn retains_public_struct_fields_inside_root_signature_surface() {
+    let workspace = temp_path("rule-public-signature-struct-field-workspace");
+    let output = temp_path("rule-public-signature-struct-field-output");
+    let target_dir = temp_path("rule-public-signature-struct-field-target");
+    write_public_signature_struct_field_surface_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("public signature struct field surface rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("signature_struct_app/src/lib.rs"));
+    let support = read(output.join("signature_record/src/lib.rs"));
+    assert!(app.contains("pub fn selected"), "{app}");
+    assert!(support.contains("pub struct Report"), "{support}");
+    assert!(support.contains("pub title: String"), "{support}");
+    assert!(
+        support.contains("pub dead_note: Option<String>"),
+        "{support}"
+    );
+    assert!(!support.contains("dead_report"), "{support}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
 fn prunes_macro_impl_surface_for_same_name_type_outside_root_signature() {
     let workspace = temp_path("rule-root-signature-impl-collision-workspace");
     let output = temp_path("rule-root-signature-impl-collision-output");
@@ -4093,6 +4147,166 @@ pub fn live_value(seed: u32) -> u32 {
         ProtocolEvent::Live(payload) => payload.value,
         _ => 0,
     }
+}
+"#,
+    );
+}
+
+fn write_public_support_struct_field_prune_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["support_struct_app", "support_record"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("support_struct_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "support_struct_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+support_record = {{ path = "../support_record" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("support_struct_app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(seed: u32) -> String {
+    support_record::live_report(seed)
+}
+
+pub fn dead(seed: u32) -> String {
+    support_record::dead_report(seed)
+}
+"#,
+    );
+    write(
+        root.join("support_record/Cargo.toml"),
+        r#"[package]
+name = "support_record"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support_record/src/lib.rs"),
+        r#"pub struct Report {
+    pub title: String,
+    pub dead_note: Option<String>,
+}
+
+impl Report {
+    pub fn render(self) -> String {
+        self.title
+    }
+
+    pub fn dead_render(self) -> String {
+        self.dead_note.unwrap_or_default()
+    }
+}
+
+pub fn live_report(seed: u32) -> String {
+    Report {
+        title: normalize(seed),
+        dead_note: None,
+    }
+    .render()
+}
+
+fn normalize(seed: u32) -> String {
+    format!("live-{seed}")
+}
+
+pub fn dead_report(seed: u32) -> String {
+    Report {
+        title: normalize(seed),
+        dead_note: Some("dead".to_string()),
+    }
+    .dead_render()
+}
+"#,
+    );
+}
+
+fn write_public_signature_struct_field_surface_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["signature_struct_app", "signature_record"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("signature_struct_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "signature_struct_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+signature_record = {{ path = "../signature_record" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("signature_struct_app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(seed: u32) -> signature_record::Report {
+    signature_record::live_report(seed)
+}
+
+pub fn dead(seed: u32) -> String {
+    signature_record::dead_report(seed)
+}
+"#,
+    );
+    write(
+        root.join("signature_record/Cargo.toml"),
+        r#"[package]
+name = "signature_record"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("signature_record/src/lib.rs"),
+        r#"pub struct Report {
+    pub title: String,
+    pub dead_note: Option<String>,
+}
+
+pub fn live_report(seed: u32) -> Report {
+    Report {
+        title: normalize(seed),
+        dead_note: None,
+    }
+}
+
+fn normalize(seed: u32) -> String {
+    format!("live-{seed}")
+}
+
+pub fn dead_report(seed: u32) -> String {
+    Report {
+        title: normalize(seed),
+        dead_note: Some("dead".to_string()),
+    }
+    .dead_note
+    .unwrap_or_default()
 }
 "#,
     );

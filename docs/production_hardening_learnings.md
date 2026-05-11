@@ -1411,3 +1411,12 @@ retain all exported methods. Root signature surface checks now ask the reducer's
 signature dependency resolver whether the concrete impl receiver item is part of
 the selected API surface before preserving a whole macro-contract impl; otherwise
 normal method reachability keeps only the used methods.
+
+Public support struct fields now follow the same API-surface rule. A retained
+public helper record inside a support package no longer keeps every public field
+merely because the original crate exposed the field. Full public field surfaces
+are preserved for selected item roots and for structs that the selected callable
+signature resolver proves are input/return API types; other support fields must
+be referenced by retained code, protected by field/struct attributes, or remain
+blocked by an unknown surface. This closes another over-retention path in the
+used/unused/unknown split without hard-coding Litter symbols.
