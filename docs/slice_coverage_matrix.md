@@ -108,7 +108,9 @@ Batch JSONL rows now also expose RA semantic budget coverage, including
 configured file/method/path budgets, analyzed/skipped files, unresolved and
 unqueried method/path counts, and selected-root counters. This lets fixture and
 real-repo mining treat an accepted-but-under-analyzed slice as a next-priority
-production gap instead of a silent success.
+production gap instead of a silent success. `semantic_proof_status` summarizes
+those counters into complete, selected-root-complete/workspace-limited,
+selected-root-limited, or explicit failed/limited states.
 
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust

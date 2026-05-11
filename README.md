@@ -127,7 +127,9 @@ shared target directory under the batch output by default, or the explicit
 Rows also include rendered usage contract counts and RA semantic budget coverage
 (`semantic_*` and `selected_root_*` counters), so mining can separate clean,
 well-proven slices from accepted slices that still spent or skipped too much
-semantic analysis.
+semantic analysis. `semantic_proof_status` gives the short version:
+`complete`, `selected_root_complete_workspace_limited`,
+`selected_root_limited`, or another explicit failure/limited state.
 
 ```sh
 cargo run -p opensource_cli --bin slicers -- \
@@ -150,9 +152,9 @@ workspace crates with dependency crates excluded by default; external
 correctness is still checked by Cargo/rustc feedback.
 Files containing selected `#[opensourced]` roots are analyzed first so bounded
 semantic budgets are spent on the active slice before wider workspace
-inventory. Batch reports expose the configured file/method/path budgets and the
-unresolved/unqueried selected-root counters to make budget exhaustion visible in
-the fast mining loop.
+inventory. Batch reports expose the configured file/method/path budgets, the
+unresolved/unqueried selected-root counters, and a `semantic_proof_status` label
+to make budget exhaustion visible in the fast mining loop.
 
 ```sh
 cargo run -p opensource_cli --bin slicers -- \

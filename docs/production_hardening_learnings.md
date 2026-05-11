@@ -1388,7 +1388,9 @@ hide RA budget pressure: only part of the workspace semantic inventory was
 queried before the slice built. Batch reports now serialize semantic budgets,
 workspace analyzed/skipped counts, and selected-root unresolved/unqueried counts
 so mining can rank accepted slices by proof quality instead of only by compiler
-success.
+success. The `semantic_proof_status` row label classifies that evidence as
+`complete`, `selected_root_complete_workspace_limited`,
+`selected_root_limited`, or an explicit failure/limited state.
 
 The first rule-database run against that production gate exposed two proof
 normalization bugs. Inline child modules must not inherit parent `use` aliases

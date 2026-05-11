@@ -18,7 +18,7 @@ use opensource_core::{
     write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
     CheckOptions, CheckReport, GenerateOptions, GenerateReport, GenerateSession,
     GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
-    RepairReport, RootId,
+    RepairReport, RootId, SemanticReport,
 };
 
 fn main() {
@@ -490,6 +490,7 @@ struct BatchRootReport {
     rendered_usage_used: Option<usize>,
     rendered_usage_blocked_by_unknown: Option<usize>,
     rendered_usage_invalid: Option<usize>,
+    semantic_proof_status: Option<String>,
     semantic_file_budget: Option<usize>,
     semantic_method_call_budget: Option<usize>,
     semantic_path_budget: Option<usize>,
@@ -970,6 +971,7 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 rendered_usage_used: None,
                 rendered_usage_blocked_by_unknown: None,
                 rendered_usage_invalid: None,
+                semantic_proof_status: None,
                 semantic_file_budget: None,
                 semantic_method_call_budget: None,
                 semantic_path_budget: None,
@@ -1276,6 +1278,7 @@ fn batch_row_from_reports(
         rendered_usage_invalid: rendered_usage
             .as_ref()
             .map(|contract| contract.invalid.len()),
+        semantic_proof_status: semantic.map(semantic_proof_status),
         semantic_file_budget: semantic.map(|semantic| semantic.file_budget),
         semantic_method_call_budget: semantic.map(|semantic| semantic.method_call_budget),
         semantic_path_budget: semantic.map(|semantic| semantic.path_budget),
@@ -1311,6 +1314,39 @@ fn batch_row_from_reports(
         duration_ms: 0,
         error,
     }
+}
+
+fn semantic_proof_status(semantic: &SemanticReport) -> String {
+    let workspace_limited = semantic.skipped_files > 0
+        || semantic.unqueried_method_calls > 0
+        || semantic.unqueried_paths > 0;
+
+    if semantic.selected_root_source_files > 0 {
+        if semantic.selected_root_failed_files > 0 {
+            return "selected_root_failed".to_string();
+        }
+        if semantic.selected_root_skipped_files > 0
+            || semantic.selected_root_unqueried_method_calls > 0
+            || semantic.selected_root_unqueried_paths > 0
+        {
+            return "selected_root_limited".to_string();
+        }
+        if workspace_limited {
+            return "selected_root_complete_workspace_limited".to_string();
+        }
+        return "complete".to_string();
+    }
+
+    if semantic.failed_files > 0 {
+        return "workspace_failed".to_string();
+    }
+    if workspace_limited {
+        return "workspace_limited".to_string();
+    }
+    if semantic.source_files == 0 {
+        return "empty".to_string();
+    }
+    "complete".to_string()
 }
 
 fn batch_runs_check(options: &CliOptions) -> bool {
