@@ -7947,6 +7947,9 @@ fn prune_support_private_use_tree(
                 name.ident.to_string()
             };
             support_private_import_name_should_render(
+                ctx,
+                live_by_file,
+                source_file,
                 &prefix,
                 &name.ident.to_string(),
                 &visible_name,
@@ -7956,6 +7959,9 @@ fn prune_support_private_use_tree(
             .then(|| UseTree::Name(name.clone()))
         }
         UseTree::Rename(rename) => support_private_import_name_should_render(
+            ctx,
+            live_by_file,
+            source_file,
             &prefix,
             &rename.ident.to_string(),
             &rename.rename.to_string(),
@@ -8004,6 +8010,9 @@ fn prune_support_private_use_tree(
 }
 
 fn support_private_import_name_should_render(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+    source_file: &Path,
     prefix: &[String],
     imported_name: &str,
     visible_name: &str,
@@ -8015,6 +8024,56 @@ fn support_private_import_name_should_render(
             || live_derive_idents.contains(visible_name);
     }
     live_names.contains(visible_name)
+        || support_private_import_target_is_live_local(
+            ctx,
+            live_by_file,
+            source_file,
+            prefix,
+            imported_name,
+        )
+}
+
+fn support_private_import_target_is_live_local(
+    ctx: &SupportResolveContext<'_>,
+    live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
+    source_file: &Path,
+    prefix: &[String],
+    imported_name: &str,
+) -> bool {
+    let mut target_file = source_file.to_path_buf();
+    let mut remaining_prefix = prefix;
+    if let Some(first) = remaining_prefix.first() {
+        match first.as_str() {
+            "self" => {
+                remaining_prefix = &remaining_prefix[1..];
+            }
+            "crate" => {
+                target_file = ctx.root_file.to_path_buf();
+                remaining_prefix = &remaining_prefix[1..];
+            }
+            "super" => {
+                let Some(parent) = support_parent_module_file(ctx.modules, source_file) else {
+                    return false;
+                };
+                target_file = parent.clone();
+                remaining_prefix = &remaining_prefix[1..];
+            }
+            _ => {}
+        }
+    }
+
+    for segment in remaining_prefix {
+        let Some(child_file) = support_child_module_file(ctx.modules, &target_file, segment) else {
+            return false;
+        };
+        target_file = child_file;
+    }
+
+    live_by_file.get(&target_file).is_some_and(|live_set| {
+        live_set.item_names.contains(imported_name)
+            || live_set.surface_item_names.contains(imported_name)
+            || live_set.public_exports.contains(imported_name)
+    })
 }
 
 fn support_import_is_derive_only(prefix: &[String], imported_name: &str) -> bool {
@@ -19486,6 +19545,13 @@ struct ConcreteStructFieldUseVisitor<'a> {
     needs_field: bool,
 }
 
+struct FieldTypeContext<'a> {
+    package: &'a str,
+    module_path: &'a [String],
+    aliases: &'a HashMap<String, Vec<String>>,
+    ty: &'a Type,
+}
+
 impl<'a> ConcreteStructFieldUseVisitor<'a> {
     fn new(
         project: &'a Project,
@@ -19512,6 +19578,15 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     fn expr_type_item(&self, expr: &Expr) -> Option<ItemId> {
         match expr {
             Expr::Struct(expr) => self.resolve_type_path(&expr.path),
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first()?.ident.to_string();
+                if name == "self" {
+                    return self.self_item.clone();
+                }
+                self.current_binding(&name)
+                    .cloned()
+                    .or_else(|| self.resolve_type_path(&path.path))
+            }
             Expr::Path(path) => self.resolve_type_path(&path.path),
             Expr::Call(call) => {
                 let Expr::Path(path) = call.func.as_ref() else {
@@ -19520,6 +19595,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 self.call_return_type_item(&path.path)
             }
             Expr::MethodCall(call) => self.method_call_return_type_item(call),
+            Expr::Field(field) => self.field_expr_type_item(field),
             Expr::Reference(reference) => self.expr_type_item(&reference.expr),
             Expr::Paren(paren) => self.expr_type_item(&paren.expr),
             Expr::Block(block) => {
@@ -19542,6 +19618,20 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     }
 
     fn method_call_return_type_item(&self, call: &syn::ExprMethodCall) -> Option<ItemId> {
+        let method = call.method.to_string();
+        if matches!(method.as_str(), "get" | "get_mut" | "remove") {
+            if let Some(item) = self.expression_map_value_type_item(&call.receiver) {
+                return Some(item);
+            }
+        }
+        if matches!(
+            method.as_str(),
+            "as_ref" | "as_mut" | "clone" | "cloned" | "copied"
+        ) {
+            if let Some(item) = self.expr_type_item(&call.receiver) {
+                return Some(item);
+            }
+        }
         let receiver_item = self.expr_type_item(&call.receiver)?;
         let callable = CallableId::Method {
             package: receiver_item.package.clone(),
@@ -19615,6 +19705,143 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         })
     }
 
+    fn field_expr_type_item(&self, field: &syn::ExprField) -> Option<ItemId> {
+        let field_type = self.field_expr_type(field)?;
+        self.type_payload_or_direct_item_in(
+            field_type.package,
+            field_type.module_path,
+            field_type.aliases,
+            field_type.ty,
+        )
+    }
+
+    fn field_expr_type(&self, field: &syn::ExprField) -> Option<FieldTypeContext<'a>> {
+        let receiver_item = self.expr_type_item(&field.base)?;
+        self.item_field_type(&receiver_item, &field.member)
+    }
+
+    fn item_field_type(&self, item: &ItemId, member: &Member) -> Option<FieldTypeContext<'a>> {
+        let field_name = member_name(member)?;
+        let record = self.project.items.get(item)?;
+        let Item::Struct(item_struct) = &record.item else {
+            return None;
+        };
+        named_struct_field(item_struct, &field_name).map(|field| FieldTypeContext {
+            package: &record.package,
+            module_path: &record.module_path,
+            aliases: &record.aliases,
+            ty: &field.ty,
+        })
+    }
+
+    fn expression_map_value_type_item(&self, expression: &Expr) -> Option<ItemId> {
+        match expression {
+            Expr::Field(field) => self
+                .field_expr_type(field)
+                .and_then(|ty| self.map_value_type_item(ty)),
+            Expr::Reference(reference) => self.expression_map_value_type_item(&reference.expr),
+            Expr::Paren(paren) => self.expression_map_value_type_item(&paren.expr),
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "as_ref" | "as_mut" | "clone"
+                ) =>
+            {
+                self.expression_map_value_type_item(&call.receiver)
+            }
+            _ => None,
+        }
+    }
+
+    fn map_value_type_item(&self, ctx: FieldTypeContext<'a>) -> Option<ItemId> {
+        let Type::Path(type_path) = ctx.ty else {
+            return match ctx.ty {
+                Type::Reference(reference) => self.map_value_type_item(FieldTypeContext {
+                    ty: &reference.elem,
+                    ..ctx
+                }),
+                Type::Group(group) => self.map_value_type_item(FieldTypeContext {
+                    ty: &group.elem,
+                    ..ctx
+                }),
+                Type::Paren(paren) => self.map_value_type_item(FieldTypeContext {
+                    ty: &paren.elem,
+                    ..ctx
+                }),
+                _ => None,
+            };
+        };
+        let segment = type_path.path.segments.last()?;
+        if !matches!(
+            segment.ident.to_string().as_str(),
+            "HashMap" | "BTreeMap" | "IndexMap"
+        ) {
+            return None;
+        }
+        let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
+        arguments
+            .args
+            .iter()
+            .filter_map(|argument| match argument {
+                GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .nth(1)
+            .and_then(|ty| {
+                self.type_payload_or_direct_item_in(ctx.package, ctx.module_path, ctx.aliases, ty)
+            })
+    }
+
+    fn type_payload_or_direct_item_in(
+        &self,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+        ty: &Type,
+    ) -> Option<ItemId> {
+        if let Some(item) = type_to_type_like_item(self.project, package, module_path, ty, aliases)
+        {
+            return Some(item);
+        }
+        match ty {
+            Type::Reference(reference) => {
+                self.type_payload_or_direct_item_in(package, module_path, aliases, &reference.elem)
+            }
+            Type::Group(group) => {
+                self.type_payload_or_direct_item_in(package, module_path, aliases, &group.elem)
+            }
+            Type::Paren(paren) => {
+                self.type_payload_or_direct_item_in(package, module_path, aliases, &paren.elem)
+            }
+            Type::Path(type_path) => {
+                let segment = type_path.path.segments.last()?;
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    return None;
+                };
+                let type_args = arguments
+                    .args
+                    .iter()
+                    .filter_map(|argument| match argument {
+                        GenericArgument::Type(ty) => Some(ty),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let index = match segment.ident.to_string().as_str() {
+                    "HashMap" | "BTreeMap" | "IndexMap" => 1,
+                    "Result" => 0,
+                    "Option" | "Vec" | "Box" | "Arc" | "Rc" | "Pin" | "Cow" => 0,
+                    _ => return None,
+                };
+                type_args.get(index).and_then(|ty| {
+                    self.type_payload_or_direct_item_in(package, module_path, aliases, ty)
+                })
+            }
+            _ => None,
+        }
+    }
+
     fn resolve_type_path(&self, path: &syn::Path) -> Option<ItemId> {
         path_to_type_like_item(
             self.project,
@@ -19646,16 +19873,54 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     }
 
     fn record_binding_from_local(&mut self, local: &syn::Local) {
+        if let Some(init) = &local.init {
+            let binding_count = self.bindings.len();
+            self.record_bindings_from_pattern_expr(&local.pat, &init.expr);
+            if self.bindings.len() == binding_count {
+                let Some(name) = local_binding_name(&local.pat) else {
+                    return;
+                };
+                if let Some(item) = local_pat_type_item(self, &local.pat) {
+                    self.bindings.push((name, item));
+                }
+            }
+            return;
+        }
         let Some(name) = local_binding_name(&local.pat) else {
             return;
         };
-        let item = local
-            .init
-            .as_ref()
-            .and_then(|init| self.expr_type_item(&init.expr))
-            .or_else(|| local_pat_type_item(self, &local.pat));
-        if let Some(item) = item {
+        if let Some(item) = local_pat_type_item(self, &local.pat) {
             self.bindings.push((name, item));
+        }
+    }
+
+    fn record_bindings_from_pattern_expr(&mut self, pat: &Pat, expr: &Expr) {
+        if let Some(item) = self.expr_type_item(expr) {
+            self.record_pattern_binding_item(pat, &item);
+        }
+    }
+
+    fn record_pattern_binding_item(&mut self, pat: &Pat, item: &ItemId) {
+        match pat {
+            Pat::Ident(ident) => {
+                self.bindings.push((ident.ident.to_string(), item.clone()));
+                if let Some((_at, subpat)) = &ident.subpat {
+                    self.record_pattern_binding_item(subpat, item);
+                }
+            }
+            Pat::Type(typed) => self.record_binding_from_typed_pat(&typed.pat, &typed.ty),
+            Pat::Reference(reference) => self.record_pattern_binding_item(&reference.pat, item),
+            Pat::Paren(paren) => self.record_pattern_binding_item(&paren.pat, item),
+            Pat::TupleStruct(tuple)
+                if tuple.path.segments.last().is_some_and(|segment| {
+                    matches!(segment.ident.to_string().as_str(), "Some" | "Ok")
+                }) =>
+            {
+                if let Some(first) = tuple.elems.first() {
+                    self.record_pattern_binding_item(first, item);
+                }
+            }
+            _ => {}
         }
     }
 
@@ -19909,6 +20174,21 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
     fn visit_local(&mut self, local: &syn::Local) {
         self.record_binding_from_local(local);
         visit::visit_local(self, local);
+    }
+
+    fn visit_expr_if(&mut self, expr_if: &syn::ExprIf) {
+        if let Expr::Let(expr_let) = expr_if.cond.as_ref() {
+            self.visit_expr(&expr_let.expr);
+            let binding_count = self.bindings.len();
+            self.record_bindings_from_pattern_expr(&expr_let.pat, &expr_let.expr);
+            self.visit_block(&expr_if.then_branch);
+            self.bindings.truncate(binding_count);
+            if let Some((_else, else_branch)) = &expr_if.else_branch {
+                self.visit_expr(else_branch);
+            }
+        } else {
+            visit::visit_expr_if(self, expr_if);
+        }
     }
 
     fn visit_expr_field(&mut self, field: &syn::ExprField) {
