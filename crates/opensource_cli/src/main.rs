@@ -1770,12 +1770,12 @@ fn run_preflight(options: &CliOptions) -> Result<PreflightReport, Box<dyn std::e
 }
 
 fn run_baseline_check(options: &CliOptions) -> Result<CheckReport, Box<dyn std::error::Error>> {
-    println!("baseline: cargo check --message-format=json");
-    run_baseline_check_with_args(
-        options,
-        options.cargo_check_args.clone(),
-        baseline_target_dir(options),
-    )
+    let target_dir = baseline_target_dir(options);
+    println!(
+        "baseline: cargo check --message-format=json (target {})",
+        target_dir.display()
+    );
+    run_baseline_check_with_args(options, options.cargo_check_args.clone(), target_dir)
 }
 
 fn run_baseline_check_with_args(
@@ -2162,9 +2162,13 @@ struct DecisionLogReportPaths {
     #[serde(skip_serializing_if = "Option::is_none")]
     baseline_report: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_target_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     preflight_report: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     feedback_report: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback_target_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2248,8 +2252,15 @@ fn build_decision_log(
             baseline_report: options
                 .run_baseline_check
                 .then(|| baseline_report_path(options)),
+            baseline_target_dir: options
+                .run_baseline_check
+                .then(|| baseline_target_dir(options)),
             preflight_report: maybe_preflight_report_path(options),
             feedback_report: feedback_report_path(options),
+            feedback_target_dir: (options.run_check
+                || options.feedback_iterations > 0
+                || options.feedback_repair_iterations > 0)
+                .then(|| feedback_target_dir(options)),
         },
         validation: validation_summary,
         steps: decision_log_steps(options, report, validation),
@@ -4550,10 +4561,45 @@ fn record_final_production_readiness(options: &CliOptions, validation: &mut Vali
 }
 
 fn baseline_target_dir(options: &CliOptions) -> PathBuf {
-    options
-        .baseline_target_dir
-        .clone()
-        .unwrap_or_else(|| sibling_output_path(&options.output_root, "target-baseline"))
+    options.baseline_target_dir.clone().unwrap_or_else(|| {
+        shared_baseline_target_dir(&options.workspace_root, &options.cargo_check_args)
+    })
+}
+
+fn shared_baseline_target_dir(workspace_root: &Path, cargo_args: &[String]) -> PathBuf {
+    let mut key_parts = Vec::with_capacity(cargo_args.len() + 2);
+    key_parts.push("v1".to_string());
+    key_parts.push(cache_key_path_component(workspace_root));
+    key_parts.extend(cargo_args.iter().cloned());
+    let key = stable_hex_hash(&key_parts);
+    std::env::temp_dir()
+        .join("slicers-baseline-targets")
+        .join(key)
+}
+
+fn cache_key_path_component(path: &Path) -> String {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .map(|current| current.join(path))
+            .unwrap_or_else(|_| path.to_path_buf())
+    };
+    fs::canonicalize(&absolute)
+        .unwrap_or(absolute)
+        .to_string_lossy()
+        .into_owned()
+}
+
+fn stable_hex_hash(parts: &[String]) -> String {
+    let mut hash = 0xcbf2_9ce4_8422_2325_u64;
+    for part in parts {
+        for byte in part.as_bytes().iter().chain(std::iter::once(&0)) {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+    }
+    format!("{hash:016x}")
 }
 
 fn sibling_output_path(output_root: &Path, suffix: &str) -> PathBuf {
@@ -5046,15 +5092,16 @@ mod tests {
 
     use super::{
         apply_default_marked_package_scope, baseline_limited_feedback_is_accepted,
-        cargo_args_have_package_scope, decision_log_path, diagnostics_shape_signature,
-        diagnostics_signature, feedback_errors_are_baseline_known, feedback_is_accepted,
-        feedback_repair_is_accepted, parse_args_from, production_readiness_blocks_validation,
-        production_validation_matrix_entries, record_final_production_readiness,
-        record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
-        run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count,
-        semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
-        slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
-        validation_report_path, FeedbackWideningState, ValidationGateReport, ValidationReport,
+        baseline_target_dir, cargo_args_have_package_scope, decision_log_path,
+        diagnostics_shape_signature, diagnostics_signature, feedback_errors_are_baseline_known,
+        feedback_is_accepted, feedback_repair_is_accepted, parse_args_from,
+        production_readiness_blocks_validation, production_validation_matrix_entries,
+        record_final_production_readiness, record_production_readiness_gate,
+        refresh_generated_lockfile_for_locked_validation, run_batch_roots, run_plain_check_gate,
+        semantic_hazard_warning_count, semantic_proof_block_reason, semantic_proof_status,
+        should_run_deferred_warning_repair, slice_report_path, try_widen_from_feedback,
+        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
+        ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -5467,6 +5514,52 @@ mod tests {
         );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
+    }
+
+    #[test]
+    fn default_baseline_target_is_shared_for_same_source_workspace() {
+        let first = parse_options(["--production", "workspace", "out-a"]);
+        let second = parse_options(["--production", "workspace", "out-b"]);
+
+        assert_eq!(baseline_target_dir(&first), baseline_target_dir(&second));
+        assert!(baseline_target_dir(&first)
+            .to_string_lossy()
+            .contains("slicers-baseline-targets"));
+    }
+
+    #[test]
+    fn baseline_target_cache_key_includes_cargo_check_args() {
+        let default_args = parse_options(["--production", "workspace", "out"]);
+        let feature_args = parse_options([
+            "--production",
+            "--cargo-check-arg",
+            "--features",
+            "--cargo-check-arg",
+            "mobile",
+            "workspace",
+            "out",
+        ]);
+
+        assert_ne!(
+            baseline_target_dir(&default_args),
+            baseline_target_dir(&feature_args)
+        );
+    }
+
+    #[test]
+    fn explicit_baseline_target_dir_overrides_shared_default() {
+        let options = parse_options([
+            "--production",
+            "--baseline-target-dir",
+            "custom-target",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(
+            baseline_target_dir(&options),
+            PathBuf::from("custom-target")
+        );
     }
 
     #[test]
