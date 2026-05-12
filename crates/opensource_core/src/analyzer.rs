@@ -394,12 +394,14 @@ mod rust_analyzer {
             atomic::{AtomicUsize, Ordering},
             Arc, Mutex,
         },
+        time::Instant,
     };
 
     use ra_ap_hir::{Adt, HasSource, ModuleDef, PathResolution};
-    use ra_ap_load_cargo::{load_workspace_at, LoadCargoConfig, ProcMacroServerChoice};
-    use ra_ap_project_model::CargoConfig;
+    use ra_ap_load_cargo::{load_workspace, LoadCargoConfig, ProcMacroServerChoice};
+    use ra_ap_project_model::{CargoConfig, ProjectManifest, ProjectWorkspace};
     use ra_ap_syntax::{ast, AstNode, TextSize};
+    use ra_ap_vfs::AbsPathBuf;
 
     use crate::{
         model::{
@@ -430,6 +432,78 @@ mod rust_analyzer {
     pub enum RaFeedbackMode {
         Disabled,
         Enabled,
+    }
+
+    #[derive(Debug, Default)]
+    struct RaWorkspaceLoadTrace {
+        requested_root: String,
+        absolute_root: Option<String>,
+        manifest_path: Option<String>,
+        workspace_manifest_or_root: Option<String>,
+        workspace_package_count: Option<usize>,
+        proc_macro_mode: &'static str,
+        manifest_discovery_ms: u64,
+        project_workspace_load_ms: u64,
+        build_scripts_ms: Option<u64>,
+        crate_graph_vfs_load_ms: u64,
+        build_script_error: Option<String>,
+        progress_events: usize,
+        progress_samples: Vec<String>,
+    }
+
+    impl RaWorkspaceLoadTrace {
+        fn new(workspace_root: &Path, proc_macro_mode: ProcMacroExpansionMode) -> Self {
+            Self {
+                requested_root: workspace_root.display().to_string(),
+                proc_macro_mode: match proc_macro_mode {
+                    ProcMacroExpansionMode::Disabled => "disabled",
+                    ProcMacroExpansionMode::Enabled => "enabled",
+                },
+                ..Self::default()
+            }
+        }
+
+        fn notes(&self) -> Vec<String> {
+            let mut notes = vec![
+                format!(
+                    "RA load scope: requested_root={}, absolute_root={}, manifest={}, workspace_manifest_or_root={}, loaded_packages={}, proc_macro_mode={}",
+                    self.requested_root,
+                    self.absolute_root.as_deref().unwrap_or("<unknown>"),
+                    self.manifest_path.as_deref().unwrap_or("<unknown>"),
+                    self.workspace_manifest_or_root.as_deref().unwrap_or("<unknown>"),
+                    self.workspace_package_count
+                        .map(|count| count.to_string())
+                        .unwrap_or_else(|| "<unknown>".to_string()),
+                    self.proc_macro_mode
+                ),
+                format!(
+                    "RA load phase timings: manifest_discovery={}ms, project_workspace={}ms, build_scripts={}, crate_graph_vfs={}ms",
+                    self.manifest_discovery_ms,
+                    self.project_workspace_load_ms,
+                    self.build_scripts_ms
+                        .map(|ms| format!("{ms}ms"))
+                        .unwrap_or_else(|| "skipped".to_string()),
+                    self.crate_graph_vfs_load_ms
+                ),
+                format!("workspace load progress events: {}", self.progress_events),
+            ];
+            if !self.progress_samples.is_empty() {
+                notes.push(format!(
+                    "workspace load progress samples: {}",
+                    self.progress_samples.join(" | ")
+                ));
+            }
+            if let Some(error) = &self.build_script_error {
+                notes.push(format!(
+                    "RA build-script discovery reported errors: {error}"
+                ));
+            }
+            notes
+        }
+    }
+
+    fn elapsed_ms_since(started: Instant) -> u64 {
+        started.elapsed().as_millis().try_into().unwrap_or(u64::MAX)
     }
 
     pub struct RustAnalyzerSemanticProvider {
@@ -518,8 +592,14 @@ mod rust_analyzer {
                 proc_macro_processes: 1,
             };
             let progress_events = AtomicUsize::new(0);
-            let progress = |_: String| {
-                progress_events.fetch_add(1, Ordering::Relaxed);
+            let progress_samples = Mutex::new(Vec::new());
+            let progress = |message: String| {
+                let index = progress_events.fetch_add(1, Ordering::Relaxed);
+                if index < 24 {
+                    if let Ok(mut samples) = progress_samples.lock() {
+                        samples.push(message);
+                    }
+                }
             };
 
             let _panic_hook_guard = RA_WORKSPACE_LOAD_PANIC_HOOK_LOCK
@@ -540,7 +620,42 @@ mod rust_analyzer {
                 }
             }));
             let loaded = panic::catch_unwind(AssertUnwindSafe(|| {
-                load_workspace_at(workspace_root, &cargo_config, &load_config, &progress)
+                let result: Result<_, Box<dyn std::error::Error>> = (|| {
+                    let mut load_trace = RaWorkspaceLoadTrace::new(workspace_root, proc_macro_mode);
+
+                    let started = Instant::now();
+                    let absolute_root =
+                        AbsPathBuf::assert_utf8(std::env::current_dir()?.join(workspace_root));
+                    load_trace.absolute_root = Some(absolute_root.to_string());
+                    let manifest = ProjectManifest::discover_single(&absolute_root)?;
+                    load_trace.manifest_path = Some(manifest.manifest_path().to_string());
+                    load_trace.manifest_discovery_ms = elapsed_ms_since(started);
+
+                    let started = Instant::now();
+                    let mut workspace = ProjectWorkspace::load(manifest, &cargo_config, &progress)?;
+                    load_trace.workspace_manifest_or_root =
+                        Some(workspace.manifest_or_root().to_string());
+                    load_trace.workspace_package_count = Some(workspace.n_packages());
+                    load_trace.project_workspace_load_ms = elapsed_ms_since(started);
+
+                    if load_config.load_out_dirs_from_check {
+                        let started = Instant::now();
+                        let build_scripts =
+                            workspace.run_build_scripts(&cargo_config, &progress)?;
+                        if let Some(error) = build_scripts.error() {
+                            load_trace.build_script_error = Some(error.to_string());
+                        }
+                        workspace.set_build_scripts(build_scripts);
+                        load_trace.build_scripts_ms = Some(elapsed_ms_since(started));
+                    }
+
+                    let started = Instant::now();
+                    let loaded = load_workspace(workspace, &cargo_config.extra_env, &load_config)?;
+                    load_trace.crate_graph_vfs_load_ms = elapsed_ms_since(started);
+
+                    Ok((loaded, load_trace))
+                })();
+                result
             }));
             let previous_hook = previous_hook
                 .lock()
@@ -549,7 +664,12 @@ mod rust_analyzer {
                 .expect("RA workspace load panic hook should be present");
             panic::set_hook(previous_hook);
             let loaded = loaded.map_err(|_| "rust-analyzer workspace load panicked")?;
-            let (database, vfs, proc_macro_client) = loaded?;
+            let ((database, vfs, proc_macro_client), mut load_trace) = loaded?;
+            load_trace.progress_events = progress_events.load(Ordering::Relaxed);
+            load_trace.progress_samples = progress_samples
+                .lock()
+                .map(|samples| samples.clone())
+                .unwrap_or_default();
 
             let semantic = collect_semantic_report(
                 &database,
@@ -563,6 +683,7 @@ mod rust_analyzer {
                 "rust-analyzer RootDatabase loaded".to_string(),
                 "HIR Semantics initialized".to_string(),
             ];
+            notes.extend(load_trace.notes());
             match proc_macro_mode {
                 ProcMacroExpansionMode::Disabled => {
                     notes.push(
@@ -592,10 +713,6 @@ mod rust_analyzer {
                     );
                 }
             }
-            notes.push(format!(
-                "workspace load progress events: {}",
-                progress_events.load(Ordering::Relaxed)
-            ));
             notes.push(format!(
                 "proc macro client active: {}",
                 proc_macro_client.is_some()
