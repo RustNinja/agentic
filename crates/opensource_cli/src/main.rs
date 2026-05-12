@@ -921,6 +921,42 @@ fn rendered_usage_contract(report: &GenerateReport) -> RenderedUsageContract {
     contract
 }
 
+fn decision_log_decision_samples(
+    kind: &str,
+    decisions: &BTreeMap<String, String>,
+    limit: usize,
+) -> Vec<String> {
+    let mut samples = Vec::new();
+    for preferred in [
+        "prunable",
+        "unclassified",
+        "blocked_by_unknown",
+        "used",
+        "retained",
+    ] {
+        for (id, decision) in decisions {
+            if decision != preferred {
+                continue;
+            }
+            samples.push(format!("{kind} {id} [{decision}]"));
+            if samples.len() >= limit {
+                return samples;
+            }
+        }
+    }
+    for (id, decision) in decisions {
+        let sample = format!("{kind} {id} [{decision}]");
+        if samples.contains(&sample) {
+            continue;
+        }
+        samples.push(sample);
+        if samples.len() >= limit {
+            break;
+        }
+    }
+    samples
+}
+
 fn accumulate_rendered_usage_decisions(
     kind: &str,
     decisions: &BTreeMap<String, String>,
@@ -4558,6 +4594,83 @@ fn decision_log_steps(
     });
 
     let rendered_summary = &report.usage.rendered_symbols.summary;
+    let rendered_decisions = &report.usage.rendered_decision_map;
+    let mut member_metrics = BTreeMap::new();
+    member_metrics.insert(
+        "rendered_members".to_string(),
+        serde_json::json!(rendered_summary.rendered_members),
+    );
+    member_metrics.insert(
+        "retained_members".to_string(),
+        serde_json::json!(rendered_summary.retained_members),
+    );
+    member_metrics.insert(
+        "blocked_members".to_string(),
+        serde_json::json!(rendered_summary.blocked_members),
+    );
+    member_metrics.insert(
+        "prunable_members".to_string(),
+        serde_json::json!(rendered_summary.prunable_members),
+    );
+    member_metrics.insert(
+        "unclassified_members".to_string(),
+        serde_json::json!(rendered_summary.unclassified_members),
+    );
+    member_metrics.insert(
+        "rendered_assoc_items".to_string(),
+        serde_json::json!(rendered_summary.rendered_assoc_items),
+    );
+    member_metrics.insert(
+        "retained_assoc_items".to_string(),
+        serde_json::json!(rendered_summary.retained_assoc_items),
+    );
+    member_metrics.insert(
+        "blocked_assoc_items".to_string(),
+        serde_json::json!(rendered_summary.blocked_assoc_items),
+    );
+    member_metrics.insert(
+        "prunable_assoc_items".to_string(),
+        serde_json::json!(rendered_summary.prunable_assoc_items),
+    );
+    member_metrics.insert(
+        "unclassified_assoc_items".to_string(),
+        serde_json::json!(rendered_summary.unclassified_assoc_items),
+    );
+    member_metrics.insert(
+        "member_decisions".to_string(),
+        serde_json::json!(rendered_decisions.members.len()),
+    );
+    member_metrics.insert(
+        "assoc_item_decisions".to_string(),
+        serde_json::json!(rendered_decisions.assoc_items.len()),
+    );
+    let mut member_evidence =
+        decision_log_decision_samples("member", &rendered_decisions.members, 20);
+    member_evidence.extend(decision_log_decision_samples(
+        "assoc_item",
+        &rendered_decisions.assoc_items,
+        20,
+    ));
+    steps.push(DecisionLogStep {
+        step: "member_pruning".to_string(),
+        status: if rendered_summary.prunable_members > 0
+            || rendered_summary.prunable_assoc_items > 0
+            || rendered_summary.unclassified_members > 0
+            || rendered_summary.unclassified_assoc_items > 0
+        {
+            "review_required".to_string()
+        } else if rendered_summary.blocked_members > 0 || rendered_summary.blocked_assoc_items > 0 {
+            "retained_unknown_surfaces".to_string()
+        } else {
+            "exact_used_surface".to_string()
+        },
+        decision: "retain only member and assoc-item surfaces classified as used or blocked_by_unknown"
+            .to_string(),
+        reason: "member pruning follows top-down concrete uses from retained bodies, macro-token field reads, public/root surfaces, and unknown-surface guards; known-unused members must not survive in generated root or dependency packages".to_string(),
+        metrics: member_metrics,
+        evidence: member_evidence,
+    });
+
     let mut import_metrics = BTreeMap::new();
     import_metrics.insert(
         "retained_members".to_string(),
@@ -5794,6 +5907,164 @@ fn run_feedback_repair_loop(
             return Err("repair produced a structurally invalid generated workspace".into());
         }
         refresh_generated_lockfile_for_locked_validation(options, validation)?;
+        if attempt == options.feedback_repair_iterations {
+            println!("feedback repair final verification: cargo check --message-format=json");
+            write_event_log(
+                options,
+                "feedback_repair_verification",
+                "started",
+                "run final cargo check after last conservative repair",
+                "a last-attempt repair must be verified before the repair loop can accept or reject",
+                event_fields(&[
+                    ("attempt", serde_json::json!(attempt + 1)),
+                    ("target_dir", serde_json::json!(feedback_target_dir(options))),
+                    (
+                        "feedback_report",
+                        serde_json::json!(feedback_report_path),
+                    ),
+                    ("repair_report", serde_json::json!(repair_report_path)),
+                    ("previous_repair_changes", serde_json::json!(repair_total_changes)),
+                ]),
+            )?;
+            let repaired_check = check_workspace(CheckOptions {
+                manifest_path: options.output_root.join("Cargo.toml"),
+                target_dir: Some(feedback_target_dir(options)),
+                timeout: options.feedback_timeout,
+                cargo_args: options.cargo_check_args.clone(),
+            })?;
+            write_report(&repaired_check, &feedback_report_path)?;
+            print_feedback(
+                &repaired_check,
+                options.feedback_limit,
+                &feedback_report_path,
+            );
+            let repaired_semantic_warnings =
+                semantic_hazard_warning_count(&repaired_check.diagnostics, baseline);
+            let repaired_repairable_warnings =
+                repairable_warning_count(&repaired_check.diagnostics);
+            write_event_log(
+                options,
+                "feedback_repair_verification",
+                if repaired_check.success {
+                    "checked"
+                } else {
+                    "failed"
+                },
+                "classify final compiler feedback after last repair",
+                "final repaired feedback decides whether the generated slice is accepted or rejected",
+                event_fields(&[
+                    ("attempt", serde_json::json!(attempt + 1)),
+                    ("success", serde_json::json!(repaired_check.success)),
+                    (
+                        "errors",
+                        serde_json::json!(repaired_check.error_count()),
+                    ),
+                    (
+                        "warnings",
+                        serde_json::json!(repaired_check.warning_count()),
+                    ),
+                    (
+                        "semantic_warnings",
+                        serde_json::json!(repaired_semantic_warnings),
+                    ),
+                    (
+                        "repairable_warnings",
+                        serde_json::json!(repaired_repairable_warnings),
+                    ),
+                    ("timed_out", serde_json::json!(repaired_check.timed_out)),
+                    ("duration_ms", serde_json::json!(repaired_check.duration_ms)),
+                ]),
+            )?;
+            if feedback_repair_is_accepted(&repaired_check, baseline, options.deny_warnings) {
+                write_event_log(
+                    options,
+                    "feedback_repair",
+                    "accepted",
+                    "accept generated workspace after final repair verification",
+                    "cargo check passed after the last conservative repair",
+                    event_fields(&[("attempt", serde_json::json!(attempt + 1))]),
+                )?;
+                record_feedback_attempt(
+                    validation,
+                    "feedback-repair",
+                    attempt + 1,
+                    "accepted",
+                    "generated workspace cargo check passed after conservative repair",
+                    &repaired_check,
+                    feedback_report_path.clone(),
+                    false,
+                    repaired_semantic_warnings,
+                    repaired_repairable_warnings,
+                    None,
+                    None,
+                );
+                record_feedback_gate(
+                    validation,
+                    "feedback-repair",
+                    "accepted",
+                    "generated workspace cargo check passed after conservative repair",
+                    &repaired_check,
+                    feedback_report_path.clone(),
+                    repaired_semantic_warnings,
+                );
+                return Ok(());
+            }
+            if options.allow_baseline_failures
+                && baseline_limited_feedback_repair_is_accepted(
+                    &repaired_check,
+                    baseline,
+                    options.deny_warnings,
+                )
+            {
+                record_feedback_attempt(
+                    validation,
+                    "feedback-repair",
+                    attempt + 1,
+                    "baseline_limited",
+                    "generated errors match the source baseline after conservative repair",
+                    &repaired_check,
+                    feedback_report_path.clone(),
+                    true,
+                    repaired_semantic_warnings,
+                    repaired_repairable_warnings,
+                    None,
+                    None,
+                );
+                record_feedback_gate(
+                    validation,
+                    "feedback-repair",
+                    "baseline_limited",
+                    "generated errors match the source baseline after conservative repair",
+                    &repaired_check,
+                    feedback_report_path.clone(),
+                    repaired_semantic_warnings,
+                );
+                return Ok(());
+            }
+            record_feedback_attempt(
+                validation,
+                "feedback-repair",
+                attempt + 1,
+                "rejected_after_repair",
+                "final verification after conservative repair did not pass",
+                &repaired_check,
+                feedback_report_path.clone(),
+                false,
+                repaired_semantic_warnings,
+                repaired_repairable_warnings,
+                None,
+                None,
+            );
+            record_feedback_gate(
+                validation,
+                "feedback-repair",
+                "failed",
+                "final verification after conservative repair did not pass",
+                &repaired_check,
+                feedback_report_path.clone(),
+                repaired_semantic_warnings,
+            );
+        }
     }
 
     if !validation
@@ -7543,10 +7814,11 @@ mod tests {
         initialize_event_log, parse_args_from, production_readiness_blocks_validation,
         production_validation_matrix_entries, record_final_production_readiness,
         record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
-        run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count,
-        semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
-        slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
-        validation_report_path, FeedbackWideningState, ValidationGateReport, ValidationReport,
+        run_batch_roots, run_feedback_repair_loop, run_plain_check_gate,
+        semantic_hazard_warning_count, semantic_proof_block_reason, semantic_proof_status,
+        should_run_deferred_warning_repair, slice_report_path, try_widen_from_feedback,
+        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
+        ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -7618,6 +7890,54 @@ mod tests {
 
         assert!(feedback_is_accepted(&report, None, false));
         assert!(!feedback_repair_is_accepted(&report, None, false));
+    }
+
+    #[test]
+    fn feedback_repair_loop_verifies_last_attempt_warning_cleanup() {
+        let output = temp_path("feedback-repair-final-verification-output");
+        write(
+            output.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            output.join("src/lib.rs"),
+            r#"use std::{fmt, mem};
+
+pub fn selected() -> usize {
+    mem::size_of::<usize>()
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            OsString::from("--feedback-repair-loop"),
+            OsString::from("1"),
+            OsString::from("--feedback-timeout"),
+            OsString::from("60"),
+            OsString::from("source"),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        let mut validation = ValidationReport::new(&options);
+
+        run_feedback_repair_loop(&options, None, &mut validation)
+            .expect("last-attempt warning repair should be verified and accepted");
+
+        let repaired = fs::read_to_string(output.join("src/lib.rs")).unwrap();
+        assert!(!repaired.contains("fmt"), "{repaired}");
+        assert!(validation
+            .attempts
+            .iter()
+            .any(|attempt| attempt.status == "repaired"));
+        assert!(validation
+            .attempts
+            .iter()
+            .any(|attempt| attempt.status == "accepted"));
+        let gate = validation
+            .gates
+            .iter()
+            .find(|gate| gate.name == "feedback-repair")
+            .expect("feedback repair gate should be recorded");
+        assert_eq!(gate.status, "accepted");
     }
 
     #[test]
@@ -8815,6 +9135,10 @@ pub fn dead() -> usize {
         );
         assert!(
             decision_log.contains("\"step\": \"usage_pruning\""),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("\"step\": \"member_pruning\""),
             "{decision_log}"
         );
         let validation = fs::read_to_string(root_output.join("slice-validation.json")).unwrap();

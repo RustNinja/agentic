@@ -1704,3 +1704,16 @@ covered by the retained variants. Leaving the wildcard arm is buildable but
 creates `unreachable_patterns` warnings and fails stricter production checks.
 Rendered impls now prune catch-all match arms only when all retained variants of
 the impl enum are already covered by unguarded explicit variant patterns.
+
+Per-root mining logs need member-level proof, not only phase summaries. A
+parallel Litter probe of `derive_recent_sessions`, `settings::render`, and
+`phone_frame::render_frame` showed that the broad rendered usage contract was
+correct but too coarse for support-package redundancy review. The CLI decision
+log now emits a `member_pruning` step with rendered/retained/blocked/prunable
+member and assoc-item counts plus sampled decisions. The same probe exposed a
+feedback-loop acceptance bug: a one-iteration repair loop could remove a
+repairable unused import after a successful warning-bearing check, pass
+preflight, and still reject because the repaired workspace was not checked
+again. Last-attempt repairs now run a final verification `cargo check`; the
+repaired Litter `derive_recent_sessions` output builds cleanly after the unused
+grouped import is removed.
