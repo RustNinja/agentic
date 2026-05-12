@@ -1761,37 +1761,17 @@ fn resolve_use_glob_dependencies(
     let Some((package, module_path)) = resolver.resolve_prefix(path) else {
         return dependencies;
     };
-    dependencies.items.extend(
-        resolver
-            .project
-            .items
-            .keys()
-            .filter(|item| {
-                item.package == package
-                    && item.module_path == module_path
-                    && reachable_idents.contains(&item.name)
-            })
-            .cloned(),
-    );
-    dependencies.callables.extend(
-        resolver
-            .project
-            .functions
-            .keys()
-            .filter(|callable| match callable {
-                CallableId::Free {
-                    package: callable_package,
-                    module_path: callable_module,
-                    name,
-                } => {
-                    callable_package == &package
-                        && callable_module == &module_path
-                        && reachable_idents.contains(name)
-                }
-                CallableId::Method { .. } => false,
-            })
-            .cloned(),
-    );
+    for ident in reachable_idents {
+        let mut target_path = module_path.clone();
+        target_path.push(ident.clone());
+        if let Some(item) = resolver.find_item(&package, &target_path, &all_item_kinds()) {
+            dependencies.items.insert(item);
+        }
+        if let Some(callable) = resolver.find_function(&package, &target_path, &mut BTreeSet::new())
+        {
+            dependencies.callables.insert(callable);
+        }
+    }
     dependencies
 }
 

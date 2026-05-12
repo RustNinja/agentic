@@ -3286,6 +3286,10 @@ fn prunes_facade_glob_support_chain_with_default_analyzer() {
         &api_root,
         &["mod dead", "dead_facade_report"],
     );
+    assert!(
+        api_live.contains("use facade_support::facade::*;"),
+        "{api_live}"
+    );
     assert!(api_live.contains("build_live"), "{api_live}");
     assert!(api_live.contains("LiveRecord"), "{api_live}");
     assert_absent(
@@ -3298,12 +3302,18 @@ fn prunes_facade_glob_support_chain_with_default_analyzer() {
     assert!(support_root.contains("mod live"), "{support_root}");
     assert!(support_root.contains("pub mod facade"), "{support_root}");
     assert!(support_root.contains("pub mod nested"), "{support_root}");
+    assert!(support_root.contains("pub use nested::*"), "{support_root}");
     assert!(support_root.contains("build_live"), "{support_root}");
     assert!(support_root.contains("LiveRecord"), "{support_root}");
     assert_absent(
         "facade_support/src/lib.rs",
         &support_root,
-        &["mod dead", "DeadRecord", "dead_factory"],
+        &[
+            "mod dead",
+            "pub use facade::*",
+            "DeadRecord",
+            "dead_factory",
+        ],
     );
     assert!(
         support_live.contains("pub struct LiveRecord"),

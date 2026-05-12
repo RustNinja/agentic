@@ -3,11 +3,11 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     fs::OpenOptions,
-    io::Write,
+    io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
-    time::Duration,
+    time::{Duration, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
@@ -41,11 +41,64 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return run_batch_roots(&options);
     }
 
+    initialize_event_log(&options)?;
+    write_event_log(
+        &options,
+        "input",
+        "configured",
+        "select top-level slice roots",
+        if options.root_selectors.is_empty() {
+            "source #[opensourced] markers define the top-level open-source surface"
+        } else {
+            "--root/--roots-file defines the top-level open-source surface without modifying source"
+        },
+        event_fields(&[
+            ("workspace_root", serde_json::json!(options.workspace_root)),
+            ("output_root", serde_json::json!(options.output_root)),
+            (
+                "analyzer",
+                serde_json::json!(options.analyzer_mode.as_str()),
+            ),
+            ("root_selectors", serde_json::json!(options.root_selectors)),
+            ("production", serde_json::json!(options.production_preset)),
+        ]),
+    )?;
+
     let mut validation = ValidationReport::new(&options);
 
     let baseline = if options.run_baseline_check {
+        write_event_log(
+            &options,
+            "baseline",
+            "started",
+            "run source workspace cargo check",
+            "source baseline distinguishes existing project failures from slicer-introduced failures",
+            event_fields(&[
+                ("target_dir", serde_json::json!(baseline_target_dir(&options))),
+                ("cargo_args", serde_json::json!(options.cargo_check_args)),
+            ]),
+        )?;
         let report = run_baseline_check(&options)?;
         let report_path = baseline_report_path(&options);
+        write_event_log(
+            &options,
+            "baseline",
+            if report.success { "passed" } else { "failed" },
+            "record source workspace baseline",
+            if report.success {
+                "source workspace cargo check passed"
+            } else if options.allow_baseline_failures {
+                "source workspace failed but failures are allowed as comparison baseline"
+            } else {
+                "source workspace failed and validation must reject before slicing"
+            },
+            event_fields(&[
+                ("report_path", serde_json::json!(report_path)),
+                ("errors", serde_json::json!(report.error_count())),
+                ("warnings", serde_json::json!(report.warning_count())),
+                ("duration_ms", serde_json::json!(report.duration_ms)),
+            ]),
+        )?;
         if !report.success && !options.allow_baseline_failures {
             write_baseline_report(&options, &report)?;
             print_baseline(&report, options.feedback_limit, Some(&report_path));
@@ -87,13 +140,61 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         None
     };
 
-    let report = generate_with_analyzer_roots(
+    write_event_log(
+        &options,
+        "generation",
+        "started",
+        "build top-down dependency closure",
+        "the slicer starts at selected roots and retains only downstream dependencies needed by those roots",
+        event_fields(&[
+            ("analyzer", serde_json::json!(options.analyzer_mode.as_str())),
+            ("output_root", serde_json::json!(options.output_root)),
+        ]),
+    )?;
+    let report = match generate_with_analyzer_roots(
         GenerateOptions {
             workspace_root: options.workspace_root.clone(),
             output_root: options.output_root.clone(),
         },
         options.analyzer_mode,
         &options.root_selectors,
+    ) {
+        Ok(report) => report,
+        Err(error) => {
+            let reason = error.to_string();
+            write_event_log(
+                &options,
+                "generation",
+                "failed",
+                "build top-down dependency closure",
+                &reason,
+                event_fields(&[
+                    (
+                        "analyzer",
+                        serde_json::json!(options.analyzer_mode.as_str()),
+                    ),
+                    ("output_root", serde_json::json!(options.output_root)),
+                    ("root_selectors", serde_json::json!(options.root_selectors)),
+                ]),
+            )?;
+            return Err(error);
+        }
+    };
+    write_event_log(
+        &options,
+        "generation",
+        "completed",
+        "render selected roots plus downstream closure",
+        "generation completed and produced a slice workspace for validation",
+        event_fields(&[
+            ("root_count", serde_json::json!(report.roots.len())),
+            ("packages", serde_json::json!(report.packages)),
+            ("files_written", serde_json::json!(report.files_written)),
+            ("total_ms", serde_json::json!(report.timings.total_ms)),
+            ("analyzer_ms", serde_json::json!(report.timings.analyzer_ms)),
+            ("reduce_ms", serde_json::json!(report.timings.reduce_ms)),
+            ("render_ms", serde_json::json!(report.timings.render_ms)),
+        ]),
     )?;
 
     println!(
@@ -188,6 +289,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         rendered_usage_contract.blocked_by_unknown,
         rendered_usage_contract.invalid.len()
     );
+    write_event_log(
+        &options,
+        "usage_contract",
+        if rendered_usage_contract.invalid.is_empty() {
+            "passed"
+        } else {
+            "failed"
+        },
+        "validate rendered source only contains used or blocked_by_unknown symbols",
+        "rendered prunable/unused symbols indicate redundant code escaped pruning",
+        event_fields(&[
+            ("used", serde_json::json!(rendered_usage_contract.used)),
+            (
+                "blocked_by_unknown",
+                serde_json::json!(rendered_usage_contract.blocked_by_unknown),
+            ),
+            (
+                "invalid",
+                serde_json::json!(rendered_usage_contract.invalid),
+            ),
+        ]),
+    )?;
     if let Some(report_path) = slice_report_path(&options) {
         write_generate_report(&report, &report_path)?;
         println!("slice report: {}", report_path.display());
@@ -241,6 +364,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err(reason.into());
     }
     if let Some(reason) = record_semantic_proof_gate(&options, &mut validation, &report) {
+        write_event_log(
+            &options,
+            "semantic_proof",
+            "failed",
+            "require RA semantic proof for selected roots",
+            &reason,
+            event_fields(&[]),
+        )?;
         finish_validation_with_decision_log(
             &options,
             &mut validation,
@@ -256,6 +387,28 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         &report.production,
         "before compiler feedback",
     );
+    write_event_log(
+        &options,
+        "production_readiness",
+        &report.production.status,
+        "classify remaining unknown surfaces before compiler feedback",
+        "warning hazards may continue to compiler feedback; error hazards fail closed",
+        event_fields(&[
+            (
+                "hazards",
+                serde_json::json!(report.production.hazards.len()),
+            ),
+            (
+                "hazard_codes",
+                serde_json::json!(report
+                    .production
+                    .hazards
+                    .iter()
+                    .map(|hazard| hazard.code.clone())
+                    .collect::<Vec<_>>()),
+            ),
+        ]),
+    )?;
     if production_readiness_blocks_validation(&options, &report.production) {
         let reason =
             "production readiness reported error hazards before compiler feedback".to_string();
@@ -275,6 +428,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             "selected target(s) are not covered by cargo check args: {}",
             uncovered_targets.join(", ")
         );
+        write_event_log(
+            &options,
+            "target_coverage",
+            "failed",
+            "verify cargo check arguments cover selected targets",
+            &reason,
+            event_fields(&[("uncovered_targets", serde_json::json!(uncovered_targets))]),
+        )?;
         validation.gates.push(ValidationGateReport {
             name: "target_coverage".to_string(),
             status: "failed".to_string(),
@@ -304,9 +465,25 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         semantic_warning_hazards: None,
         review_warning_hazards: None,
     });
+    write_event_log(
+        &options,
+        "target_coverage",
+        "passed",
+        "verify cargo check arguments cover selected targets",
+        "selected targets are covered by the requested cargo check scope",
+        event_fields(&[("targets", serde_json::json!(report.targets.len()))]),
+    )?;
     if let Err(error) = refresh_generated_lockfile_for_locked_validation(&options, &mut validation)
     {
         let reason = error.to_string();
+        write_event_log(
+            &options,
+            "lockfile",
+            "failed",
+            "reconcile generated lockfile before validation",
+            &reason,
+            event_fields(&[]),
+        )?;
         finish_validation_with_decision_log(
             &options,
             &mut validation,
@@ -328,7 +505,39 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         || options.feedback_iterations > 0
         || options.feedback_repair_iterations > 0
     {
+        write_event_log(
+            &options,
+            "preflight",
+            "started",
+            "run fast structural validation before cargo feedback",
+            "preflight catches malformed generated workspaces before slower compiler checks",
+            event_fields(&[(
+                "report_path",
+                serde_json::json!(preflight_report_path(&options)),
+            )]),
+        )?;
         let preflight = run_preflight(&options)?;
+        write_event_log(
+            &options,
+            "preflight",
+            if preflight.success {
+                "passed"
+            } else {
+                "failed"
+            },
+            "validate generated workspace structure",
+            if preflight.success {
+                "generated workspace passed fast structural validation"
+            } else {
+                "generated workspace failed fast structural validation"
+            },
+            event_fields(&[
+                ("packages", serde_json::json!(preflight.packages)),
+                ("rust_files", serde_json::json!(preflight.rust_files)),
+                ("errors", serde_json::json!(preflight.error_count())),
+                ("warnings", serde_json::json!(preflight.warning_count())),
+            ]),
+        )?;
         validation.gates.push(ValidationGateReport {
             name: "preflight".to_string(),
             status: if preflight.success {
@@ -361,6 +570,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     if options.feedback_repair_iterations > 0 {
+        write_event_log(
+            &options,
+            "feedback_repair",
+            "started",
+            "run compiler feedback with conservative repair",
+            "compiler feedback validates macro expansion and unresolved semantic surfaces",
+            event_fields(&[
+                (
+                    "iterations",
+                    serde_json::json!(options.feedback_repair_iterations),
+                ),
+                (
+                    "target_dir",
+                    serde_json::json!(feedback_target_dir(&options)),
+                ),
+            ]),
+        )?;
         if let Err(error) = run_feedback_repair_loop(&options, baseline.as_ref(), &mut validation) {
             let reason = error.to_string();
             finish_validation_with_decision_log(
@@ -373,6 +599,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(reason.into());
         }
     } else if options.feedback_iterations > 0 {
+        write_event_log(
+            &options,
+            "feedback",
+            "started",
+            "run compiler feedback",
+            "compiler feedback validates the generated slice after top-down pruning",
+            event_fields(&[
+                ("iterations", serde_json::json!(options.feedback_iterations)),
+                (
+                    "target_dir",
+                    serde_json::json!(feedback_target_dir(&options)),
+                ),
+            ]),
+        )?;
         if let Err(error) = run_feedback_loop(&options, baseline.as_ref(), &mut validation) {
             let reason = error.to_string();
             finish_validation_with_decision_log(
@@ -385,6 +625,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(reason.into());
         }
     } else if options.run_check {
+        write_event_log(
+            &options,
+            "check",
+            "started",
+            "run plain generated workspace cargo check",
+            "plain check validates generated buildability without feedback widening",
+            event_fields(&[(
+                "target_dir",
+                serde_json::json!(feedback_target_dir(&options)),
+            )]),
+        )?;
         if let Err(error) = run_plain_check_gate(&options, &mut validation) {
             let reason = error.to_string();
             write_decision_log(
@@ -413,6 +664,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
 
     record_final_production_readiness(&options, &mut validation);
+    write_event_log(
+        &options,
+        "final",
+        "accepted",
+        "accept generated slice after all requested validation gates",
+        "no validation gate rejected the generated slice",
+        event_fields(&[("gates", serde_json::json!(validation.gates.len()))]),
+    )?;
     finish_validation_with_decision_log(&options, &mut validation, &report, "accepted", None)?;
     Ok(())
 }
@@ -502,6 +761,7 @@ struct CliOptions {
     baseline_target_dir: Option<PathBuf>,
     slice_report: Option<PathBuf>,
     decision_log: Option<PathBuf>,
+    event_log: Option<PathBuf>,
     validation_report: Option<PathBuf>,
     run_preflight: bool,
     preflight_report: Option<PathBuf>,
@@ -689,6 +949,7 @@ where
     let mut baseline_target_dir = None;
     let mut slice_report = None;
     let mut decision_log = None;
+    let mut event_log = None;
     let mut validation_report = None;
     let mut run_preflight = false;
     let mut preflight_report = None;
@@ -786,6 +1047,10 @@ where
                 args.next()
                     .ok_or("--decision-log requires a following path")?,
             ));
+        } else if arg == OsStr::new("--event-log") {
+            event_log = Some(PathBuf::from(
+                args.next().ok_or("--event-log requires a following path")?,
+            ));
         } else if arg == OsStr::new("--validation-report") {
             validation_report = Some(PathBuf::from(
                 args.next()
@@ -873,6 +1138,7 @@ where
         baseline_target_dir,
         slice_report,
         decision_log,
+        event_log,
         validation_report,
         run_preflight,
         preflight_report,
@@ -1692,20 +1958,71 @@ fn parse_feedback_timeout(
     Ok((seconds > 0).then(|| Duration::from_secs(seconds)))
 }
 
-fn run_plain_check(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+#[derive(Debug, Clone)]
+struct PlainCheckOutput {
+    status: String,
+    stdout_excerpt: String,
+    stderr_excerpt: String,
+}
+
+#[derive(Debug)]
+struct PlainCheckFailure {
+    output: PlainCheckOutput,
+}
+
+impl std::fmt::Display for PlainCheckFailure {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(
+            formatter,
+            "generated workspace failed cargo check with {}",
+            self.output.status
+        )
+    }
+}
+
+impl std::error::Error for PlainCheckFailure {}
+
+fn run_plain_check(options: &CliOptions) -> Result<PlainCheckOutput, Box<dyn std::error::Error>> {
     let manifest_path = absolute_path(&options.output_root.join("Cargo.toml"))?;
     let working_dir = manifest_working_dir(&manifest_path);
-    let status = Command::new("cargo")
+    let output = Command::new("cargo")
         .arg("check")
         .arg("--manifest-path")
         .arg(&manifest_path)
         .args(&options.cargo_check_args)
         .current_dir(&working_dir)
-        .status()?;
-    if !status.success() {
-        return Err(format!("generated workspace failed cargo check with {status}").into());
+        .output()?;
+    io::stdout().write_all(&output.stdout)?;
+    io::stderr().write_all(&output.stderr)?;
+
+    let check_output = PlainCheckOutput {
+        status: output.status.to_string(),
+        stdout_excerpt: command_output_excerpt(&output.stdout),
+        stderr_excerpt: command_output_excerpt(&output.stderr),
+    };
+    if !output.status.success() {
+        return Err(Box::new(PlainCheckFailure {
+            output: check_output,
+        }));
     }
-    Ok(())
+    Ok(check_output)
+}
+
+fn command_output_excerpt(output: &[u8]) -> String {
+    const MAX_CHARS: usize = 12_000;
+    let text = String::from_utf8_lossy(output);
+    if text.chars().count() <= MAX_CHARS {
+        return text.into_owned();
+    }
+    let tail = text
+        .chars()
+        .rev()
+        .take(MAX_CHARS)
+        .collect::<Vec<_>>()
+        .into_iter()
+        .rev()
+        .collect::<String>();
+    format!("[truncated to last {MAX_CHARS} chars]\n{tail}")
 }
 
 fn run_plain_check_gate(
@@ -1713,7 +2030,18 @@ fn run_plain_check_gate(
     validation: &mut ValidationReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
     match run_plain_check(options) {
-        Ok(()) => {
+        Ok(output) => {
+            write_event_log(
+                options,
+                "check",
+                "passed",
+                "run plain generated workspace cargo check",
+                "generated workspace cargo check passed",
+                event_fields(&[
+                    ("status", serde_json::json!(output.status)),
+                    ("stderr_excerpt", serde_json::json!(output.stderr_excerpt)),
+                ]),
+            )?;
             validation.gates.push(ValidationGateReport {
                 name: "check".to_string(),
                 status: "passed".to_string(),
@@ -1728,6 +2056,32 @@ fn run_plain_check_gate(
         }
         Err(error) => {
             let reason = error.to_string();
+            let failure = error.downcast_ref::<PlainCheckFailure>();
+            write_event_log(
+                options,
+                "check",
+                "failed",
+                "run plain generated workspace cargo check",
+                &reason,
+                event_fields(&[
+                    (
+                        "status",
+                        serde_json::json!(failure.map(|failure| failure.output.status.clone())),
+                    ),
+                    (
+                        "stdout_excerpt",
+                        serde_json::json!(
+                            failure.map(|failure| failure.output.stdout_excerpt.clone())
+                        ),
+                    ),
+                    (
+                        "stderr_excerpt",
+                        serde_json::json!(
+                            failure.map(|failure| failure.output.stderr_excerpt.clone())
+                        ),
+                    ),
+                ]),
+            )?;
             validation.gates.push(ValidationGateReport {
                 name: "check".to_string(),
                 status: "failed".to_string(),
@@ -1818,6 +2172,14 @@ fn decision_log_path(options: &CliOptions) -> Option<PathBuf> {
         options
             .production_preset
             .then(|| options.output_root.join("slice-decision-log.json"))
+    })
+}
+
+fn event_log_path(options: &CliOptions) -> Option<PathBuf> {
+    options.event_log.clone().or_else(|| {
+        options
+            .production_preset
+            .then(|| options.output_root.join("slice-events.jsonl"))
     })
 }
 
@@ -2105,6 +2467,29 @@ fn finish_validation(
         write_validation_report(report, &path)?;
         println!("validation report: {}", path.display());
     }
+    write_event_log(
+        options,
+        "validation",
+        status,
+        "finish validation gates",
+        reason.unwrap_or("validation completed"),
+        event_fields(&[
+            ("gates", serde_json::json!(report.gates.len())),
+            ("attempts", serde_json::json!(report.attempts.len())),
+            (
+                "failed_gates",
+                serde_json::json!(report
+                    .gates
+                    .iter()
+                    .filter(|gate| gate.status == "failed")
+                    .count()),
+            ),
+            (
+                "validation_report",
+                serde_json::json!(validation_report_path(options)),
+            ),
+        ]),
+    )?;
     Ok(())
 }
 
@@ -2128,6 +2513,80 @@ fn finish_validation_with_decision_log(
 ) -> Result<(), Box<dyn std::error::Error>> {
     finish_validation(options, validation, status, reason)?;
     write_decision_log(options, report, Some(validation), status, reason)
+}
+
+#[derive(Debug, Serialize)]
+struct EventLogEntry {
+    timestamp_ms: u64,
+    pid: u32,
+    event: String,
+    status: String,
+    decision: String,
+    reason: String,
+    #[serde(skip_serializing_if = "BTreeMap::is_empty")]
+    fields: BTreeMap<String, serde_json::Value>,
+}
+
+fn initialize_event_log(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(path) = event_log_path(options) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, "")?;
+    write_event_log(
+        options,
+        "event_log",
+        "initialized",
+        "start append-only CLI event logging",
+        "each line records one runtime decision so parallel runs can be inspected independently",
+        event_fields(&[("path", serde_json::json!(path))]),
+    )
+}
+
+fn write_event_log(
+    options: &CliOptions,
+    event: &str,
+    status: &str,
+    decision: &str,
+    reason: &str,
+    fields: BTreeMap<String, serde_json::Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(path) = event_log_path(options) else {
+        return Ok(());
+    };
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let entry = EventLogEntry {
+        timestamp_ms: now_unix_ms(),
+        pid: std::process::id(),
+        event: event.to_string(),
+        status: status.to_string(),
+        decision: decision.to_string(),
+        reason: reason.to_string(),
+        fields,
+    };
+    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    writeln!(file, "{}", serde_json::to_string(&entry)?)?;
+    Ok(())
+}
+
+fn event_fields(pairs: &[(&str, serde_json::Value)]) -> BTreeMap<String, serde_json::Value> {
+    pairs
+        .iter()
+        .map(|(key, value)| ((*key).to_string(), value.clone()))
+        .collect()
+}
+
+fn now_unix_ms() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .try_into()
+        .unwrap_or(u64::MAX)
 }
 
 #[derive(Debug, Serialize)]
@@ -2163,6 +2622,8 @@ struct DecisionLogReportPaths {
     baseline_report: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     baseline_target_dir: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event_log: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
     preflight_report: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2255,6 +2716,7 @@ fn build_decision_log(
             baseline_target_dir: options
                 .run_baseline_check
                 .then(|| baseline_target_dir(options)),
+            event_log: event_log_path(options),
             preflight_report: maybe_preflight_report_path(options),
             feedback_report: feedback_report_path(options),
             feedback_target_dir: (options.run_check
@@ -2826,6 +3288,21 @@ fn run_feedback_loop(
             "feedback attempt {attempt}/{}: cargo check --message-format=json",
             options.feedback_iterations
         );
+        write_event_log(
+            options,
+            "feedback_attempt",
+            "started",
+            "run cargo check on generated workspace",
+            "compiler output decides whether the top-down slice is complete or needs widening",
+            event_fields(&[
+                ("attempt", serde_json::json!(attempt)),
+                (
+                    "target_dir",
+                    serde_json::json!(feedback_target_dir(options)),
+                ),
+                ("report_path", serde_json::json!(report_path)),
+            ]),
+        )?;
         let report = check_workspace(CheckOptions {
             manifest_path: options.output_root.join("Cargo.toml"),
             target_dir: Some(feedback_target_dir(options)),
@@ -2836,7 +3313,31 @@ fn run_feedback_loop(
         print_feedback(&report, options.feedback_limit, &report_path);
 
         let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, baseline);
+        write_event_log(
+            options,
+            "feedback_attempt",
+            if report.success { "checked" } else { "failed" },
+            "classify generated workspace compiler feedback",
+            "diagnostic shape and semantic warning gates decide whether to accept, widen, retry, or stop",
+            event_fields(&[
+                ("attempt", serde_json::json!(attempt)),
+                ("success", serde_json::json!(report.success)),
+                ("errors", serde_json::json!(report.error_count())),
+                ("warnings", serde_json::json!(report.warning_count())),
+                ("semantic_warnings", serde_json::json!(semantic_warnings)),
+                ("timed_out", serde_json::json!(report.timed_out)),
+                ("duration_ms", serde_json::json!(report.duration_ms)),
+            ]),
+        )?;
         if feedback_is_accepted(&report, baseline, options.deny_warnings) {
+            write_event_log(
+                options,
+                "feedback",
+                "accepted",
+                "accept generated workspace after compiler feedback",
+                "cargo check passed all feedback gates",
+                event_fields(&[("attempt", serde_json::json!(attempt))]),
+            )?;
             record_feedback_attempt(
                 validation,
                 "feedback",
@@ -2900,6 +3401,14 @@ fn run_feedback_loop(
             return Ok(());
         }
         if report.timed_out {
+            write_event_log(
+                options,
+                "feedback",
+                "timed_out",
+                "stop feedback loop",
+                "cargo check exceeded the configured timeout",
+                event_fields(&[("attempt", serde_json::json!(attempt))]),
+            )?;
             record_feedback_attempt(
                 validation,
                 "feedback",
@@ -2942,6 +3451,14 @@ fn run_feedback_loop(
 
         let signature = diagnostics_signature(&report.diagnostics);
         if !seen_diagnostics.insert(signature) {
+            write_event_log(
+                options,
+                "feedback",
+                "no_progress",
+                "stop feedback loop",
+                "feedback repeated identical diagnostics, so another attempt would not improve the slice",
+                event_fields(&[("attempt", serde_json::json!(attempt))]),
+            )?;
             record_feedback_attempt(
                 validation,
                 "feedback",
@@ -2973,6 +3490,14 @@ fn run_feedback_loop(
         }
         let shape_signature = diagnostics_shape_signature(&report.diagnostics);
         if !seen_diagnostic_shapes.insert(shape_signature) {
+            write_event_log(
+                options,
+                "feedback",
+                "low_progress",
+                "stop feedback loop",
+                "feedback repeated the same diagnostic shape, so another attempt is likely cycling",
+                event_fields(&[("attempt", serde_json::json!(attempt))]),
+            )?;
             record_feedback_attempt(
                 validation,
                 "feedback",
@@ -3028,6 +3553,14 @@ fn run_feedback_loop(
         semantic_warning_hazards: None,
         review_warning_hazards: None,
     });
+    write_event_log(
+        options,
+        "feedback",
+        "failed",
+        "exhaust feedback loop",
+        "generated workspace did not pass compiler feedback within configured attempts",
+        event_fields(&[("attempts", serde_json::json!(options.feedback_iterations))]),
+    )?;
     Err(format!(
         "generated workspace failed compiler feedback loop; report written to {}",
         report_path.display()
@@ -3058,6 +3591,22 @@ fn run_feedback_repair_loop(
             "feedback repair attempt {attempt}/{}: cargo check --message-format=json",
             options.feedback_repair_iterations
         );
+        write_event_log(
+            options,
+            "feedback_repair_attempt",
+            "started",
+            "run cargo check before optional conservative repair",
+            "compiler output decides whether the slice is accepted, repaired, widened, retried, or rejected",
+            event_fields(&[
+                ("attempt", serde_json::json!(attempt)),
+                ("target_dir", serde_json::json!(feedback_target_dir(options))),
+                (
+                    "feedback_report",
+                    serde_json::json!(feedback_report_path),
+                ),
+                ("repair_report", serde_json::json!(repair_report_path)),
+            ]),
+        )?;
         let report = check_workspace(CheckOptions {
             manifest_path: options.output_root.join("Cargo.toml"),
             target_dir: Some(feedback_target_dir(options)),
@@ -3070,7 +3619,32 @@ fn run_feedback_repair_loop(
         let warnings = report.warning_count();
         let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, baseline);
         let repairable_warnings = repairable_warning_count(&report.diagnostics);
+        write_event_log(
+            options,
+            "feedback_repair_attempt",
+            if report.success { "checked" } else { "failed" },
+            "classify compiler feedback before repair",
+            "semantic warnings, repairable warnings, and diagnostic progress choose the next action",
+            event_fields(&[
+                ("attempt", serde_json::json!(attempt)),
+                ("success", serde_json::json!(report.success)),
+                ("errors", serde_json::json!(report.error_count())),
+                ("warnings", serde_json::json!(warnings)),
+                ("semantic_warnings", serde_json::json!(semantic_warnings)),
+                ("repairable_warnings", serde_json::json!(repairable_warnings)),
+                ("timed_out", serde_json::json!(report.timed_out)),
+                ("duration_ms", serde_json::json!(report.duration_ms)),
+            ]),
+        )?;
         if feedback_repair_is_accepted(&report, baseline, options.deny_warnings) {
+            write_event_log(
+                options,
+                "feedback_repair",
+                "accepted",
+                "accept generated workspace after compiler feedback",
+                "cargo check passed all repair feedback gates",
+                event_fields(&[("attempt", serde_json::json!(attempt))]),
+            )?;
             record_feedback_attempt(
                 validation,
                 "feedback-repair",
@@ -5059,7 +5633,7 @@ fn usage() -> String {
         "[--feedback-timeout <seconds>] [--deny-warnings] [--feedback-report <path>] ",
         "[--feedback-target-dir <path>] [--cargo-check-arg <arg>] [--repair-report <path>] ",
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
-        "[--baseline-target-dir <path>] [--slice-report <path>] [--decision-log <path>] [--validation-report <path>] ",
+        "[--baseline-target-dir <path>] [--slice-report <path>] [--decision-log <path>] [--event-log <path>] [--validation-report <path>] ",
         "[--preflight-report <path>] [--root <selector>] [--roots-file <path>] ",
         "[--random-roots <n>] [--random-root-package <package>] [--random-seed <n>] [--batch-roots] [--batch-report <path>] ",
         "<workspace-root-or-Cargo.toml> <output-root>\n",
@@ -5093,15 +5667,15 @@ mod tests {
     use super::{
         apply_default_marked_package_scope, baseline_limited_feedback_is_accepted,
         baseline_target_dir, cargo_args_have_package_scope, decision_log_path,
-        diagnostics_shape_signature, diagnostics_signature, feedback_errors_are_baseline_known,
-        feedback_is_accepted, feedback_repair_is_accepted, parse_args_from,
-        production_readiness_blocks_validation, production_validation_matrix_entries,
-        record_final_production_readiness, record_production_readiness_gate,
-        refresh_generated_lockfile_for_locked_validation, run_batch_roots, run_plain_check_gate,
-        semantic_hazard_warning_count, semantic_proof_block_reason, semantic_proof_status,
-        should_run_deferred_warning_repair, slice_report_path, try_widen_from_feedback,
-        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
-        ValidationGateReport, ValidationReport,
+        diagnostics_shape_signature, diagnostics_signature, event_log_path,
+        feedback_errors_are_baseline_known, feedback_is_accepted, feedback_repair_is_accepted,
+        parse_args_from, production_readiness_blocks_validation,
+        production_validation_matrix_entries, record_final_production_readiness,
+        record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
+        run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count,
+        semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
+        slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
+        validation_report_path, FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -5511,6 +6085,10 @@ mod tests {
         assert_eq!(
             decision_log_path(&options),
             Some(PathBuf::from("out/slice-decision-log.json"))
+        );
+        assert_eq!(
+            event_log_path(&options),
+            Some(PathBuf::from("out/slice-events.jsonl"))
         );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
@@ -6240,6 +6818,16 @@ resolver = "2"
     }
 
     #[test]
+    fn explicit_event_log_enables_runtime_events() {
+        let options = parse_options(["--event-log", "events.jsonl", "workspace", "out"]);
+
+        assert_eq!(
+            event_log_path(&options),
+            Some(PathBuf::from("events.jsonl"))
+        );
+    }
+
+    #[test]
     fn explicit_root_options_select_roots_without_source_markers() {
         let options = parse_options([
             "--analyzer",
@@ -6699,11 +7287,14 @@ pub fn helper() -> usize {
         let source = temp_path("cli-plain-check-source");
         let output = temp_path("cli-plain-check-output");
         let validation_path = temp_path("cli-plain-check-report").join("validation.json");
+        let event_log_path = temp_path("cli-plain-check-events").join("events.jsonl");
         write(output.join("Cargo.toml"), "not valid toml");
         let options = parse_args_from(vec![
             std::ffi::OsString::from("--check"),
             std::ffi::OsString::from("--validation-report"),
             validation_path.clone().into_os_string(),
+            std::ffi::OsString::from("--event-log"),
+            event_log_path.clone().into_os_string(),
             source.into_os_string(),
             output.into_os_string(),
         ])
@@ -6719,6 +7310,10 @@ pub fn helper() -> usize {
         assert_eq!(value["status"], "rejected");
         assert_eq!(value["gates"][0]["name"], "check");
         assert_eq!(value["gates"][0]["status"], "failed");
+        let events = fs::read_to_string(event_log_path).unwrap();
+        assert!(events.contains(r#""event":"check""#), "{events}");
+        assert!(events.contains(r#""status":"failed""#), "{events}");
+        assert!(events.contains("stderr_excerpt"), "{events}");
     }
 
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {

@@ -18522,6 +18522,38 @@ fn module_glob_is_used_in_module(
     target_package: &str,
     target_path: &[String],
 ) -> bool {
+    if module_items_for_path(project, target_package, target_path).is_some_and(|items| {
+        module_rendered_public_visible_names(
+            project,
+            reduced,
+            render_plan,
+            target_package,
+            target_path,
+            items,
+        )
+        .iter()
+        .any(|name| {
+            reachable_module_import_scope_uses_imported_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                name,
+            ) || reachable_module_import_scope_mentions_ident_excluding(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                name,
+                Some(target_path),
+            )
+        })
+    }) {
+        return true;
+    }
+
     project.functions.keys().any(|callable| {
         let CallableId::Free {
             package: callable_package,
@@ -22926,20 +22958,19 @@ fn use_prefix_should_drop(
                 }
                 return !exposes_referenced_name;
             }
+            let glob_is_used = module_glob_is_used_in_module(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &target_package,
+                &target_path,
+            );
             if !module_should_render(project, reduced, render_plan, &target_package, &target_path) {
-                return true;
+                return !glob_is_used;
             }
-            !is_public_use
-                && prefix.first().is_none_or(|first| first != "super")
-                && !module_glob_is_used_in_module(
-                    project,
-                    reduced,
-                    render_plan,
-                    package,
-                    module_path,
-                    &target_package,
-                    &target_path,
-                )
+            !is_public_use && prefix.first().is_none_or(|first| first != "super") && !glob_is_used
         },
     )
 }
@@ -23652,7 +23683,14 @@ fn public_glob_exposed_name_is_used(
     }
 
     if source_module_path.is_empty()
-        && reachable_package_mentions_unqualified_ident(project, reduced, package, name)
+        && reachable_module_import_scope_uses_imported_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            source_module_path,
+            name,
+        )
     {
         return true;
     }
@@ -24016,36 +24054,6 @@ fn public_glob_target_name_is_selected_root(
     })
 }
 
-fn reachable_package_mentions_unqualified_ident(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &str,
-    ident: &str,
-) -> bool {
-    reduced
-        .reachable
-        .iter()
-        .filter(|callable| callable.package() == package)
-        .any(|callable| {
-            project.functions.get(callable).is_some_and(|record| {
-                token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)
-            }) || project.methods.get(callable).is_some_and(|record| {
-                token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)
-            })
-        })
-        || reduced
-            .reachable_items
-            .iter()
-            .filter(|item| {
-                item.package == package && item.name != ident && item.kind != ItemKind::Mod
-            })
-            .any(|item| {
-                project.items.get(item).is_some_and(|record| {
-                    token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)
-                })
-            })
-}
-
 fn reachable_package_mentions_module_path_ident(
     project: &Project,
     reduced: &ReducedProject,
@@ -24096,10 +24104,48 @@ fn module_rendered_public_visible_names(
     items: &[Item],
 ) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
+    let mut visited = BTreeSet::new();
+    collect_module_rendered_public_visible_names(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        items,
+        &mut visited,
+        &mut names,
+    );
+    names
+}
+
+#[allow(clippy::too_many_arguments)]
+fn collect_module_rendered_public_visible_names(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    items: &[Item],
+    visited: &mut BTreeSet<(String, Vec<String>)>,
+    names: &mut BTreeSet<String>,
+) {
+    if !visited.insert((package.to_string(), module_path.to_vec())) {
+        return;
+    }
     for item in items {
         match item {
             Item::Use(item_use) if use_is_reexport(&item_use.vis) => {
-                collect_use_tree_visible_names(&item_use.tree, Vec::new(), &mut names);
+                collect_public_use_tree_visible_names(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    &item_use.tree,
+                    Vec::new(),
+                    visited,
+                    names,
+                );
             }
             _ if item_is_public(item)
                 && public_visible_item_should_render(
@@ -24118,7 +24164,6 @@ fn module_rendered_public_visible_names(
             _ => {}
         }
     }
-    names
 }
 
 fn public_visible_item_should_render(
@@ -24148,15 +24193,32 @@ fn public_visible_item_should_render(
     }
 }
 
-fn collect_use_tree_visible_names(
+#[allow(clippy::too_many_arguments)]
+fn collect_public_use_tree_visible_names(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
     tree: &UseTree,
     mut prefix: Vec<String>,
+    visited: &mut BTreeSet<(String, Vec<String>)>,
     names: &mut BTreeSet<String>,
 ) {
     match tree {
         UseTree::Path(path) => {
             prefix.push(path.ident.to_string());
-            collect_use_tree_visible_names(&path.tree, prefix, names);
+            collect_public_use_tree_visible_names(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &path.tree,
+                prefix,
+                visited,
+                names,
+            );
         }
         UseTree::Name(name) => {
             if name.ident == "self" {
@@ -24172,10 +24234,40 @@ fn collect_use_tree_visible_names(
         }
         UseTree::Group(group) => {
             for item in &group.items {
-                collect_use_tree_visible_names(item, prefix.clone(), names);
+                collect_public_use_tree_visible_names(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    item,
+                    prefix.clone(),
+                    visited,
+                    names,
+                );
             }
         }
-        UseTree::Glob(_) => {}
+        UseTree::Glob(_) => {
+            let Some((target_package, target_module_path)) =
+                resolve_use_target_path(project, package, module_path, &prefix)
+            else {
+                return;
+            };
+            let Some(items) = module_items_for_path(project, &target_package, &target_module_path)
+            else {
+                return;
+            };
+            collect_module_rendered_public_visible_names(
+                project,
+                reduced,
+                render_plan,
+                &target_package,
+                &target_module_path,
+                items,
+                visited,
+                names,
+            );
+        }
     }
 }
 

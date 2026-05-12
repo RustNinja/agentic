@@ -1,4 +1,4 @@
-use facade_support::facade::{build_live, LiveRecord};
+use facade_support::facade::*;
 
 pub fn selected_facade_report(raw: &str) -> String {
     let record: LiveRecord = build_live(raw);
