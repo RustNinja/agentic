@@ -16,3 +16,15 @@ pub struct ChildView {
     pub child_weight: u32,
     pub dead_child_view_note: Option<String>,
 }
+
+pub struct LocalView {
+    pub local_title: String,
+    pub local_score: u32,
+    pub dead_local_note: Option<String>,
+}
+
+pub struct LazyView {
+    pub lazy_title: String,
+    pub lazy_score: u32,
+    pub dead_lazy_note: Option<String>,
+}

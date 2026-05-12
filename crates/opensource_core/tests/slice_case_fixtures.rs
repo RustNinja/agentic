@@ -759,9 +759,17 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(field_api.contains("view.weight"), "{field_api}");
     assert!(field_api.contains("child.child_weight"), "{field_api}");
     assert!(field_api.contains("child.child_label"), "{field_api}");
+    assert!(field_api.contains("local_views"), "{field_api}");
+    assert!(field_api.contains("view.local_title"), "{field_api}");
+    assert!(field_api.contains("view.local_score"), "{field_api}");
+    assert!(field_api.contains("lazy_views"), "{field_api}");
+    assert!(field_api.contains("view.lazy_title"), "{field_api}");
+    assert!(field_api.contains("view.lazy_score"), "{field_api}");
     assert!(!field_api.contains("dead_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_filter_note"), "{field_api}");
     assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
+    assert!(!field_api.contains("dead_local_note"), "{field_api}");
+    assert!(!field_api.contains("dead_lazy_note"), "{field_api}");
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
 
     assert!(
@@ -826,6 +834,17 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
         !view_record.contains("dead_child_view_note"),
         "{view_record}"
     );
+    assert!(
+        view_record.contains("pub struct LocalView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub local_title:"), "{view_record}");
+    assert!(view_record.contains("pub local_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_local_note"), "{view_record}");
+    assert!(view_record.contains("pub struct LazyView"), "{view_record}");
+    assert!(view_record.contains("pub lazy_title:"), "{view_record}");
+    assert!(view_record.contains("pub lazy_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_lazy_note"), "{view_record}");
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }

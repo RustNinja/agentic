@@ -19542,6 +19542,7 @@ struct ConcreteStructFieldUseVisitor<'a> {
     field_name: &'a str,
     self_item: Option<ItemId>,
     bindings: Vec<(String, ItemId)>,
+    iterable_bindings: Vec<(String, IteratorItemShape)>,
     needs_field: bool,
 }
 
@@ -19586,6 +19587,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             field_name,
             self_item,
             bindings: Vec::new(),
+            iterable_bindings: Vec::new(),
             needs_field: false,
         }
     }
@@ -19668,6 +19670,10 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 .elems
                 .first()
                 .and_then(|expr| self.expression_value_shape(expr)),
+            Expr::Path(path) if path.path.segments.len() == 1 => {
+                let name = path.path.segments.first()?.ident.to_string();
+                self.current_iterable_binding(&name).cloned()
+            }
             Expr::Field(field) => self
                 .field_expr_type(field)
                 .and_then(|ty| self.sequence_value_type_item(ty))
@@ -19771,6 +19777,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             field_name: self.field_name,
             self_item: self.self_item.clone(),
             bindings: self.bindings.clone(),
+            iterable_bindings: self.iterable_bindings.clone(),
             needs_field: false,
         }
     }
@@ -20140,6 +20147,13 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             .find_map(|(candidate, item)| (candidate == name).then_some(item))
     }
 
+    fn current_iterable_binding(&self, name: &str) -> Option<&IteratorItemShape> {
+        self.iterable_bindings
+            .iter()
+            .rev()
+            .find_map(|(candidate, shape)| (candidate == name).then_some(shape))
+    }
+
     fn field_base_targets_item(&self, base: &Expr) -> bool {
         match base {
             Expr::Path(path) if path.path.segments.len() == 1 => {
@@ -20156,8 +20170,11 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     fn record_binding_from_local(&mut self, local: &syn::Local) {
         if let Some(init) = &local.init {
             let binding_count = self.bindings.len();
+            let iterable_binding_count = self.iterable_bindings.len();
             self.record_bindings_from_pattern_expr(&local.pat, &init.expr);
-            if self.bindings.len() == binding_count {
+            if self.bindings.len() == binding_count
+                && self.iterable_bindings.len() == iterable_binding_count
+            {
                 let Some(name) = local_binding_name(&local.pat) else {
                     return;
                 };
@@ -20178,6 +20195,29 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     fn record_bindings_from_pattern_expr(&mut self, pat: &Pat, expr: &Expr) {
         if let Some(item) = self.expr_type_item(expr) {
             self.record_pattern_binding_item(pat, &item);
+        }
+        if let Some(shape) = self.expression_iterable_item_shape_for_binding(expr) {
+            self.record_pattern_iterable_binding_shape(pat, &shape);
+        }
+    }
+
+    fn expression_iterable_item_shape_for_binding(&self, expr: &Expr) -> Option<IteratorItemShape> {
+        self.expression_iter_item_shape(expr)
+            .or_else(|| self.expression_collected_item_shape(expr))
+    }
+
+    fn expression_collected_item_shape(&self, expr: &Expr) -> Option<IteratorItemShape> {
+        match expr {
+            Expr::MethodCall(call) if call.method == "collect" => {
+                self.expression_iter_item_shape(&call.receiver)
+            }
+            Expr::Reference(reference) => self.expression_collected_item_shape(&reference.expr),
+            Expr::Paren(paren) => self.expression_collected_item_shape(&paren.expr),
+            Expr::Block(block) => final_block_expression(&block.block)
+                .and_then(|expr| self.expression_collected_item_shape(expr)),
+            Expr::Unsafe(block) => final_block_expression(&block.block)
+                .and_then(|expr| self.expression_collected_item_shape(expr)),
+            _ => None,
         }
     }
 
@@ -20230,6 +20270,24 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 Pat::Paren(paren) => self.record_pattern_binding_shape(&paren.pat, shape),
                 _ => {}
             },
+        }
+    }
+
+    fn record_pattern_iterable_binding_shape(&mut self, pat: &Pat, shape: &IteratorItemShape) {
+        match pat {
+            Pat::Ident(ident) => {
+                self.iterable_bindings
+                    .push((ident.ident.to_string(), shape.clone()));
+                if let Some((_at, subpat)) = &ident.subpat {
+                    self.record_pattern_iterable_binding_shape(subpat, shape);
+                }
+            }
+            Pat::Type(typed) => self.record_pattern_iterable_binding_shape(&typed.pat, shape),
+            Pat::Reference(reference) => {
+                self.record_pattern_iterable_binding_shape(&reference.pat, shape)
+            }
+            Pat::Paren(paren) => self.record_pattern_iterable_binding_shape(&paren.pat, shape),
+            _ => {}
         }
     }
 
@@ -20293,6 +20351,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         positions: &[usize],
     ) {
         let binding_count = self.bindings.len();
+        let iterable_binding_count = self.iterable_bindings.len();
         for position in positions {
             if let Some(input) = closure.inputs.iter().nth(*position) {
                 self.record_pattern_binding_shape(input, shape);
@@ -20307,6 +20366,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         visit::visit_return_type(self, &closure.output);
         self.visit_expr(&closure.body);
         self.bindings.truncate(binding_count);
+        self.iterable_bindings.truncate(iterable_binding_count);
     }
 }
 
@@ -20539,6 +20599,7 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
         self.visit_fn_input_patterns(function.sig.inputs.iter());
         self.visit_block(&function.block);
         self.bindings.truncate(binding_count);
+        self.iterable_bindings.clear();
     }
 
     fn visit_impl_item_fn(&mut self, method: &syn::ImplItemFn) {
@@ -20546,22 +20607,27 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
         self.visit_fn_input_patterns(method.sig.inputs.iter());
         self.visit_block(&method.block);
         self.bindings.truncate(binding_count);
+        self.iterable_bindings.clear();
     }
 
     fn visit_expr_closure(&mut self, closure: &syn::ExprClosure) {
         let binding_count = self.push_closure_input_bindings(closure.inputs.iter());
+        let iterable_binding_count = self.iterable_bindings.len();
         for input in &closure.inputs {
             self.visit_pat(input);
         }
         visit::visit_return_type(self, &closure.output);
         self.visit_expr(&closure.body);
         self.bindings.truncate(binding_count);
+        self.iterable_bindings.truncate(iterable_binding_count);
     }
 
     fn visit_block(&mut self, block: &Block) {
         let binding_count = self.bindings.len();
+        let iterable_binding_count = self.iterable_bindings.len();
         visit::visit_block(self, block);
         self.bindings.truncate(binding_count);
+        self.iterable_bindings.truncate(iterable_binding_count);
     }
 
     fn visit_local(&mut self, local: &syn::Local) {
@@ -20573,9 +20639,11 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
         if let Expr::Let(expr_let) = expr_if.cond.as_ref() {
             self.visit_expr(&expr_let.expr);
             let binding_count = self.bindings.len();
+            let iterable_binding_count = self.iterable_bindings.len();
             self.record_bindings_from_pattern_expr(&expr_let.pat, &expr_let.expr);
             self.visit_block(&expr_if.then_branch);
             self.bindings.truncate(binding_count);
+            self.iterable_bindings.truncate(iterable_binding_count);
             if let Some((_else, else_branch)) = &expr_if.else_branch {
                 self.visit_expr(else_branch);
             }
@@ -20587,12 +20655,14 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
     fn visit_expr_for_loop(&mut self, loop_expr: &syn::ExprForLoop) {
         self.visit_expr(&loop_expr.expr);
         let binding_count = self.bindings.len();
+        let iterable_binding_count = self.iterable_bindings.len();
         if let Some(shape) = self.expression_iter_item_shape(&loop_expr.expr) {
             self.record_pattern_binding_shape(&loop_expr.pat, &shape);
         }
         self.visit_pat(&loop_expr.pat);
         self.visit_block(&loop_expr.body);
         self.bindings.truncate(binding_count);
+        self.iterable_bindings.truncate(iterable_binding_count);
     }
 
     fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
