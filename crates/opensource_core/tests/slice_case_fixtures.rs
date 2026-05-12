@@ -2300,10 +2300,7 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "litter_conversation_render_prune",
             packages: &["codex-core", "codex-protocol", "codex-tui"],
-            hazards: &[
-                ("semantic_unresolved_paths", "warning"),
-                ("syntactic_method_fallbacks", "warning"),
-            ],
+            hazards: &[("semantic_unresolved_paths", "warning")],
         },
         RaHardFixture {
             fixture: "litter_conversation_state_serde_prune",
@@ -2343,7 +2340,6 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 ("conditional_compilation_attrs", "warning"),
                 ("custom_derive_macros", "warning"),
                 ("semantic_unresolved_paths", "warning"),
-                ("syntactic_method_fallbacks", "warning"),
                 ("trait_object_surfaces", "warning"),
             ],
         },
@@ -2364,10 +2360,7 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "litter_reconnect_callback_prune",
             packages: &["codex-client", "codex-ipc"],
-            hazards: &[
-                ("syntactic_method_fallbacks", "warning"),
-                ("trait_object_surfaces", "warning"),
-            ],
+            hazards: &[("trait_object_surfaces", "warning")],
         },
         RaHardFixture {
             fixture: "macro_receiver_prune",
@@ -2394,10 +2387,7 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "callback_store_prune",
             packages: &["callback_store_api", "callback_store_support", "root"],
-            hazards: &[
-                ("trait_object_surfaces", "warning"),
-                ("syntactic_method_fallbacks", "warning"),
-            ],
+            hazards: &[("trait_object_surfaces", "warning")],
         },
         RaHardFixture {
             fixture: "ffi_export_prune",
@@ -2412,7 +2402,7 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "poll_adapter_prune",
             packages: &["poll_api", "poll_support", "root"],
-            hazards: &[("syntactic_method_fallbacks", "warning")],
+            hazards: &[],
         },
         RaHardFixture {
             fixture: "uniffi_runtime_prune",

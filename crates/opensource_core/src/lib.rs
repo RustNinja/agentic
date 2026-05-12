@@ -6416,7 +6416,7 @@ fn add_reduction_evidence_production_hazards(
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
     let evidence = &reduced.evidence;
-    if evidence.unresolved_method_candidate_matches > 0 {
+    if evidence.unresolved_method_candidate_matches > 0 && !semantic_pruning_proven {
         hazards.push(production_hazard(
             "syntactic_method_fallbacks",
             "warning",
