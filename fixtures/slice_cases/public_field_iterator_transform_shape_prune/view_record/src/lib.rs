@@ -129,3 +129,18 @@ pub struct NewtypeView {
     pub newtype_score: u32,
     pub dead_newtype_note: Option<String>,
 }
+
+pub struct LocalAliasViews(pub Vec<LocalAliasView>);
+
+impl LocalAliasViews {
+    pub fn iter(&self) -> std::slice::Iter<'_, LocalAliasView> {
+        let views = &self.0;
+        views.iter()
+    }
+}
+
+pub struct LocalAliasView {
+    pub local_alias_title: String,
+    pub local_alias_score: u32,
+    pub dead_local_alias_note: Option<String>,
+}

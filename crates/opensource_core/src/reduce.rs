@@ -9431,10 +9431,12 @@ impl Resolver<'_> {
         if let Some(qself) = &path.qself {
             return self.resolve_type(&qself.ty);
         }
-        self.type_from_associated_call(&path.path).or_else(|| {
-            self.resolve_free_function(&path.path)
-                .and_then(|callable| self.return_type_from_callable(&callable))
-        })
+        self.resolve_type_path(&path.path)
+            .or_else(|| self.type_from_associated_call(&path.path))
+            .or_else(|| {
+                self.resolve_free_function(&path.path)
+                    .and_then(|callable| self.return_type_from_callable(&callable))
+            })
     }
 
     fn type_from_value_path(&self, path: &Path) -> Option<TypeRef> {

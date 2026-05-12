@@ -272,8 +272,25 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let local_alias_views = view_record::LocalAliasViews(
+        snapshot
+            .records
+            .iter()
+            .map(|record| view_record::LocalAliasView {
+                local_alias_title: record.raw_label.clone(),
+                local_alias_score: record.raw_value,
+                dead_local_alias_note: None,
+            })
+            .collect::<Vec<_>>(),
+    );
+    let local_alias = local_alias_views
+        .iter()
+        .map(|view| format!("{}:{}", view.local_alias_title, view.local_alias_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}:{bag}:{generic_alias}:{newtype}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}:{bag}:{generic_alias}:{newtype}:{local_alias}",
         loop_titles.join(",")
     )
 }

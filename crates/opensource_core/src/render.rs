@@ -19610,6 +19610,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                     return None;
                 };
                 self.call_return_type_item(&path.path)
+                    .or_else(|| self.resolve_type_path(&path.path))
             }
             Expr::MethodCall(call) => self.method_call_return_type_item(call),
             Expr::Field(field) => self.field_expr_type_item(field),
@@ -19699,7 +19700,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         receiver_item: &ItemId,
     ) -> Option<IteratorItemShape> {
         let record = self.project.methods.get(callable)?;
-        let visitor = ConcreteStructFieldUseVisitor::new(
+        let mut visitor = ConcreteStructFieldUseVisitor::new(
             self.project,
             callable.package(),
             &record.module_path,
@@ -19708,8 +19709,33 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             self.field_name,
             Some(receiver_item.clone()),
         );
-        final_block_expression(&record.item.block)
-            .and_then(|expr| visitor.expression_iter_item_shape(expr))
+        visitor.block_final_iter_item_shape(&record.item.block)
+    }
+
+    fn block_final_iter_item_shape(&mut self, block: &Block) -> Option<IteratorItemShape> {
+        let binding_count = self.bindings.len();
+        let iterable_binding_count = self.iterable_bindings.len();
+        let mut result = None;
+        for statement in &block.stmts {
+            match statement {
+                syn::Stmt::Local(local) => {
+                    self.record_binding_from_local(local);
+                    if let Some(init) = &local.init {
+                        self.visit_expr(&init.expr);
+                    }
+                }
+                syn::Stmt::Expr(expr, None) => {
+                    result = self.expression_iter_item_shape(expr);
+                    break;
+                }
+                syn::Stmt::Expr(expr, Some(_)) => self.visit_expr(expr),
+                syn::Stmt::Item(item) => self.visit_item(item),
+                syn::Stmt::Macro(item) => self.visit_macro(&item.mac),
+            }
+        }
+        self.bindings.truncate(binding_count);
+        self.iterable_bindings.truncate(iterable_binding_count);
+        result
     }
 
     fn expression_iter_item_shape(&self, expression: &Expr) -> Option<IteratorItemShape> {
