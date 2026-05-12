@@ -935,6 +935,7 @@ fn accumulate_rendered_usage_decisions(
     }
 }
 
+#[derive(Clone)]
 struct CliOptions {
     analyzer_mode: AnalyzerMode,
     run_check: bool,
@@ -1037,6 +1038,8 @@ struct BatchRootReport {
     check_errors: Option<usize>,
     check_warnings: Option<usize>,
     duration_ms: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    artifact_error: Option<String>,
     error: Option<String>,
 }
 
@@ -1841,6 +1844,7 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 check_errors: None,
                 check_warnings: None,
                 duration_ms: elapsed_ms(started),
+                artifact_error: None,
                 error: Some(error.to_string()),
             },
         };
@@ -2039,7 +2043,8 @@ fn run_batch_root(
                     ),
                 ]),
             )?;
-            return Ok(batch_row_from_reports(
+            return finish_batch_root(
+                options,
                 root,
                 output_root,
                 "rendered_usage_failed",
@@ -2050,7 +2055,7 @@ fn run_batch_root(
                     "rendered source contains invalid usage decisions: {}",
                     rendered_usage_contract.invalid_preview()
                 )),
-            ));
+            );
         }
         if let Some(reason) = semantic_proof_block {
             write_event_log(
@@ -2064,7 +2069,8 @@ fn run_batch_root(
                     ("attempt", serde_json::json!(attempt)),
                 ]),
             )?;
-            return Ok(batch_row_from_reports(
+            return finish_batch_root(
+                options,
                 root,
                 output_root,
                 "semantic_proof_failed",
@@ -2072,7 +2078,7 @@ fn run_batch_root(
                 last_preflight.as_ref(),
                 None,
                 Some(reason),
-            ));
+            );
         }
         if let Err(error) = refresh_generated_lockfile_for_output(options, output_root) {
             let reason = error.to_string();
@@ -2087,7 +2093,8 @@ fn run_batch_root(
                     ("attempt", serde_json::json!(attempt)),
                 ]),
             )?;
-            return Ok(batch_row_from_reports(
+            return finish_batch_root(
+                options,
                 root,
                 output_root,
                 "lockfile_failed",
@@ -2095,7 +2102,7 @@ fn run_batch_root(
                 last_preflight.as_ref(),
                 None,
                 Some(reason),
-            ));
+            );
         }
 
         if options.run_preflight || attempts > 1 {
@@ -2134,7 +2141,7 @@ fn run_batch_root(
                 Ok(preflight) => preflight,
                 Err(error) => {
                     let reason = error.to_string();
-                    write_event_log(
+                    let _ = write_event_log(
                         options,
                         "batch_preflight",
                         "failed",
@@ -2148,8 +2155,17 @@ fn run_batch_root(
                                 serde_json::json!(output_root.join("Cargo.toml")),
                             ),
                         ]),
-                    )?;
-                    return Err(error);
+                    );
+                    return finish_batch_root(
+                        options,
+                        root,
+                        output_root,
+                        "preflight_error",
+                        last_report.as_ref(),
+                        last_preflight.as_ref(),
+                        None,
+                        Some(reason),
+                    );
                 }
             };
             write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
@@ -2190,7 +2206,8 @@ fn run_batch_root(
                         ("warnings", serde_json::json!(preflight.warning_count())),
                     ]),
                 )?;
-                let row = batch_row_from_reports(
+                return finish_batch_root(
+                    options,
                     root,
                     output_root,
                     "preflight_failed",
@@ -2199,7 +2216,6 @@ fn run_batch_root(
                     None,
                     None,
                 );
-                return Ok(row);
             }
             last_preflight = Some(preflight);
         }
@@ -2216,7 +2232,8 @@ fn run_batch_root(
                     ("attempt", serde_json::json!(attempt)),
                 ]),
             )?;
-            return Ok(batch_row_from_reports(
+            return finish_batch_root(
+                options,
                 root,
                 output_root,
                 "generated",
@@ -2224,7 +2241,7 @@ fn run_batch_root(
                 last_preflight.as_ref(),
                 None,
                 None,
-            ));
+            );
         }
 
         write_event_log(
@@ -2273,7 +2290,7 @@ fn run_batch_root(
             Ok(check) => check,
             Err(error) => {
                 let reason = error.to_string();
-                write_event_log(
+                let _ = write_event_log(
                     options,
                     "batch_check",
                     "failed",
@@ -2291,8 +2308,17 @@ fn run_batch_root(
                             serde_json::json!(batch_cargo_args(options, root)),
                         ),
                     ]),
-                )?;
-                return Err(error);
+                );
+                return finish_batch_root(
+                    options,
+                    root,
+                    output_root,
+                    "check_error",
+                    last_report.as_ref(),
+                    last_preflight.as_ref(),
+                    None,
+                    Some(reason),
+                );
             }
         };
         write_report(&check, &output_root.join("slice-feedback.json"))?;
@@ -2327,7 +2353,8 @@ fn run_batch_root(
             ]),
         )?;
         if accepted {
-            return Ok(batch_row_from_reports(
+            return finish_batch_root(
+                options,
                 root,
                 output_root,
                 "accepted",
@@ -2335,27 +2362,82 @@ fn run_batch_root(
                 last_preflight.as_ref(),
                 Some(&check),
                 None,
-            ));
+            );
         }
         if options.feedback_repair_iterations > 0 {
             let mut repaired_check = check.clone();
             let mut saw_deferred_warning_allows = false;
             for _repair_attempt in 1..=options.feedback_repair_iterations {
-                let repair = repair_workspace(RepairOptions {
+                let repair = match repair_workspace(RepairOptions {
                     output_root: output_root.to_path_buf(),
                     diagnostics: repaired_check.diagnostics.clone(),
-                })?;
-                write_repair_report(&repair, &output_root.join("slice-repair.json"))?;
+                }) {
+                    Ok(repair) => repair,
+                    Err(error) => {
+                        return finish_batch_root(
+                            options,
+                            root,
+                            output_root,
+                            "repair_error",
+                            last_report.as_ref(),
+                            last_preflight.as_ref(),
+                            Some(&repaired_check),
+                            Some(error.to_string()),
+                        );
+                    }
+                };
+                if let Err(error) =
+                    write_repair_report(&repair, &output_root.join("slice-repair.json"))
+                {
+                    return finish_batch_root(
+                        options,
+                        root,
+                        output_root,
+                        "repair_report_error",
+                        last_report.as_ref(),
+                        last_preflight.as_ref(),
+                        Some(&repaired_check),
+                        Some(error.to_string()),
+                    );
+                }
                 saw_deferred_warning_allows |= repair_has_deferred_warning_allows(&repair);
                 if repair.total_changes() == 0 {
                     break;
                 }
-                let preflight = preflight_workspace(PreflightOptions {
+                let preflight = match preflight_workspace(PreflightOptions {
                     manifest_path: output_root.join("Cargo.toml"),
-                })?;
-                write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
+                }) {
+                    Ok(preflight) => preflight,
+                    Err(error) => {
+                        return finish_batch_root(
+                            options,
+                            root,
+                            output_root,
+                            "preflight_error",
+                            last_report.as_ref(),
+                            last_preflight.as_ref(),
+                            Some(&repaired_check),
+                            Some(error.to_string()),
+                        );
+                    }
+                };
+                if let Err(error) =
+                    write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))
+                {
+                    return finish_batch_root(
+                        options,
+                        root,
+                        output_root,
+                        "preflight_report_error",
+                        last_report.as_ref(),
+                        last_preflight.as_ref(),
+                        Some(&repaired_check),
+                        Some(error.to_string()),
+                    );
+                }
                 if !preflight.success {
-                    return Ok(batch_row_from_reports(
+                    return finish_batch_root(
+                        options,
                         root,
                         output_root,
                         "preflight_failed",
@@ -2363,18 +2445,46 @@ fn run_batch_root(
                         Some(&preflight),
                         Some(&check),
                         Some("batch repair produced a structurally invalid workspace".to_string()),
-                    ));
+                    );
                 }
                 last_preflight = Some(preflight);
-                repaired_check = check_workspace(CheckOptions {
+                repaired_check = match check_workspace(CheckOptions {
                     manifest_path: output_root.join("Cargo.toml"),
                     target_dir: Some(batch_feedback_target_dir(options)),
                     timeout: options.feedback_timeout,
                     cargo_args: batch_cargo_args(options, root),
-                })?;
-                write_report(&repaired_check, &output_root.join("slice-feedback.json"))?;
+                }) {
+                    Ok(check) => check,
+                    Err(error) => {
+                        return finish_batch_root(
+                            options,
+                            root,
+                            output_root,
+                            "check_error",
+                            last_report.as_ref(),
+                            last_preflight.as_ref(),
+                            Some(&repaired_check),
+                            Some(error.to_string()),
+                        );
+                    }
+                };
+                if let Err(error) =
+                    write_report(&repaired_check, &output_root.join("slice-feedback.json"))
+                {
+                    return finish_batch_root(
+                        options,
+                        root,
+                        output_root,
+                        "check_report_error",
+                        last_report.as_ref(),
+                        last_preflight.as_ref(),
+                        Some(&repaired_check),
+                        Some(error.to_string()),
+                    );
+                }
                 if feedback_repair_is_accepted(&repaired_check, baseline, options.deny_warnings) {
-                    return Ok(batch_row_from_reports(
+                    return finish_batch_root(
+                        options,
                         root,
                         output_root,
                         "accepted",
@@ -2382,7 +2492,7 @@ fn run_batch_root(
                         last_preflight.as_ref(),
                         Some(&repaired_check),
                         None,
-                    ));
+                    );
                 }
             }
             if should_run_deferred_warning_repair(
@@ -2391,18 +2501,74 @@ fn run_batch_root(
                 options.deny_warnings,
                 saw_deferred_warning_allows,
             ) {
-                let repair = repair_workspace(RepairOptions {
+                let repair = match repair_workspace(RepairOptions {
                     output_root: output_root.to_path_buf(),
                     diagnostics: repaired_check.diagnostics.clone(),
-                })?;
-                write_repair_report(&repair, &output_root.join("slice-repair.json"))?;
+                }) {
+                    Ok(repair) => repair,
+                    Err(error) => {
+                        return finish_batch_root(
+                            options,
+                            root,
+                            output_root,
+                            "repair_error",
+                            last_report.as_ref(),
+                            last_preflight.as_ref(),
+                            Some(&repaired_check),
+                            Some(error.to_string()),
+                        );
+                    }
+                };
+                if let Err(error) =
+                    write_repair_report(&repair, &output_root.join("slice-repair.json"))
+                {
+                    return finish_batch_root(
+                        options,
+                        root,
+                        output_root,
+                        "repair_report_error",
+                        last_report.as_ref(),
+                        last_preflight.as_ref(),
+                        Some(&repaired_check),
+                        Some(error.to_string()),
+                    );
+                }
                 if repair.total_changes() > 0 {
-                    let preflight = preflight_workspace(PreflightOptions {
+                    let preflight = match preflight_workspace(PreflightOptions {
                         manifest_path: output_root.join("Cargo.toml"),
-                    })?;
-                    write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
+                    }) {
+                        Ok(preflight) => preflight,
+                        Err(error) => {
+                            return finish_batch_root(
+                                options,
+                                root,
+                                output_root,
+                                "preflight_error",
+                                last_report.as_ref(),
+                                last_preflight.as_ref(),
+                                Some(&repaired_check),
+                                Some(error.to_string()),
+                            );
+                        }
+                    };
+                    if let Err(error) = write_preflight_report(
+                        &preflight,
+                        &output_root.join("slice-preflight.json"),
+                    ) {
+                        return finish_batch_root(
+                            options,
+                            root,
+                            output_root,
+                            "preflight_report_error",
+                            last_report.as_ref(),
+                            last_preflight.as_ref(),
+                            Some(&repaired_check),
+                            Some(error.to_string()),
+                        );
+                    }
                     if !preflight.success {
-                        return Ok(batch_row_from_reports(
+                        return finish_batch_root(
+                            options,
                             root,
                             output_root,
                             "preflight_failed",
@@ -2413,19 +2579,47 @@ fn run_batch_root(
                                 "batch warning repair produced a structurally invalid workspace"
                                     .to_string(),
                             ),
-                        ));
+                        );
                     }
                     last_preflight = Some(preflight);
-                    repaired_check = check_workspace(CheckOptions {
+                    repaired_check = match check_workspace(CheckOptions {
                         manifest_path: output_root.join("Cargo.toml"),
                         target_dir: Some(batch_feedback_target_dir(options)),
                         timeout: options.feedback_timeout,
                         cargo_args: batch_cargo_args(options, root),
-                    })?;
-                    write_report(&repaired_check, &output_root.join("slice-feedback.json"))?;
+                    }) {
+                        Ok(check) => check,
+                        Err(error) => {
+                            return finish_batch_root(
+                                options,
+                                root,
+                                output_root,
+                                "check_error",
+                                last_report.as_ref(),
+                                last_preflight.as_ref(),
+                                Some(&repaired_check),
+                                Some(error.to_string()),
+                            );
+                        }
+                    };
+                    if let Err(error) =
+                        write_report(&repaired_check, &output_root.join("slice-feedback.json"))
+                    {
+                        return finish_batch_root(
+                            options,
+                            root,
+                            output_root,
+                            "check_report_error",
+                            last_report.as_ref(),
+                            last_preflight.as_ref(),
+                            Some(&repaired_check),
+                            Some(error.to_string()),
+                        );
+                    }
                     if feedback_repair_is_accepted(&repaired_check, baseline, options.deny_warnings)
                     {
-                        return Ok(batch_row_from_reports(
+                        return finish_batch_root(
+                            options,
                             root,
                             output_root,
                             "accepted",
@@ -2433,12 +2627,13 @@ fn run_batch_root(
                             last_preflight.as_ref(),
                             Some(&repaired_check),
                             None,
-                        ));
+                        );
                     }
                 }
             }
             if attempt == attempts || repaired_check.error_count() == 0 {
-                return Ok(batch_row_from_reports(
+                return finish_batch_root(
+                    options,
                     root,
                     output_root,
                     "check_failed",
@@ -2446,13 +2641,14 @@ fn run_batch_root(
                     last_preflight.as_ref(),
                     Some(&repaired_check),
                     Some("repaired workspace did not pass batch feedback gate".to_string()),
-                ));
+                );
             }
             diagnostics.extend(repaired_check.diagnostics);
             continue;
         }
         if attempt == attempts || check.error_count() == 0 {
-            return Ok(batch_row_from_reports(
+            return finish_batch_root(
+                options,
                 root,
                 output_root,
                 "check_failed",
@@ -2460,12 +2656,13 @@ fn run_batch_root(
                 last_preflight.as_ref(),
                 Some(&check),
                 Some("generated workspace did not pass batch feedback gate".to_string()),
-            ));
+            );
         }
         diagnostics.extend(check.diagnostics);
     }
 
-    Ok(batch_row_from_reports(
+    finish_batch_root(
+        options,
         root,
         output_root,
         "failed",
@@ -2473,7 +2670,7 @@ fn run_batch_root(
         last_preflight.as_ref(),
         None,
         Some("batch loop ended without a final report".to_string()),
-    ))
+    )
 }
 
 fn batch_row_from_reports(
@@ -2535,8 +2732,247 @@ fn batch_row_from_reports(
         check_errors: check.map(CheckReport::error_count),
         check_warnings: check.map(CheckReport::warning_count),
         duration_ms: 0,
+        artifact_error: None,
         error,
     }
+}
+
+fn finish_batch_root(
+    options: &CliOptions,
+    root: &RootId,
+    output_root: &Path,
+    status: &str,
+    report: Option<&GenerateReport>,
+    preflight: Option<&PreflightReport>,
+    check: Option<&CheckReport>,
+    error: Option<String>,
+) -> Result<BatchRootReport, Box<dyn std::error::Error>> {
+    let mut row = batch_row_from_reports(
+        root,
+        output_root,
+        status,
+        report,
+        preflight,
+        check,
+        error.clone(),
+    );
+    if let Some(report) = report {
+        let root_options = batch_root_artifact_options(options, root, output_root);
+        if let Err(artifact_error) = write_batch_root_artifacts(
+            options,
+            &root_options,
+            root,
+            output_root,
+            status,
+            report,
+            preflight,
+            check,
+            &error,
+        ) {
+            let artifact_error = artifact_error.to_string();
+            row.artifact_error = Some(artifact_error.clone());
+            let _ = write_event_log(
+                options,
+                "batch_root_artifacts",
+                "failed",
+                "write per-root batch artifact logs",
+                &artifact_error,
+                event_fields(&[
+                    ("root", serde_json::json!(root.to_string())),
+                    ("output_root", serde_json::json!(output_root)),
+                    ("status", serde_json::json!(status)),
+                ]),
+            );
+        }
+    }
+    Ok(row)
+}
+
+fn write_batch_root_artifacts(
+    batch_options: &CliOptions,
+    root_options: &CliOptions,
+    root: &RootId,
+    output_root: &Path,
+    status: &str,
+    report: &GenerateReport,
+    preflight: Option<&PreflightReport>,
+    check: Option<&CheckReport>,
+    error: &Option<String>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    initialize_event_log(root_options)?;
+    write_event_log(
+        root_options,
+        "batch_root_context",
+        status,
+        "record shared-analyzer batch root artifact context",
+        "this per-root log was produced from a batch run that loaded rust-analyzer once and generated this root by top-down dependency closure",
+        event_fields(&[
+            ("root", serde_json::json!(root.to_string())),
+            (
+                "batch_output_root",
+                serde_json::json!(&batch_options.output_root),
+            ),
+            ("root_output_root", serde_json::json!(output_root)),
+            (
+                "shared_analyzer",
+                serde_json::json!(batch_options.analyzer_mode != AnalyzerMode::Syn),
+            ),
+            ("status", serde_json::json!(status)),
+            ("error", serde_json::json!(error)),
+        ]),
+    )?;
+    let mut validation =
+        batch_root_validation_report(root_options, status, report, preflight, check, error);
+    finish_validation(
+        root_options,
+        &mut validation,
+        batch_root_validation_status(status),
+        error.as_deref(),
+    )?;
+    write_decision_log(
+        root_options,
+        report,
+        Some(&validation),
+        batch_root_validation_status(status),
+        error.as_deref(),
+    )
+}
+
+fn batch_root_artifact_options(
+    options: &CliOptions,
+    root: &RootId,
+    output_root: &Path,
+) -> CliOptions {
+    let mut root_options = options.clone();
+    root_options.output_root = output_root.to_path_buf();
+    root_options.root_selectors = vec![root.to_string()];
+    root_options.random_roots = None;
+    root_options.random_root_packages = Vec::new();
+    root_options.batch_roots = false;
+    root_options.batch_report = None;
+    root_options.slice_report = Some(output_root.join("slice-report.json"));
+    root_options.decision_log = Some(output_root.join("slice-decision-log.json"));
+    root_options.validation_report = Some(output_root.join("slice-validation.json"));
+    root_options.event_log = Some(output_root.join("slice-events.jsonl"));
+    root_options.preflight_report = Some(output_root.join("slice-preflight.json"));
+    root_options.feedback_report = Some(output_root.join("slice-feedback.json"));
+    root_options.repair_report = Some(output_root.join("slice-repair.json"));
+    root_options
+}
+
+fn batch_root_validation_status(status: &str) -> &'static str {
+    match status {
+        "accepted" | "generated" => "accepted",
+        _ => "rejected",
+    }
+}
+
+fn batch_root_validation_report(
+    options: &CliOptions,
+    status: &str,
+    report: &GenerateReport,
+    preflight: Option<&PreflightReport>,
+    check: Option<&CheckReport>,
+    error: &Option<String>,
+) -> ValidationReport {
+    let mut validation = ValidationReport::new(options);
+    validation.gates.push(ValidationGateReport {
+        name: "generation".to_string(),
+        status: "passed".to_string(),
+        reason: "batch root slice workspace was generated from the shared analyzer session"
+            .to_string(),
+        report_path: slice_report_path(options),
+        error_count: None,
+        warning_count: None,
+        semantic_warning_hazards: None,
+        review_warning_hazards: None,
+    });
+
+    let rendered_usage = rendered_usage_contract(report);
+    validation.gates.push(ValidationGateReport {
+        name: "rendered_usage_contract".to_string(),
+        status: if rendered_usage.invalid.is_empty() {
+            "passed".to_string()
+        } else {
+            "failed".to_string()
+        },
+        reason: if rendered_usage.invalid.is_empty() {
+            format!(
+                "rendered source contains {} used and {} blocked_by_unknown symbols",
+                rendered_usage.used, rendered_usage.blocked_by_unknown
+            )
+        } else {
+            format!(
+                "rendered source contains invalid usage decisions: {}",
+                rendered_usage.invalid_preview()
+            )
+        },
+        report_path: slice_report_path(options),
+        error_count: Some(rendered_usage.invalid.len()),
+        warning_count: Some(rendered_usage.blocked_by_unknown),
+        semantic_warning_hazards: None,
+        review_warning_hazards: None,
+    });
+
+    record_semantic_proof_gate(options, &mut validation, report);
+    record_production_readiness_gate(options, &mut validation, &report.production, "batch");
+
+    if let Some(preflight) = preflight {
+        validation.gates.push(ValidationGateReport {
+            name: "preflight".to_string(),
+            status: if preflight.success {
+                "passed".to_string()
+            } else {
+                "failed".to_string()
+            },
+            reason: if preflight.success {
+                "generated workspace passed fast structural validation".to_string()
+            } else {
+                "generated workspace failed fast structural validation".to_string()
+            },
+            report_path: maybe_preflight_report_path(options),
+            error_count: Some(preflight.error_count()),
+            warning_count: Some(preflight.warning_count()),
+            semantic_warning_hazards: None,
+            review_warning_hazards: None,
+        });
+    }
+
+    if let Some(check) = check {
+        validation.add_check_gate(
+            "feedback",
+            if check.success && status == "accepted" {
+                "accepted"
+            } else {
+                "failed"
+            },
+            if check.success && status == "accepted" {
+                "generated workspace cargo check passed all feedback gates"
+            } else {
+                "generated workspace did not pass the batch feedback gate"
+            },
+            check,
+            Some(options.output_root.join("slice-feedback.json")),
+            semantic_hazard_warning_count(&check.diagnostics, None),
+        );
+    }
+
+    if let Some(error) = error {
+        validation.gates.push(ValidationGateReport {
+            name: "batch_result".to_string(),
+            status: "failed".to_string(),
+            reason: error.clone(),
+            report_path: slice_report_path(options),
+            error_count: Some(1),
+            warning_count: None,
+            semantic_warning_hazards: None,
+            review_warning_hazards: None,
+        });
+    }
+
+    record_final_production_readiness(options, &mut validation);
+
+    validation
 }
 
 fn semantic_proof_status(semantic: &SemanticReport) -> String {
@@ -3057,6 +3493,18 @@ fn feedback_report_path(options: &CliOptions) -> Option<PathBuf> {
             .feedback_report
             .clone()
             .unwrap_or_else(|| options.output_root.join("slice-feedback.json"))
+    })
+}
+
+fn decision_log_feedback_report_path(options: &CliOptions) -> Option<PathBuf> {
+    feedback_report_path(options).or_else(|| {
+        options.run_check.then(|| {
+            let path = options
+                .feedback_report
+                .clone()
+                .unwrap_or_else(|| options.output_root.join("slice-feedback.json"));
+            path.exists().then_some(path)
+        })?
     })
 }
 
@@ -3826,7 +4274,7 @@ fn build_decision_log(
                 .then(|| baseline_target_dir(options)),
             event_log: event_log_path(options),
             preflight_report: maybe_preflight_report_path(options),
-            feedback_report: feedback_report_path(options),
+            feedback_report: decision_log_feedback_report_path(options),
             repair_report: repair_report_path(options),
             feedback_target_dir: (options.run_check
                 || options.feedback_iterations > 0
@@ -8359,6 +8807,26 @@ pub fn dead() -> usize {
         assert!(!original.contains("opensourced"), "{original}");
         let report = fs::read_to_string(output.join("batch-report.jsonl")).unwrap();
         assert!(report.contains("\"status\":\"generated\""), "{report}");
+        let root_output = output.join("0001-app_selected");
+        let decision_log = fs::read_to_string(root_output.join("slice-decision-log.json")).unwrap();
+        assert!(
+            decision_log.contains("\"step\": \"top_down_closure\""),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("\"step\": \"usage_pruning\""),
+            "{decision_log}"
+        );
+        let validation = fs::read_to_string(root_output.join("slice-validation.json")).unwrap();
+        assert!(
+            validation.contains("\"rendered_usage_contract\""),
+            "{validation}"
+        );
+        let events = fs::read_to_string(root_output.join("slice-events.jsonl")).unwrap();
+        assert!(
+            events.contains("\"event\":\"batch_root_context\""),
+            "{events}"
+        );
     }
 
     #[test]
@@ -8411,6 +8879,58 @@ pub fn helper() -> usize {
         assert!(
             first < second,
             "batch report should preserve explicit root order\n{report}"
+        );
+    }
+
+    #[test]
+    fn batch_roots_run_check_writes_per_root_feedback_artifacts() {
+        let source = temp_path("cli-rootless-batch-check-source");
+        let output = temp_path("cli-rootless-batch-check-output");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"pub fn selected() -> usize {
+    helper()
+}
+
+pub fn helper() -> usize {
+    1
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            OsString::from("--analyzer"),
+            OsString::from("syn"),
+            OsString::from("--batch-roots"),
+            OsString::from("--root"),
+            OsString::from("app::selected"),
+            OsString::from("--check"),
+            source.into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+
+        run_batch_roots(&options).expect("rootless batch should check");
+
+        let root_output = output.join("0001-app_selected");
+        let report = fs::read_to_string(output.join("batch-report.jsonl")).unwrap();
+        assert!(report.contains("\"status\":\"accepted\""), "{report}");
+        assert!(root_output.join("slice-feedback.json").exists());
+        let decision_log = fs::read_to_string(root_output.join("slice-decision-log.json")).unwrap();
+        assert!(
+            decision_log.contains("\"feedback_report\":"),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("slice-feedback.json"),
+            "{decision_log}"
         );
     }
 
