@@ -1,0 +1,11 @@
+[package]
+name = "field_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+source_record = { path = "../source_record" }
+view_record = { path = "../view_record" }
+
+[lib]
+path = "src/lib.rs"

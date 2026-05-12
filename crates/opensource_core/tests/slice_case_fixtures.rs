@@ -717,6 +717,120 @@ fn retains_public_support_fields_used_through_iterator_tuple_shapes() {
 }
 
 #[test]
+fn retains_public_support_fields_used_through_iterator_transform_shapes() {
+    let fixture =
+        repo_root().join("fixtures/slice_cases/public_field_iterator_transform_shape_prune");
+    let output = temp_path("slice-case-public-field-iterator-transform-shape-prune-output");
+    let target_dir = temp_path("slice-case-public-field-iterator-transform-shape-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("public_field_iterator_transform_shape_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["field_api", "root", "source_record", "view_record"]
+    );
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    let field_api = read(output.join("field_api/src/lib.rs"));
+    let source_record = read(output.join("source_record/src/lib.rs"));
+    let view_record = read(output.join("view_record/src/lib.rs"));
+
+    assert!(
+        root_source.contains("pub fn selected_summary"),
+        "{root_source}"
+    );
+    assert!(!root_source.contains("dead_summary"), "{root_source}");
+
+    assert!(field_api.contains("pub fn selected_summary"), "{field_api}");
+    assert!(field_api.contains(".map(|record|"), "{field_api}");
+    assert!(field_api.contains(".filter_map(|record|"), "{field_api}");
+    assert!(field_api.contains(".flat_map(|record|"), "{field_api}");
+    assert!(field_api.contains("view.score"), "{field_api}");
+    assert!(field_api.contains("view.title"), "{field_api}");
+    assert!(field_api.contains("view.loop_title"), "{field_api}");
+    assert!(field_api.contains("view.code"), "{field_api}");
+    assert!(field_api.contains("view.weight"), "{field_api}");
+    assert!(field_api.contains("child.child_weight"), "{field_api}");
+    assert!(field_api.contains("child.child_label"), "{field_api}");
+    assert!(!field_api.contains("dead_view_note"), "{field_api}");
+    assert!(!field_api.contains("dead_filter_note"), "{field_api}");
+    assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
+    assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
+
+    assert!(
+        source_record.contains("pub struct SourceSnapshot"),
+        "{source_record}"
+    );
+    assert!(source_record.contains("pub records:"), "{source_record}");
+    assert!(!source_record.contains("unused_note"), "{source_record}");
+    assert!(
+        source_record.contains("pub struct SourceRecord"),
+        "{source_record}"
+    );
+    assert!(source_record.contains("pub raw_label:"), "{source_record}");
+    assert!(source_record.contains("pub raw_value:"), "{source_record}");
+    assert!(
+        source_record.contains("pub filter_code:"),
+        "{source_record}"
+    );
+    assert!(source_record.contains("pub children:"), "{source_record}");
+    assert!(!source_record.contains("dead_note"), "{source_record}");
+    assert!(
+        source_record.contains("pub struct SourceChild"),
+        "{source_record}"
+    );
+    assert!(
+        source_record.contains("pub child_label:"),
+        "{source_record}"
+    );
+    assert!(
+        source_record.contains("pub child_weight:"),
+        "{source_record}"
+    );
+    assert!(
+        !source_record.contains("dead_child_note"),
+        "{source_record}"
+    );
+    assert!(source_record.contains("pub fn snapshot"), "{source_record}");
+    assert!(!source_record.contains("dead_snapshot"), "{source_record}");
+
+    assert!(
+        view_record.contains("pub struct ViewRecord"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub title:"), "{view_record}");
+    assert!(view_record.contains("pub score:"), "{view_record}");
+    assert!(view_record.contains("pub loop_title:"), "{view_record}");
+    assert!(!view_record.contains("dead_view_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct FilterRecord"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub code:"), "{view_record}");
+    assert!(view_record.contains("pub weight:"), "{view_record}");
+    assert!(!view_record.contains("dead_filter_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct ChildView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub child_label:"), "{view_record}");
+    assert!(view_record.contains("pub child_weight:"), "{view_record}");
+    assert!(
+        !view_record.contains("dead_child_view_note"),
+        "{view_record}"
+    );
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn retains_public_support_fields_used_through_typed_closure_params() {
     let fixture = repo_root().join("fixtures/slice_cases/public_field_typed_closure_prune");
     let output = temp_path("slice-case-public-field-typed-closure-prune-output");

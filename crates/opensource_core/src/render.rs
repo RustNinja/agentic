@@ -19560,6 +19560,13 @@ enum IteratorItemShape {
     Tuple(Vec<IteratorItemShape>),
 }
 
+#[derive(Clone, Copy)]
+enum IteratorTransformShape {
+    Value,
+    OptionPayload,
+    IteratorItem,
+}
+
 impl<'a> ConcreteStructFieldUseVisitor<'a> {
     fn new(
         project: &'a Project,
@@ -19657,6 +19664,10 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
 
     fn expression_iter_item_shape(&self, expression: &Expr) -> Option<IteratorItemShape> {
         match expression {
+            Expr::Array(array) => array
+                .elems
+                .first()
+                .and_then(|expr| self.expression_value_shape(expr)),
             Expr::Field(field) => self
                 .field_expr_type(field)
                 .and_then(|ty| self.sequence_value_type_item(ty))
@@ -19688,12 +19699,142 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 if method == "zip" {
                     return self.zipped_iter_item_shape(call);
                 }
+                if method == "map" {
+                    return self.iterator_transform_shape(call, IteratorTransformShape::Value);
+                }
+                if matches!(method.as_str(), "filter_map" | "map_while") {
+                    return self
+                        .iterator_transform_shape(call, IteratorTransformShape::OptionPayload);
+                }
+                if method == "flat_map" {
+                    return self
+                        .iterator_transform_shape(call, IteratorTransformShape::IteratorItem);
+                }
                 if iterator_item_passthrough_method(&method) {
                     return self.expression_iter_item_shape(&call.receiver);
                 }
                 None
             }
             _ => None,
+        }
+    }
+
+    fn iterator_transform_shape(
+        &self,
+        call: &syn::ExprMethodCall,
+        output_shape: IteratorTransformShape,
+    ) -> Option<IteratorItemShape> {
+        let receiver_shape = self.expression_iter_item_shape(&call.receiver)?;
+        let closure = call.args.iter().find_map(|arg| match arg {
+            Expr::Closure(closure) => Some(closure),
+            _ => None,
+        })?;
+        self.closure_output_shape(
+            closure,
+            &receiver_shape,
+            FIRST_ITERATOR_CLOSURE_ARG,
+            output_shape,
+        )
+    }
+
+    fn closure_output_shape(
+        &self,
+        closure: &syn::ExprClosure,
+        input_shape: &IteratorItemShape,
+        input_positions: &[usize],
+        output_shape: IteratorTransformShape,
+    ) -> Option<IteratorItemShape> {
+        let mut visitor = self.fork_for_shape_inference();
+        for position in input_positions {
+            if let Some(input) = closure.inputs.iter().nth(*position) {
+                visitor.record_pattern_binding_shape(input, input_shape);
+            }
+        }
+        match output_shape {
+            IteratorTransformShape::Value => visitor.expression_value_shape(&closure.body),
+            IteratorTransformShape::OptionPayload => {
+                visitor.expression_option_payload_shape(&closure.body)
+            }
+            IteratorTransformShape::IteratorItem => {
+                visitor.expression_iter_item_shape(&closure.body)
+            }
+        }
+    }
+
+    fn fork_for_shape_inference(&self) -> Self {
+        Self {
+            project: self.project,
+            package: self.package,
+            module_path: self.module_path,
+            aliases: self.aliases,
+            target_item: self.target_item,
+            field_name: self.field_name,
+            self_item: self.self_item.clone(),
+            bindings: self.bindings.clone(),
+            needs_field: false,
+        }
+    }
+
+    fn expression_value_shape(&self, expr: &Expr) -> Option<IteratorItemShape> {
+        if let Some(item) = self.expr_type_item(expr) {
+            return Some(IteratorItemShape::Direct(item));
+        }
+        match expr {
+            Expr::Call(call) => {
+                if let Expr::Path(path) = call.func.as_ref() {
+                    if path.path.segments.last().is_some_and(|segment| {
+                        matches!(segment.ident.to_string().as_str(), "Some" | "Ok" | "Err")
+                    }) {
+                        return call
+                            .args
+                            .first()
+                            .and_then(|arg| self.expression_value_shape(arg));
+                    }
+                }
+                None
+            }
+            Expr::Tuple(tuple) => Some(IteratorItemShape::Tuple(
+                tuple
+                    .elems
+                    .iter()
+                    .map(|expr| {
+                        self.expression_value_shape(expr)
+                            .unwrap_or(IteratorItemShape::Unknown)
+                    })
+                    .collect(),
+            )),
+            Expr::Reference(reference) => self.expression_value_shape(&reference.expr),
+            Expr::Paren(paren) => self.expression_value_shape(&paren.expr),
+            Expr::Block(block) => final_block_expression(&block.block)
+                .and_then(|expr| self.expression_value_shape(expr)),
+            Expr::Unsafe(block) => final_block_expression(&block.block)
+                .and_then(|expr| self.expression_value_shape(expr)),
+            _ => None,
+        }
+    }
+
+    fn expression_option_payload_shape(&self, expr: &Expr) -> Option<IteratorItemShape> {
+        match expr {
+            Expr::Call(call) => {
+                if let Expr::Path(path) = call.func.as_ref() {
+                    if path.path.segments.last().is_some_and(|segment| {
+                        matches!(segment.ident.to_string().as_str(), "Some" | "Ok" | "Err")
+                    }) {
+                        return call
+                            .args
+                            .first()
+                            .and_then(|arg| self.expression_value_shape(arg));
+                    }
+                }
+                self.expression_value_shape(expr)
+            }
+            Expr::Reference(reference) => self.expression_option_payload_shape(&reference.expr),
+            Expr::Paren(paren) => self.expression_option_payload_shape(&paren.expr),
+            Expr::Block(block) => final_block_expression(&block.block)
+                .and_then(|expr| self.expression_option_payload_shape(expr)),
+            Expr::Unsafe(block) => final_block_expression(&block.block)
+                .and_then(|expr| self.expression_option_payload_shape(expr)),
+            _ => self.expression_value_shape(expr),
         }
     }
 
