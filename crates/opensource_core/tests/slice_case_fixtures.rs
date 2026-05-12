@@ -1708,15 +1708,7 @@ fn prunes_litter_bridge_ipc_support_packages_with_default_analyzer() {
     )
     .expect("litter_bridge_ipc_prune fixture should slice");
 
-    assert!(
-        report
-            .production
-            .hazards
-            .iter()
-            .all(|hazard| hazard.code != "semantic_unresolved_paths"),
-        "retained associated functions and enum variants should not leave unresolved path review noise: {:?}",
-        report.production.hazards
-    );
+    assert_no_production_hazard(&report, "semantic_unresolved_paths");
 
     assert_eq!(
         report.packages,
@@ -2020,6 +2012,7 @@ fn prunes_litter_out_dir_codegen_support_packages_with_default_analyzer() {
     );
     assert_production_hazard(&report, "retained_build_scripts", "error");
     assert_production_hazard(&report, "out_dir_source_include_macros", "error");
+    assert_no_production_hazard(&report, "semantic_unresolved_paths");
 
     let tui_root = read(output.join("codex-tui/src/lib.rs"));
     let wire_source = read(output.join("codex-tui/src/wire.rs"));
@@ -2356,7 +2349,6 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             hazards: &[
                 ("out_dir_source_include_macros", "error"),
                 ("retained_build_scripts", "error"),
-                ("semantic_unresolved_paths", "warning"),
             ],
         },
         RaHardFixture {
@@ -2422,7 +2414,6 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             hazards: &[
                 ("out_dir_source_include_macros", "error"),
                 ("retained_build_scripts", "error"),
-                ("semantic_unresolved_paths", "warning"),
             ],
         },
     ];
@@ -2483,6 +2474,7 @@ fn prunes_out_dir_generated_support_chain_with_default_analyzer() {
     );
     assert_production_hazard(&report, "retained_build_scripts", "error");
     assert_production_hazard(&report, "out_dir_source_include_macros", "error");
+    assert_no_production_hazard(&report, "semantic_unresolved_paths");
 
     let root_manifest = read(output.join("root/Cargo.toml"));
     let root_source = read(output.join("root/src/lib.rs"));
@@ -24080,6 +24072,18 @@ fn assert_production_hazard(report: &GenerateReport, code: &str, severity: &str)
             .iter()
             .any(|hazard| hazard.code == code && hazard.severity == severity),
         "expected production hazard {code:?} with severity {severity:?}: {:?}",
+        report.production.hazards
+    );
+}
+
+fn assert_no_production_hazard(report: &GenerateReport, code: &str) {
+    assert!(
+        report
+            .production
+            .hazards
+            .iter()
+            .all(|hazard| hazard.code != code),
+        "expected no production hazard {code:?}: {:?}",
         report.production.hazards
     );
 }

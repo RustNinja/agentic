@@ -5103,7 +5103,8 @@ fn covered_project_path_unresolved_diagnostic(
         && rendered_symbol_proof.is_some_and(|proof| {
             proof.status == "proven"
                 && (covered_project_associated_callable_path(project, proof, diagnostic)
-                    || covered_project_enum_variant_path(project, proof, diagnostic))
+                    || covered_project_enum_variant_path(project, proof, diagnostic)
+                    || covered_build_generated_path(project, proof, diagnostic))
         })
 }
 
@@ -5155,6 +5156,64 @@ fn covered_project_enum_variant_path(
             && path_qualifier_matches_item_path(&qualifier, item)
             && rendered_symbol_is_used_or_unknown(proof, "member", &format!("{item}::{symbol}"))
     })
+}
+
+fn covered_build_generated_path(
+    project: &Project,
+    proof: &RenderedSymbolProofReport,
+    diagnostic: &SemanticUnresolvedDiagnostic,
+) -> bool {
+    let Some((qualifier, _member)) = unresolved_associated_path_segments(diagnostic) else {
+        return false;
+    };
+
+    project.items.iter().any(|(item, record)| {
+        item.kind == model::ItemKind::Mod
+            && rendered_symbol_is_used_or_unknown(proof, "item", &item.to_string())
+            && path_qualifier_matches_item_path(&qualifier, item)
+            && module_item_contains_out_dir_source_include(project, item, record)
+    })
+}
+
+fn module_item_contains_out_dir_source_include(
+    project: &Project,
+    item: &ItemId,
+    record: &model::ItemRecord,
+) -> bool {
+    item_contains_out_dir_source_include(&record.item)
+        || project
+            .source_files_by_module
+            .get(&(
+                item.package.clone(),
+                item.module_path
+                    .iter()
+                    .cloned()
+                    .chain(std::iter::once(item.name.clone()))
+                    .collect::<Vec<_>>(),
+            ))
+            .and_then(|path| project.files.get(path))
+            .is_some_and(|source| {
+                source
+                    .syntax
+                    .items
+                    .iter()
+                    .any(item_contains_out_dir_source_include)
+            })
+}
+
+fn item_contains_out_dir_source_include(item: &Item) -> bool {
+    match item {
+        Item::Macro(item_macro) => {
+            item_macro.ident.is_none()
+                && item_macro.mac.path.is_ident("include")
+                && macro_tokens_reference_out_dir(&item_macro.mac.tokens)
+        }
+        Item::Mod(item_mod) => item_mod
+            .content
+            .as_ref()
+            .is_some_and(|(_, items)| items.iter().any(item_contains_out_dir_source_include)),
+        _ => false,
+    }
 }
 
 fn unresolved_associated_path_segments(
