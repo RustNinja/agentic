@@ -15,12 +15,11 @@ use serde::Serialize;
 
 use opensource_core::{
     check_workspace, direct_free_function_root_selectors,
-    generate_with_analyzer_feedback_and_roots, generate_with_analyzer_roots,
-    marked_workspace_packages, preflight_workspace, repair_workspace, write_generate_report,
-    write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
-    CheckOptions, CheckReport, GenerateOptions, GenerateReport, GenerateSession,
-    GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
-    RepairReport, RootId, SemanticReport,
+    generate_with_analyzer_feedback_and_roots, marked_workspace_packages, preflight_workspace,
+    repair_workspace, write_generate_report, write_preflight_report, write_repair_report,
+    write_report, AnalyzerMode, CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions,
+    GenerateReport, GenerateSession, GeneratedTargetReport, PreflightDiagnostic, PreflightOptions,
+    PreflightReport, RepairOptions, RepairReport, RootId, SemanticReport,
 };
 
 fn main() {
@@ -206,47 +205,172 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             ("output_root", serde_json::json!(options.output_root)),
         ]),
     )?;
-    let _generation_heartbeat = start_event_heartbeat(
+    write_event_log(
         &options,
-        "generation",
-        "build top-down dependency closure",
-        "single-root generation is still running; analyzer loading or render planning has not returned yet",
+        "generation_analyzer",
+        "started",
+        "load analyzer session for selected roots",
+        "single-root mode resolves roots and loads the analyzer before rendering the output workspace",
         event_fields(&[
             ("analyzer", serde_json::json!(options.analyzer_mode.as_str())),
-            ("output_root", serde_json::json!(options.output_root)),
+            ("root_selectors", serde_json::json!(options.root_selectors)),
+        ]),
+    )?;
+    let _generation_analyzer_heartbeat = start_event_heartbeat(
+        &options,
+        "generation_analyzer",
+        "load analyzer session for selected roots",
+        "single-root analyzer loading is still running before render planning starts",
+        event_fields(&[
+            (
+                "analyzer",
+                serde_json::json!(options.analyzer_mode.as_str()),
+            ),
             ("root_selectors", serde_json::json!(options.root_selectors)),
         ]),
     );
-    let report = match generate_with_analyzer_roots(
-        GenerateOptions {
-            workspace_root: options.workspace_root.clone(),
-            output_root: options.output_root.clone(),
-        },
-        options.analyzer_mode,
-        &options.root_selectors,
-    ) {
-        Ok(report) => report,
+    let direct_roots = if options.root_selectors.is_empty() {
+        None
+    } else {
+        direct_free_function_root_selectors(&options.root_selectors)
+    };
+    let loaded = match direct_roots {
+        Some(roots) => GenerateSession::load_with_selected_roots(
+            &options.workspace_root,
+            options.analyzer_mode,
+            &roots,
+        )
+        .map(|session| (session, roots)),
+        None if options.root_selectors.is_empty() => {
+            GenerateSession::load(&options.workspace_root, options.analyzer_mode)
+                .map(|session| (session, Vec::new()))
+        }
+        None => GenerateSession::load_with_root_selectors(
+            &options.workspace_root,
+            options.analyzer_mode,
+            &options.root_selectors,
+        ),
+    };
+    let (session, selected_roots) = match loaded {
+        Ok(loaded) => loaded,
         Err(error) => {
             let reason = error.to_string();
             write_event_log(
                 &options,
-                "generation",
+                "generation_analyzer",
                 "failed",
-                "build top-down dependency closure",
+                "load analyzer session for selected roots",
                 &reason,
                 event_fields(&[
                     (
                         "analyzer",
                         serde_json::json!(options.analyzer_mode.as_str()),
                     ),
-                    ("output_root", serde_json::json!(options.output_root)),
                     ("root_selectors", serde_json::json!(options.root_selectors)),
                 ]),
             )?;
             return Err(error);
         }
     };
-    drop(_generation_heartbeat);
+    drop(_generation_analyzer_heartbeat);
+    let mut analyzer_fields = session_load_fields(&session);
+    analyzer_fields.extend(event_fields(&[
+        (
+            "analyzer",
+            serde_json::json!(session.analyzer().mode.as_str()),
+        ),
+        ("engine", serde_json::json!(&session.analyzer().engine)),
+        ("notes", serde_json::json!(&session.analyzer().notes)),
+        (
+            "selected_roots",
+            serde_json::json!(selected_roots
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()),
+        ),
+    ]));
+    write_event_log(
+        &options,
+        "generation_analyzer",
+        "completed",
+        "load analyzer session for selected roots",
+        "the loaded session is ready to render the downstream dependency closure",
+        analyzer_fields,
+    )?;
+
+    write_event_log(
+        &options,
+        "generation_render",
+        "started",
+        "render selected roots plus downstream closure",
+        "rendering writes the candidate slice workspace after analyzer loading is complete",
+        event_fields(&[
+            ("output_root", serde_json::json!(options.output_root)),
+            (
+                "selected_roots",
+                serde_json::json!(selected_roots
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()),
+            ),
+        ]),
+    )?;
+    let _generation_render_heartbeat = start_event_heartbeat(
+        &options,
+        "generation_render",
+        "render selected roots plus downstream closure",
+        "single-root rendering is still walking downstream dependencies and writing output files",
+        event_fields(&[
+            ("output_root", serde_json::json!(options.output_root)),
+            (
+                "selected_roots",
+                serde_json::json!(selected_roots
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()),
+            ),
+        ]),
+    );
+    let report = match session.generate(options.output_root.clone(), &selected_roots, &[]) {
+        Ok(report) => report,
+        Err(error) => {
+            let reason = error.to_string();
+            write_event_log(
+                &options,
+                "generation_render",
+                "failed",
+                "render selected roots plus downstream closure",
+                &reason,
+                event_fields(&[
+                    ("output_root", serde_json::json!(options.output_root)),
+                    (
+                        "selected_roots",
+                        serde_json::json!(selected_roots
+                            .iter()
+                            .map(ToString::to_string)
+                            .collect::<Vec<_>>()),
+                    ),
+                ]),
+            )?;
+            return Err(error);
+        }
+    };
+    drop(_generation_render_heartbeat);
+    write_event_log(
+        &options,
+        "generation_render",
+        "completed",
+        "render selected roots plus downstream closure",
+        "rendering completed and the candidate slice workspace is on disk",
+        event_fields(&[
+            ("root_count", serde_json::json!(report.roots.len())),
+            ("packages", serde_json::json!(report.packages)),
+            ("files_written", serde_json::json!(report.files_written)),
+            ("total_ms", serde_json::json!(report.timings.total_ms)),
+            ("reduce_ms", serde_json::json!(report.timings.reduce_ms)),
+            ("render_ms", serde_json::json!(report.timings.render_ms)),
+        ]),
+    )?;
     write_event_log(
         &options,
         "generation",
