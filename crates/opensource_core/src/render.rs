@@ -20082,14 +20082,17 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
     }
 
-    fn visit_closure_with_inferred_first_binding(
+    fn visit_closure_with_inferred_binding_positions(
         &mut self,
         closure: &syn::ExprClosure,
         item: &ItemId,
+        positions: &[usize],
     ) {
         let binding_count = self.bindings.len();
-        if let Some(first) = closure.inputs.first() {
-            self.record_pattern_binding_item(first, item);
+        for position in positions {
+            if let Some(input) = closure.inputs.iter().nth(*position) {
+                self.record_pattern_binding_item(input, item);
+            }
         }
         for input in &closure.inputs {
             if let Pat::Type(input) = input {
@@ -20234,21 +20237,42 @@ fn type_like_item_kind(item: &ItemId) -> bool {
     )
 }
 
-fn iterator_closure_method(method: &str) -> bool {
-    matches!(
-        method,
+const FIRST_ITERATOR_CLOSURE_ARG: &[usize] = &[0];
+const SECOND_ITERATOR_CLOSURE_ARG: &[usize] = &[1];
+const PAIR_ITERATOR_CLOSURE_ARGS: &[usize] = &[0, 1];
+
+fn iterator_closure_item_positions(method: &str) -> Option<&'static [usize]> {
+    match method {
         "all"
-            | "any"
-            | "filter"
-            | "filter_map"
-            | "find"
-            | "find_map"
-            | "for_each"
-            | "inspect"
-            | "map"
-            | "position"
-            | "rposition"
-    )
+        | "any"
+        | "binary_search_by_key"
+        | "filter"
+        | "filter_map"
+        | "find"
+        | "find_map"
+        | "flat_map"
+        | "for_each"
+        | "inspect"
+        | "map"
+        | "map_while"
+        | "max_by_key"
+        | "min_by_key"
+        | "partition"
+        | "position"
+        | "rposition"
+        | "sort_by_cached_key"
+        | "sort_by_key"
+        | "sort_unstable_by_key" => Some(FIRST_ITERATOR_CLOSURE_ARG),
+        "fold" | "rfold" | "scan" | "try_fold" | "try_rfold" => Some(SECOND_ITERATOR_CLOSURE_ARG),
+        "dedup_by"
+        | "max_by"
+        | "min_by"
+        | "reduce"
+        | "select_nth_unstable_by"
+        | "sort_by"
+        | "sort_unstable_by" => Some(PAIR_ITERATOR_CLOSURE_ARGS),
+        _ => None,
+    }
 }
 
 fn iterator_item_passthrough_method(method: &str) -> bool {
@@ -20359,12 +20383,12 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
     fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
         self.visit_expr(&call.receiver);
         let method = call.method.to_string();
-        let inferred_item = iterator_closure_method(&method)
-            .then(|| self.expression_iter_item_type_item(&call.receiver))
-            .flatten();
+        let inferred_closure_item = iterator_closure_item_positions(&method)
+            .zip(self.expression_iter_item_type_item(&call.receiver));
         for arg in &call.args {
-            if let (Some(item), Expr::Closure(closure)) = (&inferred_item, arg) {
-                self.visit_closure_with_inferred_first_binding(closure, item);
+            if let (Some((positions, item)), Expr::Closure(closure)) = (&inferred_closure_item, arg)
+            {
+                self.visit_closure_with_inferred_binding_positions(closure, item, positions);
             } else {
                 self.visit_expr(arg);
             }

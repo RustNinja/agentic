@@ -569,6 +569,66 @@ fn retains_public_support_fields_used_through_vec_iter_closure() {
 }
 
 #[test]
+fn retains_public_support_fields_used_through_iterator_closure_surfaces() {
+    let fixture =
+        repo_root().join("fixtures/slice_cases/public_field_iterator_closure_surfaces_prune");
+    let output = temp_path("slice-case-public-field-iterator-closure-surfaces-prune-output");
+    let target_dir = temp_path("slice-case-public-field-iterator-closure-surfaces-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("public_field_iterator_closure_surfaces_prune fixture should slice");
+
+    assert_eq!(report.packages, ["audit_record", "field_api", "root"]);
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    let field_api = read(output.join("field_api/src/lib.rs"));
+    let audit_record = read(output.join("audit_record/src/lib.rs"));
+
+    assert!(
+        root_source.contains("pub fn selected_summary"),
+        "{root_source}"
+    );
+    assert!(!root_source.contains("dead_summary"), "{root_source}");
+
+    assert!(field_api.contains("pub fn selected_summary"), "{field_api}");
+    assert!(field_api.contains("sort_by"), "{field_api}");
+    assert!(field_api.contains("left.label"), "{field_api}");
+    assert!(field_api.contains("right.label"), "{field_api}");
+    assert!(field_api.contains("record.value"), "{field_api}");
+    assert!(field_api.contains("record.tags"), "{field_api}");
+    assert!(field_api.contains("record.active"), "{field_api}");
+    assert!(!field_api.contains("dead_note"), "{field_api}");
+    assert!(!field_api.contains("unused_note"), "{field_api}");
+    assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
+
+    assert!(
+        audit_record.contains("pub struct AuditSnapshot"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub records:"), "{audit_record}");
+    assert!(!audit_record.contains("unused_note"), "{audit_record}");
+    assert!(
+        audit_record.contains("pub struct AuditRecord"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub value:"), "{audit_record}");
+    assert!(audit_record.contains("pub label:"), "{audit_record}");
+    assert!(audit_record.contains("pub tags:"), "{audit_record}");
+    assert!(audit_record.contains("pub active:"), "{audit_record}");
+    assert!(!audit_record.contains("dead_note"), "{audit_record}");
+    assert!(audit_record.contains("pub fn snapshot"), "{audit_record}");
+    assert!(!audit_record.contains("dead_snapshot"), "{audit_record}");
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn retains_public_support_fields_used_through_typed_closure_params() {
     let fixture = repo_root().join("fixtures/slice_cases/public_field_typed_closure_prune");
     let output = temp_path("slice-case-public-field-typed-closure-prune-output");
