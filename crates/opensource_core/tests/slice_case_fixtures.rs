@@ -735,9 +735,11 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(
         report.production.hazards.iter().all(|hazard| !matches!(
             hazard.code.as_str(),
-            "semantic_unresolved_method_calls" | "syntactic_method_fallback_cap"
+            "semantic_unresolved_method_calls"
+                | "syntactic_method_fallback_cap"
+                | "trait_object_surfaces"
         )),
-        "project-local iterator methods retained by the top-down graph must not remain as unresolved method hazards: {:?}",
+        "project-local iterator methods and returned dyn Iterator<Item = ProjectType> surfaces should be fully proven for this fixture: {:?}",
         report.production.hazards
     );
 

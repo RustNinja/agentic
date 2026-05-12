@@ -7461,13 +7461,19 @@ impl SyntacticHazardVisitor<'_> {
             return BTreeSet::new();
         }
 
-        let constructed_types = returned_constructed_local_type_names(
+        let constructed_local_types = returned_constructed_local_type_names(
             project,
             &self.location.package,
             &self.location.module_path,
             block,
         );
-        if constructed_types.is_empty() {
+        let constructed_project_types = returned_constructed_project_type_names(
+            project,
+            &self.location.package,
+            &self.location.module_path,
+            block,
+        );
+        if constructed_local_types.is_empty() && constructed_project_types.is_empty() {
             return BTreeSet::new();
         }
 
@@ -7475,17 +7481,16 @@ impl SyntacticHazardVisitor<'_> {
             .into_iter()
             .filter(|surface| {
                 let traits = dispatchable_trait_object_names(surface);
-                !traits.is_empty()
-                    && constructed_types.iter().any(|type_name| {
-                        traits.iter().all(|trait_name| {
-                            local_type_implements_trait(
-                                project,
-                                &self.location.package,
-                                type_name,
-                                trait_name,
-                            )
-                        })
-                    })
+                proven_local_trait_object_return(
+                    project,
+                    &self.location.package,
+                    &constructed_local_types,
+                    &traits,
+                ) || proven_iterator_trait_object_return(
+                    surface,
+                    &traits,
+                    &constructed_project_types,
+                )
             })
             .map(|surface| trait_object_surface_key(surface))
             .collect()
@@ -8290,45 +8295,120 @@ fn returned_constructed_local_type_names(
     module_path: &[String],
     block: &syn::Block,
 ) -> BTreeSet<String> {
-    let mut visited_callables = BTreeSet::new();
-    returned_constructed_local_type_names_inner(
-        project,
-        package,
-        module_path,
-        block,
-        &mut visited_callables,
-    )
-}
-
-fn returned_constructed_local_type_names_inner(
-    project: &Project,
-    package: &str,
-    module_path: &[String],
-    block: &syn::Block,
-    visited_callables: &mut BTreeSet<CallableId>,
-) -> BTreeSet<String> {
-    let mut local_type_counts = BTreeMap::<String, usize>::new();
-    for item in project.items.keys().filter(|item| {
+    let local_types = unique_data_type_names(project.items.keys().filter(|item| {
         item.package == package
             && matches!(
                 item.kind,
                 model::ItemKind::Struct | model::ItemKind::Enum | model::ItemKind::Union
             )
-    }) {
-        *local_type_counts.entry(item.name.clone()).or_default() += 1;
+    }));
+    returned_constructed_type_names(project, package, module_path, block, &local_types)
+}
+
+fn returned_constructed_project_type_names(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    block: &syn::Block,
+) -> BTreeSet<String> {
+    let project_types = unique_data_type_names(project.items.keys().filter(|item| {
+        matches!(
+            item.kind,
+            model::ItemKind::Struct | model::ItemKind::Enum | model::ItemKind::Union
+        )
+    }));
+    returned_constructed_type_names_with_closures(
+        project,
+        package,
+        module_path,
+        block,
+        &project_types,
+    )
+}
+
+fn unique_data_type_names<'a>(items: impl Iterator<Item = &'a ItemId>) -> BTreeSet<String> {
+    let mut counts = BTreeMap::<String, usize>::new();
+    for item in items {
+        *counts.entry(item.name.clone()).or_default() += 1;
     }
-    let local_types = local_type_counts
+    counts
         .into_iter()
         .filter_map(|(name, count)| (count == 1).then_some(name))
-        .collect::<BTreeSet<_>>();
-    if local_types.is_empty() {
+        .collect()
+}
+
+fn returned_constructed_type_names(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    block: &syn::Block,
+    candidate_types: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    returned_constructed_type_names_inner_entry(
+        project,
+        package,
+        module_path,
+        block,
+        candidate_types,
+        false,
+    )
+}
+
+fn returned_constructed_type_names_with_closures(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    block: &syn::Block,
+    candidate_types: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    returned_constructed_type_names_inner_entry(
+        project,
+        package,
+        module_path,
+        block,
+        candidate_types,
+        true,
+    )
+}
+
+fn returned_constructed_type_names_inner_entry(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    block: &syn::Block,
+    candidate_types: &BTreeSet<String>,
+    visit_closures: bool,
+) -> BTreeSet<String> {
+    let mut visited_callables = BTreeSet::new();
+    returned_constructed_type_names_inner(
+        project,
+        package,
+        module_path,
+        block,
+        candidate_types,
+        visit_closures,
+        &mut visited_callables,
+    )
+}
+
+fn returned_constructed_type_names_inner(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    block: &syn::Block,
+    candidate_types: &BTreeSet<String>,
+    visit_closures: bool,
+    visited_callables: &mut BTreeSet<CallableId>,
+) -> BTreeSet<String> {
+    if candidate_types.is_empty() {
         return BTreeSet::new();
     }
 
     let mut return_visitor = ReturnConstructedLocalTypeVisitor {
         constructor: ConstructedLocalTypeVisitor {
-            local_types: &local_types,
+            local_types: candidate_types,
             constructed: BTreeSet::new(),
+            visit_closures,
         },
     };
     return_visitor.visit_block(block);
@@ -8351,15 +8431,115 @@ fn returned_constructed_local_type_names_inner(
         let Some(record) = project.functions.get(&callable) else {
             continue;
         };
-        constructed.extend(returned_constructed_local_type_names_inner(
+        constructed.extend(returned_constructed_type_names_inner(
             project,
             package,
             &record.module_path,
             &record.item.block,
+            candidate_types,
+            visit_closures,
             visited_callables,
         ));
     }
     constructed
+}
+
+fn proven_local_trait_object_return(
+    project: &Project,
+    package: &str,
+    constructed_local_types: &BTreeSet<String>,
+    traits: &BTreeSet<String>,
+) -> bool {
+    !traits.is_empty()
+        && constructed_local_types.iter().any(|type_name| {
+            traits.iter().all(|trait_name| {
+                local_type_implements_trait(project, package, type_name, trait_name)
+            })
+        })
+}
+
+fn proven_iterator_trait_object_return(
+    surface: &syn::TypeTraitObject,
+    traits: &BTreeSet<String>,
+    constructed_project_types: &BTreeSet<String>,
+) -> bool {
+    traits.len() == 1 && traits.contains("Iterator") && {
+        let item_types = iterator_trait_object_item_type_names(surface);
+        !item_types.is_empty()
+            && item_types
+                .iter()
+                .all(|item_type| constructed_project_types.contains(item_type))
+    }
+}
+
+fn iterator_trait_object_item_type_names(surface: &syn::TypeTraitObject) -> BTreeSet<String> {
+    let mut item_types = BTreeSet::new();
+    for bound in &surface.bounds {
+        let syn::TypeParamBound::Trait(trait_bound) = bound else {
+            continue;
+        };
+        let Some(segment) = trait_bound.path.segments.last() else {
+            continue;
+        };
+        if segment.ident != "Iterator" {
+            continue;
+        }
+        let syn::PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            continue;
+        };
+        for argument in &arguments.args {
+            if let syn::GenericArgument::AssocType(assoc) = argument {
+                if assoc.ident == "Item" {
+                    collect_type_leaf_idents(&assoc.ty, &mut item_types);
+                }
+            }
+        }
+    }
+    item_types
+}
+
+fn collect_type_leaf_idents(ty: &syn::Type, idents: &mut BTreeSet<String>) {
+    match ty {
+        syn::Type::Array(array) => collect_type_leaf_idents(&array.elem, idents),
+        syn::Type::Group(group) => collect_type_leaf_idents(&group.elem, idents),
+        syn::Type::Paren(paren) => collect_type_leaf_idents(&paren.elem, idents),
+        syn::Type::Path(type_path) => {
+            if let Some(segment) = type_path.path.segments.last() {
+                let ident = segment.ident.to_string();
+                if !type_surface_wrapper_or_builtin_ident(&ident) {
+                    idents.insert(ident);
+                }
+            }
+            for segment in &type_path.path.segments {
+                collect_path_argument_type_leaf_idents(&segment.arguments, idents);
+            }
+        }
+        syn::Type::Ptr(ptr) => collect_type_leaf_idents(&ptr.elem, idents),
+        syn::Type::Reference(reference) => collect_type_leaf_idents(&reference.elem, idents),
+        syn::Type::Slice(slice) => collect_type_leaf_idents(&slice.elem, idents),
+        syn::Type::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_type_leaf_idents(elem, idents);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_path_argument_type_leaf_idents(
+    arguments: &syn::PathArguments,
+    idents: &mut BTreeSet<String>,
+) {
+    let syn::PathArguments::AngleBracketed(arguments) = arguments else {
+        return;
+    };
+    for argument in &arguments.args {
+        match argument {
+            syn::GenericArgument::Type(ty) => collect_type_leaf_idents(ty, idents),
+            syn::GenericArgument::AssocType(assoc) => collect_type_leaf_idents(&assoc.ty, idents),
+            _ => {}
+        }
+    }
 }
 
 struct ReturnConstructedLocalTypeVisitor<'types> {
@@ -8530,6 +8710,7 @@ fn resolve_returned_local_function_call(
 struct ConstructedLocalTypeVisitor<'types> {
     local_types: &'types BTreeSet<String>,
     constructed: BTreeSet<String>,
+    visit_closures: bool,
 }
 
 impl<'ast> Visit<'ast> for ConstructedLocalTypeVisitor<'_> {
@@ -8554,7 +8735,11 @@ impl<'ast> Visit<'ast> for ConstructedLocalTypeVisitor<'_> {
         }
     }
 
-    fn visit_expr_closure(&mut self, _closure: &'ast syn::ExprClosure) {}
+    fn visit_expr_closure(&mut self, closure: &'ast syn::ExprClosure) {
+        if self.visit_closures {
+            self.visit_expr(&closure.body);
+        }
+    }
 
     fn visit_expr_async(&mut self, _async_expr: &'ast syn::ExprAsync) {}
 
@@ -8588,6 +8773,7 @@ impl ConstructedLocalTypeVisitor<'_> {
             constructor: ConstructedLocalTypeVisitor {
                 local_types: self.local_types,
                 constructed: BTreeSet::new(),
+                visit_closures: self.visit_closures,
             },
         };
         return_visitor.visit_block(block);
