@@ -134,9 +134,12 @@ semantic analysis. `semantic_proof_status` gives the short version:
 `complete`, `selected_root_complete_workspace_limited`,
 `selected_root_limited`, or another explicit failure/limited state. Under
 each generated root, `slice-decision-log.json` records the top-down phases and
-now includes a `member_pruning` step with retained/blocked/prunable member and
-assoc-item counts plus sampled decisions, which is the quickest way to inspect
-whether support packages contain only used or unknown surfaces.
+now includes `file_retention` and `member_pruning` steps. `file_retention`
+lists retained packages, generated targets, files written, and sampled source
+files with reachable symbol counts. `member_pruning` records
+retained/blocked/prunable member and assoc-item counts plus sampled decisions,
+which is the quickest way to inspect whether support packages contain only used
+or unknown surfaces.
 `--production`, selected-root proof failures or selected-root budget limits
 reject the slice before compiler feedback. Wider workspace limits remain visible
 but non-fatal when the selected-root proof itself is complete.

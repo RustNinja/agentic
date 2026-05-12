@@ -957,6 +957,53 @@ fn decision_log_decision_samples(
     samples
 }
 
+fn decision_log_retained_source_file_samples(report: &GenerateReport, limit: usize) -> Vec<String> {
+    let mut files: BTreeMap<PathBuf, (usize, usize)> = BTreeMap::new();
+    for location in &report.source_map.callables {
+        if !location.reachable {
+            continue;
+        }
+        files
+            .entry(location.span.file.clone())
+            .and_modify(|counts| counts.0 += 1)
+            .or_insert((1, 0));
+    }
+    for location in &report.source_map.items {
+        if !location.reachable {
+            continue;
+        }
+        files
+            .entry(location.span.file.clone())
+            .and_modify(|counts| counts.1 += 1)
+            .or_insert((0, 1));
+    }
+    files
+        .into_iter()
+        .take(limit)
+        .map(|(file, (callables, items))| {
+            format!(
+                "{} (reachable_callables={callables}, reachable_items={items})",
+                file.display()
+            )
+        })
+        .collect()
+}
+
+fn retained_source_file_count(report: &GenerateReport) -> usize {
+    let mut files = BTreeSet::new();
+    for location in &report.source_map.callables {
+        if location.reachable {
+            files.insert(location.span.file.clone());
+        }
+    }
+    for location in &report.source_map.items {
+        if location.reachable {
+            files.insert(location.span.file.clone());
+        }
+    }
+    files.len()
+}
+
 fn accumulate_rendered_usage_decisions(
     kind: &str,
     decisions: &BTreeMap<String, String>,
@@ -4492,6 +4539,58 @@ fn decision_log_steps(
         reason: "the top-down closure is the production direction: start at the open-source surface, walk dependencies, then render the retained set".to_string(),
         metrics: closure_metrics,
         evidence: report.packages.clone(),
+    });
+
+    let mut file_metrics = BTreeMap::new();
+    file_metrics.insert(
+        "retained_packages".to_string(),
+        serde_json::json!(report.packages.len()),
+    );
+    file_metrics.insert(
+        "generated_targets".to_string(),
+        serde_json::json!(report.targets.len()),
+    );
+    file_metrics.insert(
+        "files_written".to_string(),
+        serde_json::json!(report.files_written),
+    );
+    file_metrics.insert(
+        "source_files_with_reachable_symbols".to_string(),
+        serde_json::json!(retained_source_file_count(report)),
+    );
+    file_metrics.insert(
+        "reachable_callables".to_string(),
+        serde_json::json!(report.reachable.len()),
+    );
+    file_metrics.insert(
+        "reachable_items".to_string(),
+        serde_json::json!(report.reachable_items.len()),
+    );
+    let mut file_evidence = Vec::new();
+    file_evidence.extend(
+        report
+            .packages
+            .iter()
+            .take(12)
+            .map(|package| format!("package {package}")),
+    );
+    file_evidence.extend(report.targets.iter().take(12).map(|target| {
+        format!(
+            "target {}::{} {:?} src={}",
+            target.package,
+            target.name,
+            target.kind,
+            target.src_path.display()
+        )
+    }));
+    file_evidence.extend(decision_log_retained_source_file_samples(report, 24));
+    steps.push(DecisionLogStep {
+        step: "file_retention".to_string(),
+        status: "explained".to_string(),
+        decision: "write package manifests, selected targets, and source files that contain retained top-down symbols".to_string(),
+        reason: "a generated file exists because it is required to describe a retained package/target, to compile a source module containing selected roots or downstream dependencies, or to carry a copied asset/include surface that compiler feedback must validate".to_string(),
+        metrics: file_metrics,
+        evidence: file_evidence,
     });
 
     let macro_summary = &report.macro_surfaces.summary;
@@ -9131,6 +9230,10 @@ pub fn dead() -> usize {
         let decision_log = fs::read_to_string(root_output.join("slice-decision-log.json")).unwrap();
         assert!(
             decision_log.contains("\"step\": \"top_down_closure\""),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("\"step\": \"file_retention\""),
             "{decision_log}"
         );
         assert!(

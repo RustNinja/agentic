@@ -1705,15 +1705,24 @@ creates `unreachable_patterns` warnings and fails stricter production checks.
 Rendered impls now prune catch-all match arms only when all retained variants of
 the impl enum are already covered by unguarded explicit variant patterns.
 
-Per-root mining logs need member-level proof, not only phase summaries. A
+Per-root mining logs need file/member-level proof, not only phase summaries. A
 parallel Litter probe of `derive_recent_sessions`, `settings::render`, and
 `phone_frame::render_frame` showed that the broad rendered usage contract was
 correct but too coarse for support-package redundancy review. The CLI decision
-log now emits a `member_pruning` step with rendered/retained/blocked/prunable
-member and assoc-item counts plus sampled decisions. The same probe exposed a
+log now emits `file_retention` with retained package/target/source-file proof
+and `member_pruning` with rendered/retained/blocked/prunable member and
+assoc-item counts plus sampled decisions. The same probe exposed a
 feedback-loop acceptance bug: a one-iteration repair loop could remove a
 repairable unused import after a successful warning-bearing check, pass
 preflight, and still reject because the repaired workspace was not checked
 again. Last-attempt repairs now run a final verification `cargo check`; the
 repaired Litter `derive_recent_sessions` output builds cleanly after the unused
 grouped import is removed.
+
+A follow-up shared `--batch-roots` Litter probe used one RA load for
+`phone_frame::render_frame`, `derive_recent_sessions`, `settings::render`, and
+`theme::health_color`. Three roots accepted, and their logs showed exact member
+surfaces with zero prunable or unclassified retained members. The settings root
+still failed on `codex_mobile_client::types::AppAccount`; the checked-out source
+defines/reexports `Account` but does not define `AppAccount`, so this probe is
+tracked as a source/upstream mismatch rather than a member-retention regression.
