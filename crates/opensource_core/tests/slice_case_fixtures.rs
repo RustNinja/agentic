@@ -775,6 +775,12 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(field_api.contains("summarize_param_views"), "{field_api}");
     assert!(field_api.contains("view.param_title"), "{field_api}");
     assert!(field_api.contains("view.param_score"), "{field_api}");
+    assert!(field_api.contains("impl_iter_views"), "{field_api}");
+    assert!(field_api.contains("view.impl_title"), "{field_api}");
+    assert!(field_api.contains("view.impl_score"), "{field_api}");
+    assert!(field_api.contains("dyn_iter_views"), "{field_api}");
+    assert!(field_api.contains("view.dyn_title"), "{field_api}");
+    assert!(field_api.contains("view.dyn_score"), "{field_api}");
     assert!(!field_api.contains("dead_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_filter_note"), "{field_api}");
     assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
@@ -783,6 +789,8 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(!field_api.contains("dead_returned_note"), "{field_api}");
     assert!(!field_api.contains("dead_method_note"), "{field_api}");
     assert!(!field_api.contains("dead_param_note"), "{field_api}");
+    assert!(!field_api.contains("dead_impl_note"), "{field_api}");
+    assert!(!field_api.contains("dead_dyn_note"), "{field_api}");
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
 
     assert!(
@@ -879,6 +887,20 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(view_record.contains("pub param_title:"), "{view_record}");
     assert!(view_record.contains("pub param_score:"), "{view_record}");
     assert!(!view_record.contains("dead_param_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct ImplIterView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub impl_title:"), "{view_record}");
+    assert!(view_record.contains("pub impl_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_impl_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct DynIterView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub dyn_title:"), "{view_record}");
+    assert!(view_record.contains("pub dyn_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_dyn_note"), "{view_record}");
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }

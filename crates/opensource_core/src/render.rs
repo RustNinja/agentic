@@ -20114,8 +20114,38 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 ctx.aliases,
                 &array.elem,
             ),
+            Type::ImplTrait(impl_trait) => self.iterator_item_type_from_bounds(
+                &impl_trait.bounds,
+                ctx.package,
+                ctx.module_path,
+                ctx.aliases,
+            ),
+            Type::TraitObject(trait_object) => self.iterator_item_type_from_bounds(
+                &trait_object.bounds,
+                ctx.package,
+                ctx.module_path,
+                ctx.aliases,
+            ),
             Type::Path(type_path) => {
                 let segment = type_path.path.segments.last()?;
+                if matches!(
+                    segment.ident.to_string().as_str(),
+                    "Arc" | "Box" | "Cow" | "Pin" | "Rc"
+                ) {
+                    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                        return None;
+                    };
+                    return arguments
+                        .args
+                        .iter()
+                        .find_map(|argument| match argument {
+                            GenericArgument::Type(ty) => Some(ty),
+                            _ => None,
+                        })
+                        .and_then(|ty| {
+                            self.sequence_value_type_item(FieldTypeContext { ty, ..ctx })
+                        });
+                }
                 if !matches!(
                     segment.ident.to_string().as_str(),
                     "BinaryHeap"
@@ -20149,6 +20179,64 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             }
             _ => None,
         }
+    }
+
+    fn iterator_item_type_from_bounds(
+        &self,
+        bounds: &Punctuated<syn::TypeParamBound, syn::Token![+]>,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+    ) -> Option<ItemId> {
+        bounds.iter().find_map(|bound| {
+            let syn::TypeParamBound::Trait(trait_bound) = bound else {
+                return None;
+            };
+            self.iterator_item_type_from_trait_path(
+                &trait_bound.path,
+                package,
+                module_path,
+                aliases,
+            )
+        })
+    }
+
+    fn iterator_item_type_from_trait_path(
+        &self,
+        path: &syn::Path,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+    ) -> Option<ItemId> {
+        let segment = path.segments.last()?;
+        if !matches!(
+            segment.ident.to_string().as_str(),
+            "DoubleEndedIterator"
+                | "ExactSizeIterator"
+                | "FusedIterator"
+                | "IntoIterator"
+                | "Iterator"
+        ) {
+            return None;
+        }
+        let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
+        arguments.args.iter().find_map(|argument| {
+            let GenericArgument::AssocType(assoc_type) = argument else {
+                return None;
+            };
+            (assoc_type.ident == "Item")
+                .then(|| {
+                    self.type_payload_or_direct_item_in(
+                        package,
+                        module_path,
+                        aliases,
+                        &assoc_type.ty,
+                    )
+                })
+                .flatten()
+        })
     }
 
     fn type_payload_or_direct_item_in(

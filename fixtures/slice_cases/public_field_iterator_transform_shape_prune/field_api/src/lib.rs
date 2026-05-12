@@ -107,8 +107,18 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>();
     let param = summarize_param_views(param_views);
 
+    let impl_iter = impl_iter_views(&snapshot)
+        .map(|view| format!("{}:{}", view.impl_title, view.impl_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let dyn_iter = dyn_iter_views(&snapshot)
+        .map(|view| format!("{}:{}", view.dyn_title, view.dyn_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}",
         loop_titles.join(",")
     )
 }
@@ -153,6 +163,26 @@ fn summarize_param_views(views: Vec<view_record::ParamView>) -> String {
         .map(|view| format!("{}:{}", view.param_title, view.param_score))
         .collect::<Vec<_>>()
         .join(",")
+}
+
+fn impl_iter_views(
+    snapshot: &source_record::SourceSnapshot,
+) -> impl Iterator<Item = view_record::ImplIterView> + '_ {
+    snapshot.records.iter().map(|record| view_record::ImplIterView {
+        impl_title: record.raw_label.clone(),
+        impl_score: record.raw_value,
+        dead_impl_note: None,
+    })
+}
+
+fn dyn_iter_views(
+    snapshot: &source_record::SourceSnapshot,
+) -> Box<dyn Iterator<Item = view_record::DynIterView> + '_> {
+    Box::new(snapshot.records.iter().map(|record| view_record::DynIterView {
+        dyn_title: record.raw_label.clone(),
+        dyn_score: record.raw_value,
+        dead_dyn_note: None,
+    }))
 }
 
 pub fn dead_summary(seed: u32) -> String {

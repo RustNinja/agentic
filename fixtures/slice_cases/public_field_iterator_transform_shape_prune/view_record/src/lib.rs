@@ -46,3 +46,15 @@ pub struct ParamView {
     pub param_score: u32,
     pub dead_param_note: Option<String>,
 }
+
+pub struct ImplIterView {
+    pub impl_title: String,
+    pub impl_score: u32,
+    pub dead_impl_note: Option<String>,
+}
+
+pub struct DynIterView {
+    pub dyn_title: String,
+    pub dyn_score: u32,
+    pub dead_dyn_note: Option<String>,
+}
