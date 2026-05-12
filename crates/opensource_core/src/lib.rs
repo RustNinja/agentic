@@ -1127,6 +1127,58 @@ pub fn generate_with_analyzer_feedback_and_roots(
     session.generate(options.output_root, &roots, feedback_diagnostics)
 }
 
+pub fn direct_free_function_root_selectors(selectors: &[String]) -> Option<Vec<RootId>> {
+    let mut roots = Vec::new();
+    let mut seen = BTreeSet::new();
+    for selector in selectors {
+        let root = direct_free_function_root_selector(selector)?;
+        if seen.insert(root.clone()) {
+            roots.push(root);
+        }
+    }
+    Some(roots)
+}
+
+fn direct_free_function_root_selector(selector: &str) -> Option<RootId> {
+    let selector = selector.trim();
+    if selector.contains('(')
+        || selector.contains('<')
+        || selector.contains('>')
+        || selector.contains(" as ")
+        || selector.contains(char::is_whitespace)
+    {
+        return None;
+    }
+    let segments = selector.split("::").map(str::trim).collect::<Vec<_>>();
+    if segments.len() < 3 || segments.iter().any(|segment| segment.is_empty()) {
+        return None;
+    }
+    let (package, rest) = segments.split_first()?;
+    let (name, module_path) = rest.split_last()?;
+    if !module_path
+        .iter()
+        .all(|segment| looks_like_module_segment(segment))
+    {
+        return None;
+    }
+    Some(RootId::Callable(CallableId::Free {
+        package: (*package).to_string(),
+        module_path: module_path
+            .iter()
+            .map(|segment| (*segment).to_string())
+            .collect(),
+        name: (*name).to_string(),
+    }))
+}
+
+fn looks_like_module_segment(segment: &str) -> bool {
+    let segment = segment.strip_prefix("r#").unwrap_or(segment);
+    segment
+        .chars()
+        .next()
+        .is_some_and(|ch| ch == '_' || ch.is_ascii_lowercase())
+}
+
 impl GenerateSession {
     pub fn load(
         workspace_root: &Path,
@@ -1135,12 +1187,98 @@ impl GenerateSession {
         Self::load_with_selected_roots(workspace_root, analyzer_mode, &[])
     }
 
+    pub fn load_without_marker_targets(
+        workspace_root: &Path,
+        analyzer_mode: AnalyzerMode,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (project, manifest_ms, parse_ms) = load_project_without_marker_targets(workspace_root)?;
+        let phase_started = Instant::now();
+        let analyzer = analyzer::load_report_for_project_and_roots(
+            workspace_root,
+            analyzer_mode,
+            &project,
+            &[],
+        )?;
+        let analyzer_ms = elapsed_ms(phase_started);
+
+        Ok(Self {
+            workspace_root: workspace_root.to_path_buf(),
+            project,
+            analyzer,
+            manifest_ms,
+            parse_ms,
+            analyzer_ms,
+        })
+    }
+
+    pub fn load_without_marker_targets_for_root_selectors(
+        workspace_root: &Path,
+        analyzer_mode: AnalyzerMode,
+        root_selectors: &[String],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (project, manifest_ms, parse_ms) =
+            load_project_without_marker_targets_for_root_selectors(workspace_root, root_selectors)?;
+        let phase_started = Instant::now();
+        let analyzer = analyzer::load_report_for_project_and_roots(
+            workspace_root,
+            analyzer_mode,
+            &project,
+            &[],
+        )?;
+        let analyzer_ms = elapsed_ms(phase_started);
+
+        Ok(Self {
+            workspace_root: workspace_root.to_path_buf(),
+            project,
+            analyzer,
+            manifest_ms,
+            parse_ms,
+            analyzer_ms,
+        })
+    }
+
+    pub fn load_root_selector_resolver_without_marker_targets(
+        workspace_root: &Path,
+        analyzer_mode: AnalyzerMode,
+        root_selectors: &[String],
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let (project, manifest_ms, parse_ms) =
+            load_project_without_marker_targets_for_root_selector_packages(
+                workspace_root,
+                root_selectors,
+            )?;
+        let phase_started = Instant::now();
+        let analyzer = analyzer::load_report_for_project_and_roots(
+            workspace_root,
+            analyzer_mode,
+            &project,
+            &[],
+        )?;
+        let analyzer_ms = elapsed_ms(phase_started);
+
+        Ok(Self {
+            workspace_root: workspace_root.to_path_buf(),
+            project,
+            analyzer,
+            manifest_ms,
+            parse_ms,
+            analyzer_ms,
+        })
+    }
+
     pub fn load_with_selected_roots(
         workspace_root: &Path,
         analyzer_mode: AnalyzerMode,
         selected_roots: &[RootId],
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (project, manifest_ms, parse_ms) = load_project(workspace_root)?;
+        let (project, manifest_ms, parse_ms) = if selected_roots.is_empty() {
+            load_project(workspace_root)?
+        } else {
+            load_project_without_marker_targets_for_root_packages(
+                workspace_root,
+                &root_packages(selected_roots),
+            )?
+        };
         let phase_started = Instant::now();
         let analyzer = analyzer::load_report_for_project_and_roots(
             workspace_root,
@@ -1165,7 +1303,11 @@ impl GenerateSession {
         analyzer_mode: AnalyzerMode,
         root_selectors: &[String],
     ) -> Result<(Self, Vec<RootId>), Box<dyn std::error::Error>> {
-        let (project, manifest_ms, parse_ms) = load_project(workspace_root)?;
+        let (project, manifest_ms, parse_ms) = if root_selectors.is_empty() {
+            load_project(workspace_root)?
+        } else {
+            load_project_without_marker_targets_for_root_selectors(workspace_root, root_selectors)?
+        };
         let roots = resolve_root_selectors_in_project(&project, root_selectors)?;
         let phase_started = Instant::now();
         let analyzer = analyzer::load_report_for_project_and_roots(
@@ -1243,6 +1385,94 @@ fn load_project(workspace_root: &Path) -> Result<(Project, u64, u64), Box<dyn st
     let parse_ms = elapsed_ms(phase_started);
 
     Ok((project, manifest_ms, parse_ms))
+}
+
+fn load_project_without_marker_targets(
+    workspace_root: &Path,
+) -> Result<(Project, u64, u64), Box<dyn std::error::Error>> {
+    let phase_started = Instant::now();
+    let workspace = manifest::load_workspace_without_marker_targets(workspace_root)?;
+    let manifest_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
+    let project = parse::parse_workspace(workspace)?;
+    let parse_ms = elapsed_ms(phase_started);
+
+    Ok((project, manifest_ms, parse_ms))
+}
+
+fn load_project_without_marker_targets_for_root_selectors(
+    workspace_root: &Path,
+    root_selectors: &[String],
+) -> Result<(Project, u64, u64), Box<dyn std::error::Error>> {
+    let phase_started = Instant::now();
+    let workspace = manifest::load_workspace_without_marker_targets(workspace_root)?;
+    let manifest_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
+    let project = if let Some(packages) = root_selector_package_filter(root_selectors) {
+        parse::parse_workspace_package_closure(workspace, &packages)?
+    } else {
+        parse::parse_workspace(workspace)?
+    };
+    let parse_ms = elapsed_ms(phase_started);
+
+    Ok((project, manifest_ms, parse_ms))
+}
+
+fn load_project_without_marker_targets_for_root_selector_packages(
+    workspace_root: &Path,
+    root_selectors: &[String],
+) -> Result<(Project, u64, u64), Box<dyn std::error::Error>> {
+    let phase_started = Instant::now();
+    let workspace = manifest::load_workspace_without_marker_targets(workspace_root)?;
+    let manifest_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
+    let project = if let Some(packages) = root_selector_package_filter(root_selectors) {
+        parse::parse_workspace_packages(workspace, &packages)?
+    } else {
+        parse::parse_workspace(workspace)?
+    };
+    let parse_ms = elapsed_ms(phase_started);
+
+    Ok((project, manifest_ms, parse_ms))
+}
+
+fn load_project_without_marker_targets_for_root_packages(
+    workspace_root: &Path,
+    packages: &BTreeSet<String>,
+) -> Result<(Project, u64, u64), Box<dyn std::error::Error>> {
+    let phase_started = Instant::now();
+    let workspace = manifest::load_workspace_without_marker_targets(workspace_root)?;
+    let manifest_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
+    let project = parse::parse_workspace_package_closure(workspace, packages)?;
+    let parse_ms = elapsed_ms(phase_started);
+
+    Ok((project, manifest_ms, parse_ms))
+}
+
+fn root_selector_package_filter(root_selectors: &[String]) -> Option<BTreeSet<String>> {
+    let mut packages = BTreeSet::new();
+    for selector in root_selectors {
+        let Some((package, _rest)) = selector.split_once("::") else {
+            return None;
+        };
+        if package.is_empty() {
+            return None;
+        }
+        packages.insert(package.to_string());
+    }
+    (!packages.is_empty()).then_some(packages)
+}
+
+fn root_packages(roots: &[RootId]) -> BTreeSet<String> {
+    roots
+        .iter()
+        .map(|root| root.package().to_string())
+        .collect()
 }
 
 fn resolve_root_selectors_in_project(
@@ -11444,23 +11674,50 @@ mod tests {
     use super::non_benign_unresolved_count;
     use super::{
         add_public_reexport_proof_hazards, add_rendered_symbol_proof_hazards,
-        add_semantic_inventory_hazard, default_feature_closure, generate,
-        generate_with_analyzer_feedback, generated_package_source_roots,
-        production_hazard_with_details, production_readiness_status, public_reexport_proof_report,
-        rendered_symbol_proof_report, rendered_symbol_proof_report_with_members,
-        semantic_hazard_metrics, semantic_unresolved_details, unknown_surface_category,
-        usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
-        write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
-        GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
-        PublicReexportProofReport, PublicReexportProofSummary, RenderedSymbolProofEntry,
-        RenderedSymbolProofReport, RenderedSymbolProofSummary, SemanticFileReport,
-        SemanticHazardScope, SemanticOwnerId, SemanticReductionHints, SemanticReport,
-        SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic, SemanticUnresolvedKind,
-        SemanticUsageReport, UsageDecision, UsageDecisionIndex,
+        add_semantic_inventory_hazard, default_feature_closure,
+        direct_free_function_root_selectors, generate, generate_with_analyzer_feedback,
+        generated_package_source_roots, production_hazard_with_details,
+        production_readiness_status, public_reexport_proof_report, rendered_symbol_proof_report,
+        rendered_symbol_proof_report_with_members, semantic_hazard_metrics,
+        semantic_unresolved_details, unknown_surface_category, usage_classification_report,
+        usage_evidence_reason, usage_guarded_render_reduction, write_generate_report, AnalyzerMode,
+        AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions, ItemId,
+        ProductionHazardDetail, PublicReexportProofEntry, PublicReexportProofReport,
+        PublicReexportProofSummary, RenderedSymbolProofEntry, RenderedSymbolProofReport,
+        RenderedSymbolProofSummary, SemanticFileReport, SemanticHazardScope, SemanticOwnerId,
+        SemanticReductionHints, SemanticReport, SemanticUnresolvedCategory,
+        SemanticUnresolvedDiagnostic, SemanticUnresolvedKind, SemanticUsageReport, UsageDecision,
+        UsageDecisionIndex,
     };
     #[cfg(feature = "ra-hir")]
     use super::{generate_with_analyzer, generate_with_analyzer_roots};
     use super::{manifest, parse, reduce, render};
+
+    #[test]
+    fn direct_free_function_roots_decode_without_workspace_scan() {
+        let roots = direct_free_function_root_selectors(&[
+            "codex-tui::theme::health_color".to_string(),
+            "codex-tui::theme::health_symbol".to_string(),
+            "codex-tui::theme::health_color".to_string(),
+        ])
+        .expect("fully qualified free functions should decode directly");
+
+        assert_eq!(
+            roots.iter().map(ToString::to_string).collect::<Vec<_>>(),
+            [
+                "codex-tui::theme::health_color",
+                "codex-tui::theme::health_symbol"
+            ]
+        );
+        assert!(
+            direct_free_function_root_selectors(&["theme::health_color".to_string()]).is_none()
+        );
+        assert!(direct_free_function_root_selectors(&["app::Type::method".to_string()]).is_none());
+        assert!(
+            direct_free_function_root_selectors(&["app::<Type as Trait>::method".to_string()])
+                .is_none()
+        );
+    }
 
     #[test]
     fn reduces_fixture_to_reachable_callables() {

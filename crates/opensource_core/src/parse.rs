@@ -1,5 +1,5 @@
 use std::{
-    collections::HashMap,
+    collections::{BTreeSet, HashMap, VecDeque},
     fs,
     path::{Path, PathBuf},
 };
@@ -8,8 +8,8 @@ use proc_macro2::{Span, TokenTree};
 use quote::ToTokens;
 use syn::spanned::Spanned;
 use syn::{
-    Expr, GenericArgument, ImplItem, Item, ItemImpl, ItemMod, ItemUse, Lit, Meta, PathArguments,
-    Type, UseTree,
+    parse::Parser as SynParser, punctuated::Punctuated, Attribute, Expr, GenericArgument, ImplItem,
+    Item, ItemImpl, ItemMod, ItemUse, Lit, Meta, PathArguments, Type, UseTree,
 };
 
 use crate::{
@@ -22,15 +22,42 @@ use crate::{
 };
 
 pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::error::Error>> {
+    parse_workspace_with_package_filter(workspace, None, false)
+}
+
+pub fn parse_workspace_package_closure(
+    workspace: Workspace,
+    root_packages: &BTreeSet<String>,
+) -> Result<Project, Box<dyn std::error::Error>> {
+    let package_filter = workspace_package_closure(&workspace, root_packages);
+    parse_workspace_with_package_filter(workspace, Some(&package_filter), true)
+}
+
+pub fn parse_workspace_packages(
+    workspace: Workspace,
+    packages: &BTreeSet<String>,
+) -> Result<Project, Box<dyn std::error::Error>> {
+    parse_workspace_with_package_filter(workspace, Some(packages), true)
+}
+
+fn parse_workspace_with_package_filter(
+    workspace: Workspace,
+    package_filter: Option<&BTreeSet<String>>,
+    ignore_missing_modules: bool,
+) -> Result<Project, Box<dyn std::error::Error>> {
     let mut parser = Parser {
         files: HashMap::new(),
         functions: HashMap::new(),
         methods: HashMap::new(),
         items: HashMap::new(),
         module_aliases: HashMap::new(),
+        ignore_missing_modules,
     };
 
     for package in workspace.packages.values() {
+        if package_filter.is_some_and(|filter| !filter.contains(&package.name)) {
+            continue;
+        }
         if package.lib_path.exists() {
             let module_dir = package
                 .lib_path
@@ -95,12 +122,37 @@ pub fn parse_workspace(workspace: Workspace) -> Result<Project, Box<dyn std::err
     })
 }
 
+fn workspace_package_closure(
+    workspace: &Workspace,
+    root_packages: &BTreeSet<String>,
+) -> BTreeSet<String> {
+    let mut packages = BTreeSet::new();
+    let mut queue = VecDeque::from_iter(root_packages.iter().cloned());
+    while let Some(package) = queue.pop_front() {
+        if !packages.insert(package.clone()) {
+            continue;
+        }
+        let Some(record) = workspace.packages.get(&package) else {
+            continue;
+        };
+        for dependency in &record.dependencies {
+            if workspace.packages.contains_key(&dependency.package)
+                && !packages.contains(&dependency.package)
+            {
+                queue.push_back(dependency.package.clone());
+            }
+        }
+    }
+    packages
+}
+
 struct Parser {
     files: HashMap<std::path::PathBuf, SourceFile>,
     functions: HashMap<CallableId, FunctionRecord>,
     methods: HashMap<CallableId, MethodRecord>,
     items: HashMap<ItemId, ItemRecord>,
     module_aliases: HashMap<(String, Vec<String>), HashMap<String, Vec<String>>>,
+    ignore_missing_modules: bool,
 }
 
 impl Parser {
@@ -233,7 +285,7 @@ impl Parser {
                     }
                 }
                 Item::Mod(item_mod) => {
-                    if item_mod.attrs.iter().any(is_cfg_test_attr) {
+                    if module_attrs_exclude_current_target(&item_mod.attrs) {
                         continue;
                     }
                     let id = ItemId {
@@ -333,7 +385,7 @@ impl Parser {
         if item_mod.content.is_some() {
             return Ok(());
         }
-        if item_mod.attrs.iter().any(is_cfg_test_attr) {
+        if module_attrs_exclude_current_target(&item_mod.attrs) {
             return Ok(());
         }
 
@@ -349,6 +401,9 @@ impl Parser {
                 module_dir.join(path_attr)
             };
             if !path.exists() {
+                if self.ignore_missing_modules {
+                    return Ok(());
+                }
                 return Err(format!(
                     "module {name} path attribute points to missing source file in package {package}: {}",
                     path.display()
@@ -362,6 +417,9 @@ impl Parser {
         } else if mod_path.exists() {
             (mod_path, module_dir.join(source_name))
         } else {
+            if self.ignore_missing_modules {
+                return Ok(());
+            }
             return Err(format!(
                 "module {name} has no matching source file in package {package} at {} (looked for {} and {})",
                 module_dir.display(),
@@ -810,6 +868,100 @@ fn module_source_name(name: &str) -> &str {
     name.strip_prefix("r#").unwrap_or(name)
 }
 
+fn module_attrs_exclude_current_target(attrs: &[Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(|attr| is_cfg_test_attr(attr) || cfg_attr_is_definitely_false_for_current_target(attr))
+}
+
+fn cfg_attr_is_definitely_false_for_current_target(attr: &Attribute) -> bool {
+    if !attr.path().is_ident("cfg") {
+        return false;
+    }
+    attr.parse_args::<Meta>()
+        .ok()
+        .and_then(|meta| cfg_meta_eval_current_target(&meta))
+        .is_some_and(|active| !active)
+}
+
+fn cfg_meta_eval_current_target(meta: &Meta) -> Option<bool> {
+    match meta {
+        Meta::Path(path) => cfg_path_eval_current_target(path),
+        Meta::NameValue(name_value) => {
+            let key = name_value.path.segments.last()?.ident.to_string();
+            let value = expr_string_literal(&name_value.value)?;
+            cfg_key_value_eval_current_target(&key, &value)
+        }
+        Meta::List(list) => {
+            let key = list.path.segments.last()?.ident.to_string();
+            let args = SynParser::parse2(
+                Punctuated::<Meta, syn::Token![,]>::parse_terminated,
+                list.tokens.clone(),
+            )
+            .ok()?
+            .into_iter()
+            .collect::<Vec<_>>();
+            match key.as_str() {
+                "all" => {
+                    let mut has_unknown = false;
+                    for arg in &args {
+                        match cfg_meta_eval_current_target(arg) {
+                            Some(true) => {}
+                            Some(false) => return Some(false),
+                            None => has_unknown = true,
+                        }
+                    }
+                    (!has_unknown).then_some(true)
+                }
+                "any" => {
+                    let mut has_unknown = false;
+                    for arg in &args {
+                        match cfg_meta_eval_current_target(arg) {
+                            Some(true) => return Some(true),
+                            Some(false) => {}
+                            None => has_unknown = true,
+                        }
+                    }
+                    (!has_unknown).then_some(false)
+                }
+                "not" if args.len() == 1 => cfg_meta_eval_current_target(&args[0]).map(|v| !v),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn cfg_path_eval_current_target(path: &syn::Path) -> Option<bool> {
+    let key = path.segments.last()?.ident.to_string();
+    match key.as_str() {
+        "test" => Some(false),
+        "unix" => Some(cfg!(unix)),
+        "windows" => Some(cfg!(windows)),
+        "debug_assertions" => Some(cfg!(debug_assertions)),
+        _ => None,
+    }
+}
+
+fn cfg_key_value_eval_current_target(key: &str, value: &str) -> Option<bool> {
+    match key {
+        "target_arch" => Some(value == std::env::consts::ARCH),
+        "target_family" => Some(value == std::env::consts::FAMILY),
+        "target_os" => Some(value == std::env::consts::OS),
+        "target_pointer_width" => Some(value == (std::mem::size_of::<usize>() * 8).to_string()),
+        _ => None,
+    }
+}
+
+fn expr_string_literal(expr: &Expr) -> Option<String> {
+    let Expr::Lit(expr_lit) = expr else {
+        return None;
+    };
+    let Lit::Str(lit) = &expr_lit.lit else {
+        return None;
+    };
+    Some(lit.value())
+}
+
 fn path_attr(item_mod: &syn::ItemMod) -> Option<PathBuf> {
     item_mod.attrs.iter().find_map(|attribute| {
         if !attribute.path().is_ident("path") {
@@ -826,4 +978,110 @@ fn path_attr(item_mod: &syn::ItemMod) -> Option<PathBuf> {
         };
         Some(PathBuf::from(lit.value()))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn parse_skips_missing_module_behind_inactive_target_cfg() {
+        let root = temp_workspace("parse-inactive-cfg-module");
+        fs::create_dir_all(root.join("app/src")).expect("fixture dirs should create");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .expect("workspace manifest should write");
+        fs::write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("package manifest should write");
+        fs::write(
+            root.join("app/src/lib.rs"),
+            "#[cfg(windows)]\n#[path = \"missing_windows.rs\"]\nmod windows_only;\n\npub fn selected() -> usize { 1 }\n",
+        )
+        .expect("lib source should write");
+
+        let workspace = crate::manifest::load_workspace_without_marker_targets(&root)
+            .expect("workspace should load");
+        let project = parse_workspace(workspace).expect("inactive cfg module should be skipped");
+        assert!(project
+            .functions
+            .keys()
+            .any(|id| id.to_string() == "app::selected"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn explicit_root_parse_ignores_unrelated_broken_workspace_packages() {
+        let root = temp_workspace("parse-root-package-closure");
+        fs::create_dir_all(root.join("app/src")).expect("app dirs should create");
+        fs::create_dir_all(root.join("broken/src")).expect("broken dirs should create");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"broken\"]\nresolver = \"2\"\n",
+        )
+        .expect("workspace manifest should write");
+        fs::write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[dependencies]\nbroken = { path = \"../broken\" }\n",
+        )
+        .expect("app manifest should write");
+        fs::write(
+            root.join("broken/Cargo.toml"),
+            "[package]\nname = \"broken\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("broken manifest should write");
+        fs::write(
+            root.join("app/src/lib.rs"),
+            "pub fn selected() -> usize { 1 }\n",
+        )
+        .expect("app source should write");
+        fs::write(
+            root.join("broken/src/lib.rs"),
+            "#[path = \"missing.rs\"]\nmod missing;\npub fn broken() {}\n",
+        )
+        .expect("broken source should write");
+
+        let workspace = crate::manifest::load_workspace_without_marker_targets(&root)
+            .expect("workspace should load");
+        let packages = BTreeSet::from(["app".to_string()]);
+        let project = parse_workspace_package_closure(workspace, &packages)
+            .expect("unrelated broken package should not block explicit root parsing");
+        assert!(project
+            .functions
+            .keys()
+            .any(|id| id.to_string() == "app::selected"));
+        assert!(project
+            .functions
+            .keys()
+            .any(|id| id.to_string().starts_with("broken::")));
+
+        let workspace = crate::manifest::load_workspace_without_marker_targets(&root)
+            .expect("workspace should load");
+        let project = parse_workspace_packages(workspace, &packages)
+            .expect("root package parse should not parse dependency package");
+        assert!(project
+            .functions
+            .keys()
+            .any(|id| id.to_string() == "app::selected"));
+        assert!(!project
+            .functions
+            .keys()
+            .any(|id| id.to_string().starts_with("broken::")));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn temp_workspace(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("slicer-{label}-{}-{nanos}", std::process::id()))
+    }
 }

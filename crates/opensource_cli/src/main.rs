@@ -7,13 +7,14 @@ use std::{
     path::{Path, PathBuf},
     process::Command,
     sync::OnceLock,
-    time::{Duration, SystemTime, UNIX_EPOCH},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
 use serde::Serialize;
 
 use opensource_core::{
-    check_workspace, generate_with_analyzer_feedback_and_roots, generate_with_analyzer_roots,
+    check_workspace, direct_free_function_root_selectors,
+    generate_with_analyzer_feedback_and_roots, generate_with_analyzer_roots,
     marked_workspace_packages, preflight_workspace, repair_workspace, write_generate_report,
     write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
     CheckOptions, CheckReport, GenerateOptions, GenerateReport, GenerateSession,
@@ -35,13 +36,66 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("output root must be different from workspace root".into());
     }
 
-    apply_default_marked_package_scope(&mut options)?;
+    initialize_event_log(&options)?;
+    write_event_log(
+        &options,
+        "startup",
+        "configured",
+        "initialize CLI run before workspace probing",
+        "event logging starts before metadata/package-scope resolution so slow startup is visible",
+        event_fields(&[
+            ("workspace_root", serde_json::json!(options.workspace_root)),
+            ("output_root", serde_json::json!(options.output_root)),
+            (
+                "analyzer",
+                serde_json::json!(options.analyzer_mode.as_str()),
+            ),
+            ("batch_roots", serde_json::json!(options.batch_roots)),
+            ("root_selectors", serde_json::json!(options.root_selectors)),
+        ]),
+    )?;
+    write_event_log(
+        &options,
+        "scope_resolution",
+        "started",
+        "resolve default validation package scope",
+        "the CLI may inspect the source workspace before generation to avoid over-broad cargo checks",
+        event_fields(&[(
+            "cargo_check_args_before",
+            serde_json::json!(options.cargo_check_args),
+        )]),
+    )?;
+    if let Err(error) = apply_default_marked_package_scope(&mut options) {
+        let reason = error.to_string();
+        write_event_log(
+            &options,
+            "scope_resolution",
+            "failed",
+            "resolve default validation package scope",
+            &reason,
+            event_fields(&[(
+                "cargo_check_args",
+                serde_json::json!(options.cargo_check_args),
+            )]),
+        )?;
+        return Err(error);
+    }
+    write_event_log(
+        &options,
+        "scope_resolution",
+        "completed",
+        "resolve default validation package scope",
+        "default package scope is ready and generation can start",
+        event_fields(&[(
+            "cargo_check_args_after",
+            serde_json::json!(options.cargo_check_args),
+        )]),
+    )?;
 
     if options.batch_roots {
         return run_batch_roots(&options);
     }
 
-    initialize_event_log(&options)?;
     write_event_log(
         &options,
         "input",
@@ -1169,6 +1223,9 @@ fn apply_default_marked_package_scope(
 ) -> Result<(), Box<dyn std::error::Error>> {
     if !validation_runs_cargo_check(options)
         || cargo_args_have_package_scope(&options.cargo_check_args)
+        || !options.root_selectors.is_empty()
+        || options.random_roots.is_some()
+        || options.batch_roots
     {
         return Ok(());
     }
@@ -1236,8 +1293,32 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
         fs::create_dir_all(parent)?;
     }
     fs::write(&report_path, "")?;
+    write_event_log(
+        options,
+        "batch",
+        "initialized",
+        "run multiple top-down roots from one source checkout",
+        "batch mode amortizes resolver/analyzer loading across roots and keeps the source checkout unmodified",
+        event_fields(&[
+            ("batch_report", serde_json::json!(&report_path)),
+            ("output_root", serde_json::json!(&options.output_root)),
+            ("random_roots", serde_json::json!(options.random_roots)),
+            ("root_selectors", serde_json::json!(&options.root_selectors)),
+        ]),
+    )?;
 
     let baseline = if options.run_baseline_check {
+        write_event_log(
+            options,
+            "batch_baseline",
+            "started",
+            "run source baseline once for the batch",
+            "one baseline report is reused when classifying generated-root failures",
+            event_fields(&[(
+                "target_dir",
+                serde_json::json!(baseline_target_dir(options)),
+            )]),
+        )?;
         let report = run_baseline_check(options)?;
         write_baseline_report(options, &report)?;
         print_baseline(
@@ -1245,6 +1326,22 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
             options.feedback_limit,
             Some(&baseline_report_path(options)),
         );
+        write_event_log(
+            options,
+            "batch_baseline",
+            if report.success { "passed" } else { "failed" },
+            "record source baseline once for the batch",
+            if report.success {
+                "source workspace baseline passed"
+            } else {
+                "source workspace baseline failed"
+            },
+            event_fields(&[
+                ("errors", serde_json::json!(report.error_count())),
+                ("warnings", serde_json::json!(report.warning_count())),
+                ("duration_ms", serde_json::json!(report.duration_ms)),
+            ]),
+        )?;
         if !report.success && !options.allow_baseline_failures {
             return Err("source workspace failed baseline cargo check".into());
         }
@@ -1253,36 +1350,145 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
         None
     };
 
-    let resolver_session = GenerateSession::load(&options.workspace_root, AnalyzerMode::Syn)?;
-    let mut roots = resolver_session.resolve_root_selectors(&options.root_selectors)?;
-    if let Some(count) = options.random_roots {
-        roots.extend(select_random_roots(
-            random_root_candidates(
-                resolver_session.selectable_roots(),
-                &options.random_root_packages,
-            ),
-            count,
-            options.random_seed,
-        ));
-    }
-    roots.sort();
-    roots.dedup();
+    let direct_roots = if options.random_roots.is_none() && !options.root_selectors.is_empty() {
+        direct_free_function_root_selectors(&options.root_selectors)
+    } else {
+        None
+    };
+    let (mut roots, resolver_session) = if let Some(roots) = direct_roots {
+        write_event_log(
+            options,
+            "batch_resolver",
+            "completed",
+            "directly decode explicit free-function roots",
+            "fully qualified function selectors do not need a pre-analyzer workspace scan",
+            event_fields(&[(
+                "roots",
+                serde_json::json!(roots.iter().map(ToString::to_string).collect::<Vec<_>>()),
+            )]),
+        )?;
+        (roots, None)
+    } else {
+        write_event_log(
+            options,
+            "batch_resolver",
+            "started",
+            "load narrow syntactic resolver for root selection",
+            "selectors that need disambiguation parse the smallest available package scope before the wider top-down generation closure is loaded",
+            BTreeMap::new(),
+        )?;
+        let resolver_session = if options.random_roots.is_some() {
+            GenerateSession::load_without_marker_targets(
+                &options.workspace_root,
+                AnalyzerMode::Syn,
+            )?
+        } else {
+            GenerateSession::load_root_selector_resolver_without_marker_targets(
+                &options.workspace_root,
+                AnalyzerMode::Syn,
+                &options.root_selectors,
+            )?
+        };
+        write_event_log(
+            options,
+            "batch_resolver",
+            "completed",
+            "load narrow syntactic resolver for root selection",
+            "root selector resolver is ready",
+            event_fields(&[(
+                "selectable_roots",
+                serde_json::json!(resolver_session.selectable_roots().len()),
+            )]),
+        )?;
+        let mut roots = resolver_session.resolve_root_selectors(&options.root_selectors)?;
+        if let Some(count) = options.random_roots {
+            roots.extend(select_random_roots(
+                random_root_candidates(
+                    resolver_session.selectable_roots(),
+                    &options.random_root_packages,
+                ),
+                count,
+                options.random_seed,
+            ));
+        }
+        (roots, Some(resolver_session))
+    };
+    roots = dedup_roots_preserve_order(roots);
     if roots.is_empty() {
         return Err(
             "--batch-roots requires at least one --root, --roots-file entry, or --random-roots"
                 .into(),
         );
     }
+    write_event_log(
+        options,
+        "batch_roots",
+        "selected",
+        "select batch root set",
+        "each selected root is generated independently while sharing the loaded analyzer session",
+        event_fields(&[
+            ("root_count", serde_json::json!(roots.len())),
+            (
+                "roots",
+                serde_json::json!(roots.iter().map(ToString::to_string).collect::<Vec<_>>()),
+            ),
+        ]),
+    )?;
 
     let session = if options.analyzer_mode == AnalyzerMode::Syn {
-        resolver_session
+        if let Some(resolver_session) = resolver_session {
+            resolver_session
+        } else {
+            write_event_log(
+                options,
+                "batch_analyzer",
+                "started",
+                "load syntactic analyzer for direct roots",
+                "direct root decoding skipped resolver loading, so generation loads the normal top-down project once",
+                event_fields(&[("root_count", serde_json::json!(roots.len()))]),
+            )?;
+            GenerateSession::load_with_selected_roots(
+                &options.workspace_root,
+                options.analyzer_mode,
+                &roots,
+            )?
+        }
     } else {
+        write_event_log(
+            options,
+            "batch_analyzer",
+            "started",
+            "load requested analyzer once for selected roots",
+            "one analyzer session is shared across all batch roots to avoid repeated cold starts",
+            event_fields(&[
+                (
+                    "analyzer",
+                    serde_json::json!(options.analyzer_mode.as_str()),
+                ),
+                ("root_count", serde_json::json!(roots.len())),
+            ]),
+        )?;
         GenerateSession::load_with_selected_roots(
             &options.workspace_root,
             options.analyzer_mode,
             &roots,
         )?
     };
+    write_event_log(
+        options,
+        "batch_analyzer",
+        "completed",
+        "load analyzer session for batch",
+        "the loaded session will generate roots by downstream dependency closure",
+        event_fields(&[
+            (
+                "analyzer",
+                serde_json::json!(session.analyzer().mode.as_str()),
+            ),
+            ("engine", serde_json::json!(&session.analyzer().engine)),
+            ("notes", serde_json::json!(&session.analyzer().notes)),
+        ]),
+    )?;
     println!(
         "analyzer: {} ({})",
         session.analyzer().mode.as_str(),
@@ -1309,6 +1515,19 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
             root,
             output_root.display()
         );
+        write_event_log(
+            options,
+            "batch_root",
+            "started",
+            "generate and validate one selected root",
+            "the root is treated as the top-level open-source surface and only downstream dependencies are retained",
+            event_fields(&[
+                ("index", serde_json::json!(index + 1)),
+                ("total", serde_json::json!(roots.len())),
+                ("root", serde_json::json!(root.to_string())),
+                ("output_root", serde_json::json!(&output_root)),
+            ]),
+        )?;
         let started = std::time::Instant::now();
         let row = match run_batch_root(options, &session, root, &output_root, baseline.as_ref()) {
             Ok(mut row) => {
@@ -1361,9 +1580,63 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
             row.status,
             row.root
         );
+        write_event_log(
+            options,
+            "batch_root",
+            &row.status,
+            "record final row for one selected root",
+            row.error
+                .as_deref()
+                .unwrap_or("batch root finished with recorded validation status"),
+            event_fields(&[
+                ("index", serde_json::json!(index + 1)),
+                ("total", serde_json::json!(roots.len())),
+                ("root", serde_json::json!(&row.root)),
+                ("output_root", serde_json::json!(&row.output_root)),
+                ("duration_ms", serde_json::json!(row.duration_ms)),
+                ("files_written", serde_json::json!(row.files_written)),
+                (
+                    "rendered_usage_used",
+                    serde_json::json!(row.rendered_usage_used),
+                ),
+                (
+                    "rendered_usage_blocked_by_unknown",
+                    serde_json::json!(row.rendered_usage_blocked_by_unknown),
+                ),
+                (
+                    "rendered_usage_invalid",
+                    serde_json::json!(row.rendered_usage_invalid),
+                ),
+                ("check_success", serde_json::json!(row.check_success)),
+                ("check_errors", serde_json::json!(row.check_errors)),
+                ("check_warnings", serde_json::json!(row.check_warnings)),
+            ]),
+        )?;
         append_batch_report_row(&report_path, &row)?;
     }
+    write_event_log(
+        options,
+        "batch",
+        "completed",
+        "finish batch root run",
+        "all selected roots were generated and their rows appended to the batch report",
+        event_fields(&[
+            ("root_count", serde_json::json!(roots.len())),
+            ("batch_report", serde_json::json!(&report_path)),
+        ]),
+    )?;
     Ok(())
+}
+
+fn dedup_roots_preserve_order(roots: Vec<RootId>) -> Vec<RootId> {
+    let mut seen = BTreeSet::new();
+    let mut deduped = Vec::new();
+    for root in roots {
+        if seen.insert(root.to_string()) {
+            deduped.push(root);
+        }
+    }
+    deduped
 }
 
 fn random_root_candidates(roots: Vec<RootId>, packages: &[String]) -> Vec<RootId> {
@@ -1394,7 +1667,48 @@ fn run_batch_root(
     let mut last_preflight = None;
 
     for attempt in 1..=attempts {
+        write_event_log(
+            options,
+            "batch_generation",
+            "started",
+            "generate one top-down root slice",
+            "generation starts from the selected root and walks only downstream dependencies",
+            event_fields(&[
+                ("root", serde_json::json!(root.to_string())),
+                ("attempt", serde_json::json!(attempt)),
+                ("attempts", serde_json::json!(attempts)),
+                ("output_root", serde_json::json!(output_root)),
+                (
+                    "diagnostics_available",
+                    serde_json::json!(diagnostics.len()),
+                ),
+            ]),
+        )?;
         let report = session.generate(output_root.to_path_buf(), &[root.clone()], &diagnostics)?;
+        write_event_log(
+            options,
+            "batch_generation",
+            "completed",
+            "render selected root plus downstream closure",
+            "generation produced a candidate slice workspace for this root",
+            event_fields(&[
+                ("root", serde_json::json!(root.to_string())),
+                ("attempt", serde_json::json!(attempt)),
+                ("packages", serde_json::json!(&report.packages)),
+                ("files_written", serde_json::json!(report.files_written)),
+                (
+                    "reachable_callables",
+                    serde_json::json!(report.reachable.len()),
+                ),
+                (
+                    "reachable_items",
+                    serde_json::json!(report.reachable_items.len()),
+                ),
+                ("total_ms", serde_json::json!(report.timings.total_ms)),
+                ("reduce_ms", serde_json::json!(report.timings.reduce_ms)),
+                ("render_ms", serde_json::json!(report.timings.render_ms)),
+            ]),
+        )?;
         write_generate_report(&report, &output_root.join("slice-report.json"))?;
         let rendered_usage_contract = rendered_usage_contract(&report);
         let semantic_proof_block = options
@@ -1440,10 +1754,48 @@ fn run_batch_root(
         }
 
         if options.run_preflight || attempts > 1 {
+            write_event_log(
+                options,
+                "batch_preflight",
+                "started",
+                "run fast structural validation for batch root",
+                "preflight catches malformed generated workspaces before cargo check",
+                event_fields(&[
+                    ("root", serde_json::json!(root.to_string())),
+                    ("attempt", serde_json::json!(attempt)),
+                    (
+                        "manifest",
+                        serde_json::json!(output_root.join("Cargo.toml")),
+                    ),
+                ]),
+            )?;
             let preflight = preflight_workspace(PreflightOptions {
                 manifest_path: output_root.join("Cargo.toml"),
             })?;
             write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
+            write_event_log(
+                options,
+                "batch_preflight",
+                if preflight.success {
+                    "passed"
+                } else {
+                    "failed"
+                },
+                "run fast structural validation for batch root",
+                if preflight.success {
+                    "generated workspace passed preflight"
+                } else {
+                    "generated workspace failed preflight"
+                },
+                event_fields(&[
+                    ("root", serde_json::json!(root.to_string())),
+                    ("attempt", serde_json::json!(attempt)),
+                    ("errors", serde_json::json!(preflight.error_count())),
+                    ("warnings", serde_json::json!(preflight.warning_count())),
+                    ("packages", serde_json::json!(preflight.packages)),
+                    ("rust_files", serde_json::json!(preflight.rust_files)),
+                ]),
+            )?;
             if !preflight.success {
                 let row = batch_row_from_reports(
                     root,
@@ -1471,6 +1823,25 @@ fn run_batch_root(
             ));
         }
 
+        write_event_log(
+            options,
+            "batch_check",
+            "started",
+            "run cargo check for generated batch root",
+            "cargo check validates that the top-down generated workspace builds",
+            event_fields(&[
+                ("root", serde_json::json!(root.to_string())),
+                ("attempt", serde_json::json!(attempt)),
+                (
+                    "target_dir",
+                    serde_json::json!(batch_feedback_target_dir(options)),
+                ),
+                (
+                    "cargo_args",
+                    serde_json::json!(batch_cargo_args(options, root)),
+                ),
+            ]),
+        )?;
         let check = check_workspace(CheckOptions {
             manifest_path: output_root.join("Cargo.toml"),
             target_dir: Some(batch_feedback_target_dir(options)),
@@ -1483,6 +1854,31 @@ fn run_batch_root(
         } else {
             feedback_is_accepted(&check, baseline, options.deny_warnings)
         };
+        write_event_log(
+            options,
+            "batch_check",
+            if accepted { "accepted" } else { "failed" },
+            "classify cargo check result for generated batch root",
+            if accepted {
+                "generated workspace passed the requested check policy"
+            } else {
+                "generated workspace did not pass the requested check policy"
+            },
+            event_fields(&[
+                ("root", serde_json::json!(root.to_string())),
+                ("attempt", serde_json::json!(attempt)),
+                ("success", serde_json::json!(check.success)),
+                ("timed_out", serde_json::json!(check.timed_out)),
+                ("exit_code", serde_json::json!(check.exit_code)),
+                ("duration_ms", serde_json::json!(check.duration_ms)),
+                ("errors", serde_json::json!(check.error_count())),
+                ("warnings", serde_json::json!(check.warning_count())),
+                (
+                    "report_path",
+                    serde_json::json!(output_root.join("slice-feedback.json")),
+                ),
+            ]),
+        )?;
         if accepted {
             return Ok(batch_row_from_reports(
                 root,
@@ -2467,6 +2863,16 @@ fn finish_validation(
         write_validation_report(report, &path)?;
         println!("validation report: {}", path.display());
     }
+    let failed_gates: Vec<_> = report
+        .gates
+        .iter()
+        .filter(|gate| gate.status == "failed")
+        .collect();
+    let non_passed_gates: Vec<_> = report
+        .gates
+        .iter()
+        .filter(|gate| gate.status != "passed")
+        .collect();
     write_event_log(
         options,
         "validation",
@@ -2476,13 +2882,39 @@ fn finish_validation(
         event_fields(&[
             ("gates", serde_json::json!(report.gates.len())),
             ("attempts", serde_json::json!(report.attempts.len())),
+            ("failed_gates", serde_json::json!(failed_gates.len())),
             (
-                "failed_gates",
+                "failed_gate_names",
+                serde_json::json!(failed_gates
+                    .iter()
+                    .map(|gate| gate.name.as_str())
+                    .collect::<Vec<_>>()),
+            ),
+            (
+                "failed_gate_reasons",
+                serde_json::json!(failed_gates
+                    .iter()
+                    .map(|gate| format!("{}: {}", gate.name, gate.reason))
+                    .collect::<Vec<_>>()),
+            ),
+            (
+                "non_passed_gates",
+                serde_json::json!(non_passed_gates.len()),
+            ),
+            (
+                "non_passed_gate_names",
+                serde_json::json!(non_passed_gates
+                    .iter()
+                    .map(|gate| gate.name.as_str())
+                    .collect::<Vec<_>>()),
+            ),
+            (
+                "gate_outcomes",
                 serde_json::json!(report
                     .gates
                     .iter()
-                    .filter(|gate| gate.status == "failed")
-                    .count()),
+                    .map(gate_event_summary)
+                    .collect::<Vec<_>>()),
             ),
             (
                 "validation_report",
@@ -2491,6 +2923,25 @@ fn finish_validation(
         ]),
     )?;
     Ok(())
+}
+
+fn gate_event_summary(gate: &ValidationGateReport) -> BTreeMap<String, serde_json::Value> {
+    event_fields(&[
+        ("name", serde_json::json!(&gate.name)),
+        ("status", serde_json::json!(&gate.status)),
+        ("reason", serde_json::json!(&gate.reason)),
+        ("report_path", serde_json::json!(&gate.report_path)),
+        ("error_count", serde_json::json!(gate.error_count)),
+        ("warning_count", serde_json::json!(gate.warning_count)),
+        (
+            "semantic_warning_hazards",
+            serde_json::json!(gate.semantic_warning_hazards),
+        ),
+        (
+            "review_warning_hazards",
+            serde_json::json!(gate.review_warning_hazards),
+        ),
+    ])
 }
 
 fn write_validation_report(
@@ -2518,6 +2969,7 @@ fn finish_validation_with_decision_log(
 #[derive(Debug, Serialize)]
 struct EventLogEntry {
     timestamp_ms: u64,
+    elapsed_ms: u64,
     pid: u32,
     event: String,
     status: String,
@@ -2561,6 +3013,7 @@ fn write_event_log(
     }
     let entry = EventLogEntry {
         timestamp_ms: now_unix_ms(),
+        elapsed_ms: run_elapsed_ms(),
         pid: std::process::id(),
         event: event.to_string(),
         status: status.to_string(),
@@ -2587,6 +3040,11 @@ fn now_unix_ms() -> u64 {
         .as_millis()
         .try_into()
         .unwrap_or(u64::MAX)
+}
+
+fn run_elapsed_ms() -> u64 {
+    static RUN_STARTED: OnceLock<Instant> = OnceLock::new();
+    elapsed_ms(*RUN_STARTED.get_or_init(Instant::now))
 }
 
 #[derive(Debug, Serialize)]
@@ -2640,6 +3098,21 @@ struct DecisionLogValidationSummary {
     gates: usize,
     attempts: usize,
     failed_gates: Vec<String>,
+    non_passed_gates: Vec<String>,
+    gate_outcomes: Vec<DecisionLogGateOutcome>,
+}
+
+#[derive(Debug, Serialize)]
+struct DecisionLogGateOutcome {
+    name: String,
+    status: String,
+    reason: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    report_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error_count: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    warning_count: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -2690,6 +3163,24 @@ fn build_decision_log(
             .iter()
             .filter(|gate| gate.status == "failed")
             .map(|gate| gate.name.clone())
+            .collect(),
+        non_passed_gates: validation
+            .gates
+            .iter()
+            .filter(|gate| gate.status != "passed")
+            .map(|gate| gate.name.clone())
+            .collect(),
+        gate_outcomes: validation
+            .gates
+            .iter()
+            .map(|gate| DecisionLogGateOutcome {
+                name: gate.name.clone(),
+                status: gate.status.clone(),
+                reason: gate.reason.clone(),
+                report_path: gate.report_path.clone(),
+                error_count: gate.error_count,
+                warning_count: gate.warning_count,
+            })
             .collect(),
     });
     DecisionLogReport {
@@ -6231,6 +6722,23 @@ resolver = "2"
     }
 
     #[test]
+    fn default_validation_scope_skips_marker_scan_for_explicit_roots() {
+        let mut options = parse_options([
+            "--production",
+            "--root",
+            "app::selected",
+            "/definitely/missing/workspace",
+            "out",
+        ]);
+        let original_args = options.cargo_check_args.clone();
+
+        apply_default_marked_package_scope(&mut options)
+            .expect("explicit root scope should not inspect source markers");
+
+        assert_eq!(options.cargo_check_args, original_args);
+    }
+
+    #[test]
     fn cargo_arg_package_scope_detection_accepts_common_forms() {
         assert!(cargo_args_have_package_scope(&["-p".to_string()]));
         assert!(cargo_args_have_package_scope(&["-papp".to_string()]));
@@ -6900,6 +7408,59 @@ pub fn dead() -> usize {
         assert!(!original.contains("opensourced"), "{original}");
         let report = fs::read_to_string(output.join("batch-report.jsonl")).unwrap();
         assert!(report.contains("\"status\":\"generated\""), "{report}");
+    }
+
+    #[test]
+    fn batch_roots_preserve_explicit_selector_order() {
+        let source = temp_path("cli-rootless-batch-order-source");
+        let output = temp_path("cli-rootless-batch-order-output");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"pub fn selected() -> usize {
+    helper()
+}
+
+pub fn helper() -> usize {
+    1
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            OsString::from("--analyzer"),
+            OsString::from("syn"),
+            OsString::from("--batch-roots"),
+            OsString::from("--root"),
+            OsString::from("app::helper"),
+            OsString::from("--root"),
+            OsString::from("app::selected"),
+            OsString::from("--root"),
+            OsString::from("app::helper"),
+            OsString::from("--preflight"),
+            source.into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+
+        run_batch_roots(&options).expect("rootless batch should generate");
+
+        assert!(output.join("0001-app_helper").exists());
+        assert!(output.join("0002-app_selected").exists());
+        assert!(!output.join("0003-app_helper").exists());
+        let report = fs::read_to_string(output.join("batch-report.jsonl")).unwrap();
+        let first = report.find("\"root\":\"app::helper\"").unwrap();
+        let second = report.find("\"root\":\"app::selected\"").unwrap();
+        assert!(
+            first < second,
+            "batch report should preserve explicit root order\n{report}"
+        );
     }
 
     #[test]

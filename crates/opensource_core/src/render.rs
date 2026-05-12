@@ -5547,6 +5547,7 @@ fn transform_restricted_support_file(
     }
     let live_derive_idents = support_live_derive_idents(syntax, live_set);
     let mut public_use_names = live_set.public_exports.clone();
+    public_use_names.extend(live_import_names.iter().cloned());
     public_use_names.retain(|name| !pruned_variant_payload_drop_names.contains(name));
     let mut transformed = syntax.clone();
     transformed.items = syntax
@@ -5673,6 +5674,12 @@ fn support_pruned_struct_fields(
                 &struct_name,
             )
             || support_struct_is_live_signature_surface(syntax, live_set, named_items, &struct_name)
+            || support_struct_is_mentioned_by_live_macro(
+                syntax,
+                live_set,
+                named_items,
+                &struct_name,
+            )
         {
             continue;
         }
@@ -5807,6 +5814,37 @@ fn support_struct_is_live_signature_surface(
                 }
             }
             _ => {}
+        }
+    }
+    false
+}
+
+fn support_struct_is_mentioned_by_live_macro(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+    named_items: &BTreeMap<String, Item>,
+    struct_name: &str,
+) -> bool {
+    let mut visitor = SupportStructMacroMentionVisitor {
+        struct_name,
+        mentioned: false,
+    };
+    for item in &syntax.items {
+        if !support_item_should_collect_live_usage(item, named_items, live_set) {
+            continue;
+        }
+        match item {
+            Item::Impl(item_impl) => {
+                if let Some(rendered_impl) =
+                    transform_support_impl(item_impl, named_items, live_set)
+                {
+                    visitor.visit_item_impl(&rendered_impl);
+                }
+            }
+            _ => visitor.visit_item(item),
+        }
+        if visitor.mentioned {
+            return true;
         }
     }
     false
@@ -6111,6 +6149,21 @@ impl Visit<'_> for SupportStructFieldUseVisitor<'_> {
     fn visit_macro(&mut self, mac: &syn::Macro) {
         if token_stream_mentions_ident(&mac.tokens, self.field_name) {
             self.needs_field = true;
+        }
+        visit::visit_macro(self, mac);
+    }
+}
+
+struct SupportStructMacroMentionVisitor<'a> {
+    struct_name: &'a str,
+    mentioned: bool,
+}
+
+impl Visit<'_> for SupportStructMacroMentionVisitor<'_> {
+    fn visit_macro(&mut self, mac: &syn::Macro) {
+        if token_stream_mentions_ident(&mac.tokens, self.struct_name) {
+            self.mentioned = true;
+            return;
         }
         visit::visit_macro(self, mac);
     }

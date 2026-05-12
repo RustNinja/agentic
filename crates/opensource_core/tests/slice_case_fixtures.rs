@@ -220,6 +220,128 @@ fn prunes_support_sub_dependencies_to_used_closure_with_default_analyzer() {
 }
 
 #[test]
+fn retains_support_public_reexports_used_as_private_imports() {
+    let fixture =
+        repo_root().join("fixtures/slice_cases/support_public_reexport_import_prune/workspace");
+    let output = temp_path("slice-case-support-public-reexport-import-output");
+    let target_dir = temp_path("slice-case-support-public-reexport-import-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("support_public_reexport_import_prune fixture should slice");
+
+    assert_eq!(report.packages, ["root"]);
+    let root_source = read(output.join("root/src/lib.rs"));
+    let protocol_source = read(output.join("support/support_proto/src/protocol.rs"));
+    let approvals_source = read(output.join("support/support_proto/src/approvals.rs"));
+
+    assert!(
+        protocol_source.contains("pub use crate::approvals::ExecPolicyAmendment"),
+        "pub use must be retained because the same module uses the imported name in a retained enum\n{protocol_source}"
+    );
+    assert!(
+        protocol_source.contains("ExecPolicyAmendment"),
+        "{protocol_source}"
+    );
+    assert!(
+        !protocol_source.contains("DeadAmendment"),
+        "dead public reexport should still be pruned\n{protocol_source}"
+    );
+    assert!(
+        approvals_source.contains("pub struct ExecPolicyAmendment"),
+        "{approvals_source}"
+    );
+    assert!(
+        !approvals_source.contains("pub struct DeadAmendment"),
+        "{approvals_source}"
+    );
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", fixture_rustflags_with_denied_unused_imports())
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        output.status.success(),
+        "generated support public reexport fixture did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nroot/src/lib.rs:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        root_source,
+    );
+}
+
+#[test]
+fn retains_support_struct_fields_mentioned_by_external_macro_invocation() {
+    let fixture = repo_root().join("fixtures/slice_cases/support_macro_field_surface/workspace");
+    let output = temp_path("slice-case-support-macro-field-surface-output");
+    let target_dir = temp_path("slice-case-support-macro-field-surface-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("support_macro_field_surface fixture should slice");
+
+    assert_eq!(report.packages, ["root"]);
+    let root_source = read(output.join("root/src/lib.rs"));
+    let experimental_source = read(output.join("support/support_proto/src/experimental_api.rs"));
+
+    assert!(
+        root_source.contains("pub fn selected_reason"),
+        "{root_source}"
+    );
+    assert!(
+        experimental_source.contains("macro_host::expose_registered_field!(ExperimentalField)"),
+        "retained support macro invocation should remain\n{experimental_source}"
+    );
+    assert!(
+        experimental_source.contains("pub type_name: &'static str"),
+        "support struct fields mentioned only through a retained external macro must not be pruned\n{experimental_source}"
+    );
+    assert!(
+        experimental_source.contains("pub field_name: &'static str"),
+        "{experimental_source}"
+    );
+    assert!(
+        experimental_source.contains("pub reason: &'static str"),
+        "{experimental_source}"
+    );
+    assert!(
+        output.join("support/macro_host/src/lib.rs").exists(),
+        "external macro support package should be copied"
+    );
+
+    let output = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", fixture_rustflags_with_denied_unused_imports())
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        output.status.success(),
+        "generated support macro field fixture did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nroot/src/lib.rs:\n{}",
+        output.status,
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+        root_source,
+    );
+}
+
+#[test]
 fn prunes_public_support_field_name_collisions_to_concrete_struct_use() {
     let fixture = repo_root().join("fixtures/slice_cases/public_field_collision_prune");
     let output = temp_path("slice-case-public-field-collision-prune-output");

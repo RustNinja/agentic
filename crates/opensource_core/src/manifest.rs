@@ -41,6 +41,19 @@ pub struct Dependency {
 }
 
 pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Error>> {
+    load_workspace_with_marker_targets(root, true)
+}
+
+pub fn load_workspace_without_marker_targets(
+    root: &Path,
+) -> Result<Workspace, Box<dyn std::error::Error>> {
+    load_workspace_with_marker_targets(root, false)
+}
+
+fn load_workspace_with_marker_targets(
+    root: &Path,
+    prefer_marker_targets: bool,
+) -> Result<Workspace, Box<dyn std::error::Error>> {
     let root = root.canonicalize()?;
     let root_manifest = root.join("Cargo.toml");
     let root_value = read_manifest(&root_manifest)?;
@@ -69,7 +82,12 @@ pub fn load_workspace(root: &Path) -> Result<Workspace, Box<dyn std::error::Erro
             .canonicalize()?;
         let manifest = read_manifest(&manifest_path)?;
 
-        let entry_target = entry_target(&package_root, &manifest, &metadata_package.targets)?;
+        let entry_target = entry_target(
+            &package_root,
+            &manifest,
+            &metadata_package.targets,
+            prefer_marker_targets,
+        )?;
         let lib_path = entry_target.src_path.clone();
 
         let dependencies = metadata_dependencies(&metadata_package.dependencies, &entry_target);
@@ -168,9 +186,12 @@ fn entry_target(
     package_root: &Path,
     manifest: &Value,
     targets: &[MetadataTarget],
+    prefer_marker_targets: bool,
 ) -> Result<PackageTarget, Box<dyn std::error::Error>> {
-    if let Some(target) = metadata_marker_target(targets)? {
-        return Ok(package_target_from_metadata(package_root, manifest, target));
+    if prefer_marker_targets {
+        if let Some(target) = metadata_marker_target(targets)? {
+            return Ok(package_target_from_metadata(package_root, manifest, target));
+        }
     }
 
     if let Some(target) = metadata_entry_target(package_root, targets) {
@@ -680,5 +701,61 @@ impl From<MetadataTarget> for PackageTarget {
             src_path: target.src_path,
             required_features: target.required_features,
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn explicit_root_workspace_load_skips_marker_target_scan() {
+        let root = temp_workspace("manifest-explicit-root-entry-target");
+        fs::create_dir_all(root.join("app/src/bin")).expect("fixture dirs should create");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .expect("workspace manifest should write");
+        fs::write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n\n[[bin]]\nname = \"tool\"\npath = \"src/bin/tool.rs\"\n",
+        )
+        .expect("package manifest should write");
+        fs::write(root.join("app/src/lib.rs"), "pub fn library_root() {}\n")
+            .expect("lib source should write");
+        fs::write(
+            root.join("app/src/bin/tool.rs"),
+            "#[opensourced::opensourced]\npub fn marked_bin_root() {}\nfn main() {}\n",
+        )
+        .expect("bin source should write");
+
+        let marker_workspace = load_workspace(&root).expect("marker workspace should load");
+        let marker_target = &marker_workspace.packages["app"].entry_target;
+        assert!(
+            marker_target.kind.iter().any(|kind| kind == "bin"),
+            "{marker_target:?}"
+        );
+        assert!(marker_target.src_path.ends_with("src/bin/tool.rs"));
+
+        let explicit_workspace = load_workspace_without_marker_targets(&root)
+            .expect("explicit-root workspace should load");
+        let explicit_target = &explicit_workspace.packages["app"].entry_target;
+        assert!(
+            explicit_target.kind.iter().any(|kind| kind == "lib"),
+            "{explicit_target:?}"
+        );
+        assert!(explicit_target.src_path.ends_with("src/lib.rs"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    fn temp_workspace(label: &str) -> PathBuf {
+        let nanos = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .expect("system time should be after unix epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("slicer-{label}-{}-{nanos}", std::process::id()))
     }
 }
