@@ -785,6 +785,24 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(field_api.contains("view.branch_score"), "{field_api}");
     assert!(field_api.contains("view.if_title"), "{field_api}");
     assert!(field_api.contains("view.if_score"), "{field_api}");
+    assert!(field_api.contains("if_collection_views"), "{field_api}");
+    assert!(
+        field_api.contains("view.if_collection_title"),
+        "{field_api}"
+    );
+    assert!(
+        field_api.contains("view.if_collection_score"),
+        "{field_api}"
+    );
+    assert!(field_api.contains("match_collection_views"), "{field_api}");
+    assert!(
+        field_api.contains("view.match_collection_title"),
+        "{field_api}"
+    );
+    assert!(
+        field_api.contains("view.match_collection_score"),
+        "{field_api}"
+    );
     assert!(!field_api.contains("dead_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_filter_note"), "{field_api}");
     assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
@@ -797,6 +815,14 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(!field_api.contains("dead_dyn_note"), "{field_api}");
     assert!(!field_api.contains("dead_branch_note"), "{field_api}");
     assert!(!field_api.contains("dead_if_note"), "{field_api}");
+    assert!(
+        !field_api.contains("dead_if_collection_note"),
+        "{field_api}"
+    );
+    assert!(
+        !field_api.contains("dead_match_collection_note"),
+        "{field_api}"
+    );
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
 
     assert!(
@@ -918,6 +944,38 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(view_record.contains("pub if_title:"), "{view_record}");
     assert!(view_record.contains("pub if_score:"), "{view_record}");
     assert!(!view_record.contains("dead_if_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct IfCollectionView"),
+        "{view_record}"
+    );
+    assert!(
+        view_record.contains("pub if_collection_title:"),
+        "{view_record}"
+    );
+    assert!(
+        view_record.contains("pub if_collection_score:"),
+        "{view_record}"
+    );
+    assert!(
+        !view_record.contains("dead_if_collection_note"),
+        "{view_record}"
+    );
+    assert!(
+        view_record.contains("pub struct MatchCollectionView"),
+        "{view_record}"
+    );
+    assert!(
+        view_record.contains("pub match_collection_title:"),
+        "{view_record}"
+    );
+    assert!(
+        view_record.contains("pub match_collection_score:"),
+        "{view_record}"
+    );
+    assert!(
+        !view_record.contains("dead_match_collection_note"),
+        "{view_record}"
+    );
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }

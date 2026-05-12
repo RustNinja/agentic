@@ -150,8 +150,55 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let if_collection_views = if seed % 2 == 0 {
+        snapshot
+            .records
+            .iter()
+            .map(|record| view_record::IfCollectionView {
+                if_collection_title: record.raw_label.clone(),
+                if_collection_score: record.raw_value,
+                dead_if_collection_note: None,
+            })
+            .collect::<Vec<_>>()
+    } else {
+        Vec::new()
+    };
+    let if_collection = if_collection_views
+        .iter()
+        .map(|view| {
+            format!(
+                "{}:{}",
+                view.if_collection_title, view.if_collection_score
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let match_collection_views = match seed % 3 {
+        0 => snapshot
+            .records
+            .iter()
+            .map(|record| view_record::MatchCollectionView {
+                match_collection_title: record.raw_label.clone(),
+                match_collection_score: record.raw_value,
+                dead_match_collection_note: None,
+            })
+            .collect::<Vec<_>>(),
+        _ => Vec::new(),
+    };
+    let match_collection = match_collection_views
+        .iter()
+        .map(|view| {
+            format!(
+                "{}:{}",
+                view.match_collection_title, view.match_collection_score
+            )
+        })
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}",
         loop_titles.join(",")
     )
 }

@@ -19718,6 +19718,20 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 .and_then(|expr| self.expression_iter_item_shape(expr)),
             Expr::Unsafe(block) => final_block_expression(&block.block)
                 .and_then(|expr| self.expression_iter_item_shape(expr)),
+            Expr::If(expr_if) => {
+                let then_shape = final_block_expression(&expr_if.then_branch)
+                    .and_then(|expr| self.expression_iter_item_shape(expr));
+                then_shape.or_else(|| {
+                    expr_if
+                        .else_branch
+                        .as_ref()
+                        .and_then(|(_else, else_expr)| self.expression_iter_item_shape(else_expr))
+                })
+            }
+            Expr::Match(expr_match) => expr_match
+                .arms
+                .iter()
+                .find_map(|arm| self.expression_iter_item_shape(&arm.body)),
             Expr::MethodCall(call) => {
                 let method = call.method.to_string();
                 if matches!(method.as_str(), "values" | "values_mut" | "into_values") {
@@ -20401,6 +20415,19 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 .and_then(|expr| self.expression_collected_item_shape(expr)),
             Expr::Unsafe(block) => final_block_expression(&block.block)
                 .and_then(|expr| self.expression_collected_item_shape(expr)),
+            Expr::If(expr_if) => {
+                let then_shape = final_block_expression(&expr_if.then_branch)
+                    .and_then(|expr| self.expression_collected_item_shape(expr));
+                then_shape.or_else(|| {
+                    expr_if.else_branch.as_ref().and_then(|(_else, else_expr)| {
+                        self.expression_collected_item_shape(else_expr)
+                    })
+                })
+            }
+            Expr::Match(expr_match) => expr_match
+                .arms
+                .iter()
+                .find_map(|arm| self.expression_collected_item_shape(&arm.body)),
             _ => None,
         }
     }

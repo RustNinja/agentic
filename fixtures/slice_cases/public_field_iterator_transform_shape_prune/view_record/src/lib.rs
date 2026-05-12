@@ -70,3 +70,15 @@ pub struct IfView {
     pub if_score: u32,
     pub dead_if_note: Option<String>,
 }
+
+pub struct IfCollectionView {
+    pub if_collection_title: String,
+    pub if_collection_score: u32,
+    pub dead_if_collection_note: Option<String>,
+}
+
+pub struct MatchCollectionView {
+    pub match_collection_title: String,
+    pub match_collection_score: u32,
+    pub dead_match_collection_note: Option<String>,
+}
