@@ -19545,6 +19545,7 @@ struct ConcreteStructFieldUseVisitor<'a> {
     needs_field: bool,
 }
 
+#[derive(Clone, Copy)]
 struct FieldTypeContext<'a> {
     package: &'a str,
     module_path: &'a [String],
@@ -19645,6 +19646,47 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
         let return_type = &self.project.methods.get(&callable)?.item.sig.output;
         self.return_type_item(return_type, &callable)
+    }
+
+    fn expression_iter_item_type_item(&self, expression: &Expr) -> Option<ItemId> {
+        match expression {
+            Expr::Field(field) => self
+                .field_expr_type(field)
+                .and_then(|ty| self.sequence_value_type_item(ty)),
+            Expr::Reference(reference) => self.expression_iter_item_type_item(&reference.expr),
+            Expr::Paren(paren) => self.expression_iter_item_type_item(&paren.expr),
+            Expr::Block(block) => final_block_expression(&block.block)
+                .and_then(|expr| self.expression_iter_item_type_item(expr)),
+            Expr::Unsafe(block) => final_block_expression(&block.block)
+                .and_then(|expr| self.expression_iter_item_type_item(expr)),
+            Expr::MethodCall(call) => {
+                let method = call.method.to_string();
+                if matches!(method.as_str(), "values" | "values_mut" | "into_values") {
+                    return self.expression_map_value_type_item(&call.receiver);
+                }
+                if matches!(method.as_str(), "iter" | "iter_mut" | "into_iter") {
+                    return self
+                        .expression_iter_item_type_item(&call.receiver)
+                        .or_else(|| self.field_collection_value_type_item(&call.receiver));
+                }
+                if iterator_item_passthrough_method(&method) {
+                    return self.expression_iter_item_type_item(&call.receiver);
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn field_collection_value_type_item(&self, expression: &Expr) -> Option<ItemId> {
+        match expression {
+            Expr::Field(field) => self
+                .field_expr_type(field)
+                .and_then(|ty| self.sequence_value_type_item(ty)),
+            Expr::Reference(reference) => self.field_collection_value_type_item(&reference.expr),
+            Expr::Paren(paren) => self.field_collection_value_type_item(&paren.expr),
+            _ => None,
+        }
     }
 
     fn return_type_item(
@@ -19792,6 +19834,69 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             .and_then(|ty| {
                 self.type_payload_or_direct_item_in(ctx.package, ctx.module_path, ctx.aliases, ty)
             })
+    }
+
+    fn sequence_value_type_item(&self, ctx: FieldTypeContext<'a>) -> Option<ItemId> {
+        match ctx.ty {
+            Type::Reference(reference) => self.sequence_value_type_item(FieldTypeContext {
+                ty: &reference.elem,
+                ..ctx
+            }),
+            Type::Group(group) => self.sequence_value_type_item(FieldTypeContext {
+                ty: &group.elem,
+                ..ctx
+            }),
+            Type::Paren(paren) => self.sequence_value_type_item(FieldTypeContext {
+                ty: &paren.elem,
+                ..ctx
+            }),
+            Type::Slice(slice) => self.type_payload_or_direct_item_in(
+                ctx.package,
+                ctx.module_path,
+                ctx.aliases,
+                &slice.elem,
+            ),
+            Type::Array(array) => self.type_payload_or_direct_item_in(
+                ctx.package,
+                ctx.module_path,
+                ctx.aliases,
+                &array.elem,
+            ),
+            Type::Path(type_path) => {
+                let segment = type_path.path.segments.last()?;
+                if !matches!(
+                    segment.ident.to_string().as_str(),
+                    "BinaryHeap"
+                        | "BTreeSet"
+                        | "HashSet"
+                        | "LinkedList"
+                        | "Option"
+                        | "Vec"
+                        | "VecDeque"
+                ) {
+                    return None;
+                }
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    return None;
+                };
+                arguments
+                    .args
+                    .iter()
+                    .find_map(|argument| match argument {
+                        GenericArgument::Type(ty) => Some(ty),
+                        _ => None,
+                    })
+                    .and_then(|ty| {
+                        self.type_payload_or_direct_item_in(
+                            ctx.package,
+                            ctx.module_path,
+                            ctx.aliases,
+                            ty,
+                        )
+                    })
+            }
+            _ => None,
+        }
     }
 
     fn type_payload_or_direct_item_in(
@@ -19976,6 +20081,26 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             }
         }
     }
+
+    fn visit_closure_with_inferred_first_binding(
+        &mut self,
+        closure: &syn::ExprClosure,
+        item: &ItemId,
+    ) {
+        let binding_count = self.bindings.len();
+        if let Some(first) = closure.inputs.first() {
+            self.record_pattern_binding_item(first, item);
+        }
+        for input in &closure.inputs {
+            if let Pat::Type(input) = input {
+                self.record_binding_from_typed_pat(&input.pat, &input.ty);
+            }
+            self.visit_pat(input);
+        }
+        visit::visit_return_type(self, &closure.output);
+        self.visit_expr(&closure.body);
+        self.bindings.truncate(binding_count);
+    }
 }
 
 fn type_path_to_struct_item(package: &str, type_path: &[String]) -> Option<ItemId> {
@@ -20109,6 +20234,46 @@ fn type_like_item_kind(item: &ItemId) -> bool {
     )
 }
 
+fn iterator_closure_method(method: &str) -> bool {
+    matches!(
+        method,
+        "all"
+            | "any"
+            | "filter"
+            | "filter_map"
+            | "find"
+            | "find_map"
+            | "for_each"
+            | "inspect"
+            | "map"
+            | "position"
+            | "rposition"
+    )
+}
+
+fn iterator_item_passthrough_method(method: &str) -> bool {
+    matches!(
+        method,
+        "as_mut"
+            | "as_ref"
+            | "by_ref"
+            | "cloned"
+            | "copied"
+            | "cycle"
+            | "filter"
+            | "fuse"
+            | "inspect"
+            | "iter"
+            | "iter_mut"
+            | "rev"
+            | "skip"
+            | "skip_while"
+            | "step_by"
+            | "take"
+            | "take_while"
+    )
+}
+
 fn rendered_sibling_struct_has_field_name(
     project: &Project,
     reduced: &ReducedProject,
@@ -20188,6 +20353,21 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
             }
         } else {
             visit::visit_expr_if(self, expr_if);
+        }
+    }
+
+    fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
+        self.visit_expr(&call.receiver);
+        let method = call.method.to_string();
+        let inferred_item = iterator_closure_method(&method)
+            .then(|| self.expression_iter_item_type_item(&call.receiver))
+            .flatten();
+        for arg in &call.args {
+            if let (Some(item), Expr::Closure(closure)) = (&inferred_item, arg) {
+                self.visit_closure_with_inferred_first_binding(closure, item);
+            } else {
+                self.visit_expr(arg);
+            }
         }
     }
 
