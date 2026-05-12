@@ -1708,6 +1708,16 @@ fn prunes_litter_bridge_ipc_support_packages_with_default_analyzer() {
     )
     .expect("litter_bridge_ipc_prune fixture should slice");
 
+    assert!(
+        report
+            .production
+            .hazards
+            .iter()
+            .all(|hazard| hazard.code != "semantic_unresolved_paths"),
+        "retained associated functions and enum variants should not leave unresolved path review noise: {:?}",
+        report.production.hazards
+    );
+
     assert_eq!(
         report.packages,
         ["bridge-core", "bridge-protocol", "codex-bridge"]
@@ -2289,7 +2299,6 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             hazards: &[
                 ("custom_attribute_macros", "warning"),
                 ("custom_derive_macros", "warning"),
-                ("semantic_unresolved_paths", "warning"),
             ],
         },
         RaHardFixture {
@@ -2300,7 +2309,7 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "litter_conversation_render_prune",
             packages: &["codex-core", "codex-protocol", "codex-tui"],
-            hazards: &[("semantic_unresolved_paths", "warning")],
+            hazards: &[],
         },
         RaHardFixture {
             fixture: "litter_conversation_state_serde_prune",
@@ -2319,13 +2328,12 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 ("custom_attribute_macros", "warning"),
                 ("conditional_compilation_attrs", "warning"),
                 ("custom_derive_macros", "warning"),
-                ("semantic_unresolved_paths", "warning"),
             ],
         },
         RaHardFixture {
             fixture: "litter_bridge_ipc_prune",
             packages: &["bridge-core", "bridge-protocol", "codex-bridge"],
-            hazards: &[("semantic_unresolved_paths", "warning")],
+            hazards: &[],
         },
         RaHardFixture {
             fixture: "litter_event_callback_prune",
@@ -2339,7 +2347,6 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 ("custom_attribute_macros", "warning"),
                 ("conditional_compilation_attrs", "warning"),
                 ("custom_derive_macros", "warning"),
-                ("semantic_unresolved_paths", "warning"),
                 ("trait_object_surfaces", "warning"),
             ],
         },

@@ -4696,7 +4696,13 @@ fn production_readiness_report_inner(
         ));
         return production_readiness_status(hazards);
     };
-    add_semantic_query_hazards(semantic, project, reduced, &mut hazards);
+    add_semantic_query_hazards(
+        semantic,
+        project,
+        reduced,
+        rendered_symbol_proof,
+        &mut hazards,
+    );
     add_semantic_usage_mapping_hazard(analyzer, project, reduced, &mut hazards);
     add_semantic_usage_reference_hazard(analyzer, project, &mut hazards);
 
@@ -4897,6 +4903,7 @@ fn add_semantic_query_hazards(
     semantic: &SemanticReport,
     project: &Project,
     reduced: &ReducedProject,
+    rendered_symbol_proof: Option<&RenderedSymbolProofReport>,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
     let retained_paths = retained_semantic_file_paths(project, reduced);
@@ -4961,8 +4968,15 @@ fn add_semantic_query_hazards(
             .expect("semantic unresolved method hazard was just pushed");
         last.details = semantic_unresolved_details(unresolved_method_diagnostics);
     }
-    let unresolved_path_diagnostics =
+    let raw_unresolved_path_diagnostics =
         unresolved_diagnostics_for_kind(&metrics, SemanticUnresolvedKind::Path);
+    let unresolved_path_diagnostics = raw_unresolved_path_diagnostics
+        .iter()
+        .copied()
+        .filter(|diagnostic| {
+            !covered_project_path_unresolved_diagnostic(project, rendered_symbol_proof, diagnostic)
+        })
+        .collect::<Vec<_>>();
     let unresolved_paths =
         non_benign_unresolved_count(metrics.unresolved_paths, &unresolved_path_diagnostics);
     if unresolved_paths > 0 {
@@ -5076,6 +5090,130 @@ fn covered_project_method_unresolved_diagnostic(
                 method,
             )
         })
+}
+
+fn covered_project_path_unresolved_diagnostic(
+    project: &Project,
+    rendered_symbol_proof: Option<&RenderedSymbolProofReport>,
+    diagnostic: &SemanticUnresolvedDiagnostic,
+) -> bool {
+    diagnostic.kind == SemanticUnresolvedKind::Path
+        && diagnostic.category == SemanticUnresolvedCategory::DependencyRisk
+        && diagnostic.reason == "unresolved_path_anchor_matches_project_local_identifier"
+        && rendered_symbol_proof.is_some_and(|proof| {
+            proof.status == "proven"
+                && (covered_project_associated_callable_path(project, proof, diagnostic)
+                    || covered_project_enum_variant_path(project, proof, diagnostic))
+        })
+}
+
+fn covered_project_associated_callable_path(
+    project: &Project,
+    proof: &RenderedSymbolProofReport,
+    diagnostic: &SemanticUnresolvedDiagnostic,
+) -> bool {
+    let Some(symbol) = diagnostic.symbol.as_deref() else {
+        return false;
+    };
+    let Some((qualifier, member)) = unresolved_associated_path_segments(diagnostic) else {
+        return false;
+    };
+    if member != symbol {
+        return false;
+    }
+
+    project.methods.keys().any(|callable| {
+        let CallableId::Method {
+            type_path, method, ..
+        } = callable
+        else {
+            return false;
+        };
+        method == symbol
+            && path_qualifier_matches_type_path(&qualifier, type_path)
+            && rendered_symbol_is_used_or_unknown(proof, "callable", &callable.to_string())
+    })
+}
+
+fn covered_project_enum_variant_path(
+    project: &Project,
+    proof: &RenderedSymbolProofReport,
+    diagnostic: &SemanticUnresolvedDiagnostic,
+) -> bool {
+    let Some(symbol) = diagnostic.symbol.as_deref() else {
+        return false;
+    };
+    let Some((qualifier, member)) = unresolved_associated_path_segments(diagnostic) else {
+        return false;
+    };
+    if member != symbol {
+        return false;
+    }
+
+    project.items.keys().any(|item| {
+        item.kind == model::ItemKind::Enum
+            && path_qualifier_matches_item_path(&qualifier, item)
+            && rendered_symbol_is_used_or_unknown(proof, "member", &format!("{item}::{symbol}"))
+    })
+}
+
+fn unresolved_associated_path_segments(
+    diagnostic: &SemanticUnresolvedDiagnostic,
+) -> Option<(Vec<String>, String)> {
+    let mut segments = syn_path_segments(&diagnostic.snippet);
+    if segments.len() < 2 {
+        return None;
+    }
+    let member = segments.pop()?;
+    Some((segments, member))
+}
+
+fn syn_path_segments(snippet: &str) -> Vec<String> {
+    syn::parse_str::<syn::Path>(snippet)
+        .ok()
+        .map(|path| {
+            path.segments
+                .iter()
+                .map(|segment| segment.ident.to_string())
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default()
+}
+
+fn path_qualifier_matches_type_path(qualifier: &[String], type_path: &[String]) -> bool {
+    qualifier != ["Self"] && path_segments_have_matching_suffix(qualifier, type_path)
+}
+
+fn path_qualifier_matches_item_path(qualifier: &[String], item: &ItemId) -> bool {
+    qualifier != ["Self"]
+        && path_segments_have_matching_suffix(
+            qualifier,
+            &item
+                .module_path
+                .iter()
+                .cloned()
+                .chain(std::iter::once(item.name.clone()))
+                .collect::<Vec<_>>(),
+        )
+}
+
+fn path_segments_have_matching_suffix(left: &[String], right: &[String]) -> bool {
+    !left.is_empty() && !right.is_empty() && (left.ends_with(right) || right.ends_with(left))
+}
+
+fn rendered_symbol_is_used_or_unknown(
+    proof: &RenderedSymbolProofReport,
+    kind: &str,
+    id: &str,
+) -> bool {
+    proof.entries.iter().any(|entry| {
+        entry.kind == kind
+            && entry.id == id
+            && matches!(
+                entry.classification.as_str(),
+                "retained" | "blocked_by_unknown"
+            )
+    })
 }
 
 fn project_method_name_fully_reachable_in_retained_paths(
