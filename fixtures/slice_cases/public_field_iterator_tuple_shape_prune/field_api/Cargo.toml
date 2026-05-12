@@ -1,0 +1,11 @@
+[package]
+name = "field_api"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+left_record = { path = "../left_record" }
+right_record = { path = "../right_record" }
+
+[lib]
+path = "src/lib.rs"

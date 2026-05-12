@@ -19553,6 +19553,13 @@ struct FieldTypeContext<'a> {
     ty: &'a Type,
 }
 
+#[derive(Clone)]
+enum IteratorItemShape {
+    Unknown,
+    Direct(ItemId),
+    Tuple(Vec<IteratorItemShape>),
+}
+
 impl<'a> ConcreteStructFieldUseVisitor<'a> {
     fn new(
         project: &'a Project,
@@ -19648,34 +19655,62 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         self.return_type_item(return_type, &callable)
     }
 
-    fn expression_iter_item_type_item(&self, expression: &Expr) -> Option<ItemId> {
+    fn expression_iter_item_shape(&self, expression: &Expr) -> Option<IteratorItemShape> {
         match expression {
             Expr::Field(field) => self
                 .field_expr_type(field)
-                .and_then(|ty| self.sequence_value_type_item(ty)),
-            Expr::Reference(reference) => self.expression_iter_item_type_item(&reference.expr),
-            Expr::Paren(paren) => self.expression_iter_item_type_item(&paren.expr),
+                .and_then(|ty| self.sequence_value_type_item(ty))
+                .map(IteratorItemShape::Direct),
+            Expr::Reference(reference) => self.expression_iter_item_shape(&reference.expr),
+            Expr::Paren(paren) => self.expression_iter_item_shape(&paren.expr),
             Expr::Block(block) => final_block_expression(&block.block)
-                .and_then(|expr| self.expression_iter_item_type_item(expr)),
+                .and_then(|expr| self.expression_iter_item_shape(expr)),
             Expr::Unsafe(block) => final_block_expression(&block.block)
-                .and_then(|expr| self.expression_iter_item_type_item(expr)),
+                .and_then(|expr| self.expression_iter_item_shape(expr)),
             Expr::MethodCall(call) => {
                 let method = call.method.to_string();
                 if matches!(method.as_str(), "values" | "values_mut" | "into_values") {
-                    return self.expression_map_value_type_item(&call.receiver);
+                    return self
+                        .expression_map_value_type_item(&call.receiver)
+                        .map(IteratorItemShape::Direct);
                 }
                 if matches!(method.as_str(), "iter" | "iter_mut" | "into_iter") {
-                    return self
-                        .expression_iter_item_type_item(&call.receiver)
-                        .or_else(|| self.field_collection_value_type_item(&call.receiver));
+                    return self.expression_iter_item_shape(&call.receiver).or_else(|| {
+                        self.field_collection_value_type_item(&call.receiver)
+                            .map(IteratorItemShape::Direct)
+                    });
+                }
+                if method == "enumerate" {
+                    return self.expression_iter_item_shape(&call.receiver).map(|item| {
+                        IteratorItemShape::Tuple(vec![IteratorItemShape::Unknown, item])
+                    });
+                }
+                if method == "zip" {
+                    return self.zipped_iter_item_shape(call);
                 }
                 if iterator_item_passthrough_method(&method) {
-                    return self.expression_iter_item_type_item(&call.receiver);
+                    return self.expression_iter_item_shape(&call.receiver);
                 }
                 None
             }
             _ => None,
         }
+    }
+
+    fn zipped_iter_item_shape(&self, call: &syn::ExprMethodCall) -> Option<IteratorItemShape> {
+        let left = self
+            .expression_iter_item_shape(&call.receiver)
+            .unwrap_or(IteratorItemShape::Unknown);
+        let right = call
+            .args
+            .first()
+            .and_then(|arg| self.expression_iter_item_shape(arg))
+            .unwrap_or(IteratorItemShape::Unknown);
+        if matches!(left, IteratorItemShape::Unknown) && matches!(right, IteratorItemShape::Unknown)
+        {
+            return None;
+        }
+        Some(IteratorItemShape::Tuple(vec![left, right]))
     }
 
     fn field_collection_value_type_item(&self, expression: &Expr) -> Option<ItemId> {
@@ -20029,6 +20064,34 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
     }
 
+    fn record_pattern_binding_shape(&mut self, pat: &Pat, shape: &IteratorItemShape) {
+        match shape {
+            IteratorItemShape::Unknown => {}
+            IteratorItemShape::Direct(item) => self.record_pattern_binding_item(pat, item),
+            IteratorItemShape::Tuple(items) => match pat {
+                Pat::Tuple(tuple) => {
+                    for (pat, shape) in tuple.elems.iter().zip(items.iter()) {
+                        self.record_pattern_binding_shape(pat, shape);
+                    }
+                }
+                Pat::Ident(ident) => {
+                    if let Some((_at, subpat)) = &ident.subpat {
+                        self.record_pattern_binding_shape(subpat, shape);
+                    }
+                }
+                Pat::Type(typed) => {
+                    self.record_binding_from_typed_pat(&typed.pat, &typed.ty);
+                    self.record_pattern_binding_shape(&typed.pat, shape);
+                }
+                Pat::Reference(reference) => {
+                    self.record_pattern_binding_shape(&reference.pat, shape)
+                }
+                Pat::Paren(paren) => self.record_pattern_binding_shape(&paren.pat, shape),
+                _ => {}
+            },
+        }
+    }
+
     fn record_binding_from_typed_pat(&mut self, pat: &Pat, ty: &Type) {
         let Some(name) = local_binding_name(pat) else {
             return;
@@ -20085,13 +20148,13 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     fn visit_closure_with_inferred_binding_positions(
         &mut self,
         closure: &syn::ExprClosure,
-        item: &ItemId,
+        shape: &IteratorItemShape,
         positions: &[usize],
     ) {
         let binding_count = self.bindings.len();
         for position in positions {
             if let Some(input) = closure.inputs.iter().nth(*position) {
-                self.record_pattern_binding_item(input, item);
+                self.record_pattern_binding_shape(input, shape);
             }
         }
         for input in &closure.inputs {
@@ -20384,7 +20447,7 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
         self.visit_expr(&call.receiver);
         let method = call.method.to_string();
         let inferred_closure_item = iterator_closure_item_positions(&method)
-            .zip(self.expression_iter_item_type_item(&call.receiver));
+            .zip(self.expression_iter_item_shape(&call.receiver));
         for arg in &call.args {
             if let (Some((positions, item)), Expr::Closure(closure)) = (&inferred_closure_item, arg)
             {

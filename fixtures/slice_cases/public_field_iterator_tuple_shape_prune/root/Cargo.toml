@@ -1,0 +1,11 @@
+[package]
+name = "root"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = { path = "../../../../crates/opensourced" }
+field_api = { path = "../field_api" }
+
+[lib]
+path = "src/lib.rs"

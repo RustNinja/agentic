@@ -1,0 +1,3 @@
+[workspace]
+members = ["field_api", "left_record", "right_record", "root"]
+resolver = "2"

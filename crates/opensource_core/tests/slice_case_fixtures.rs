@@ -629,6 +629,86 @@ fn retains_public_support_fields_used_through_iterator_closure_surfaces() {
 }
 
 #[test]
+fn retains_public_support_fields_used_through_iterator_tuple_shapes() {
+    let fixture = repo_root().join("fixtures/slice_cases/public_field_iterator_tuple_shape_prune");
+    let output = temp_path("slice-case-public-field-iterator-tuple-shape-prune-output");
+    let target_dir = temp_path("slice-case-public-field-iterator-tuple-shape-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("public_field_iterator_tuple_shape_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["field_api", "left_record", "right_record", "root"]
+    );
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    let field_api = read(output.join("field_api/src/lib.rs"));
+    let left_record = read(output.join("left_record/src/lib.rs"));
+    let right_record = read(output.join("right_record/src/lib.rs"));
+
+    assert!(
+        root_source.contains("pub fn selected_summary"),
+        "{root_source}"
+    );
+    assert!(!root_source.contains("dead_summary"), "{root_source}");
+
+    assert!(field_api.contains("pub fn selected_summary"), "{field_api}");
+    assert!(field_api.contains("enumerate()"), "{field_api}");
+    assert!(
+        field_api.contains("zip(right.entries.iter())"),
+        "{field_api}"
+    );
+    assert!(field_api.contains("record.label"), "{field_api}");
+    assert!(field_api.contains("left.value"), "{field_api}");
+    assert!(field_api.contains("right.weight"), "{field_api}");
+    assert!(field_api.contains("entry.code"), "{field_api}");
+    assert!(!field_api.contains("dead_note"), "{field_api}");
+    assert!(!field_api.contains("unused_note"), "{field_api}");
+    assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
+
+    assert!(
+        left_record.contains("pub struct LeftSnapshot"),
+        "{left_record}"
+    );
+    assert!(left_record.contains("pub records:"), "{left_record}");
+    assert!(!left_record.contains("unused_note"), "{left_record}");
+    assert!(
+        left_record.contains("pub struct LeftRecord"),
+        "{left_record}"
+    );
+    assert!(left_record.contains("pub label:"), "{left_record}");
+    assert!(left_record.contains("pub value:"), "{left_record}");
+    assert!(!left_record.contains("dead_note"), "{left_record}");
+    assert!(left_record.contains("pub fn snapshot"), "{left_record}");
+    assert!(!left_record.contains("dead_snapshot"), "{left_record}");
+
+    assert!(
+        right_record.contains("pub struct RightSnapshot"),
+        "{right_record}"
+    );
+    assert!(right_record.contains("pub entries:"), "{right_record}");
+    assert!(!right_record.contains("unused_note"), "{right_record}");
+    assert!(
+        right_record.contains("pub struct RightRecord"),
+        "{right_record}"
+    );
+    assert!(right_record.contains("pub code:"), "{right_record}");
+    assert!(right_record.contains("pub weight:"), "{right_record}");
+    assert!(!right_record.contains("dead_note"), "{right_record}");
+    assert!(right_record.contains("pub fn snapshot"), "{right_record}");
+    assert!(!right_record.contains("dead_snapshot"), "{right_record}");
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn retains_public_support_fields_used_through_typed_closure_params() {
     let fixture = repo_root().join("fixtures/slice_cases/public_field_typed_closure_prune");
     let output = temp_path("slice-case-public-field-typed-closure-prune-output");
