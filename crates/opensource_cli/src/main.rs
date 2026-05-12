@@ -1151,6 +1151,8 @@ where
     let mut random_seed = 0;
     let mut batch_roots = false;
     let mut batch_report = None;
+    let mut workspace_root_arg = None;
+    let mut output_root_arg = None;
     let mut positional = Vec::new();
     let mut args = args.into_iter();
 
@@ -1252,7 +1254,7 @@ where
                 args.next()
                     .ok_or("--preflight-report requires a following path")?,
             ));
-        } else if arg == OsStr::new("--root") {
+        } else if arg == OsStr::new("--root") || arg == OsStr::new("--root-selector") {
             let value = args
                 .next()
                 .ok_or("--root requires a following function, method, or item selector")?;
@@ -1290,6 +1292,15 @@ where
                 args.next()
                     .ok_or("--batch-report requires a following path")?,
             ));
+        } else if arg == OsStr::new("--workspace-root") {
+            workspace_root_arg = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--workspace-root requires a following path")?,
+            ));
+        } else if arg == OsStr::new("--output") || arg == OsStr::new("--output-root") {
+            output_root_arg = Some(PathBuf::from(
+                args.next().ok_or("--output requires a following path")?,
+            ));
         } else if arg == OsStr::new("--help") || arg == OsStr::new("-h") {
             println!("{}", usage());
             std::process::exit(0);
@@ -1298,10 +1309,17 @@ where
         }
     }
 
-    let [workspace_root, output_root] = positional.as_slice() else {
+    let mut positional = positional.into_iter();
+    let Some(workspace_root) = workspace_root_arg.or_else(|| positional.next()) else {
         return Err(usage().into());
     };
-    let workspace_root = normalize_workspace_root_arg(workspace_root);
+    let Some(output_root) = output_root_arg.or_else(|| positional.next()) else {
+        return Err(usage().into());
+    };
+    if positional.next().is_some() {
+        return Err(usage().into());
+    }
+    let workspace_root = normalize_workspace_root_arg(&workspace_root);
 
     if production_preset && !analyzer_mode_explicit {
         analyzer_mode = AnalyzerMode::production_default_for_build();
@@ -1341,7 +1359,7 @@ where
         batch_roots,
         batch_report,
         workspace_root,
-        output_root: output_root.clone(),
+        output_root,
     })
 }
 
@@ -6655,9 +6673,9 @@ fn usage() -> String {
         "[--feedback-target-dir <path>] [--cargo-check-arg <arg>] [--repair-report <path>] ",
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
         "[--baseline-target-dir <path>] [--slice-report <path>] [--decision-log <path>] [--event-log <path>] [--validation-report <path>] ",
-        "[--preflight-report <path>] [--root <selector>] [--roots-file <path>] ",
+        "[--preflight-report <path>] [--root <selector>|--root-selector <selector>] [--roots-file <path>] ",
         "[--random-roots <n>] [--random-root-package <package>] [--random-seed <n>] [--batch-roots] [--batch-report <path>] ",
-        "<workspace-root-or-Cargo.toml> <output-root>\n",
+        "[--workspace-root <workspace-root-or-Cargo.toml>] [--output <output-root>] <workspace-root-or-Cargo.toml> <output-root>\n",
         "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn; ",
         "ra-feedback exposes the bounded RA outgoing-call closure explicitly; ",
         "--production defaults to ra-hir-proc-macros with RA feedback closure when available; ",
@@ -7886,6 +7904,25 @@ resolver = "2"
         assert_eq!(options.random_root_packages, ["codex-ipc"]);
         assert!(options.batch_roots);
         assert_eq!(options.random_seed, 7);
+    }
+
+    #[test]
+    fn named_cli_aliases_select_roots_and_output_without_positionals() {
+        let options = parse_options([
+            "--analyzer",
+            "syn",
+            "--root-selector",
+            "app::selected",
+            "--workspace-root",
+            "workspace",
+            "--output",
+            "out",
+        ]);
+
+        assert_eq!(options.analyzer_mode, AnalyzerMode::Syn);
+        assert_eq!(options.root_selectors, ["app::selected"]);
+        assert_eq!(options.workspace_root, PathBuf::from("workspace"));
+        assert_eq!(options.output_root, PathBuf::from("out"));
     }
 
     #[test]
