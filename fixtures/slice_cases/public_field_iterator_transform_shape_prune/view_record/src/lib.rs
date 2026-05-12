@@ -96,3 +96,14 @@ pub struct TupleView {
     pub tuple_score: u32,
     pub dead_tuple_note: Option<String>,
 }
+
+pub struct StructBag {
+    pub bag_views: Vec<StructBagView>,
+    pub dead_bag_views: Vec<StructBagView>,
+}
+
+pub struct StructBagView {
+    pub bag_title: String,
+    pub bag_score: u32,
+    pub dead_bag_note: Option<String>,
+}

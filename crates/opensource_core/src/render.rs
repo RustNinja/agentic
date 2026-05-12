@@ -20440,6 +20440,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     fn record_bindings_from_pattern_expr(&mut self, pat: &Pat, expr: &Expr) {
         if let Some(item) = self.expr_type_item(expr) {
             self.record_pattern_binding_item(pat, &item);
+            self.record_pattern_iterable_bindings_from_item(pat, &item);
         }
         if let Some(shape) = self.expression_iterable_item_shape_for_binding(expr) {
             self.record_pattern_iterable_binding_shape(pat, &shape);
@@ -20516,6 +20517,39 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                     self.record_pattern_binding_item(first, item);
                 }
             }
+            Pat::Struct(pat_struct) => {
+                for field in &pat_struct.fields {
+                    if let Some(item) = self.struct_field_direct_item(item, &field.member) {
+                        self.record_pattern_binding_item(&field.pat, &item);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_pattern_iterable_bindings_from_item(&mut self, pat: &Pat, item: &ItemId) {
+        match pat {
+            Pat::Struct(pat_struct) => {
+                for field in &pat_struct.fields {
+                    if let Some(shape) = self.struct_field_iter_shape(item, &field.member) {
+                        self.record_pattern_iterable_binding_shape(&field.pat, &shape);
+                    }
+                    if let Some(item) = self.struct_field_direct_item(item, &field.member) {
+                        self.record_pattern_iterable_bindings_from_item(&field.pat, &item);
+                    }
+                }
+            }
+            Pat::Ident(ident) => {
+                if let Some((_at, subpat)) = &ident.subpat {
+                    self.record_pattern_iterable_bindings_from_item(subpat, item);
+                }
+            }
+            Pat::Type(typed) => self.record_pattern_iterable_bindings_from_item(&typed.pat, item),
+            Pat::Reference(reference) => {
+                self.record_pattern_iterable_bindings_from_item(&reference.pat, item)
+            }
+            Pat::Paren(paren) => self.record_pattern_iterable_bindings_from_item(&paren.pat, item),
             _ => {}
         }
     }
@@ -20574,6 +20608,12 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     }
 
     fn record_binding_from_typed_pat(&mut self, pat: &Pat, ty: &Type) {
+        if let Some(item) =
+            self.type_direct_item_in(self.package, self.module_path, self.aliases, ty)
+        {
+            self.record_pattern_binding_item(pat, &item);
+            self.record_pattern_iterable_bindings_from_item(pat, &item);
+        }
         let Some(name) = local_binding_name(pat) else {
             return;
         };
@@ -20595,6 +20635,43 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             self.iterable_bindings
                 .push((name, IteratorItemShape::Direct(item)));
         }
+    }
+
+    fn struct_field_direct_item(&self, item: &ItemId, member: &Member) -> Option<ItemId> {
+        let field_type = self.item_field_type(item, member)?;
+        self.type_direct_item_in(
+            field_type.package,
+            field_type.module_path,
+            field_type.aliases,
+            field_type.ty,
+        )
+    }
+
+    fn struct_field_iter_shape(&self, item: &ItemId, member: &Member) -> Option<IteratorItemShape> {
+        self.item_field_type(item, member)
+            .and_then(|field_type| self.sequence_value_type_item(field_type))
+            .map(IteratorItemShape::Direct)
+    }
+
+    fn type_direct_item_in(
+        &self,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+        ty: &Type,
+    ) -> Option<ItemId> {
+        let item = type_to_type_like_item(self.project, package, module_path, ty, aliases)?;
+        if let Some(alias_ctx) = self.type_alias_target_context(&item) {
+            return self
+                .type_direct_item_in(
+                    alias_ctx.package,
+                    alias_ctx.module_path,
+                    alias_ctx.aliases,
+                    alias_ctx.ty,
+                )
+                .or(Some(item));
+        }
+        Some(item)
     }
 
     fn push_fn_input_bindings<'b, I>(&mut self, inputs: I) -> usize
@@ -21204,6 +21281,43 @@ fn pure_std_struct_literal_initializer_path(
                 last.as_str(),
                 "from_secs" | "from_millis" | "from_micros" | "from_nanos"
             )
+        || last == "new" && pure_empty_std_constructor_path(&segments)
+        || last == "default" && pure_default_constructor_path(&segments)
+}
+
+fn pure_empty_std_constructor_path(segments: &[String]) -> bool {
+    [
+        &["String"][..],
+        &["std", "string", "String"],
+        &["alloc", "string", "String"],
+        &["Vec"],
+        &["std", "vec", "Vec"],
+        &["alloc", "vec", "Vec"],
+        &["VecDeque"],
+        &["std", "collections", "VecDeque"],
+        &["HashMap"],
+        &["std", "collections", "HashMap"],
+        &["BTreeMap"],
+        &["std", "collections", "BTreeMap"],
+        &["HashSet"],
+        &["std", "collections", "HashSet"],
+        &["BTreeSet"],
+        &["std", "collections", "BTreeSet"],
+        &["BinaryHeap"],
+        &["std", "collections", "BinaryHeap"],
+        &["PathBuf"],
+        &["std", "path", "PathBuf"],
+        &["OsString"],
+        &["std", "ffi", "OsString"],
+    ]
+    .iter()
+    .any(|prefix| path_segments_match(segments, prefix))
+}
+
+fn pure_default_constructor_path(segments: &[String]) -> bool {
+    path_segments_match(segments, &["Default"])
+        || path_segments_match(segments, &["std", "default", "Default"])
+        || path_segments_match(segments, &["core", "default", "Default"])
 }
 
 fn path_segments_match(segments: &[String], prefix: &[&str]) -> bool {

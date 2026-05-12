@@ -226,8 +226,26 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let view_record::StructBag { bag_views, .. } = view_record::StructBag {
+        bag_views: snapshot
+            .records
+            .iter()
+            .map(|record| view_record::StructBagView {
+                bag_title: record.raw_label.clone(),
+                bag_score: record.raw_value,
+                dead_bag_note: None,
+            })
+            .collect::<Vec<_>>(),
+        dead_bag_views: Vec::new(),
+    };
+    let bag = bag_views
+        .iter()
+        .map(|view| format!("{}:{}", view.bag_title, view.bag_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}:{bag}",
         loop_titles.join(",")
     )
 }
