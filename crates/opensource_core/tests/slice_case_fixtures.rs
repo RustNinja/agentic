@@ -2301,7 +2301,6 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             fixture: "litter_conversation_render_prune",
             packages: &["codex-core", "codex-protocol", "codex-tui"],
             hazards: &[
-                ("semantic_unresolved_method_calls", "warning"),
                 ("semantic_unresolved_paths", "warning"),
                 ("syntactic_method_fallbacks", "warning"),
             ],
@@ -2320,19 +2319,16 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 "session-protocol",
             ],
             hazards: &[
+                ("custom_attribute_macros", "warning"),
                 ("conditional_compilation_attrs", "warning"),
                 ("custom_derive_macros", "warning"),
-                ("semantic_unresolved_method_calls", "warning"),
                 ("semantic_unresolved_paths", "warning"),
             ],
         },
         RaHardFixture {
             fixture: "litter_bridge_ipc_prune",
             packages: &["bridge-core", "bridge-protocol", "codex-bridge"],
-            hazards: &[
-                ("semantic_unresolved_method_calls", "warning"),
-                ("semantic_unresolved_paths", "warning"),
-            ],
+            hazards: &[("semantic_unresolved_paths", "warning")],
         },
         RaHardFixture {
             fixture: "litter_event_callback_prune",
@@ -2343,11 +2339,10 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
                 "event-protocol",
             ],
             hazards: &[
+                ("custom_attribute_macros", "warning"),
                 ("conditional_compilation_attrs", "warning"),
                 ("custom_derive_macros", "warning"),
-                ("semantic_unresolved_method_calls", "warning"),
                 ("semantic_unresolved_paths", "warning"),
-                ("syntactic_method_fallback_cap", "warning"),
                 ("syntactic_method_fallbacks", "warning"),
                 ("trait_object_surfaces", "warning"),
             ],
@@ -2358,22 +2353,18 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             hazards: &[
                 ("out_dir_source_include_macros", "error"),
                 ("retained_build_scripts", "error"),
-                ("semantic_unresolved_method_calls", "warning"),
                 ("semantic_unresolved_paths", "warning"),
-                ("syntactic_method_fallback_cap", "warning"),
             ],
         },
         RaHardFixture {
             fixture: "litter_reconnect_import_prune",
             packages: &["codex-client", "codex-ipc"],
-            hazards: &[("semantic_unresolved_method_calls", "warning")],
+            hazards: &[],
         },
         RaHardFixture {
             fixture: "litter_reconnect_callback_prune",
             packages: &["codex-client", "codex-ipc"],
             hazards: &[
-                ("semantic_unresolved_method_calls", "warning"),
-                ("syntactic_method_fallback_cap", "warning"),
                 ("syntactic_method_fallbacks", "warning"),
                 ("trait_object_surfaces", "warning"),
             ],
@@ -2388,21 +2379,17 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         },
         RaHardFixture {
             fixture: "cfg_attr_uniffi_prune",
-            packages: &["cfg_api", "cfg_model", "root"],
+            packages: &["cfg_api", "cfg_model", "root", "uniffi"],
             hazards: &[
                 ("custom_attribute_macros", "warning"),
                 ("custom_derive_macros", "warning"),
                 ("conditional_compilation_attrs", "warning"),
-                ("semantic_unresolved_method_calls", "warning"),
             ],
         },
         RaHardFixture {
             fixture: "returned_dyn_trait_prune",
             packages: &["dyn_api", "dyn_model", "root"],
-            hazards: &[
-                ("trait_object_surfaces", "warning"),
-                ("semantic_unresolved_method_calls", "warning"),
-            ],
+            hazards: &[("trait_object_surfaces", "warning")],
         },
         RaHardFixture {
             fixture: "callback_store_prune",
@@ -2410,8 +2397,6 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
             hazards: &[
                 ("trait_object_surfaces", "warning"),
                 ("syntactic_method_fallbacks", "warning"),
-                ("syntactic_method_fallback_cap", "warning"),
-                ("semantic_unresolved_method_calls", "warning"),
             ],
         },
         RaHardFixture {
@@ -2427,18 +2412,12 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "poll_adapter_prune",
             packages: &["poll_api", "poll_support", "root"],
-            hazards: &[
-                ("syntactic_method_fallbacks", "warning"),
-                ("semantic_unresolved_method_calls", "warning"),
-            ],
+            hazards: &[("syntactic_method_fallbacks", "warning")],
         },
         RaHardFixture {
             fixture: "uniffi_runtime_prune",
             packages: &["root", "runtime_api", "runtime_support"],
-            hazards: &[
-                ("syntactic_method_fallback_cap", "warning"),
-                ("semantic_unresolved_method_calls", "warning"),
-            ],
+            hazards: &[],
         },
         RaHardFixture {
             fixture: "out_dir_generated_prune",
