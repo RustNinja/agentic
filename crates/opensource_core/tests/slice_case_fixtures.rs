@@ -3458,6 +3458,76 @@ fn prunes_facade_glob_support_chain_with_default_analyzer() {
 }
 
 #[test]
+fn prunes_support_glob_external_leaf_reexport_with_default_analyzer() {
+    let fixture = repo_root().join("fixtures/slice_cases/support_glob_external_leaf_prune");
+    let output = temp_path("slice-case-support-glob-external-leaf-prune-output");
+    let target_dir = temp_path("slice-case-support-glob-external-leaf-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("support_glob_external_leaf_prune fixture should slice");
+
+    assert_eq!(
+        report.packages,
+        ["external_leaf", "root", "support_package"]
+    );
+    assert!(
+        report
+            .roots
+            .iter()
+            .any(|root| root.to_string() == "root::selected_leaf_report"),
+        "selected root should be recorded: {:?}",
+        report.roots
+    );
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    let support_manifest = read(output.join("support_package/Cargo.toml"));
+    let support_root = read(output.join("support_package/src/lib.rs"));
+    let leaf_root = read(output.join("external_leaf/src/lib.rs"));
+    let leaf_live = read(output.join("external_leaf/src/live.rs"));
+
+    assert!(
+        root_source.contains("pub fn selected_leaf_report"),
+        "{root_source}"
+    );
+    assert_absent("root/src/lib.rs", &root_source, &["dead_leaf_report"]);
+
+    assert!(
+        support_manifest.contains("../external_leaf"),
+        "{support_manifest}"
+    );
+    assert!(
+        support_root.contains("pub use external_leaf::prelude::*;"),
+        "{support_root}"
+    );
+    assert!(support_root.contains("LeafRecord"), "{support_root}");
+    assert_absent(
+        "support_package/src/lib.rs",
+        &support_root,
+        &["DeadLeaf", "dead_leaf_report"],
+    );
+
+    assert!(leaf_root.contains("pub mod prelude"), "{leaf_root}");
+    assert!(leaf_root.contains("LeafRecord"), "{leaf_root}");
+    assert_absent(
+        "external_leaf/src/lib.rs",
+        &leaf_root,
+        &["DeadLeaf", "dead_leaf", "dead_live_leaf", "mod dead"],
+    );
+
+    assert!(leaf_live.contains("pub struct LeafRecord"), "{leaf_live}");
+    assert_absent("external_leaf/src/live.rs", &leaf_live, &["dead_live_leaf"]);
+    assert!(!output.join("external_leaf/src/dead.rs").exists());
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_macro_generated_support_chain_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/macro_generated_prune");
     let output = temp_path("slice-case-macro-generated-prune-output");

@@ -1,0 +1,7 @@
+[package]
+name = "support_package"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+external_leaf = { path = "../external_leaf" }

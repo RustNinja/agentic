@@ -4557,7 +4557,15 @@ fn record_required_external_reexport_use_tree(
                 );
             }
         }
-        UseTree::Glob(_) => {}
+        UseTree::Glob(_) => {
+            record_required_external_reexport_path(
+                &prefix,
+                visible_name,
+                dependency_roots,
+                assoc_name,
+                usage,
+            );
+        }
     }
 }
 
@@ -4710,7 +4718,7 @@ fn mark_support_required_reexport(
                     live,
                     visited,
                 ),
-                SupportLocalTarget::External => SupportReexportMark::Unsupported,
+                SupportLocalTarget::External => SupportReexportMark::Matched(false),
                 SupportLocalTarget::Unsupported => SupportReexportMark::Unsupported,
             }
         }
@@ -4938,16 +4946,7 @@ fn mark_support_live_glob_imports(
     live: &mut BTreeMap<PathBuf, SupportLiveSet>,
 ) -> Option<bool> {
     match support_local_glob_prefix_target(ctx, source_file, prefix) {
-        SupportLocalGlobTarget::External => {
-            if needs.live_idents.is_empty()
-                && needs.live_exports.is_empty()
-                && needs.live_assoc_items.is_empty()
-            {
-                Some(false)
-            } else {
-                None
-            }
-        }
+        SupportLocalGlobTarget::External => Some(false),
         SupportLocalGlobTarget::Unsupported => None,
         SupportLocalGlobTarget::Enum {
             source_file,
@@ -7961,7 +7960,10 @@ fn prune_support_public_use_tree(
                 (enum_is_live && variants.iter().any(|variant| live_names.contains(variant)))
                     .then(|| UseTree::Glob(glob.clone()))
             }
-            SupportLocalGlobTarget::External | SupportLocalGlobTarget::Unsupported => None,
+            SupportLocalGlobTarget::External => {
+                (!live_names.is_empty()).then(|| UseTree::Glob(glob.clone()))
+            }
+            SupportLocalGlobTarget::Unsupported => None,
         },
     }
 }
@@ -8057,7 +8059,10 @@ fn prune_support_private_use_tree(
                 (enum_is_live && variants.iter().any(|variant| live_names.contains(variant)))
                     .then(|| UseTree::Glob(glob.clone()))
             }
-            SupportLocalGlobTarget::External | SupportLocalGlobTarget::Unsupported => None,
+            SupportLocalGlobTarget::External => {
+                (!live_names.is_empty()).then(|| UseTree::Glob(glob.clone()))
+            }
+            SupportLocalGlobTarget::Unsupported => None,
         },
     }
 }
@@ -11879,6 +11884,8 @@ struct TokenUsage {
     local_path_leaf_idents: BTreeSet<String>,
     use_idents: BTreeSet<String>,
     dependency_root_aliases: BTreeMap<String, BTreeSet<Vec<String>>>,
+    dependency_glob_prefixes: BTreeMap<String, BTreeSet<Vec<String>>>,
+    dependency_glob_visible_names: BTreeSet<String>,
     dependency_public_names: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -11894,6 +11901,10 @@ impl TokenUsage {
         dependency_enum_payloads: &DependencyEnumPayloadMap,
     ) {
         collect_token_usage(&file.to_token_stream(), self);
+        let mut glob_visible_names = DependencyGlobVisibleNameVisitor::default();
+        glob_visible_names.visit_file(file);
+        self.dependency_glob_visible_names
+            .extend(glob_visible_names.names);
         self.record_dependency_method_calls(file);
         self.record_dependency_methods_through_typed_values(file, dependency_enum_payloads);
         self.record_dependency_assoc_calls_through_imports(file);
@@ -11911,6 +11922,11 @@ impl TokenUsage {
             &item_use.tree,
             Vec::new(),
             &mut self.dependency_root_aliases,
+        );
+        collect_use_tree_dependency_glob_prefixes(
+            &item_use.tree,
+            Vec::new(),
+            &mut self.dependency_glob_prefixes,
         );
         collect_use_tree_dependency_public_names(
             &item_use.tree,
@@ -12020,6 +12036,14 @@ impl TokenUsage {
                 .or_default()
                 .extend(targets.iter().cloned());
         }
+        for (root, prefixes) in &other.dependency_glob_prefixes {
+            self.dependency_glob_prefixes
+                .entry(root.clone())
+                .or_default()
+                .extend(prefixes.iter().cloned());
+        }
+        self.dependency_glob_visible_names
+            .extend(other.dependency_glob_visible_names.iter().cloned());
         for (root, names) in &other.dependency_public_names {
             self.dependency_public_names
                 .entry(root.clone())
@@ -12042,6 +12066,12 @@ impl TokenUsage {
                             .is_some_and(|root| root == alias || root == &code_name)
                     })
             })
+            || self.dependency_glob_prefixes.keys().any(|root| {
+                root == alias
+                    || root == &code_name
+                    || dependency_code_name(root) == alias
+                    || dependency_code_name(root) == code_name
+            })
             || known_macro_dependency_usage(self, alias, &code_name)
     }
 
@@ -12053,8 +12083,8 @@ impl TokenUsage {
         let roots = BTreeSet::from([alias.to_string(), code_name.clone()]);
 
         let mut names = BTreeSet::new();
-        for root in roots {
-            if let Some(root_names) = self.dependency_public_names.get(&root) {
+        for root in &roots {
+            if let Some(root_names) = self.dependency_public_names.get(root) {
                 names.extend(root_names.iter().cloned());
             }
         }
@@ -12096,6 +12126,27 @@ impl TokenUsage {
                 }
             }
         }
+        for root in &roots {
+            if let Some(prefixes) = self.dependency_glob_prefixes.get(root) {
+                for prefix in prefixes {
+                    for visible_name in self.path_roots.union(&self.dependency_glob_visible_names) {
+                        if visible_name == alias
+                            || visible_name == &code_name
+                            || visible_name == root
+                            || prefix.contains(visible_name)
+                            || matches!(visible_name.as_str(), "crate" | "self" | "super")
+                        {
+                            continue;
+                        }
+                        let mut path = prefix.clone();
+                        path.push(visible_name.clone());
+                        if let Some(path) = dependency_required_path_string(&path) {
+                            names.insert(path);
+                        }
+                    }
+                }
+            }
+        }
         Some(names)
     }
 }
@@ -12103,6 +12154,79 @@ impl TokenUsage {
 #[derive(Default)]
 struct DependencyMethodCallVisitor {
     calls: Vec<(String, Vec<String>, String)>,
+}
+
+#[derive(Default)]
+struct DependencyGlobVisibleNameVisitor {
+    names: BTreeSet<String>,
+}
+
+impl DependencyGlobVisibleNameVisitor {
+    fn record_single_segment_path(&mut self, path: &syn::Path) {
+        if path.leading_colon.is_some() || path.segments.len() != 1 {
+            return;
+        }
+        let Some(segment) = path.segments.first() else {
+            return;
+        };
+        let name = segment.ident.to_string();
+        if !dependency_glob_visible_name_is_builtin(&name) {
+            self.names.insert(name);
+        }
+    }
+}
+
+impl Visit<'_> for DependencyGlobVisibleNameVisitor {
+    fn visit_expr_struct(&mut self, node: &syn::ExprStruct) {
+        self.record_single_segment_path(&node.path);
+        visit::visit_expr_struct(self, node);
+    }
+
+    fn visit_pat_struct(&mut self, node: &syn::PatStruct) {
+        self.record_single_segment_path(&node.path);
+        visit::visit_pat_struct(self, node);
+    }
+
+    fn visit_type_path(&mut self, node: &syn::TypePath) {
+        if node.qself.is_none() {
+            self.record_single_segment_path(&node.path);
+        }
+        visit::visit_type_path(self, node);
+    }
+}
+
+fn dependency_glob_visible_name_is_builtin(name: &str) -> bool {
+    matches!(
+        name,
+        "Self"
+            | "String"
+            | "Vec"
+            | "Option"
+            | "Result"
+            | "Box"
+            | "Cow"
+            | "Some"
+            | "None"
+            | "Ok"
+            | "Err"
+            | "bool"
+            | "char"
+            | "str"
+            | "usize"
+            | "isize"
+            | "u8"
+            | "u16"
+            | "u32"
+            | "u64"
+            | "u128"
+            | "i8"
+            | "i16"
+            | "i32"
+            | "i64"
+            | "i128"
+            | "f32"
+            | "f64"
+    )
 }
 
 impl Visit<'_> for DependencyMethodCallVisitor {
@@ -13064,6 +13188,37 @@ fn collect_use_tree_dependency_root_aliases(
             }
         }
         UseTree::Glob(_) => {}
+    }
+}
+
+fn collect_use_tree_dependency_glob_prefixes(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    globs: &mut BTreeMap<String, BTreeSet<Vec<String>>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_use_tree_dependency_glob_prefixes(&path.tree, prefix, globs);
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_use_tree_dependency_glob_prefixes(item, prefix.clone(), globs);
+            }
+        }
+        UseTree::Glob(_) => {
+            let Some(root) = prefix.first() else {
+                return;
+            };
+            if matches!(root.as_str(), "crate" | "self" | "super") {
+                return;
+            }
+            globs
+                .entry(root.clone())
+                .or_default()
+                .insert(prefix[1..].to_vec());
+        }
+        UseTree::Name(_) | UseTree::Rename(_) => {}
     }
 }
 
