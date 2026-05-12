@@ -806,6 +806,9 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(field_api.contains("summarize_alias_views"), "{field_api}");
     assert!(field_api.contains("view.alias_title"), "{field_api}");
     assert!(field_api.contains("view.alias_score"), "{field_api}");
+    assert!(field_api.contains("tuple_views"), "{field_api}");
+    assert!(field_api.contains("view.tuple_title"), "{field_api}");
+    assert!(field_api.contains("view.tuple_score"), "{field_api}");
     assert!(!field_api.contains("dead_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_filter_note"), "{field_api}");
     assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
@@ -827,6 +830,7 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
         "{field_api}"
     );
     assert!(!field_api.contains("dead_alias_note"), "{field_api}");
+    assert!(!field_api.contains("dead_tuple_note"), "{field_api}");
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
 
     assert!(
@@ -992,6 +996,13 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(view_record.contains("pub alias_title:"), "{view_record}");
     assert!(view_record.contains("pub alias_score:"), "{view_record}");
     assert!(!view_record.contains("dead_alias_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct TupleView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub tuple_title:"), "{view_record}");
+    assert!(view_record.contains("pub tuple_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_tuple_note"), "{view_record}");
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }

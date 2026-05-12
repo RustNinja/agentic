@@ -20447,8 +20447,25 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     }
 
     fn expression_iterable_item_shape_for_binding(&self, expr: &Expr) -> Option<IteratorItemShape> {
-        self.expression_iter_item_shape(expr)
-            .or_else(|| self.expression_collected_item_shape(expr))
+        match expr {
+            Expr::Tuple(tuple) => {
+                let shapes = tuple
+                    .elems
+                    .iter()
+                    .map(|expr| {
+                        self.expression_iterable_item_shape_for_binding(expr)
+                            .unwrap_or(IteratorItemShape::Unknown)
+                    })
+                    .collect::<Vec<_>>();
+                shapes
+                    .iter()
+                    .any(|shape| !matches!(shape, IteratorItemShape::Unknown))
+                    .then_some(IteratorItemShape::Tuple(shapes))
+            }
+            _ => self
+                .expression_iter_item_shape(expr)
+                .or_else(|| self.expression_collected_item_shape(expr)),
+        }
     }
 
     fn expression_collected_item_shape(&self, expr: &Expr) -> Option<IteratorItemShape> {
@@ -20538,6 +20555,13 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                     .push((ident.ident.to_string(), shape.clone()));
                 if let Some((_at, subpat)) = &ident.subpat {
                     self.record_pattern_iterable_binding_shape(subpat, shape);
+                }
+            }
+            Pat::Tuple(tuple) => {
+                if let IteratorItemShape::Tuple(shapes) = shape {
+                    for (pat, shape) in tuple.elems.iter().zip(shapes.iter()) {
+                        self.record_pattern_iterable_binding_shape(pat, shape);
+                    }
                 }
             }
             Pat::Type(typed) => self.record_pattern_iterable_binding_shape(&typed.pat, shape),

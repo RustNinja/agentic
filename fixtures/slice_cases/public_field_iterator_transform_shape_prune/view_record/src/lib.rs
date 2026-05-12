@@ -90,3 +90,9 @@ pub struct AliasView {
     pub alias_score: u32,
     pub dead_alias_note: Option<String>,
 }
+
+pub struct TupleView {
+    pub tuple_title: String,
+    pub tuple_score: u32,
+    pub dead_tuple_note: Option<String>,
+}

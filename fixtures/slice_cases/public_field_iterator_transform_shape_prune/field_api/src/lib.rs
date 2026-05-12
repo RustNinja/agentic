@@ -208,8 +208,26 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>();
     let alias = summarize_alias_views(alias_views);
 
+    let (tuple_views, _tuple_ignored) = (
+        snapshot
+            .records
+            .iter()
+            .map(|record| view_record::TupleView {
+                tuple_title: record.raw_label.clone(),
+                tuple_score: record.raw_value,
+                dead_tuple_note: None,
+            })
+            .collect::<Vec<_>>(),
+        Vec::<String>::new(),
+    );
+    let tuple = tuple_views
+        .iter()
+        .map(|view| format!("{}:{}", view.tuple_title, view.tuple_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}",
         loop_titles.join(",")
     )
 }
