@@ -117,8 +117,41 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let branch = snapshot
+        .records
+        .iter()
+        .filter_map(|record| match record.raw_value % 2 {
+            0 => Some(view_record::BranchView {
+                branch_title: record.raw_label.clone(),
+                branch_score: record.raw_value,
+                dead_branch_note: None,
+            }),
+            _ => None,
+        })
+        .map(|view| format!("{}:{}", view.branch_title, view.branch_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let if_branch = snapshot
+        .records
+        .iter()
+        .filter_map(|record| {
+            if record.raw_value > 0 {
+                Some(view_record::IfView {
+                    if_title: record.raw_label.clone(),
+                    if_score: record.raw_value,
+                    dead_if_note: None,
+                })
+            } else {
+                None
+            }
+        })
+        .map(|view| format!("{}:{}", view.if_title, view.if_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}",
         loop_titles.join(",")
     )
 }

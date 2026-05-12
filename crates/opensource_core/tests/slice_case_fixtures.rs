@@ -781,6 +781,10 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(field_api.contains("dyn_iter_views"), "{field_api}");
     assert!(field_api.contains("view.dyn_title"), "{field_api}");
     assert!(field_api.contains("view.dyn_score"), "{field_api}");
+    assert!(field_api.contains("view.branch_title"), "{field_api}");
+    assert!(field_api.contains("view.branch_score"), "{field_api}");
+    assert!(field_api.contains("view.if_title"), "{field_api}");
+    assert!(field_api.contains("view.if_score"), "{field_api}");
     assert!(!field_api.contains("dead_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_filter_note"), "{field_api}");
     assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
@@ -791,6 +795,8 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(!field_api.contains("dead_param_note"), "{field_api}");
     assert!(!field_api.contains("dead_impl_note"), "{field_api}");
     assert!(!field_api.contains("dead_dyn_note"), "{field_api}");
+    assert!(!field_api.contains("dead_branch_note"), "{field_api}");
+    assert!(!field_api.contains("dead_if_note"), "{field_api}");
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
 
     assert!(
@@ -901,6 +907,17 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(view_record.contains("pub dyn_title:"), "{view_record}");
     assert!(view_record.contains("pub dyn_score:"), "{view_record}");
     assert!(!view_record.contains("dead_dyn_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct BranchView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub branch_title:"), "{view_record}");
+    assert!(view_record.contains("pub branch_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_branch_note"), "{view_record}");
+    assert!(view_record.contains("pub struct IfView"), "{view_record}");
+    assert!(view_record.contains("pub if_title:"), "{view_record}");
+    assert!(view_record.contains("pub if_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_if_note"), "{view_record}");
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }

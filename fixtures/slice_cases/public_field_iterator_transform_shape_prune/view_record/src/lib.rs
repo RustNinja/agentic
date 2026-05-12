@@ -58,3 +58,15 @@ pub struct DynIterView {
     pub dyn_score: u32,
     pub dead_dyn_note: Option<String>,
 }
+
+pub struct BranchView {
+    pub branch_title: String,
+    pub branch_score: u32,
+    pub dead_branch_note: Option<String>,
+}
+
+pub struct IfView {
+    pub if_title: String,
+    pub if_score: u32,
+    pub dead_if_note: Option<String>,
+}
