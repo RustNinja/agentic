@@ -2268,7 +2268,10 @@ fn hazard_uses_precise_detail_blockers(code: &str) -> bool {
 }
 
 fn hazard_uses_scoped_detail_blockers(code: &str) -> bool {
-    matches!(code, "syntactic_method_fallback_cap")
+    matches!(
+        code,
+        "custom_macro_invocations" | "syntactic_method_fallback_cap"
+    )
 }
 
 fn deletion_blocked_extra_roots(
@@ -2277,7 +2280,7 @@ fn deletion_blocked_extra_roots(
     production: &ProductionReadinessReport,
 ) -> Vec<RootId> {
     let scope = DeletionBlockerScope::from_report(production);
-    if !scope.global && scope.idents.is_empty() {
+    if !scope.global && scope.idents.is_empty() && scope.scoped.is_empty() {
         return Vec::new();
     }
 
@@ -12037,8 +12040,8 @@ pub fn unrelated_dead_code() -> i32 {
             "token-named helper in the retained macro surface must stay blocked_by_unknown: {blocked_callables:?}",
         );
         assert!(
-            blocked_callables.contains("app::safe::macro_token_helper"),
-            "same-name helpers remain fail-closed for custom macro invocations until macro expansion is modeled: {blocked_callables:?}",
+            !blocked_callables.contains("app::safe::macro_token_helper"),
+            "same-name helpers outside the macro invocation module should stay prunable: {blocked_callables:?}",
         );
 
         let prunable_callables = usage
@@ -12050,6 +12053,10 @@ pub fn unrelated_dead_code() -> i32 {
         assert!(
             prunable_callables.contains("app::safe::unrelated_dead_code"),
             "unrelated dead code must remain prunable: {prunable_callables:?}",
+        );
+        assert!(
+            prunable_callables.contains("app::safe::macro_token_helper"),
+            "macro blockers should be scoped to the macro invocation module: {prunable_callables:?}",
         );
         assert!(
             !usage
@@ -12064,9 +12071,10 @@ pub fn unrelated_dead_code() -> i32 {
         assert!(risky_source.contains("macro_token_helper"));
         assert!(risky_source.contains("private_leaf"));
         assert!(!risky_source.contains("custom_macro"));
-        let safe_source = fs::read_to_string(output.join("app/src/safe.rs")).unwrap();
-        assert!(safe_source.contains("macro_token_helper"));
-        assert!(!safe_source.contains("unrelated_dead_code"));
+        assert!(
+            !output.join("app/src/safe.rs").exists(),
+            "same-name helper in an unrelated module should not be rendered",
+        );
     }
 
     #[test]

@@ -231,11 +231,23 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             semantic_warning_hazards: None,
             review_warning_hazards: None,
         });
-        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        finish_validation_with_decision_log(
+            &options,
+            &mut validation,
+            &report,
+            "rejected",
+            Some(&reason),
+        )?;
         return Err(reason.into());
     }
     if let Some(reason) = record_semantic_proof_gate(&options, &mut validation, &report) {
-        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        finish_validation_with_decision_log(
+            &options,
+            &mut validation,
+            &report,
+            "rejected",
+            Some(&reason),
+        )?;
         return Err(reason.into());
     }
     record_production_readiness_gate(
@@ -247,7 +259,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if production_readiness_blocks_validation(&options, &report.production) {
         let reason =
             "production readiness reported error hazards before compiler feedback".to_string();
-        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        finish_validation_with_decision_log(
+            &options,
+            &mut validation,
+            &report,
+            "rejected",
+            Some(&reason),
+        )?;
         return Err(reason.into());
     }
     let uncovered_targets =
@@ -267,7 +285,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             semantic_warning_hazards: None,
             review_warning_hazards: None,
         });
-        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        finish_validation_with_decision_log(
+            &options,
+            &mut validation,
+            &report,
+            "rejected",
+            Some(&reason),
+        )?;
         return Err(reason.into());
     }
     validation.gates.push(ValidationGateReport {
@@ -283,7 +307,13 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if let Err(error) = refresh_generated_lockfile_for_locked_validation(&options, &mut validation)
     {
         let reason = error.to_string();
-        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        finish_validation_with_decision_log(
+            &options,
+            &mut validation,
+            &report,
+            "rejected",
+            Some(&reason),
+        )?;
         return Err(reason.into());
     }
     if let Some(report) = &baseline {
@@ -298,25 +328,31 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         || options.feedback_iterations > 0
         || options.feedback_repair_iterations > 0
     {
-        let report = run_preflight(&options)?;
+        let preflight = run_preflight(&options)?;
         validation.gates.push(ValidationGateReport {
             name: "preflight".to_string(),
-            status: if report.success { "passed" } else { "failed" }.to_string(),
-            reason: if report.success {
+            status: if preflight.success {
+                "passed"
+            } else {
+                "failed"
+            }
+            .to_string(),
+            reason: if preflight.success {
                 "generated workspace passed fast structural validation".to_string()
             } else {
                 "generated workspace failed fast structural validation".to_string()
             },
             report_path: Some(preflight_report_path(&options)),
-            error_count: Some(report.error_count()),
-            warning_count: Some(report.warning_count()),
+            error_count: Some(preflight.error_count()),
+            warning_count: Some(preflight.warning_count()),
             semantic_warning_hazards: None,
             review_warning_hazards: None,
         });
-        if !report.success {
-            finish_validation(
+        if !preflight.success {
+            finish_validation_with_decision_log(
                 &options,
                 &mut validation,
+                &report,
                 "rejected",
                 Some("generated workspace failed fast preflight validation"),
             )?;
@@ -327,29 +363,57 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     if options.feedback_repair_iterations > 0 {
         if let Err(error) = run_feedback_repair_loop(&options, baseline.as_ref(), &mut validation) {
             let reason = error.to_string();
-            finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+            finish_validation_with_decision_log(
+                &options,
+                &mut validation,
+                &report,
+                "rejected",
+                Some(&reason),
+            )?;
             return Err(reason.into());
         }
     } else if options.feedback_iterations > 0 {
         if let Err(error) = run_feedback_loop(&options, baseline.as_ref(), &mut validation) {
             let reason = error.to_string();
-            finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+            finish_validation_with_decision_log(
+                &options,
+                &mut validation,
+                &report,
+                "rejected",
+                Some(&reason),
+            )?;
             return Err(reason.into());
         }
     } else if options.run_check {
-        run_plain_check_gate(&options, &mut validation)?;
+        if let Err(error) = run_plain_check_gate(&options, &mut validation) {
+            let reason = error.to_string();
+            write_decision_log(
+                &options,
+                &report,
+                Some(&validation),
+                "rejected",
+                Some(&reason),
+            )?;
+            return Err(error);
+        }
     }
 
     if let Err(error) =
         run_production_validation_matrix(&options, &report.production, &mut validation)
     {
         let reason = error.to_string();
-        finish_validation(&options, &mut validation, "rejected", Some(&reason))?;
+        finish_validation_with_decision_log(
+            &options,
+            &mut validation,
+            &report,
+            "rejected",
+            Some(&reason),
+        )?;
         return Err(reason.into());
     }
 
     record_final_production_readiness(&options, &mut validation);
-    finish_validation(&options, &mut validation, "accepted", None)?;
+    finish_validation_with_decision_log(&options, &mut validation, &report, "accepted", None)?;
     Ok(())
 }
 
@@ -437,6 +501,7 @@ struct CliOptions {
     baseline_report: Option<PathBuf>,
     baseline_target_dir: Option<PathBuf>,
     slice_report: Option<PathBuf>,
+    decision_log: Option<PathBuf>,
     validation_report: Option<PathBuf>,
     run_preflight: bool,
     preflight_report: Option<PathBuf>,
@@ -623,6 +688,7 @@ where
     let mut baseline_report = None;
     let mut baseline_target_dir = None;
     let mut slice_report = None;
+    let mut decision_log = None;
     let mut validation_report = None;
     let mut run_preflight = false;
     let mut preflight_report = None;
@@ -715,6 +781,11 @@ where
                 args.next()
                     .ok_or("--slice-report requires a following path")?,
             ));
+        } else if arg == OsStr::new("--decision-log") {
+            decision_log = Some(PathBuf::from(
+                args.next()
+                    .ok_or("--decision-log requires a following path")?,
+            ));
         } else if arg == OsStr::new("--validation-report") {
             validation_report = Some(PathBuf::from(
                 args.next()
@@ -801,6 +872,7 @@ where
         baseline_report,
         baseline_target_dir,
         slice_report,
+        decision_log,
         validation_report,
         run_preflight,
         preflight_report,
@@ -1741,11 +1813,35 @@ fn slice_report_path(options: &CliOptions) -> Option<PathBuf> {
     })
 }
 
+fn decision_log_path(options: &CliOptions) -> Option<PathBuf> {
+    options.decision_log.clone().or_else(|| {
+        options
+            .production_preset
+            .then(|| options.output_root.join("slice-decision-log.json"))
+    })
+}
+
 fn preflight_report_path(options: &CliOptions) -> PathBuf {
     options
         .preflight_report
         .clone()
         .unwrap_or_else(|| options.output_root.join("slice-preflight.json"))
+}
+
+fn maybe_preflight_report_path(options: &CliOptions) -> Option<PathBuf> {
+    (options.run_preflight
+        || options.feedback_iterations > 0
+        || options.feedback_repair_iterations > 0)
+        .then(|| preflight_report_path(options))
+}
+
+fn feedback_report_path(options: &CliOptions) -> Option<PathBuf> {
+    (options.feedback_iterations > 0 || options.feedback_repair_iterations > 0).then(|| {
+        options
+            .feedback_report
+            .clone()
+            .unwrap_or_else(|| options.output_root.join("slice-feedback.json"))
+    })
 }
 
 fn validation_report_path(options: &CliOptions) -> Option<PathBuf> {
@@ -2021,6 +2117,500 @@ fn write_validation_report(
     }
     fs::write(path, serde_json::to_string_pretty(report)?)?;
     Ok(())
+}
+
+fn finish_validation_with_decision_log(
+    options: &CliOptions,
+    validation: &mut ValidationReport,
+    report: &GenerateReport,
+    status: &str,
+    reason: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    finish_validation(options, validation, status, reason)?;
+    write_decision_log(options, report, Some(validation), status, reason)
+}
+
+#[derive(Debug, Serialize)]
+struct DecisionLogReport {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    workspace_root: PathBuf,
+    output_root: PathBuf,
+    analyzer_mode: String,
+    production_preset: bool,
+    run_check: bool,
+    run_preflight: bool,
+    feedback_iterations: usize,
+    feedback_repair_iterations: usize,
+    deny_warnings: bool,
+    root_selectors: Vec<String>,
+    cargo_check_args: Vec<String>,
+    reports: DecisionLogReportPaths,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validation: Option<DecisionLogValidationSummary>,
+    steps: Vec<DecisionLogStep>,
+}
+
+#[derive(Debug, Serialize)]
+struct DecisionLogReportPaths {
+    decision_log: PathBuf,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    slice_report: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    validation_report: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    baseline_report: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    preflight_report: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback_report: Option<PathBuf>,
+}
+
+#[derive(Debug, Serialize)]
+struct DecisionLogValidationSummary {
+    status: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reason: Option<String>,
+    gates: usize,
+    attempts: usize,
+    failed_gates: Vec<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DecisionLogStep {
+    step: String,
+    status: String,
+    decision: String,
+    reason: String,
+    metrics: BTreeMap<String, serde_json::Value>,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    evidence: Vec<String>,
+}
+
+fn write_decision_log(
+    options: &CliOptions,
+    report: &GenerateReport,
+    validation: Option<&ValidationReport>,
+    status: &str,
+    reason: Option<&str>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(path) = decision_log_path(options) else {
+        return Ok(());
+    };
+    let log = build_decision_log(options, report, validation, &path, status, reason);
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::write(&path, serde_json::to_string_pretty(&log)?)?;
+    println!("decision log: {}", path.display());
+    Ok(())
+}
+
+fn build_decision_log(
+    options: &CliOptions,
+    report: &GenerateReport,
+    validation: Option<&ValidationReport>,
+    decision_log_path: &Path,
+    status: &str,
+    reason: Option<&str>,
+) -> DecisionLogReport {
+    let validation_summary = validation.map(|validation| DecisionLogValidationSummary {
+        status: validation.status.clone(),
+        reason: validation.reason.clone(),
+        gates: validation.gates.len(),
+        attempts: validation.attempts.len(),
+        failed_gates: validation
+            .gates
+            .iter()
+            .filter(|gate| gate.status == "failed")
+            .map(|gate| gate.name.clone())
+            .collect(),
+    });
+    DecisionLogReport {
+        status: status.to_string(),
+        reason: reason.map(str::to_string),
+        workspace_root: options.workspace_root.clone(),
+        output_root: options.output_root.clone(),
+        analyzer_mode: options.analyzer_mode.as_str().to_string(),
+        production_preset: options.production_preset,
+        run_check: options.run_check,
+        run_preflight: options.run_preflight,
+        feedback_iterations: options.feedback_iterations,
+        feedback_repair_iterations: options.feedback_repair_iterations,
+        deny_warnings: options.deny_warnings,
+        root_selectors: options.root_selectors.clone(),
+        cargo_check_args: options.cargo_check_args.clone(),
+        reports: DecisionLogReportPaths {
+            decision_log: decision_log_path.to_path_buf(),
+            slice_report: slice_report_path(options),
+            validation_report: validation_report_path(options),
+            baseline_report: options
+                .run_baseline_check
+                .then(|| baseline_report_path(options)),
+            preflight_report: maybe_preflight_report_path(options),
+            feedback_report: feedback_report_path(options),
+        },
+        validation: validation_summary,
+        steps: decision_log_steps(options, report, validation),
+    }
+}
+
+fn decision_log_steps(
+    options: &CliOptions,
+    report: &GenerateReport,
+    validation: Option<&ValidationReport>,
+) -> Vec<DecisionLogStep> {
+    let mut steps = Vec::new();
+
+    let mut input_metrics = BTreeMap::new();
+    input_metrics.insert(
+        "explicit_root_selectors".to_string(),
+        serde_json::json!(options.root_selectors.len()),
+    );
+    input_metrics.insert(
+        "cargo_check_args".to_string(),
+        serde_json::json!(options.cargo_check_args.len()),
+    );
+    steps.push(DecisionLogStep {
+        step: "input".to_string(),
+        status: "configured".to_string(),
+        decision: if options.root_selectors.is_empty() {
+            "use source markers".to_string()
+        } else {
+            "use explicit in-memory roots".to_string()
+        },
+        reason: if options.root_selectors.is_empty() {
+            "no --root or --roots-file was provided, so #[opensourced] markers define the top slice surface".to_string()
+        } else {
+            "--root/--roots-file selects the top slice surface without modifying the source checkout".to_string()
+        },
+        metrics: input_metrics,
+        evidence: options.root_selectors.clone(),
+    });
+
+    let mut analyzer_metrics = BTreeMap::new();
+    analyzer_metrics.insert(
+        "loaded".to_string(),
+        serde_json::json!(report.analyzer.loaded),
+    );
+    analyzer_metrics.insert(
+        "semantic_available".to_string(),
+        serde_json::json!(report.analyzer.semantic.is_some()),
+    );
+    analyzer_metrics.insert(
+        "semantic_hint_callable_owners".to_string(),
+        serde_json::json!(report.analyzer.semantic_hints.callable_edges.len()),
+    );
+    analyzer_metrics.insert(
+        "semantic_hint_item_owners".to_string(),
+        serde_json::json!(report.analyzer.semantic_hints.item_edges.len()),
+    );
+    analyzer_metrics.insert(
+        "semantic_hint_edges".to_string(),
+        serde_json::json!(report.analyzer.semantic_hints.total_edges()),
+    );
+    analyzer_metrics.insert(
+        "semantic_unresolved_queries".to_string(),
+        serde_json::json!(report.analyzer.semantic_hints.unresolved_queries),
+    );
+    analyzer_metrics.insert(
+        "semantic_unqueried_queries".to_string(),
+        serde_json::json!(report.analyzer.semantic_hints.unqueried_queries),
+    );
+    analyzer_metrics.insert(
+        "semantic_unmapped_targets".to_string(),
+        serde_json::json!(report.analyzer.semantic_hints.unmapped_targets),
+    );
+    if let Some(semantic) = &report.analyzer.semantic {
+        analyzer_metrics.insert(
+            "semantic_source_files".to_string(),
+            serde_json::json!(semantic.source_files),
+        );
+        analyzer_metrics.insert(
+            "semantic_analyzed_files".to_string(),
+            serde_json::json!(semantic.analyzed_files),
+        );
+        analyzer_metrics.insert(
+            "selected_root_source_files".to_string(),
+            serde_json::json!(semantic.selected_root_source_files),
+        );
+        analyzer_metrics.insert(
+            "selected_root_analyzed_files".to_string(),
+            serde_json::json!(semantic.selected_root_analyzed_files),
+        );
+        analyzer_metrics.insert(
+            "selected_root_unresolved_paths".to_string(),
+            serde_json::json!(semantic.selected_root_unresolved_paths),
+        );
+        analyzer_metrics.insert(
+            "selected_root_unresolved_method_calls".to_string(),
+            serde_json::json!(semantic.selected_root_unresolved_method_calls),
+        );
+    }
+    steps.push(DecisionLogStep {
+        step: "analyzer".to_string(),
+        status: if report.analyzer.semantic.is_some() {
+            semantic_proof_status(report.analyzer.semantic.as_ref().unwrap())
+        } else if report.analyzer.loaded {
+            "loaded_without_semantics".to_string()
+        } else {
+            "syntactic_only".to_string()
+        },
+        decision: format!(
+            "run {} via {}",
+            report.analyzer.mode.as_str(),
+            report.analyzer.engine
+        ),
+        reason: "the slicer uses the syntactic index plus available rust-analyzer semantic hints to expand the downstream dependency closure".to_string(),
+        metrics: analyzer_metrics,
+        evidence: report.analyzer.notes.clone(),
+    });
+
+    let mut root_metrics = BTreeMap::new();
+    root_metrics.insert("roots".to_string(), serde_json::json!(report.roots.len()));
+    root_metrics.insert(
+        "packages".to_string(),
+        serde_json::json!(report.packages.len()),
+    );
+    steps.push(DecisionLogStep {
+        step: "root_selection".to_string(),
+        status: "selected".to_string(),
+        decision: "treat selected roots as the only top-level open-source surface".to_string(),
+        reason: "reverse dependents are not retained; the retained workspace is grown only from what selected roots depend on".to_string(),
+        metrics: root_metrics,
+        evidence: report.roots.iter().map(ToString::to_string).collect(),
+    });
+
+    let mut closure_metrics = BTreeMap::new();
+    closure_metrics.insert(
+        "reachable_callables".to_string(),
+        serde_json::json!(report.reachable.len()),
+    );
+    closure_metrics.insert(
+        "reachable_items".to_string(),
+        serde_json::json!(report.reachable_items.len()),
+    );
+    closure_metrics.insert(
+        "rendered_callables".to_string(),
+        serde_json::json!(rendered_symbol_count(report, "callable")),
+    );
+    closure_metrics.insert(
+        "rendered_items".to_string(),
+        serde_json::json!(rendered_symbol_count(report, "item")),
+    );
+    closure_metrics.insert(
+        "files_written".to_string(),
+        serde_json::json!(report.files_written),
+    );
+    closure_metrics.insert(
+        "total_ms".to_string(),
+        serde_json::json!(report.timings.total_ms),
+    );
+    closure_metrics.insert(
+        "analyzer_ms".to_string(),
+        serde_json::json!(report.timings.analyzer_ms),
+    );
+    closure_metrics.insert(
+        "reduce_ms".to_string(),
+        serde_json::json!(report.timings.reduce_ms),
+    );
+    closure_metrics.insert(
+        "render_ms".to_string(),
+        serde_json::json!(report.timings.render_ms),
+    );
+    steps.push(DecisionLogStep {
+        step: "top_down_closure".to_string(),
+        status: "rendered".to_string(),
+        decision: "copy and render only the selected roots plus their downstream dependency closure".to_string(),
+        reason: "the top-down closure is the production direction: start at the open-source surface, walk dependencies, then render the retained set".to_string(),
+        metrics: closure_metrics,
+        evidence: report.packages.clone(),
+    });
+
+    let macro_summary = &report.macro_surfaces.summary;
+    let mut macro_metrics = BTreeMap::new();
+    macro_metrics.insert("total".to_string(), serde_json::json!(macro_summary.total));
+    macro_metrics.insert(
+        "derive_macros".to_string(),
+        serde_json::json!(macro_summary.derive_macros),
+    );
+    macro_metrics.insert(
+        "attribute_macros".to_string(),
+        serde_json::json!(macro_summary.attribute_macros),
+    );
+    macro_metrics.insert(
+        "helper_attributes".to_string(),
+        serde_json::json!(macro_summary.helper_attributes),
+    );
+    macro_metrics.insert(
+        "macro_invocations".to_string(),
+        serde_json::json!(macro_summary.macro_invocations),
+    );
+    macro_metrics.insert(
+        "macro_blocked".to_string(),
+        serde_json::json!(macro_summary.macro_blocked),
+    );
+    steps.push(DecisionLogStep {
+        step: "macro_surfaces".to_string(),
+        status: if macro_summary.macro_blocked > 0 {
+            "fail_closed".to_string()
+        } else {
+            "classified".to_string()
+        },
+        decision: "scope macro uncertainty to touched macro surfaces".to_string(),
+        reason: "unknown macro expansion can require token-named helpers, so affected owners are blocked_by_unknown instead of pruned".to_string(),
+        metrics: macro_metrics,
+        evidence: report
+            .macro_surfaces
+            .surfaces
+            .iter()
+            .take(20)
+            .map(|surface| {
+                format!(
+                    "{} {} on {}",
+                    surface.category, surface.path, surface.subject
+                )
+            })
+            .collect(),
+    });
+
+    let usage = &report.usage.summary;
+    let rendered_usage = rendered_usage_contract(report);
+    let mut usage_metrics = BTreeMap::new();
+    usage_metrics.insert(
+        "used_callables".to_string(),
+        serde_json::json!(usage.used_callables),
+    );
+    usage_metrics.insert(
+        "used_items".to_string(),
+        serde_json::json!(usage.used_items),
+    );
+    usage_metrics.insert(
+        "prunable_callables".to_string(),
+        serde_json::json!(usage.prunable_callables),
+    );
+    usage_metrics.insert(
+        "prunable_items".to_string(),
+        serde_json::json!(usage.prunable_items),
+    );
+    usage_metrics.insert(
+        "blocked_by_unknown_callables".to_string(),
+        serde_json::json!(usage.blocked_by_unknown_callables),
+    );
+    usage_metrics.insert(
+        "blocked_by_unknown_items".to_string(),
+        serde_json::json!(usage.blocked_by_unknown_items),
+    );
+    usage_metrics.insert(
+        "rendered_used".to_string(),
+        serde_json::json!(rendered_usage.used),
+    );
+    usage_metrics.insert(
+        "rendered_blocked_by_unknown".to_string(),
+        serde_json::json!(rendered_usage.blocked_by_unknown),
+    );
+    usage_metrics.insert(
+        "rendered_invalid".to_string(),
+        serde_json::json!(rendered_usage.invalid.len()),
+    );
+    steps.push(DecisionLogStep {
+        step: "usage_pruning".to_string(),
+        status: if rendered_usage.invalid.is_empty() {
+            "contract_ok".to_string()
+        } else {
+            "contract_failed".to_string()
+        },
+        decision: "strip prunable unused symbols and retain used or blocked_by_unknown symbols".to_string(),
+        reason: "generated source must not retain known-unused code except where an unknown surface blocks safe deletion".to_string(),
+        metrics: usage_metrics,
+        evidence: rendered_usage.invalid.into_iter().take(20).collect(),
+    });
+
+    let mut readiness_metrics = BTreeMap::new();
+    readiness_metrics.insert(
+        "hazards".to_string(),
+        serde_json::json!(report.production.hazards.len()),
+    );
+    readiness_metrics.insert(
+        "error_hazards".to_string(),
+        serde_json::json!(report
+            .production
+            .hazards
+            .iter()
+            .filter(|hazard| hazard.severity == "error")
+            .count()),
+    );
+    readiness_metrics.insert(
+        "warning_hazards".to_string(),
+        serde_json::json!(report
+            .production
+            .hazards
+            .iter()
+            .filter(|hazard| hazard.severity == "warning")
+            .count()),
+    );
+    steps.push(DecisionLogStep {
+        step: "production_readiness".to_string(),
+        status: report.production.status.clone(),
+        decision: "accept only if hard validation gates pass".to_string(),
+        reason: "hazards describe remaining semantic uncertainty; error hazards fail production validation unless specifically discharged".to_string(),
+        metrics: readiness_metrics,
+        evidence: report
+            .production
+            .hazards
+            .iter()
+            .take(20)
+            .map(|hazard| format!("{} {}: {}", hazard.severity, hazard.code, hazard.message))
+            .collect(),
+    });
+
+    if let Some(validation) = validation {
+        let mut validation_metrics = BTreeMap::new();
+        validation_metrics.insert(
+            "gates".to_string(),
+            serde_json::json!(validation.gates.len()),
+        );
+        validation_metrics.insert(
+            "attempts".to_string(),
+            serde_json::json!(validation.attempts.len()),
+        );
+        validation_metrics.insert(
+            "failed_gates".to_string(),
+            serde_json::json!(validation
+                .gates
+                .iter()
+                .filter(|gate| gate.status == "failed")
+                .count()),
+        );
+        steps.push(DecisionLogStep {
+            step: "validation".to_string(),
+            status: validation.status.clone(),
+            decision: "use validation gates as the acceptance contract".to_string(),
+            reason: validation
+                .reason
+                .clone()
+                .unwrap_or_else(|| "all configured validation gates completed".to_string()),
+            metrics: validation_metrics,
+            evidence: validation
+                .gates
+                .iter()
+                .map(|gate| format!("{}={}: {}", gate.name, gate.status, gate.reason))
+                .collect(),
+        });
+    }
+
+    steps
+}
+
+fn rendered_symbol_count(report: &GenerateReport, kind: &str) -> usize {
+    report
+        .usage
+        .rendered_symbols
+        .entries
+        .iter()
+        .filter(|entry| entry.kind == kind)
+        .count()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -4423,7 +5013,7 @@ fn usage() -> String {
         "[--feedback-timeout <seconds>] [--deny-warnings] [--feedback-report <path>] ",
         "[--feedback-target-dir <path>] [--cargo-check-arg <arg>] [--repair-report <path>] ",
         "[--baseline-check] [--allow-baseline-failures] [--baseline-report <path>] ",
-        "[--baseline-target-dir <path>] [--slice-report <path>] [--validation-report <path>] ",
+        "[--baseline-target-dir <path>] [--slice-report <path>] [--decision-log <path>] [--validation-report <path>] ",
         "[--preflight-report <path>] [--root <selector>] [--roots-file <path>] ",
         "[--random-roots <n>] [--random-root-package <package>] [--random-seed <n>] [--batch-roots] [--batch-report <path>] ",
         "<workspace-root-or-Cargo.toml> <output-root>\n",
@@ -4456,9 +5046,9 @@ mod tests {
 
     use super::{
         apply_default_marked_package_scope, baseline_limited_feedback_is_accepted,
-        cargo_args_have_package_scope, diagnostics_shape_signature, diagnostics_signature,
-        feedback_errors_are_baseline_known, feedback_is_accepted, feedback_repair_is_accepted,
-        parse_args_from, production_readiness_blocks_validation,
+        cargo_args_have_package_scope, decision_log_path, diagnostics_shape_signature,
+        diagnostics_signature, feedback_errors_are_baseline_known, feedback_is_accepted,
+        feedback_repair_is_accepted, parse_args_from, production_readiness_blocks_validation,
         production_validation_matrix_entries, record_final_production_readiness,
         record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
         run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count,
@@ -4870,6 +5460,10 @@ mod tests {
         assert_eq!(
             validation_report_path(&options),
             Some(PathBuf::from("out/slice-validation.json"))
+        );
+        assert_eq!(
+            decision_log_path(&options),
+            Some(PathBuf::from("out/slice-decision-log.json"))
         );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
@@ -5539,6 +6133,16 @@ resolver = "2"
         assert_eq!(
             slice_report_path(&options),
             Some(PathBuf::from("custom.json"))
+        );
+    }
+
+    #[test]
+    fn explicit_decision_log_enables_decision_report() {
+        let options = parse_options(["--decision-log", "decisions.json", "workspace", "out"]);
+
+        assert_eq!(
+            decision_log_path(&options),
+            Some(PathBuf::from("decisions.json"))
         );
     }
 
