@@ -803,6 +803,9 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
         field_api.contains("view.match_collection_score"),
         "{field_api}"
     );
+    assert!(field_api.contains("summarize_alias_views"), "{field_api}");
+    assert!(field_api.contains("view.alias_title"), "{field_api}");
+    assert!(field_api.contains("view.alias_score"), "{field_api}");
     assert!(!field_api.contains("dead_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_filter_note"), "{field_api}");
     assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
@@ -823,6 +826,7 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
         !field_api.contains("dead_match_collection_note"),
         "{field_api}"
     );
+    assert!(!field_api.contains("dead_alias_note"), "{field_api}");
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
 
     assert!(
@@ -976,6 +980,18 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
         !view_record.contains("dead_match_collection_note"),
         "{view_record}"
     );
+    assert!(
+        view_record.contains("pub type AliasViews = Vec < AliasView >")
+            || view_record.contains("pub type AliasViews = Vec<AliasView>"),
+        "{view_record}"
+    );
+    assert!(
+        view_record.contains("pub struct AliasView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub alias_title:"), "{view_record}");
+    assert!(view_record.contains("pub alias_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_alias_note"), "{view_record}");
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }

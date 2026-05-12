@@ -82,3 +82,11 @@ pub struct MatchCollectionView {
     pub match_collection_score: u32,
     pub dead_match_collection_note: Option<String>,
 }
+
+pub type AliasViews = Vec<AliasView>;
+
+pub struct AliasView {
+    pub alias_title: String,
+    pub alias_score: u32,
+    pub dead_alias_note: Option<String>,
+}

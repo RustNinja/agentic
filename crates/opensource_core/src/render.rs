@@ -20168,6 +20168,16 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 ctx.aliases,
             ),
             Type::Path(type_path) => {
+                if let Some(alias_ctx) = self.type_path_alias_target_context(
+                    ctx.package,
+                    ctx.module_path,
+                    ctx.aliases,
+                    &type_path.path,
+                ) {
+                    if let Some(item) = self.sequence_value_type_item(alias_ctx) {
+                        return Some(item);
+                    }
+                }
                 let segment = type_path.path.segments.last()?;
                 if matches!(
                     segment.ident.to_string().as_str(),
@@ -20280,6 +20290,33 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         })
     }
 
+    fn type_path_alias_target_context(
+        &self,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+        path: &syn::Path,
+    ) -> Option<FieldTypeContext<'a>> {
+        let item = path_to_type_like_item(self.project, package, module_path, path, aliases)?;
+        self.type_alias_target_context(&item)
+    }
+
+    fn type_alias_target_context(&self, item: &ItemId) -> Option<FieldTypeContext<'a>> {
+        if item.kind != ItemKind::Type {
+            return None;
+        }
+        let record = self.project.items.get(item)?;
+        let Item::Type(type_alias) = &record.item else {
+            return None;
+        };
+        Some(FieldTypeContext {
+            package: &record.package,
+            module_path: &record.module_path,
+            aliases: &record.aliases,
+            ty: &type_alias.ty,
+        })
+    }
+
     fn type_payload_or_direct_item_in(
         &self,
         package: &str,
@@ -20289,6 +20326,16 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     ) -> Option<ItemId> {
         if let Some(item) = type_to_type_like_item(self.project, package, module_path, ty, aliases)
         {
+            if let Some(alias_ctx) = self.type_alias_target_context(&item) {
+                if let Some(expanded) = self.type_payload_or_direct_item_in(
+                    alias_ctx.package,
+                    alias_ctx.module_path,
+                    alias_ctx.aliases,
+                    alias_ctx.ty,
+                ) {
+                    return Some(expanded);
+                }
+            }
             return Some(item);
         }
         match ty {

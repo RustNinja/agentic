@@ -197,8 +197,19 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let alias_views: view_record::AliasViews = snapshot
+        .records
+        .iter()
+        .map(|record| view_record::AliasView {
+            alias_title: record.raw_label.clone(),
+            alias_score: record.raw_value,
+            dead_alias_note: None,
+        })
+        .collect::<Vec<_>>();
+    let alias = summarize_alias_views(alias_views);
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}",
         loop_titles.join(",")
     )
 }
@@ -241,6 +252,14 @@ fn summarize_param_views(views: Vec<view_record::ParamView>) -> String {
     views
         .iter()
         .map(|view| format!("{}:{}", view.param_title, view.param_score))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn summarize_alias_views(views: view_record::AliasViews) -> String {
+    views
+        .iter()
+        .map(|view| format!("{}:{}", view.alias_title, view.alias_score))
         .collect::<Vec<_>>()
         .join(",")
 }
