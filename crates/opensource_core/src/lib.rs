@@ -1336,6 +1336,42 @@ impl GenerateSession {
         &self.analyzer
     }
 
+    pub fn manifest_ms(&self) -> u64 {
+        self.manifest_ms
+    }
+
+    pub fn parse_ms(&self) -> u64 {
+        self.parse_ms
+    }
+
+    pub fn analyzer_ms(&self) -> u64 {
+        self.analyzer_ms
+    }
+
+    pub fn indexed_package_names(&self) -> Vec<String> {
+        let mut packages = self
+            .project
+            .files
+            .values()
+            .map(|source| source.package.clone())
+            .collect::<Vec<_>>();
+        packages.sort();
+        packages.dedup();
+        packages
+    }
+
+    pub fn indexed_source_files(&self) -> usize {
+        self.project.files.len()
+    }
+
+    pub fn indexed_callables(&self) -> usize {
+        self.project.functions.len() + self.project.methods.len()
+    }
+
+    pub fn indexed_items(&self) -> usize {
+        self.project.items.len()
+    }
+
     pub fn selectable_roots(&self) -> Vec<RootId> {
         selectable_roots_for_project(&self.project)
     }

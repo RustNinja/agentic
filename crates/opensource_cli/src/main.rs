@@ -6,7 +6,8 @@ use std::{
     io::{self, Write},
     path::{Path, PathBuf},
     process::Command,
-    sync::OnceLock,
+    sync::{mpsc, OnceLock},
+    thread::{self, JoinHandle},
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
@@ -1375,19 +1376,47 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
             "started",
             "load narrow syntactic resolver for root selection",
             "selectors that need disambiguation parse the smallest available package scope before the wider top-down generation closure is loaded",
-            BTreeMap::new(),
+            event_fields(&[
+                ("root_selectors", serde_json::json!(&options.root_selectors)),
+                ("random_roots", serde_json::json!(options.random_roots)),
+            ]),
         )?;
-        let resolver_session = if options.random_roots.is_some() {
-            GenerateSession::load_without_marker_targets(
-                &options.workspace_root,
-                AnalyzerMode::Syn,
-            )?
+        let _heartbeat = start_event_heartbeat(
+            options,
+            "batch_resolver",
+            "load narrow syntactic resolver for root selection",
+            "selectors that need disambiguation parse the smallest available package scope before the wider top-down generation closure is loaded",
+            event_fields(&[
+                ("root_selectors", serde_json::json!(&options.root_selectors)),
+                ("random_roots", serde_json::json!(options.random_roots)),
+            ]),
+        );
+        let resolver_session_result = if options.random_roots.is_some() {
+            GenerateSession::load_without_marker_targets(&options.workspace_root, AnalyzerMode::Syn)
         } else {
             GenerateSession::load_root_selector_resolver_without_marker_targets(
                 &options.workspace_root,
                 AnalyzerMode::Syn,
                 &options.root_selectors,
-            )?
+            )
+        };
+        let resolver_session = match resolver_session_result {
+            Ok(session) => session,
+            Err(error) => {
+                let reason = error.to_string();
+                write_event_log(
+                    options,
+                    "batch_resolver",
+                    "failed",
+                    "load narrow syntactic resolver for root selection",
+                    &reason,
+                    event_fields(&[
+                        ("root_selectors", serde_json::json!(&options.root_selectors)),
+                        ("random_roots", serde_json::json!(options.random_roots)),
+                    ]),
+                )?;
+                return Err(error);
+            }
         };
         write_event_log(
             options,
@@ -1447,11 +1476,52 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 "direct root decoding skipped resolver loading, so generation loads the normal top-down project once",
                 event_fields(&[("root_count", serde_json::json!(roots.len()))]),
             )?;
-            GenerateSession::load_with_selected_roots(
+            let _heartbeat = start_event_heartbeat(
+                options,
+                "batch_analyzer",
+                "load syntactic analyzer for direct roots",
+                "direct root decoding skipped resolver loading, so generation loads the selected roots' dependency closure once",
+                event_fields(&[
+                    ("analyzer", serde_json::json!(options.analyzer_mode.as_str())),
+                    ("root_count", serde_json::json!(roots.len())),
+                    (
+                        "roots",
+                        serde_json::json!(roots.iter().map(ToString::to_string).collect::<Vec<_>>()),
+                    ),
+                ]),
+            );
+            match GenerateSession::load_with_selected_roots(
                 &options.workspace_root,
                 options.analyzer_mode,
                 &roots,
-            )?
+            ) {
+                Ok(session) => session,
+                Err(error) => {
+                    let reason = error.to_string();
+                    write_event_log(
+                        options,
+                        "batch_analyzer",
+                        "failed",
+                        "load syntactic analyzer for direct roots",
+                        &reason,
+                        event_fields(&[
+                            (
+                                "analyzer",
+                                serde_json::json!(options.analyzer_mode.as_str()),
+                            ),
+                            ("root_count", serde_json::json!(roots.len())),
+                            (
+                                "roots",
+                                serde_json::json!(roots
+                                    .iter()
+                                    .map(ToString::to_string)
+                                    .collect::<Vec<_>>()),
+                            ),
+                        ]),
+                    )?;
+                    return Err(error);
+                }
+            }
         }
     } else {
         write_event_log(
@@ -1468,26 +1538,72 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 ("root_count", serde_json::json!(roots.len())),
             ]),
         )?;
-        GenerateSession::load_with_selected_roots(
+        let _heartbeat = start_event_heartbeat(
+            options,
+            "batch_analyzer",
+            "load requested analyzer once for selected roots",
+            "one analyzer session is shared across all batch roots to avoid repeated cold starts",
+            event_fields(&[
+                (
+                    "analyzer",
+                    serde_json::json!(options.analyzer_mode.as_str()),
+                ),
+                ("root_count", serde_json::json!(roots.len())),
+                (
+                    "roots",
+                    serde_json::json!(roots.iter().map(ToString::to_string).collect::<Vec<_>>()),
+                ),
+            ]),
+        );
+        match GenerateSession::load_with_selected_roots(
             &options.workspace_root,
             options.analyzer_mode,
             &roots,
-        )?
+        ) {
+            Ok(session) => session,
+            Err(error) => {
+                let reason = error.to_string();
+                write_event_log(
+                    options,
+                    "batch_analyzer",
+                    "failed",
+                    "load requested analyzer once for selected roots",
+                    &reason,
+                    event_fields(&[
+                        (
+                            "analyzer",
+                            serde_json::json!(options.analyzer_mode.as_str()),
+                        ),
+                        ("root_count", serde_json::json!(roots.len())),
+                        (
+                            "roots",
+                            serde_json::json!(roots
+                                .iter()
+                                .map(ToString::to_string)
+                                .collect::<Vec<_>>()),
+                        ),
+                    ]),
+                )?;
+                return Err(error);
+            }
+        }
     };
+    let mut analyzer_fields = session_load_fields(&session);
+    analyzer_fields.extend(event_fields(&[
+        (
+            "analyzer",
+            serde_json::json!(session.analyzer().mode.as_str()),
+        ),
+        ("engine", serde_json::json!(&session.analyzer().engine)),
+        ("notes", serde_json::json!(&session.analyzer().notes)),
+    ]));
     write_event_log(
         options,
         "batch_analyzer",
         "completed",
         "load analyzer session for batch",
         "the loaded session will generate roots by downstream dependency closure",
-        event_fields(&[
-            (
-                "analyzer",
-                serde_json::json!(session.analyzer().mode.as_str()),
-            ),
-            ("engine", serde_json::json!(&session.analyzer().engine)),
-            ("notes", serde_json::json!(&session.analyzer().notes)),
-        ]),
+        analyzer_fields,
     )?;
     println!(
         "analyzer: {} ({})",
@@ -1684,7 +1800,43 @@ fn run_batch_root(
                 ),
             ]),
         )?;
-        let report = session.generate(output_root.to_path_buf(), &[root.clone()], &diagnostics)?;
+        let _heartbeat = start_event_heartbeat(
+            options,
+            "batch_generation",
+            "generate one top-down root slice",
+            "generation starts from the selected root and walks only downstream dependencies",
+            event_fields(&[
+                ("root", serde_json::json!(root.to_string())),
+                ("attempt", serde_json::json!(attempt)),
+                ("attempts", serde_json::json!(attempts)),
+                ("output_root", serde_json::json!(output_root)),
+                (
+                    "diagnostics_available",
+                    serde_json::json!(diagnostics.len()),
+                ),
+            ]),
+        );
+        let report =
+            match session.generate(output_root.to_path_buf(), &[root.clone()], &diagnostics) {
+                Ok(report) => report,
+                Err(error) => {
+                    let reason = error.to_string();
+                    write_event_log(
+                        options,
+                        "batch_generation",
+                        "failed",
+                        "generate one top-down root slice",
+                        &reason,
+                        event_fields(&[
+                            ("root", serde_json::json!(root.to_string())),
+                            ("attempt", serde_json::json!(attempt)),
+                            ("attempts", serde_json::json!(attempts)),
+                            ("output_root", serde_json::json!(output_root)),
+                        ]),
+                    )?;
+                    return Err(error);
+                }
+            };
         write_event_log(
             options,
             "batch_generation",
@@ -1717,6 +1869,21 @@ fn run_batch_root(
             .flatten();
         last_report = Some(report);
         if !rendered_usage_contract.invalid.is_empty() {
+            write_event_log(
+                options,
+                "batch_gate",
+                "failed",
+                "stop batch root on rendered usage contract",
+                "rendered source contains invalid usage decisions",
+                event_fields(&[
+                    ("root", serde_json::json!(root.to_string())),
+                    ("attempt", serde_json::json!(attempt)),
+                    (
+                        "invalid_preview",
+                        serde_json::json!(rendered_usage_contract.invalid_preview()),
+                    ),
+                ]),
+            )?;
             return Ok(batch_row_from_reports(
                 root,
                 output_root,
@@ -1731,6 +1898,17 @@ fn run_batch_root(
             ));
         }
         if let Some(reason) = semantic_proof_block {
+            write_event_log(
+                options,
+                "batch_gate",
+                "failed",
+                "stop batch root on semantic proof gate",
+                &reason,
+                event_fields(&[
+                    ("root", serde_json::json!(root.to_string())),
+                    ("attempt", serde_json::json!(attempt)),
+                ]),
+            )?;
             return Ok(batch_row_from_reports(
                 root,
                 output_root,
@@ -1742,6 +1920,18 @@ fn run_batch_root(
             ));
         }
         if let Err(error) = refresh_generated_lockfile_for_output(options, output_root) {
+            let reason = error.to_string();
+            write_event_log(
+                options,
+                "batch_gate",
+                "failed",
+                "stop batch root on lockfile refresh",
+                &reason,
+                event_fields(&[
+                    ("root", serde_json::json!(root.to_string())),
+                    ("attempt", serde_json::json!(attempt)),
+                ]),
+            )?;
             return Ok(batch_row_from_reports(
                 root,
                 output_root,
@@ -1749,7 +1939,7 @@ fn run_batch_root(
                 last_report.as_ref(),
                 last_preflight.as_ref(),
                 None,
-                Some(error.to_string()),
+                Some(reason),
             ));
         }
 
@@ -1769,9 +1959,44 @@ fn run_batch_root(
                     ),
                 ]),
             )?;
-            let preflight = preflight_workspace(PreflightOptions {
+            let _heartbeat = start_event_heartbeat(
+                options,
+                "batch_preflight",
+                "run fast structural validation for batch root",
+                "preflight catches malformed generated workspaces before cargo check",
+                event_fields(&[
+                    ("root", serde_json::json!(root.to_string())),
+                    ("attempt", serde_json::json!(attempt)),
+                    (
+                        "manifest",
+                        serde_json::json!(output_root.join("Cargo.toml")),
+                    ),
+                ]),
+            );
+            let preflight = match preflight_workspace(PreflightOptions {
                 manifest_path: output_root.join("Cargo.toml"),
-            })?;
+            }) {
+                Ok(preflight) => preflight,
+                Err(error) => {
+                    let reason = error.to_string();
+                    write_event_log(
+                        options,
+                        "batch_preflight",
+                        "failed",
+                        "run fast structural validation for batch root",
+                        &reason,
+                        event_fields(&[
+                            ("root", serde_json::json!(root.to_string())),
+                            ("attempt", serde_json::json!(attempt)),
+                            (
+                                "manifest",
+                                serde_json::json!(output_root.join("Cargo.toml")),
+                            ),
+                        ]),
+                    )?;
+                    return Err(error);
+                }
+            };
             write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
             write_event_log(
                 options,
@@ -1797,6 +2022,19 @@ fn run_batch_root(
                 ]),
             )?;
             if !preflight.success {
+                write_event_log(
+                    options,
+                    "batch_gate",
+                    "failed",
+                    "stop batch root on preflight gate",
+                    "generated workspace failed preflight",
+                    event_fields(&[
+                        ("root", serde_json::json!(root.to_string())),
+                        ("attempt", serde_json::json!(attempt)),
+                        ("errors", serde_json::json!(preflight.error_count())),
+                        ("warnings", serde_json::json!(preflight.warning_count())),
+                    ]),
+                )?;
                 let row = batch_row_from_reports(
                     root,
                     output_root,
@@ -1812,6 +2050,17 @@ fn run_batch_root(
         }
 
         if !batch_runs_check(options) {
+            write_event_log(
+                options,
+                "batch_gate",
+                "passed",
+                "finish batch root after generation",
+                "cargo check was not requested for this batch root",
+                event_fields(&[
+                    ("root", serde_json::json!(root.to_string())),
+                    ("attempt", serde_json::json!(attempt)),
+                ]),
+            )?;
             return Ok(batch_row_from_reports(
                 root,
                 output_root,
@@ -1842,12 +2091,55 @@ fn run_batch_root(
                 ),
             ]),
         )?;
-        let check = check_workspace(CheckOptions {
+        let _heartbeat = start_event_heartbeat(
+            options,
+            "batch_check",
+            "run cargo check for generated batch root",
+            "cargo check validates that the top-down generated workspace builds",
+            event_fields(&[
+                ("root", serde_json::json!(root.to_string())),
+                ("attempt", serde_json::json!(attempt)),
+                (
+                    "target_dir",
+                    serde_json::json!(batch_feedback_target_dir(options)),
+                ),
+                (
+                    "cargo_args",
+                    serde_json::json!(batch_cargo_args(options, root)),
+                ),
+            ]),
+        );
+        let check = match check_workspace(CheckOptions {
             manifest_path: output_root.join("Cargo.toml"),
             target_dir: Some(batch_feedback_target_dir(options)),
             timeout: options.feedback_timeout,
             cargo_args: batch_cargo_args(options, root),
-        })?;
+        }) {
+            Ok(check) => check,
+            Err(error) => {
+                let reason = error.to_string();
+                write_event_log(
+                    options,
+                    "batch_check",
+                    "failed",
+                    "run cargo check for generated batch root",
+                    &reason,
+                    event_fields(&[
+                        ("root", serde_json::json!(root.to_string())),
+                        ("attempt", serde_json::json!(attempt)),
+                        (
+                            "target_dir",
+                            serde_json::json!(batch_feedback_target_dir(options)),
+                        ),
+                        (
+                            "cargo_args",
+                            serde_json::json!(batch_cargo_args(options, root)),
+                        ),
+                    ]),
+                )?;
+                return Err(error);
+            }
+        };
         write_report(&check, &output_root.join("slice-feedback.json"))?;
         let accepted = if options.feedback_repair_iterations > 0 {
             feedback_repair_is_accepted(&check, baseline, options.deny_warnings)
@@ -2979,6 +3271,31 @@ struct EventLogEntry {
     fields: BTreeMap<String, serde_json::Value>,
 }
 
+struct EventHeartbeat {
+    stop: Option<mpsc::Sender<()>>,
+    handle: Option<JoinHandle<()>>,
+}
+
+impl EventHeartbeat {
+    fn inactive() -> Self {
+        Self {
+            stop: None,
+            handle: None,
+        }
+    }
+}
+
+impl Drop for EventHeartbeat {
+    fn drop(&mut self) {
+        if let Some(stop) = self.stop.take() {
+            let _ = stop.send(());
+        }
+        if let Some(handle) = self.handle.take() {
+            let _ = handle.join();
+        }
+    }
+}
+
 fn initialize_event_log(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
     let Some(path) = event_log_path(options) else {
         return Ok(());
@@ -2997,6 +3314,51 @@ fn initialize_event_log(options: &CliOptions) -> Result<(), Box<dyn std::error::
     )
 }
 
+fn start_event_heartbeat(
+    options: &CliOptions,
+    event: &str,
+    decision: &str,
+    reason: &str,
+    fields: BTreeMap<String, serde_json::Value>,
+) -> EventHeartbeat {
+    let Some(path) = event_log_path(options) else {
+        return EventHeartbeat::inactive();
+    };
+    let event = event.to_string();
+    let decision = decision.to_string();
+    let reason = reason.to_string();
+    let (stop, rx) = mpsc::channel();
+    let handle = thread::spawn(move || {
+        let mut heartbeat = 0usize;
+        loop {
+            match rx.recv_timeout(Duration::from_secs(15)) {
+                Ok(()) | Err(mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(mpsc::RecvTimeoutError::Timeout) => {
+                    heartbeat += 1;
+                    let mut heartbeat_fields = fields.clone();
+                    heartbeat_fields.insert("heartbeat".to_string(), serde_json::json!(heartbeat));
+                    heartbeat_fields.insert(
+                        "heartbeat_interval_ms".to_string(),
+                        serde_json::json!(15_000),
+                    );
+                    let _ = append_event_log_path(
+                        &path,
+                        &event,
+                        "running",
+                        &decision,
+                        &reason,
+                        heartbeat_fields,
+                    );
+                }
+            }
+        }
+    });
+    EventHeartbeat {
+        stop: Some(stop),
+        handle: Some(handle),
+    }
+}
+
 fn write_event_log(
     options: &CliOptions,
     event: &str,
@@ -3008,6 +3370,17 @@ fn write_event_log(
     let Some(path) = event_log_path(options) else {
         return Ok(());
     };
+    append_event_log_path(&path, event, status, decision, reason, fields)
+}
+
+fn append_event_log_path(
+    path: &Path,
+    event: &str,
+    status: &str,
+    decision: &str,
+    reason: &str,
+    fields: BTreeMap<String, serde_json::Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -3021,7 +3394,7 @@ fn write_event_log(
         reason: reason.to_string(),
         fields,
     };
-    let mut file = OpenOptions::new().create(true).append(true).open(&path)?;
+    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
     writeln!(file, "{}", serde_json::to_string(&entry)?)?;
     Ok(())
 }
@@ -3031,6 +3404,27 @@ fn event_fields(pairs: &[(&str, serde_json::Value)]) -> BTreeMap<String, serde_j
         .iter()
         .map(|(key, value)| ((*key).to_string(), value.clone()))
         .collect()
+}
+
+fn session_load_fields(session: &GenerateSession) -> BTreeMap<String, serde_json::Value> {
+    event_fields(&[
+        ("manifest_ms", serde_json::json!(session.manifest_ms())),
+        ("parse_ms", serde_json::json!(session.parse_ms())),
+        ("analyzer_ms", serde_json::json!(session.analyzer_ms())),
+        (
+            "indexed_packages",
+            serde_json::json!(session.indexed_package_names()),
+        ),
+        (
+            "indexed_source_files",
+            serde_json::json!(session.indexed_source_files()),
+        ),
+        (
+            "indexed_callables",
+            serde_json::json!(session.indexed_callables()),
+        ),
+        ("indexed_items", serde_json::json!(session.indexed_items())),
+    ])
 }
 
 fn now_unix_ms() -> u64 {
