@@ -4758,7 +4758,9 @@ fn add_semantic_usage_mapping_hazard(
         }
     }
     for item in &reduced.reachable_items {
-        if usage.is_item_mapped(item) || item.kind == model::ItemKind::Mod {
+        if usage.is_item_mapped(item)
+            || matches!(item.kind, model::ItemKind::Mod | model::ItemKind::Macro)
+        {
             continue;
         }
         if let Some(record) = project.items.get(item) {
@@ -6808,6 +6810,9 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
     counts.add(retained_inline_out_dir_macro_hazard_counts(
         project, reduced,
     ));
+    counts.add(retained_top_level_macro_invocation_hazard_counts(
+        project, reduced,
+    ));
 
     for callable in &reduced.reachable {
         if let Some(record) = project.functions.get(callable) {
@@ -6860,6 +6865,57 @@ fn syntactic_hazard_counts(project: &Project, reduced: &ReducedProject) -> Synta
     }
 
     counts
+}
+
+fn retained_top_level_macro_invocation_hazard_counts(
+    project: &Project,
+    reduced: &ReducedProject,
+) -> SyntacticHazardCounts {
+    let mut counts = SyntacticHazardCounts::default();
+    let retained_paths = retained_semantic_file_paths(project, reduced);
+    for source in project
+        .files
+        .values()
+        .filter(|source| reduced.packages.contains(&source.package))
+        .filter(|source| retained_paths.contains(&normalize_report_path(&source.path)))
+    {
+        let mut visitor = syntactic_hazard_visitor_for_location(
+            project,
+            &source.package,
+            &source.module_path,
+            None,
+        );
+        for item in &source.syntax.items {
+            let Item::Macro(item_macro) = item else {
+                continue;
+            };
+            if item_macro.ident.is_some()
+                || !macro_invocation_requires_expansion_boundary(
+                    &item_macro.mac,
+                    &visitor.macro_context,
+                )
+                || !top_level_macro_invocation_mentions_reduced_code(
+                    project, reduced, source, item_macro,
+                )
+            {
+                continue;
+            }
+            visitor.visit_item(item);
+        }
+        counts.add(visitor.counts);
+    }
+    counts
+}
+
+fn top_level_macro_invocation_mentions_reduced_code(
+    project: &Project,
+    reduced: &ReducedProject,
+    source: &model::SourceFile,
+    item_macro: &syn::ItemMacro,
+) -> bool {
+    token_stream_idents(&item_macro.mac.tokens)
+        .iter()
+        .any(|ident| reduced_package_mentions_ident(project, reduced, &source.package, ident))
 }
 
 fn retained_top_level_out_dir_macro_hazard_counts(

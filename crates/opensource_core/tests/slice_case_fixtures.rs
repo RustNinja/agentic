@@ -2297,7 +2297,7 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "macro_generated_prune",
             packages: &["macro_api", "macro_support", "root"],
-            hazards: &[("semantic_usage_mapping_incomplete", "warning")],
+            hazards: &[("custom_macro_invocations", "warning")],
         },
         RaHardFixture {
             fixture: "litter_conversation_render_prune",
@@ -2364,10 +2364,7 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "macro_receiver_prune",
             packages: &["macro_api", "macro_support", "root"],
-            hazards: &[
-                ("custom_macro_invocations", "warning"),
-                ("semantic_usage_mapping_incomplete", "warning"),
-            ],
+            hazards: &[("custom_macro_invocations", "warning")],
         },
         RaHardFixture {
             fixture: "cfg_attr_uniffi_prune",
@@ -3342,6 +3339,9 @@ fn prunes_macro_generated_support_chain_with_default_analyzer() {
         AnalyzerMode::default_for_build(),
     )
     .expect("macro_generated_prune fixture should slice");
+
+    assert_production_hazard(&report, "custom_macro_invocations", "warning");
+    assert_no_production_hazard(&report, "semantic_usage_mapping_incomplete");
 
     assert_eq!(report.packages, ["macro_api", "macro_support", "root"]);
     assert!(
@@ -4474,6 +4474,9 @@ fn prunes_macro_receiver_support_chain_with_default_analyzer() {
         AnalyzerMode::default_for_build(),
     )
     .expect("macro_receiver_prune fixture should slice");
+
+    assert_production_hazard(&report, "custom_macro_invocations", "warning");
+    assert_no_production_hazard(&report, "semantic_usage_mapping_incomplete");
 
     assert_eq!(report.packages, ["macro_api", "macro_support", "root"]);
     assert!(
