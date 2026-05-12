@@ -2247,6 +2247,7 @@ fn hazard_blocks_unused_pruning(code: &str) -> bool {
             | "out_dir_source_include_macros"
             | "custom_attribute_macros"
             | "custom_derive_macros"
+            | "custom_macro_invocations"
             | "function_pointer_surfaces"
             | "trait_object_surfaces"
             | "dynamic_callback_boundaries"
@@ -11924,6 +11925,148 @@ fn private_leaf() -> i32 {
             !output.join("app/src/safe.rs").exists(),
             "prunable module outside the unknown surface scope should not be rendered",
         );
+    }
+
+    #[test]
+    fn custom_macro_invocation_blockers_retain_token_named_unknowns() {
+        let root = temp_output("custom-macro-invocation-blocker-source");
+        let output = temp_output("custom-macro-invocation-blocker-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub mod risky;
+pub mod safe;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    risky::selected()
+}
+"#,
+        );
+        write(
+            root.join("app/src/risky.rs"),
+            r#"pub fn selected() -> i32 {
+    1
+}
+
+pub fn macro_token_helper() -> i32 {
+    private_leaf()
+}
+
+fn private_leaf() -> i32 {
+    2
+}
+"#,
+        );
+        write(
+            root.join("app/src/safe.rs"),
+            r#"pub fn macro_token_helper() -> i32 {
+    99
+}
+
+pub fn unrelated_dead_code() -> i32 {
+    100
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::Syn,
+            loaded: true,
+            engine: "syn".to_string(),
+            notes: Vec::new(),
+            semantic: None,
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: None,
+        };
+        let blocker = production_readiness_status(vec![production_hazard_with_details(
+            "custom_macro_invocations",
+            "warning",
+            "synthetic retained macro invocation may expand through token-named helper",
+            vec![ProductionHazardDetail {
+                subject: "app::risky: custom_macro!(macro_token_helper)".to_string(),
+                package: Some("app".to_string()),
+                module_path: Some("risky".to_string()),
+                file: None,
+                start_line: None,
+                cfg: None,
+                blocked_idents: vec!["macro_token_helper".to_string()],
+                suggested_cargo_args: Vec::new(),
+            }],
+        )]);
+        let (render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &blocker)
+                .expect("usage-guarded render reduction should work");
+        render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
+            .expect("render should succeed");
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &blocker,
+            RenderedSymbolProofReport::default(),
+            PublicReexportProofReport::default(),
+        );
+
+        let blocked_callables = usage
+            .blocked_by_unknown
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            blocked_callables.contains("app::risky::macro_token_helper"),
+            "token-named helper in the retained macro surface must stay blocked_by_unknown: {blocked_callables:?}",
+        );
+        assert!(
+            blocked_callables.contains("app::safe::macro_token_helper"),
+            "same-name helpers remain fail-closed for custom macro invocations until macro expansion is modeled: {blocked_callables:?}",
+        );
+
+        let prunable_callables = usage
+            .prunable
+            .callables
+            .iter()
+            .map(ToString::to_string)
+            .collect::<BTreeSet<_>>();
+        assert!(
+            prunable_callables.contains("app::safe::unrelated_dead_code"),
+            "unrelated dead code must remain prunable: {prunable_callables:?}",
+        );
+        assert!(
+            !usage
+                .unused
+                .callables
+                .iter()
+                .any(|callable| callable.to_string() == "app::risky::macro_token_helper"),
+            "blocked_by_unknown macro helpers must not be exposed as removable unused code",
+        );
+
+        let risky_source = fs::read_to_string(output.join("app/src/risky.rs")).unwrap();
+        assert!(risky_source.contains("macro_token_helper"));
+        assert!(risky_source.contains("private_leaf"));
+        assert!(!risky_source.contains("custom_macro"));
+        let safe_source = fs::read_to_string(output.join("app/src/safe.rs")).unwrap();
+        assert!(safe_source.contains("macro_token_helper"));
+        assert!(!safe_source.contains("unrelated_dead_code"));
     }
 
     #[test]
