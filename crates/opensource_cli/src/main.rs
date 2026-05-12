@@ -16,10 +16,11 @@ use serde::Serialize;
 use opensource_core::{
     check_workspace, direct_free_function_root_selectors,
     generate_with_analyzer_feedback_and_roots, marked_workspace_packages, preflight_workspace,
-    repair_workspace, write_generate_report, write_preflight_report, write_repair_report,
-    write_report, AnalyzerMode, CheckDiagnostic, CheckOptions, CheckReport, GenerateOptions,
-    GenerateReport, GenerateSession, GeneratedTargetReport, PreflightDiagnostic, PreflightOptions,
-    PreflightReport, RepairOptions, RepairReport, RootId, SemanticReport,
+    repair_workspace, resolve_feedback_widening_roots, write_generate_report,
+    write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
+    CheckOptions, CheckReport, GenerateOptions, GenerateReport, GenerateSession,
+    GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
+    RepairReport, RootId, SemanticReport,
 };
 
 fn main() {
@@ -4455,39 +4456,58 @@ fn try_widen_from_feedback(
             ("report_path", serde_json::json!(report_path)),
         ]),
     )?;
-    let _widening_heartbeat = start_event_heartbeat(
-        options,
-        "feedback_widening",
-        "rerender generated workspace from compiler feedback roots",
-        "feedback widening is still resolving diagnostics, expanding roots, and writing the next candidate workspace",
-        event_fields(&[
-            ("stage", serde_json::json!(stage)),
-            ("attempt", serde_json::json!(attempt)),
-            ("diagnostics", serde_json::json!(state.diagnostics.len())),
-            (
-                "widening_candidates",
-                serde_json::json!(report.widening.candidates.len()),
-            ),
-            (
-                "widening_hazards",
-                serde_json::json!(report.widening.hazards.len()),
-            ),
-        ]),
-    );
-    let widened_report = generate_with_analyzer_feedback_and_roots(
-        GenerateOptions {
-            workspace_root: options.workspace_root.clone(),
-            output_root: options.output_root.clone(),
-        },
-        options.analyzer_mode,
+    let resolution = resolve_feedback_widening_roots(
+        &options.workspace_root,
         &state.diagnostics,
         &options.root_selectors,
     )?;
-    let widened_roots = widened_report
-        .feedback_widened_roots
-        .iter()
-        .map(ToString::to_string)
-        .collect::<Vec<_>>();
+    write_event_log(
+        options,
+        "feedback_widening_resolution",
+        "completed",
+        "resolve compiler feedback symbols to top-down roots before rerender",
+        "the slicer only pays the full analyzer/render cost when diagnostics map to a new bounded root set",
+        event_fields(&[
+            ("stage", serde_json::json!(stage)),
+            ("attempt", serde_json::json!(attempt)),
+            ("diagnostics", serde_json::json!(resolution.diagnostics)),
+            (
+                "error_diagnostics",
+                serde_json::json!(resolution.error_diagnostics),
+            ),
+            (
+                "candidate_symbols",
+                serde_json::json!(resolution.candidate_symbols),
+            ),
+            (
+                "matched_roots",
+                serde_json::json!(resolution.matched_roots.len()),
+            ),
+            (
+                "skipped_no_match",
+                serde_json::json!(resolution.skipped_no_match),
+            ),
+            (
+                "skipped_too_many_matches",
+                serde_json::json!(resolution.skipped_too_many_matches),
+            ),
+            (
+                "skipped_marked_roots",
+                serde_json::json!(resolution.skipped_marked_roots),
+            ),
+            (
+                "entries_truncated",
+                serde_json::json!(resolution.entries_truncated),
+            ),
+            ("manifest_ms", serde_json::json!(resolution.manifest_ms)),
+            ("parse_ms", serde_json::json!(resolution.parse_ms)),
+            (
+                "entry_sample",
+                serde_json::json!(resolution.entries.iter().take(12).collect::<Vec<_>>()),
+            ),
+        ]),
+    )?;
+    let widened_roots = resolution.matched_roots.clone();
     let widened_signature = widened_roots.join("\n");
     let widened_signature_is_empty = widened_signature.is_empty();
     if widened_signature_is_empty || !state.seen_root_sets.insert(widened_signature) {
@@ -4505,11 +4525,53 @@ fn try_widen_from_feedback(
                 ("stage", serde_json::json!(stage)),
                 ("attempt", serde_json::json!(attempt)),
                 ("widened_roots", serde_json::json!(widened_roots)),
+                (
+                    "skipped_no_match",
+                    serde_json::json!(resolution.skipped_no_match),
+                ),
+                (
+                    "skipped_too_many_matches",
+                    serde_json::json!(resolution.skipped_too_many_matches),
+                ),
             ]),
         )?;
         return Ok(false);
     }
 
+    let _widening_heartbeat = start_event_heartbeat(
+        options,
+        "feedback_widening",
+        "rerender generated workspace from compiler feedback roots",
+        "feedback widening resolved new roots and is now reloading analyzer state and writing the next candidate workspace",
+        event_fields(&[
+            ("stage", serde_json::json!(stage)),
+            ("attempt", serde_json::json!(attempt)),
+            ("diagnostics", serde_json::json!(state.diagnostics.len())),
+            (
+                "widening_candidates",
+                serde_json::json!(report.widening.candidates.len()),
+            ),
+            (
+                "widening_hazards",
+                serde_json::json!(report.widening.hazards.len()),
+            ),
+            ("widened_roots", serde_json::json!(widened_roots.len())),
+        ]),
+    );
+    let widened_report = generate_with_analyzer_feedback_and_roots(
+        GenerateOptions {
+            workspace_root: options.workspace_root.clone(),
+            output_root: options.output_root.clone(),
+        },
+        options.analyzer_mode,
+        &state.diagnostics,
+        &options.root_selectors,
+    )?;
+    let widened_roots = widened_report
+        .feedback_widened_roots
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
     if let Some(report_path) = slice_report_path(options) {
         write_generate_report(&widened_report, &report_path)?;
     }
@@ -7030,7 +7092,7 @@ mod tests {
         baseline_target_dir, cargo_args_have_package_scope, decision_log_path,
         diagnostics_shape_signature, diagnostics_signature, event_log_path,
         feedback_errors_are_baseline_known, feedback_is_accepted, feedback_repair_is_accepted,
-        parse_args_from, production_readiness_blocks_validation,
+        initialize_event_log, parse_args_from, production_readiness_blocks_validation,
         production_validation_matrix_entries, record_final_production_readiness,
         record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
         run_batch_roots, run_plain_check_gate, semantic_hazard_warning_count,
@@ -8591,6 +8653,70 @@ pub fn helper() -> usize {
         let report_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(slice_report).unwrap()).unwrap();
         assert_eq!(report_json["feedback_widened_roots"][0], "app::helper");
+    }
+
+    #[test]
+    fn feedback_widening_logs_resolution_and_skips_when_no_roots_match() {
+        let source = temp_path("cli-feedback-widen-no-root-source");
+        let output = temp_path("cli-feedback-widen-no-root-output");
+        let event_log = temp_path("cli-feedback-widen-no-root-events").join("events.jsonl");
+        let opensourced_path = repo_root().join("crates/opensourced");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            std::ffi::OsString::from("--event-log"),
+            event_log.clone().into_os_string(),
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        initialize_event_log(&options).expect("event log should initialize");
+        let mut validation = ValidationReport::new(&options);
+        let mut state = FeedbackWideningState::default();
+        let mut missing_type = diagnostic(
+            "E0425",
+            "cannot find type `DefinitelyMissing` in this scope",
+        );
+        missing_type.package_id = Some("app 0.1.0 (path+file:///tmp/app)".to_string());
+        let feedback_report = report(false, vec![missing_type]);
+
+        let widened = try_widen_from_feedback(
+            &options,
+            &mut validation,
+            &mut state,
+            "feedback",
+            1,
+            &feedback_report,
+            &output.join("slice-feedback.json"),
+            0,
+            0,
+        )
+        .expect("feedback widening should resolve without rerendering");
+
+        assert!(!widened);
+        let events = fs::read_to_string(event_log).unwrap();
+        assert!(events.contains("\"event\":\"feedback_widening_resolution\""));
+        assert!(events.contains("\"skipped_no_match\":1"));
+        assert!(events.contains("compiler feedback produced no additional roots"));
     }
 
     #[test]

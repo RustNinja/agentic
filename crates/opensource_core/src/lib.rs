@@ -79,6 +79,39 @@ pub struct GenerateReport {
     pub timings: GenerateTimingReport,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedbackRootResolutionReport {
+    pub manifest_ms: u64,
+    pub parse_ms: u64,
+    pub diagnostics: usize,
+    pub error_diagnostics: usize,
+    pub skipped_non_error_diagnostics: usize,
+    pub skipped_missing_code_diagnostics: usize,
+    pub candidate_symbols: usize,
+    pub skipped_missing_symbol: usize,
+    pub skipped_no_match: usize,
+    pub skipped_too_many_matches: usize,
+    pub skipped_marked_roots: usize,
+    pub matched_roots: Vec<String>,
+    pub entries: Vec<FeedbackRootResolutionEntry>,
+    pub entries_truncated: bool,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct FeedbackRootResolutionEntry {
+    pub code: String,
+    pub symbol: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub package_hint: Option<String>,
+    pub matches: usize,
+    pub retained_roots: usize,
+    pub skipped_marked_roots: usize,
+    pub action: String,
+    pub roots: Vec<String>,
+}
+
 #[derive(Debug, Clone)]
 pub struct GeneratedTargetReport {
     pub package: String,
@@ -1127,6 +1160,29 @@ pub fn generate_with_analyzer_feedback_and_roots(
     session.generate(options.output_root, &roots, feedback_diagnostics)
 }
 
+pub fn resolve_feedback_widening_roots(
+    workspace_root: &Path,
+    feedback_diagnostics: &[feedback::CheckDiagnostic],
+    root_selectors: &[String],
+) -> Result<FeedbackRootResolutionReport, Box<dyn std::error::Error>> {
+    let phase_started = Instant::now();
+    let workspace = manifest::load_workspace_without_marker_targets(workspace_root)?;
+    let manifest_ms = elapsed_ms(phase_started);
+
+    let phase_started = Instant::now();
+    let project = if let Some(packages) = root_selector_package_filter(root_selectors) {
+        parse::parse_workspace_package_closure(workspace, &packages)?
+    } else {
+        parse::parse_workspace(workspace)?
+    };
+    let parse_ms = elapsed_ms(phase_started);
+
+    let (_roots, mut report) = feedback_extra_roots_with_report(&project, feedback_diagnostics);
+    report.manifest_ms = manifest_ms;
+    report.parse_ms = parse_ms;
+    Ok(report)
+}
+
 pub fn direct_free_function_root_selectors(selectors: &[String]) -> Option<Vec<RootId>> {
     let mut roots = Vec::new();
     let mut seen = BTreeSet::new();
@@ -1848,49 +1904,183 @@ fn item_kind_selector_name(kind: model::ItemKind) -> &'static str {
 }
 
 const FEEDBACK_WIDENING_ROOT_MATCH_LIMIT: usize = 24;
+const FEEDBACK_WIDENING_RESOLUTION_ENTRY_LIMIT: usize = 128;
 
 fn feedback_extra_roots(
     project: &Project,
     diagnostics: &[feedback::CheckDiagnostic],
 ) -> Vec<RootId> {
+    feedback_extra_roots_with_report(project, diagnostics).0
+}
+
+fn feedback_extra_roots_with_report(
+    project: &Project,
+    diagnostics: &[feedback::CheckDiagnostic],
+) -> (Vec<RootId>, FeedbackRootResolutionReport) {
     let mut roots = Vec::new();
     let mut seen = BTreeSet::new();
+    let mut report = FeedbackRootResolutionReport {
+        manifest_ms: 0,
+        parse_ms: 0,
+        diagnostics: diagnostics.len(),
+        error_diagnostics: 0,
+        skipped_non_error_diagnostics: 0,
+        skipped_missing_code_diagnostics: 0,
+        candidate_symbols: 0,
+        skipped_missing_symbol: 0,
+        skipped_no_match: 0,
+        skipped_too_many_matches: 0,
+        skipped_marked_roots: 0,
+        matched_roots: Vec::new(),
+        entries: Vec::new(),
+        entries_truncated: false,
+    };
     for diagnostic in diagnostics {
         if diagnostic.level != "error" {
+            report.skipped_non_error_diagnostics += 1;
             continue;
         }
+        report.error_diagnostics += 1;
         let Some(code) = diagnostic.code.as_deref() else {
+            report.skipped_missing_code_diagnostics += 1;
             continue;
         };
         let symbols = diagnostic_symbols(diagnostic);
         let package_hint = diagnostic_package_hint(diagnostic);
-        for root in
-            feedback_diagnostic_root_candidates(project, diagnostic, package_hint.as_deref())
-        {
-            if !root_is_marked(project, &root) && seen.insert(root.clone()) {
-                roots.push(root);
-            }
+        let diagnostic_candidates =
+            feedback_diagnostic_root_candidates(project, diagnostic, package_hint.as_deref());
+        if !diagnostic_candidates.is_empty() {
+            let (retained_roots, skipped_marked_roots) =
+                retain_feedback_roots(project, diagnostic_candidates, &mut seen, &mut roots);
+            report.skipped_marked_roots += skipped_marked_roots;
+            push_feedback_resolution_entry(
+                &mut report,
+                FeedbackRootResolutionEntry {
+                    code: code.to_string(),
+                    symbol: "<diagnostic>".to_string(),
+                    name: None,
+                    package_hint: package_hint.clone(),
+                    matches: retained_roots.len() + skipped_marked_roots,
+                    retained_roots: retained_roots.len(),
+                    skipped_marked_roots,
+                    action: if retained_roots.is_empty() {
+                        "matched only already-selected roots".to_string()
+                    } else {
+                        "widen to diagnostic-specific root".to_string()
+                    },
+                    roots: retained_roots,
+                },
+            );
         }
         if symbols.is_empty() {
+            report.skipped_missing_symbol += 1;
             continue;
         }
         for symbol in symbols {
             let Some(name) = symbol_leaf_name(&symbol) else {
+                report.skipped_missing_symbol += 1;
                 continue;
             };
-            let candidates = feedback_root_candidates(project, code, package_hint.as_deref(), name);
-            if candidates.is_empty() || candidates.len() > FEEDBACK_WIDENING_ROOT_MATCH_LIMIT {
+            let name = name.to_string();
+            report.candidate_symbols += 1;
+            let candidates =
+                feedback_root_candidates(project, code, package_hint.as_deref(), &name);
+            if candidates.is_empty() {
+                report.skipped_no_match += 1;
+                push_feedback_resolution_entry(
+                    &mut report,
+                    FeedbackRootResolutionEntry {
+                        code: code.to_string(),
+                        symbol,
+                        name: Some(name),
+                        package_hint: package_hint.clone(),
+                        matches: 0,
+                        retained_roots: 0,
+                        skipped_marked_roots: 0,
+                        action: "no matching project-local root".to_string(),
+                        roots: Vec::new(),
+                    },
+                );
                 continue;
             }
-            for root in candidates {
-                if !root_is_marked(project, &root) && seen.insert(root.clone()) {
-                    roots.push(root);
-                }
+            if candidates.len() > FEEDBACK_WIDENING_ROOT_MATCH_LIMIT {
+                report.skipped_too_many_matches += 1;
+                push_feedback_resolution_entry(
+                    &mut report,
+                    FeedbackRootResolutionEntry {
+                        code: code.to_string(),
+                        symbol,
+                        name: Some(name),
+                        package_hint: package_hint.clone(),
+                        matches: candidates.len(),
+                        retained_roots: 0,
+                        skipped_marked_roots: 0,
+                        action: "too many matches; fail closed instead of over-retaining"
+                            .to_string(),
+                        roots: candidates.iter().take(8).map(ToString::to_string).collect(),
+                    },
+                );
+                continue;
             }
+            let matches = candidates.len();
+            let (retained_roots, skipped_marked_roots) =
+                retain_feedback_roots(project, candidates, &mut seen, &mut roots);
+            report.skipped_marked_roots += skipped_marked_roots;
+            push_feedback_resolution_entry(
+                &mut report,
+                FeedbackRootResolutionEntry {
+                    code: code.to_string(),
+                    symbol,
+                    name: Some(name),
+                    package_hint: package_hint.clone(),
+                    matches,
+                    retained_roots: retained_roots.len(),
+                    skipped_marked_roots,
+                    action: if retained_roots.is_empty() {
+                        "matched only already-selected roots".to_string()
+                    } else {
+                        "widen to matched project-local roots".to_string()
+                    },
+                    roots: retained_roots,
+                },
+            );
         }
     }
     roots.sort();
-    roots
+    report.matched_roots = roots.iter().map(ToString::to_string).collect();
+    (roots, report)
+}
+
+fn retain_feedback_roots(
+    project: &Project,
+    candidates: Vec<RootId>,
+    seen: &mut BTreeSet<RootId>,
+    roots: &mut Vec<RootId>,
+) -> (Vec<String>, usize) {
+    let mut retained = Vec::new();
+    let mut skipped_marked_roots = 0;
+    for root in candidates {
+        if root_is_marked(project, &root) {
+            skipped_marked_roots += 1;
+            continue;
+        }
+        if seen.insert(root.clone()) {
+            retained.push(root.to_string());
+            roots.push(root);
+        }
+    }
+    (retained, skipped_marked_roots)
+}
+
+fn push_feedback_resolution_entry(
+    report: &mut FeedbackRootResolutionReport,
+    entry: FeedbackRootResolutionEntry,
+) {
+    if report.entries.len() < FEEDBACK_WIDENING_RESOLUTION_ENTRY_LIMIT {
+        report.entries.push(entry);
+    } else {
+        report.entries_truncated = true;
+    }
 }
 
 fn feedback_diagnostic_root_candidates(
@@ -1907,6 +2097,19 @@ fn feedback_diagnostic_root_candidates(
 }
 
 fn feedback_root_candidates(
+    project: &Project,
+    code: &str,
+    package_hint: Option<&str>,
+    name: &str,
+) -> Vec<RootId> {
+    let scoped = feedback_root_candidates_in_scope(project, code, package_hint, name);
+    if package_hint.is_none() || !scoped.is_empty() {
+        return scoped;
+    }
+    feedback_root_candidates_in_scope(project, code, None, name)
+}
+
+fn feedback_root_candidates_in_scope(
     project: &Project,
     code: &str,
     package_hint: Option<&str>,
@@ -1935,7 +2138,17 @@ fn feedback_root_candidates(
         "E0425" => {
             roots.extend(free_function_name_candidates(project, package_hint, name));
             roots.extend(item_name_candidates(project, package_hint, name, |item| {
-                matches!(item.kind, model::ItemKind::Const | model::ItemKind::Static)
+                matches!(
+                    item.kind,
+                    model::ItemKind::Struct
+                        | model::ItemKind::Enum
+                        | model::ItemKind::Union
+                        | model::ItemKind::Type
+                        | model::ItemKind::Trait
+                        | model::ItemKind::Mod
+                        | model::ItemKind::Const
+                        | model::ItemKind::Static
+                )
             }));
         }
         "E0432" | "E0433" => {
@@ -11714,16 +11927,16 @@ mod tests {
         direct_free_function_root_selectors, generate, generate_with_analyzer_feedback,
         generated_package_source_roots, production_hazard_with_details,
         production_readiness_status, public_reexport_proof_report, rendered_symbol_proof_report,
-        rendered_symbol_proof_report_with_members, semantic_hazard_metrics,
-        semantic_unresolved_details, unknown_surface_category, usage_classification_report,
-        usage_evidence_reason, usage_guarded_render_reduction, write_generate_report, AnalyzerMode,
-        AnalyzerReport, CallableId, CheckDiagnostic, GenerateOptions, ItemId,
-        ProductionHazardDetail, PublicReexportProofEntry, PublicReexportProofReport,
-        PublicReexportProofSummary, RenderedSymbolProofEntry, RenderedSymbolProofReport,
-        RenderedSymbolProofSummary, SemanticFileReport, SemanticHazardScope, SemanticOwnerId,
-        SemanticReductionHints, SemanticReport, SemanticUnresolvedCategory,
-        SemanticUnresolvedDiagnostic, SemanticUnresolvedKind, SemanticUsageReport, UsageDecision,
-        UsageDecisionIndex,
+        rendered_symbol_proof_report_with_members, resolve_feedback_widening_roots,
+        semantic_hazard_metrics, semantic_unresolved_details, unknown_surface_category,
+        usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
+        write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
+        GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
+        PublicReexportProofReport, PublicReexportProofSummary, RenderedSymbolProofEntry,
+        RenderedSymbolProofReport, RenderedSymbolProofSummary, SemanticFileReport,
+        SemanticHazardScope, SemanticOwnerId, SemanticReductionHints, SemanticReport,
+        SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic, SemanticUnresolvedKind,
+        SemanticUsageReport, UsageDecision, UsageDecisionIndex,
     };
     #[cfg(feature = "ra-hir")]
     use super::{generate_with_analyzer, generate_with_analyzer_roots};
@@ -17033,6 +17246,139 @@ pub fn maybe_macro_helper() -> usize {
             .callables
             .iter()
             .any(|callable| callable.to_string() == "app::helper"));
+    }
+
+    #[test]
+    fn feedback_diagnostics_widen_matching_type_roots_from_e0425() {
+        let root = temp_output("feedback-widen-type-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+
+pub struct Helper {
+    pub value: usize,
+}
+"#,
+        );
+
+        let diagnostic = CheckDiagnostic {
+            level: "error".to_string(),
+            message: "cannot find type `Helper` in this scope".to_string(),
+            code: Some("E0425".to_string()),
+            package_id: Some("app 0.1.0 (path+file:///tmp/app)".to_string()),
+            target: None,
+            rendered: None,
+            spans: Vec::new(),
+            suggestions: Vec::new(),
+        };
+        let resolution =
+            resolve_feedback_widening_roots(&root, std::slice::from_ref(&diagnostic), &[])
+                .expect("feedback root resolution should load");
+
+        assert!(resolution
+            .matched_roots
+            .iter()
+            .any(|root| root == "app::Helper(Struct)"));
+        assert_eq!(resolution.skipped_no_match, 0);
+
+        let report = generate_with_analyzer_feedback(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: temp_output("feedback-widen-type-output"),
+            },
+            AnalyzerMode::Syn,
+            &[diagnostic],
+        )
+        .expect("feedback widening should generate");
+
+        assert!(report
+            .feedback_widened_roots
+            .iter()
+            .any(|root| root.to_string() == "app::Helper(Struct)"));
+        assert!(report
+            .reachable_items
+            .iter()
+            .any(|item| item.to_string() == "app::Helper(Struct)"));
+        assert!(report
+            .usage
+            .used
+            .items
+            .iter()
+            .any(|item| item.to_string() == "app::Helper(Struct)"));
+    }
+
+    #[test]
+    fn feedback_diagnostics_fallback_to_dependency_package_roots() {
+        let root = temp_output("feedback-widen-dependency-type-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"support\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nsupport = {{ path = \"../support\" }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            root.join("support/Cargo.toml"),
+            "[package]\nname = \"support\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("support/src/lib.rs"),
+            r#"pub struct SupportType {
+    pub value: usize,
+}
+"#,
+        );
+
+        let diagnostic = CheckDiagnostic {
+            level: "error".to_string(),
+            message: "cannot find type `SupportType` in this scope".to_string(),
+            code: Some("E0425".to_string()),
+            package_id: Some("app 0.1.0 (path+file:///tmp/app)".to_string()),
+            target: None,
+            rendered: None,
+            spans: Vec::new(),
+            suggestions: Vec::new(),
+        };
+        let resolution = resolve_feedback_widening_roots(&root, &[diagnostic], &[])
+            .expect("feedback root resolution should load dependency closure");
+
+        assert!(resolution
+            .matched_roots
+            .iter()
+            .any(|root| root == "support::SupportType(Struct)"));
+        assert_eq!(resolution.skipped_no_match, 0);
     }
 
     #[test]
