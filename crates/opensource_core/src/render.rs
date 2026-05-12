@@ -5,7 +5,7 @@ use std::{
     path::{Component, Path, PathBuf},
 };
 
-use proc_macro2::{Delimiter, TokenStream, TokenTree};
+use proc_macro2::{Delimiter, Span, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::parse::Parser;
 use syn::punctuated::Punctuated;
@@ -20449,11 +20449,19 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                         .expression_map_value_type_item(&call.receiver)
                         .map(IteratorItemShape::Direct);
                 }
+                if matches!(method.as_str(), "keys" | "into_keys") {
+                    return self
+                        .expression_map_key_type_item(&call.receiver)
+                        .map(IteratorItemShape::Direct);
+                }
                 if matches!(method.as_str(), "iter" | "iter_mut" | "into_iter") {
-                    return self.expression_iter_item_shape(&call.receiver).or_else(|| {
-                        self.field_collection_value_type_item(&call.receiver)
-                            .map(IteratorItemShape::Direct)
-                    });
+                    return self
+                        .expression_iter_item_shape(&call.receiver)
+                        .or_else(|| {
+                            self.field_collection_value_type_item(&call.receiver)
+                                .map(IteratorItemShape::Direct)
+                        })
+                        .or_else(|| self.expression_map_entry_iter_shape(&call.receiver));
                 }
                 if method == "enumerate" {
                     return self.expression_iter_item_shape(&call.receiver).map(|item| {
@@ -20804,24 +20812,90 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
     }
 
+    fn expression_map_key_type_item(&self, expression: &Expr) -> Option<ItemId> {
+        match expression {
+            Expr::Field(field) => self
+                .field_expr_type(field)
+                .and_then(|ty| self.map_key_value_type_items(ty))
+                .and_then(|(key, _value)| key),
+            Expr::Reference(reference) => self.expression_map_key_type_item(&reference.expr),
+            Expr::Paren(paren) => self.expression_map_key_type_item(&paren.expr),
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "as_ref" | "as_mut" | "clone"
+                ) =>
+            {
+                self.expression_map_key_type_item(&call.receiver)
+            }
+            _ => None,
+        }
+    }
+
+    fn expression_map_entry_iter_shape(&self, expression: &Expr) -> Option<IteratorItemShape> {
+        match expression {
+            Expr::Field(field) => {
+                let (key, value) = self
+                    .field_expr_type(field)
+                    .and_then(|ty| self.map_key_value_type_items(ty))?;
+                Some(IteratorItemShape::Tuple(vec![
+                    key.map(IteratorItemShape::Direct)
+                        .unwrap_or(IteratorItemShape::Unknown),
+                    value
+                        .map(IteratorItemShape::Direct)
+                        .unwrap_or(IteratorItemShape::Unknown),
+                ]))
+            }
+            Expr::Reference(reference) => self.expression_map_entry_iter_shape(&reference.expr),
+            Expr::Paren(paren) => self.expression_map_entry_iter_shape(&paren.expr),
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "as_ref" | "as_mut" | "clone"
+                ) =>
+            {
+                self.expression_map_entry_iter_shape(&call.receiver)
+            }
+            _ => None,
+        }
+    }
+
     fn map_value_type_item(&self, ctx: FieldTypeContext<'a>) -> Option<ItemId> {
+        self.map_key_value_type_items(ctx)
+            .and_then(|(_key, value)| value)
+    }
+
+    fn map_key_value_type_items(
+        &self,
+        ctx: FieldTypeContext<'a>,
+    ) -> Option<(Option<ItemId>, Option<ItemId>)> {
         let Type::Path(type_path) = ctx.ty else {
             return match ctx.ty {
-                Type::Reference(reference) => self.map_value_type_item(FieldTypeContext {
+                Type::Reference(reference) => self.map_key_value_type_items(FieldTypeContext {
                     ty: &reference.elem,
                     ..ctx
                 }),
-                Type::Group(group) => self.map_value_type_item(FieldTypeContext {
+                Type::Group(group) => self.map_key_value_type_items(FieldTypeContext {
                     ty: &group.elem,
                     ..ctx
                 }),
-                Type::Paren(paren) => self.map_value_type_item(FieldTypeContext {
+                Type::Paren(paren) => self.map_key_value_type_items(FieldTypeContext {
                     ty: &paren.elem,
                     ..ctx
                 }),
                 _ => None,
             };
         };
+        if let Some(alias_ctx) = self.type_path_alias_target_context(
+            ctx.package,
+            ctx.module_path,
+            ctx.aliases,
+            &type_path.path,
+        ) {
+            if let Some(items) = self.map_key_value_type_items(alias_ctx) {
+                return Some(items);
+            }
+        }
         let segment = type_path.path.segments.last()?;
         if !matches!(
             segment.ident.to_string().as_str(),
@@ -20832,6 +20906,87 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
             return None;
         };
+        let type_args = arguments
+            .args
+            .iter()
+            .filter_map(|argument| match argument {
+                GenericArgument::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        Some((
+            type_args.first().and_then(|ty| {
+                self.type_payload_or_direct_item_in(ctx.package, ctx.module_path, ctx.aliases, ty)
+            }),
+            type_args.get(1).and_then(|ty| {
+                self.type_payload_or_direct_item_in(ctx.package, ctx.module_path, ctx.aliases, ty)
+            }),
+        ))
+    }
+
+    fn expression_option_payload_type_item(&self, expression: &Expr) -> Option<ItemId> {
+        match expression {
+            Expr::Field(field) => self
+                .field_expr_type(field)
+                .and_then(|ty| self.option_payload_type_item(ty)),
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "get" | "get_mut" | "remove"
+                ) =>
+            {
+                self.expression_map_value_type_item(&call.receiver)
+            }
+            Expr::MethodCall(call)
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "as_ref" | "as_mut" | "clone" | "cloned" | "copied"
+                ) =>
+            {
+                self.expression_option_payload_type_item(&call.receiver)
+            }
+            Expr::Reference(reference) => self.expression_option_payload_type_item(&reference.expr),
+            Expr::Paren(paren) => self.expression_option_payload_type_item(&paren.expr),
+            _ => None,
+        }
+    }
+
+    fn option_payload_type_item(&self, ctx: FieldTypeContext<'a>) -> Option<ItemId> {
+        let Type::Path(type_path) = ctx.ty else {
+            return match ctx.ty {
+                Type::Reference(reference) => self.option_payload_type_item(FieldTypeContext {
+                    ty: &reference.elem,
+                    ..ctx
+                }),
+                Type::Group(group) => self.option_payload_type_item(FieldTypeContext {
+                    ty: &group.elem,
+                    ..ctx
+                }),
+                Type::Paren(paren) => self.option_payload_type_item(FieldTypeContext {
+                    ty: &paren.elem,
+                    ..ctx
+                }),
+                _ => None,
+            };
+        };
+        if let Some(alias_ctx) = self.type_path_alias_target_context(
+            ctx.package,
+            ctx.module_path,
+            ctx.aliases,
+            &type_path.path,
+        ) {
+            if let Some(item) = self.option_payload_type_item(alias_ctx) {
+                return Some(item);
+            }
+        }
+        let segment = type_path.path.segments.last()?;
+        let index = match segment.ident.to_string().as_str() {
+            "Option" | "Result" => 0,
+            _ => return None,
+        };
+        let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+            return None;
+        };
         arguments
             .args
             .iter()
@@ -20839,7 +20994,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 GenericArgument::Type(ty) => Some(ty),
                 _ => None,
             })
-            .nth(1)
+            .nth(index)
             .and_then(|ty| {
                 self.type_payload_or_direct_item_in(ctx.package, ctx.module_path, ctx.aliases, ty)
             })
@@ -21429,6 +21584,59 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
     }
 
+    fn macro_tokens_need_target_field(&self, tokens: &TokenStream) -> bool {
+        let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+        for (index, token) in tokens.iter().enumerate() {
+            if let TokenTree::Group(group) = token {
+                if self.macro_tokens_need_target_field(&group.stream()) {
+                    return true;
+                }
+            }
+            let Some(base_name) = token_ident_name(token) else {
+                continue;
+            };
+            let Some(mut item) = self.macro_chain_base_item(&base_name) else {
+                continue;
+            };
+            let mut cursor = index + 1;
+            while cursor + 1 < tokens.len() {
+                if !token_is_dot(&tokens[cursor]) {
+                    break;
+                }
+                let Some(field_name) = token_ident_name(&tokens[cursor + 1]) else {
+                    break;
+                };
+                if item == *self.target_item && field_name == self.field_name {
+                    return true;
+                }
+                let Some(next_item) = self.item_field_type_by_name(&item, &field_name) else {
+                    break;
+                };
+                item = next_item;
+                cursor += 2;
+            }
+        }
+        false
+    }
+
+    fn macro_chain_base_item(&self, name: &str) -> Option<ItemId> {
+        if name == "self" {
+            return self.self_item.clone();
+        }
+        self.current_binding(name).cloned()
+    }
+
+    fn item_field_type_by_name(&self, item: &ItemId, field_name: &str) -> Option<ItemId> {
+        let member = Member::Named(syn::Ident::new(field_name, Span::call_site()));
+        let field_type = self.item_field_type(item, &member)?;
+        self.type_payload_or_direct_item_in(
+            field_type.package,
+            field_type.module_path,
+            field_type.aliases,
+            field_type.ty,
+        )
+    }
+
     fn record_binding_from_local(&mut self, local: &syn::Local) {
         if let Some(init) = &local.init {
             let binding_count = self.bindings.len();
@@ -21924,6 +22132,15 @@ fn iterator_closure_item_positions(method: &str) -> Option<&'static [usize]> {
     }
 }
 
+fn option_payload_closure_item_positions(method: &str) -> Option<&'static [usize]> {
+    match method {
+        "and_then" | "filter" | "inspect" | "is_none_or" | "is_some_and" | "map" => {
+            Some(FIRST_ITERATOR_CLOSURE_ARG)
+        }
+        _ => None,
+    }
+}
+
 fn iterator_item_passthrough_method(method: &str) -> bool {
     matches!(
         method,
@@ -22054,7 +22271,13 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
         self.visit_expr(&call.receiver);
         let method = call.method.to_string();
         let inferred_closure_item = iterator_closure_item_positions(&method)
-            .zip(self.expression_iter_item_shape(&call.receiver));
+            .zip(self.expression_iter_item_shape(&call.receiver))
+            .or_else(|| {
+                option_payload_closure_item_positions(&method).zip(
+                    self.expression_option_payload_type_item(&call.receiver)
+                        .map(IteratorItemShape::Direct),
+                )
+            });
         for arg in &call.args {
             if let (Some((positions, item)), Expr::Closure(closure)) = (&inferred_closure_item, arg)
             {
@@ -22103,6 +22326,27 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
         if let Some(rest) = &expr.rest {
             self.visit_expr(rest);
         }
+    }
+
+    fn visit_macro(&mut self, mac: &syn::Macro) {
+        if self.macro_tokens_need_target_field(&mac.tokens) {
+            self.needs_field = true;
+        }
+        visit::visit_macro(self, mac);
+    }
+}
+
+fn token_ident_name(token: &TokenTree) -> Option<String> {
+    match token {
+        TokenTree::Ident(ident) => Some(ident.to_string()),
+        _ => None,
+    }
+}
+
+fn token_is_dot(token: &TokenTree) -> bool {
+    match token {
+        TokenTree::Punct(punct) => punct.as_char() == '.',
+        _ => false,
     }
 }
 

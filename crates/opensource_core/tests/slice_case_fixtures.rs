@@ -838,6 +838,96 @@ fn retains_public_support_fields_used_through_iterator_closure_surfaces() {
 }
 
 #[test]
+fn retains_public_support_fields_used_through_map_iter_and_option_payload_closures() {
+    let fixture =
+        repo_root().join("fixtures/slice_cases/public_field_map_iter_option_closure_prune");
+    let output = temp_path("slice-case-public-field-map-iter-option-closure-prune-output");
+    let target_dir = temp_path("slice-case-public-field-map-iter-option-closure-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("public_field_map_iter_option_closure_prune fixture should slice");
+
+    assert_eq!(report.packages, ["audit_record", "field_api", "root"]);
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    let field_api = read(output.join("field_api/src/lib.rs"));
+    let audit_record = read(output.join("audit_record/src/lib.rs"));
+
+    assert!(
+        root_source.contains("pub fn selected_summary"),
+        "{root_source}"
+    );
+    assert!(!root_source.contains("dead_summary"), "{root_source}");
+
+    assert!(field_api.contains("pub fn selected_summary"), "{field_api}");
+    assert!(field_api.contains(".threads"), "{field_api}");
+    assert!(field_api.contains(".iter()"), "{field_api}");
+    assert!(field_api.contains(".get(&key.server_id)"), "{field_api}");
+    assert!(field_api.contains("server.display_name"), "{field_api}");
+    assert!(field_api.contains(".info"), "{field_api}");
+    assert!(field_api.contains(".title"), "{field_api}");
+    assert!(field_api.contains(".cwd"), "{field_api}");
+    assert!(field_api.contains("thread.active_turn_id"), "{field_api}");
+    assert!(field_api.contains(".values()"), "{field_api}");
+    assert!(field_api.contains("server.host"), "{field_api}");
+    assert!(field_api.contains("server.port"), "{field_api}");
+    assert!(!field_api.contains("dead_summary"), "{field_api}");
+
+    assert!(
+        audit_record.contains("pub struct AppSnapshot"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub servers:"), "{audit_record}");
+    assert!(audit_record.contains("pub threads:"), "{audit_record}");
+    assert!(audit_record.contains("pub other:"), "{audit_record}");
+    assert!(!audit_record.contains("unused_note"), "{audit_record}");
+    assert!(
+        audit_record.contains("pub struct ThreadKey"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub server_id:"), "{audit_record}");
+    assert!(!audit_record.contains("dead_key_note"), "{audit_record}");
+    assert!(
+        audit_record.contains("pub struct ThreadSnapshot"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub info:"), "{audit_record}");
+    assert!(
+        audit_record.contains("pub active_turn_id:"),
+        "{audit_record}"
+    );
+    assert!(!audit_record.contains("dead_thread_note"), "{audit_record}");
+    assert!(
+        audit_record.contains("pub struct ThreadInfo"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub title:"), "{audit_record}");
+    assert!(audit_record.contains("pub cwd:"), "{audit_record}");
+    assert!(!audit_record.contains("dead_info_note"), "{audit_record}");
+    assert!(
+        audit_record.contains("pub struct ServerSnapshot"),
+        "{audit_record}"
+    );
+    assert!(audit_record.contains("pub display_name:"), "{audit_record}");
+    assert!(audit_record.contains("pub host:"), "{audit_record}");
+    assert!(audit_record.contains("pub port:"), "{audit_record}");
+    assert!(!audit_record.contains("dead_server_note"), "{audit_record}");
+    assert!(
+        audit_record.contains("pub struct OtherDisplay"),
+        "{audit_record}"
+    );
+    assert!(!audit_record.contains("dead_other_note"), "{audit_record}");
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn retains_public_support_fields_used_through_iterator_tuple_shapes() {
     let fixture = repo_root().join("fixtures/slice_cases/public_field_iterator_tuple_shape_prune");
     let output = temp_path("slice-case-public-field-iterator-tuple-shape-prune-output");
