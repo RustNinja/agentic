@@ -206,6 +206,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             ("output_root", serde_json::json!(options.output_root)),
         ]),
     )?;
+    let _generation_heartbeat = start_event_heartbeat(
+        &options,
+        "generation",
+        "build top-down dependency closure",
+        "single-root generation is still running; analyzer loading or render planning has not returned yet",
+        event_fields(&[
+            ("analyzer", serde_json::json!(options.analyzer_mode.as_str())),
+            ("output_root", serde_json::json!(options.output_root)),
+            ("root_selectors", serde_json::json!(options.root_selectors)),
+        ]),
+    );
     let report = match generate_with_analyzer_roots(
         GenerateOptions {
             workspace_root: options.workspace_root.clone(),
@@ -235,6 +246,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             return Err(error);
         }
     };
+    drop(_generation_heartbeat);
     write_event_log(
         &options,
         "generation",
