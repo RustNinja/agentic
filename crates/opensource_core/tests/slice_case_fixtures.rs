@@ -769,12 +769,20 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(field_api.contains("returned_views"), "{field_api}");
     assert!(field_api.contains("view.returned_title"), "{field_api}");
     assert!(field_api.contains("view.returned_score"), "{field_api}");
+    assert!(field_api.contains("method_views"), "{field_api}");
+    assert!(field_api.contains("view.method_title"), "{field_api}");
+    assert!(field_api.contains("view.method_score"), "{field_api}");
+    assert!(field_api.contains("summarize_param_views"), "{field_api}");
+    assert!(field_api.contains("view.param_title"), "{field_api}");
+    assert!(field_api.contains("view.param_score"), "{field_api}");
     assert!(!field_api.contains("dead_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_filter_note"), "{field_api}");
     assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_local_note"), "{field_api}");
     assert!(!field_api.contains("dead_lazy_note"), "{field_api}");
     assert!(!field_api.contains("dead_returned_note"), "{field_api}");
+    assert!(!field_api.contains("dead_method_note"), "{field_api}");
+    assert!(!field_api.contains("dead_param_note"), "{field_api}");
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
 
     assert!(
@@ -857,6 +865,20 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(view_record.contains("pub returned_title:"), "{view_record}");
     assert!(view_record.contains("pub returned_score:"), "{view_record}");
     assert!(!view_record.contains("dead_returned_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct MethodView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub method_title:"), "{view_record}");
+    assert!(view_record.contains("pub method_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_method_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct ParamView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub param_title:"), "{view_record}");
+    assert!(view_record.contains("pub param_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_param_note"), "{view_record}");
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }

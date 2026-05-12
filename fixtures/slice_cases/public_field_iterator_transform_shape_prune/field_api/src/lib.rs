@@ -85,8 +85,30 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let factory = ViewFactory {
+        prefix: "method".to_string(),
+        dead_factory_note: None,
+    };
+    let method_views = factory.method_views(&snapshot);
+    let method = method_views
+        .iter()
+        .map(|view| format!("{}:{}", view.method_title, view.method_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
+    let param_views = snapshot
+        .records
+        .iter()
+        .map(|record| view_record::ParamView {
+            param_title: record.raw_label.clone(),
+            param_score: record.raw_value,
+            dead_param_note: None,
+        })
+        .collect::<Vec<_>>();
+    let param = summarize_param_views(param_views);
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}",
         loop_titles.join(",")
     )
 }
@@ -101,6 +123,36 @@ fn build_returned_views(snapshot: &source_record::SourceSnapshot) -> Vec<view_re
             dead_returned_note: None,
         })
         .collect::<Vec<_>>()
+}
+
+struct ViewFactory {
+    prefix: String,
+    dead_factory_note: Option<String>,
+}
+
+impl ViewFactory {
+    fn method_views(
+        &self,
+        snapshot: &source_record::SourceSnapshot,
+    ) -> Vec<view_record::MethodView> {
+        snapshot
+            .records
+            .iter()
+            .map(|record| view_record::MethodView {
+                method_title: format!("{}:{}", self.prefix, record.raw_label),
+                method_score: record.raw_value,
+                dead_method_note: None,
+            })
+            .collect::<Vec<_>>()
+    }
+}
+
+fn summarize_param_views(views: Vec<view_record::ParamView>) -> String {
+    views
+        .iter()
+        .map(|view| format!("{}:{}", view.param_title, view.param_score))
+        .collect::<Vec<_>>()
+        .join(",")
 }
 
 pub fn dead_summary(seed: u32) -> String {

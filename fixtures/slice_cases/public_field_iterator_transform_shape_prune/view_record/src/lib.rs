@@ -34,3 +34,15 @@ pub struct ReturnedView {
     pub returned_score: u32,
     pub dead_returned_note: Option<String>,
 }
+
+pub struct MethodView {
+    pub method_title: String,
+    pub method_score: u32,
+    pub dead_method_note: Option<String>,
+}
+
+pub struct ParamView {
+    pub param_title: String,
+    pub param_score: u32,
+    pub dead_param_note: Option<String>,
+}

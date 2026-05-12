@@ -20088,7 +20088,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             })
     }
 
-    fn sequence_value_type_item(&self, ctx: FieldTypeContext<'a>) -> Option<ItemId> {
+    fn sequence_value_type_item<'ctx>(&self, ctx: FieldTypeContext<'ctx>) -> Option<ItemId> {
         match ctx.ty {
             Type::Reference(reference) => self.sequence_value_type_item(FieldTypeContext {
                 ty: &reference.elem,
@@ -20371,7 +20371,16 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             ty,
             self.aliases,
         ) {
-            self.bindings.push((name, item));
+            self.bindings.push((name.clone(), item));
+        }
+        if let Some(item) = self.sequence_value_type_item(FieldTypeContext {
+            package: self.package,
+            module_path: self.module_path,
+            aliases: self.aliases,
+            ty,
+        }) {
+            self.iterable_bindings
+                .push((name, IteratorItemShape::Direct(item)));
         }
     }
 
