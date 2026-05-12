@@ -1484,7 +1484,7 @@ mod rust_analyzer {
             .name_ref()
             .map(|name| name.syntax().text().to_string());
         let (category, reason) =
-            classify_unresolved_method(context.semantic_index, &symbol, syntax);
+            classify_unresolved_method(context.semantic_index, &symbol, syntax, source_text);
         unresolved_diagnostic(
             SemanticUnresolvedKind::MethodCall,
             category,
@@ -1561,6 +1561,7 @@ mod rust_analyzer {
         index: Option<&ProjectSemanticIndex>,
         symbol: &Option<String>,
         syntax: &ra_ap_syntax::SyntaxNode,
+        source_text: &str,
     ) -> (SemanticUnresolvedCategory, &'static str) {
         if syntax_has_macro_or_attr_ancestor(syntax) {
             return (
@@ -1568,10 +1569,25 @@ mod rust_analyzer {
                 "unresolved_method_inside_macro_or_attribute_context",
             );
         }
-        if snippet_has_only_primitive_turbofish(&compact_node_snippet(syntax)) {
+        let snippet = compact_node_snippet(syntax);
+        if snippet_has_only_primitive_turbofish(&snippet) {
             return (
                 SemanticUnresolvedCategory::Benign,
                 "unresolved_method_has_primitive_turbofish",
+            );
+        }
+        if unresolved_method_receiver_has_external_anchor(source_text, symbol, &snippet) {
+            return (
+                SemanticUnresolvedCategory::Benign,
+                "unresolved_method_receiver_has_external_anchor",
+            );
+        }
+        if symbol.as_deref().is_some_and(|name| {
+            unresolved_method_looks_like_common_external_receiver(name, &snippet)
+        }) {
+            return (
+                SemanticUnresolvedCategory::Benign,
+                "unresolved_method_looks_like_common_external_receiver",
             );
         }
         if symbol
@@ -1611,6 +1627,12 @@ mod rust_analyzer {
             return (
                 SemanticUnresolvedCategory::Benign,
                 "unresolved_path_has_retained_external_import",
+            );
+        }
+        if index.is_some_and(|index| index.path_is_derived_default_call(segments)) {
+            return (
+                SemanticUnresolvedCategory::Benign,
+                "unresolved_path_is_derived_default_call",
             );
         }
         if index.is_some_and(|index| index.path_has_project_local_anchor(segments)) {
@@ -1663,6 +1685,88 @@ mod rust_analyzer {
                 | "u64"
                 | "u128"
                 | "usize"
+        )
+    }
+
+    fn unresolved_method_receiver_has_external_anchor(
+        source_text: &str,
+        symbol: &Option<String>,
+        snippet: &str,
+    ) -> bool {
+        let Some(method_name) = symbol.as_deref() else {
+            return false;
+        };
+        let Some(receiver) = method_receiver_snippet(snippet, method_name) else {
+            return false;
+        };
+        let Some(anchor) = leading_receiver_ident(&receiver) else {
+            return false;
+        };
+        matches!(anchor, "std" | "core" | "alloc")
+            || source_has_external_imported_symbols(source_text, &[anchor])
+    }
+
+    fn unresolved_method_looks_like_common_external_receiver(
+        method_name: &str,
+        snippet: &str,
+    ) -> bool {
+        if !is_common_external_method_name(method_name) {
+            return false;
+        }
+        method_receiver_snippet(snippet, method_name)
+            .is_some_and(|receiver| receiver_is_plain_value_or_field_chain(&receiver))
+    }
+
+    fn method_receiver_snippet(snippet: &str, method_name: &str) -> Option<String> {
+        let normalized = snippet.replace(" .", ".").replace(". ", ".");
+        let needle = format!(".{method_name}");
+        let index = normalized.rfind(&needle)?;
+        Some(normalized[..index].trim().to_string())
+    }
+
+    fn leading_receiver_ident(receiver: &str) -> Option<&str> {
+        let receiver = receiver.trim_start_matches(['&', '*', '(', ' ']);
+        let end = receiver
+            .char_indices()
+            .find_map(|(index, character)| {
+                (!(character.is_ascii_alphanumeric() || character == '_')).then_some(index)
+            })
+            .unwrap_or(receiver.len());
+        (end > 0).then_some(&receiver[..end])
+    }
+
+    fn receiver_is_plain_value_or_field_chain(receiver: &str) -> bool {
+        !receiver.is_empty()
+            && !receiver.contains("::")
+            && receiver.chars().all(|character| {
+                character.is_ascii_alphanumeric() || matches!(character, '_' | '.')
+            })
+    }
+
+    fn is_common_external_method_name(name: &str) -> bool {
+        matches!(
+            name,
+            "as_ref"
+                | "as_mut"
+                | "borrow"
+                | "borrow_mut"
+                | "clone"
+                | "contains"
+                | "get"
+                | "get_mut"
+                | "insert"
+                | "is_empty"
+                | "iter"
+                | "iter_mut"
+                | "join"
+                | "len"
+                | "parent"
+                | "push"
+                | "read"
+                | "remove"
+                | "to_path_buf"
+                | "to_string"
+                | "write"
         )
     }
 
@@ -1973,6 +2077,39 @@ mod rust_analyzer {
         index.item_at_vfs_offset(source_vfs_path, offset, kind)
     }
 
+    fn item_derives_default(item: &syn::Item) -> bool {
+        item_attrs(item).iter().any(attribute_derives_default)
+    }
+
+    fn item_attrs(item: &syn::Item) -> &[syn::Attribute] {
+        match item {
+            syn::Item::Const(item) => &item.attrs,
+            syn::Item::Enum(item) => &item.attrs,
+            syn::Item::Mod(item) => &item.attrs,
+            syn::Item::Static(item) => &item.attrs,
+            syn::Item::Struct(item) => &item.attrs,
+            syn::Item::Trait(item) => &item.attrs,
+            syn::Item::Type(item) => &item.attrs,
+            syn::Item::Union(item) => &item.attrs,
+            _ => &[],
+        }
+    }
+
+    fn attribute_derives_default(attribute: &syn::Attribute) -> bool {
+        if !attribute.path().is_ident("derive") {
+            return false;
+        }
+        let Ok(list) = attribute.meta.require_list() else {
+            return false;
+        };
+        list.tokens
+            .to_string()
+            .split(|character: char| {
+                !(character.is_ascii_alphanumeric() || matches!(character, '_' | ':'))
+            })
+            .any(|token| token.rsplit("::").next() == Some("Default"))
+    }
+
     struct ProjectSemanticIndex {
         files: HashMap<PathBuf, IndexedSourceFile>,
         root_files: BTreeSet<PathBuf>,
@@ -1981,6 +2118,7 @@ mod rust_analyzer {
         selected_roots: Vec<RootId>,
         local_idents: BTreeSet<String>,
         method_names: BTreeSet<String>,
+        derived_default_types: BTreeSet<String>,
     }
 
     impl ProjectSemanticIndex {
@@ -1989,6 +2127,7 @@ mod rust_analyzer {
             let mut root_files = BTreeSet::new();
             let mut local_idents = BTreeSet::new();
             let mut method_names = BTreeSet::new();
+            let mut derived_default_types = BTreeSet::new();
             let retention =
                 retained_scope(project, &SemanticReductionHints::default(), selected_roots);
             for source in project.files.values() {
@@ -2039,6 +2178,9 @@ mod rust_analyzer {
                     root_files.insert(normalize_fs_path(&record.span.file));
                 }
                 local_idents.insert(id.name.clone());
+                if item_derives_default(&record.item) {
+                    derived_default_types.insert(id.name.clone());
+                }
                 if let Some(file) = files.get_mut(&normalize_fs_path(&record.span.file)) {
                     file.items.push(IndexedItem {
                         id: id.clone(),
@@ -2061,6 +2203,7 @@ mod rust_analyzer {
                 selected_roots: selected_roots.to_vec(),
                 local_idents,
                 method_names,
+                derived_default_types,
             }
         }
 
@@ -2155,6 +2298,14 @@ mod rust_analyzer {
                 }
                 [] => false,
             }
+        }
+
+        fn path_is_derived_default_call(&self, segments: &[String]) -> bool {
+            matches!(
+                segments,
+                [type_name, method_name]
+                    if method_name == "default" && self.derived_default_types.contains(type_name)
+            )
         }
 
         fn callable_at_vfs_offset(
@@ -2617,8 +2768,11 @@ mod rust_analyzer {
     #[cfg(test)]
     mod tests {
         use super::{
+            item_derives_default, method_receiver_snippet, receiver_is_plain_value_or_field_chain,
             snippet_has_only_primitive_turbofish, source_has_external_imported_path,
             source_has_external_imported_symbol,
+            unresolved_method_looks_like_common_external_receiver,
+            unresolved_method_receiver_has_external_anchor,
         };
 
         #[test]
@@ -2682,6 +2836,72 @@ use crate::local::fmt as local_fmt;
                 "value.parse::<ProjectType>()"
             ));
             assert!(!snippet_has_only_primitive_turbofish("value.parse()"));
+        }
+
+        #[test]
+        fn external_receiver_methods_are_benign_unresolved_candidates() {
+            let source = "use std::{fs, path::PathBuf};";
+            assert!(unresolved_method_receiver_has_external_anchor(
+                source,
+                &Some("join".to_string()),
+                "PathBuf::from(directory).join(PREFERENCES_FILE)"
+            ));
+            assert!(unresolved_method_receiver_has_external_anchor(
+                source,
+                &Some("write".to_string()),
+                "fs::OpenOptions::new().write(true)"
+            ));
+            assert!(!unresolved_method_receiver_has_external_anchor(
+                source,
+                &Some("create".to_string()),
+                "manager.create()"
+            ));
+        }
+
+        #[test]
+        fn common_external_receiver_methods_are_benign_unresolved_candidates() {
+            assert_eq!(
+                method_receiver_snippet("prefs.hidden_threads.insert(0, key)", "insert"),
+                Some("prefs.hidden_threads".to_string())
+            );
+            assert!(receiver_is_plain_value_or_field_chain(
+                "prefs.hidden_threads"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "insert",
+                "prefs.hidden_threads.insert(0, key)"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "len",
+                "prefs.pinned_threads.len()"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "parent",
+                "path.parent()"
+            ));
+            assert!(!unresolved_method_looks_like_common_external_receiver(
+                "create",
+                "manager.create()"
+            ));
+        }
+
+        #[test]
+        fn derived_default_items_qualify_default_calls_as_benign() {
+            let item: syn::Item = syn::parse_quote! {
+                #[derive(Debug, Clone, Default)]
+                pub struct TranscriptBuffer {
+                    pub text: String,
+                }
+            };
+            let non_default: syn::Item = syn::parse_quote! {
+                #[derive(Debug, Clone)]
+                pub struct ManualBuffer {
+                    pub text: String,
+                }
+            };
+
+            assert!(item_derives_default(&item));
+            assert!(!item_derives_default(&non_default));
         }
     }
 }
