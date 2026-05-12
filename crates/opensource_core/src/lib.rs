@@ -4667,7 +4667,12 @@ fn production_readiness_report_inner(
     }
     add_cfg_gated_root_production_hazards(project, reduced, &mut hazards);
     add_syntactic_production_hazards(project, reduced, &mut hazards);
-    add_reduction_evidence_production_hazards(reduced, semantic_pruning_proven, &mut hazards);
+    add_reduction_evidence_production_hazards(
+        project,
+        reduced,
+        semantic_pruning_proven,
+        &mut hazards,
+    );
 
     if !analyzer.loaded {
         hazards.push(production_hazard(
@@ -4919,12 +4924,23 @@ fn add_semantic_query_hazards(
             ),
         ));
     }
-    let unresolved_method_diagnostics =
+    let raw_unresolved_method_diagnostics =
         unresolved_diagnostics_for_kind(&metrics, SemanticUnresolvedKind::MethodCall);
-    let unresolved_method_calls = non_benign_unresolved_count(
-        metrics.unresolved_method_calls,
-        &unresolved_method_diagnostics,
-    );
+    let unresolved_method_diagnostics = raw_unresolved_method_diagnostics
+        .iter()
+        .copied()
+        .filter(|diagnostic| {
+            !covered_project_method_unresolved_diagnostic(project, reduced, diagnostic)
+        })
+        .collect::<Vec<_>>();
+    let unresolved_method_calls = if raw_unresolved_method_diagnostics.is_empty() {
+        metrics.unresolved_method_calls
+    } else {
+        unresolved_method_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.category == SemanticUnresolvedCategory::DependencyRisk)
+            .count()
+    };
     if unresolved_method_calls > 0 {
         hazards.push(production_hazard(
             "semantic_unresolved_method_calls",
@@ -5036,6 +5052,46 @@ fn semantic_unresolved_details(
             suggested_cargo_args: Vec::new(),
         })
         .collect()
+}
+
+fn covered_project_method_unresolved_diagnostic(
+    project: &Project,
+    reduced: &ReducedProject,
+    diagnostic: &SemanticUnresolvedDiagnostic,
+) -> bool {
+    diagnostic.kind == SemanticUnresolvedKind::MethodCall
+        && diagnostic.category == SemanticUnresolvedCategory::DependencyRisk
+        && diagnostic.reason == "unresolved_method_name_matches_project_method"
+        && diagnostic
+            .symbol
+            .as_deref()
+            .is_some_and(|method| project_method_name_fully_reachable(project, reduced, method))
+}
+
+fn project_method_name_fully_reachable(
+    project: &Project,
+    reduced: &ReducedProject,
+    method_name: &str,
+) -> bool {
+    let mut found = false;
+    for callable in project.methods.keys() {
+        let CallableId::Method { method, .. } = callable else {
+            continue;
+        };
+        if method != method_name {
+            continue;
+        }
+        found = true;
+        if !reduced.reachable.contains(callable)
+            && !reduced
+                .roots
+                .iter()
+                .any(|root| matches!(root, RootId::Callable(root) if root == callable))
+        {
+            return false;
+        }
+    }
+    found
 }
 
 fn semantic_hazard_metrics(
@@ -6329,6 +6385,7 @@ fn add_syntactic_production_hazards(
 }
 
 fn add_reduction_evidence_production_hazards(
+    project: &Project,
     reduced: &ReducedProject,
     semantic_pruning_proven: bool,
     hazards: &mut Vec<ProductionHazardReport>,
@@ -6344,15 +6401,20 @@ fn add_reduction_evidence_production_hazards(
             ),
         ));
     }
-    if evidence.capped_unresolved_method_fallbacks > 0 {
+    let capped_details = capped_method_fallback_details(project, reduced, evidence);
+    let unaccounted_capped_fallbacks = evidence
+        .capped_unresolved_method_fallbacks
+        .saturating_sub(evidence.capped_unresolved_method_details.len());
+    let capped_fallback_hazard_count = unaccounted_capped_fallbacks + capped_details.len();
+    if capped_fallback_hazard_count > 0 {
         hazards.push(production_hazard_with_details(
             "syntactic_method_fallback_cap",
             "warning",
             format!(
                 "{} unresolved method fallback(s) exceeded the name-only candidate cap; compiler feedback is required to detect any omitted method dependencies",
-                evidence.capped_unresolved_method_fallbacks
+                capped_fallback_hazard_count
             ),
-            capped_method_fallback_details(evidence),
+            capped_details,
         ));
     }
     if evidence.semantic_edges_applied > 0 && !semantic_pruning_proven {
@@ -6368,11 +6430,16 @@ fn add_reduction_evidence_production_hazards(
 }
 
 fn capped_method_fallback_details(
+    project: &Project,
+    reduced: &ReducedProject,
     evidence: &model::ReductionEvidence,
 ) -> Vec<ProductionHazardDetail> {
     evidence
         .capped_unresolved_method_details
         .iter()
+        .filter(|detail| {
+            !project_method_name_fully_reachable(project, reduced, &detail.method_name)
+        })
         .map(|detail| ProductionHazardDetail {
             subject: format!(
                 "{}method={}; local_candidate_methods={}; receiver_candidates={}",

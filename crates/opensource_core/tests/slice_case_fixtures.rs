@@ -732,6 +732,15 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     )
     .expect("public_field_iterator_transform_shape_prune fixture should slice");
 
+    assert!(
+        report.production.hazards.iter().all(|hazard| !matches!(
+            hazard.code.as_str(),
+            "semantic_unresolved_method_calls" | "syntactic_method_fallback_cap"
+        )),
+        "project-local iterator methods retained by the top-down graph must not remain as unresolved method hazards: {:?}",
+        report.production.hazards
+    );
+
     assert_eq!(
         report.packages,
         ["field_api", "root", "source_record", "view_record"]
