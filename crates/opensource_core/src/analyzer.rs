@@ -1568,6 +1568,12 @@ mod rust_analyzer {
                 "unresolved_method_inside_macro_or_attribute_context",
             );
         }
+        if snippet_has_only_primitive_turbofish(&compact_node_snippet(syntax)) {
+            return (
+                SemanticUnresolvedCategory::Benign,
+                "unresolved_method_has_primitive_turbofish",
+            );
+        }
         if symbol
             .as_deref()
             .is_some_and(|name| index.is_some_and(|index| index.has_project_method_name(name)))
@@ -1595,10 +1601,13 @@ mod rust_analyzer {
                 "unresolved_path_inside_macro_or_attribute_context",
             );
         }
-        if segments
-            .last()
-            .is_some_and(|symbol| source_has_external_imported_symbol(source_text, symbol))
-        {
+        if path_segments_have_external_root(segments) {
+            return (
+                SemanticUnresolvedCategory::Benign,
+                "unresolved_path_has_external_root",
+            );
+        }
+        if source_has_external_imported_path(source_text, segments) {
             return (
                 SemanticUnresolvedCategory::Benign,
                 "unresolved_path_has_retained_external_import",
@@ -1616,7 +1625,75 @@ mod rust_analyzer {
         )
     }
 
+    fn snippet_has_only_primitive_turbofish(snippet: &str) -> bool {
+        let Some(arguments) = turbofish_arguments(snippet) else {
+            return false;
+        };
+        let idents = arguments
+            .split(|character: char| !character.is_ascii_alphanumeric() && character != '_')
+            .filter(|ident| !ident.is_empty())
+            .collect::<Vec<_>>();
+        !idents.is_empty() && idents.iter().all(|ident| is_primitive_type_ident(ident))
+    }
+
+    fn turbofish_arguments(snippet: &str) -> Option<&str> {
+        let start = snippet.find("::<")? + 3;
+        let rest = &snippet[start..];
+        let end = rest.rfind('>')?;
+        Some(&rest[..end])
+    }
+
+    fn is_primitive_type_ident(ident: &str) -> bool {
+        matches!(
+            ident,
+            "bool"
+                | "char"
+                | "str"
+                | "f32"
+                | "f64"
+                | "i8"
+                | "i16"
+                | "i32"
+                | "i64"
+                | "i128"
+                | "isize"
+                | "u8"
+                | "u16"
+                | "u32"
+                | "u64"
+                | "u128"
+                | "usize"
+        )
+    }
+
+    fn path_segments_have_external_root(segments: &[String]) -> bool {
+        segments
+            .first()
+            .is_some_and(|segment| matches!(segment.as_str(), "std" | "core" | "alloc"))
+    }
+
+    fn source_has_external_imported_path(source_text: &str, segments: &[String]) -> bool {
+        let mut symbols = Vec::new();
+        if let Some(symbol) = segments.last() {
+            symbols.push(symbol.as_str());
+        }
+        if segments.len() > 1 {
+            if let Some(symbol) = segments.first() {
+                symbols.push(symbol.as_str());
+            }
+        }
+        source_has_external_imported_symbols(source_text, &symbols)
+    }
+
+    #[cfg(test)]
     fn source_has_external_imported_symbol(source_text: &str, symbol: &str) -> bool {
+        source_has_external_imported_symbols(source_text, &[symbol])
+    }
+
+    fn source_has_external_imported_symbols(source_text: &str, symbols: &[&str]) -> bool {
+        if symbols.is_empty() {
+            return false;
+        }
         let Ok(file) = syn::parse_file(source_text) else {
             return false;
         };
@@ -1624,7 +1701,7 @@ mod rust_analyzer {
             let syn::Item::Use(item_use) = item else {
                 return false;
             };
-            use_tree_imports_external_symbol(&item_use.tree, symbol, UseRootKind::Unknown)
+            use_tree_imports_external_symbol(&item_use.tree, symbols, UseRootKind::Unknown)
         })
     }
 
@@ -1637,7 +1714,7 @@ mod rust_analyzer {
 
     fn use_tree_imports_external_symbol(
         tree: &syn::UseTree,
-        symbol: &str,
+        symbols: &[&str],
         root: UseRootKind,
     ) -> bool {
         match tree {
@@ -1648,19 +1725,20 @@ mod rust_analyzer {
                     UseRootKind::Unknown => UseRootKind::External,
                     existing => existing,
                 };
-                use_tree_imports_external_symbol(&path.tree, symbol, root)
+                use_tree_imports_external_symbol(&path.tree, symbols, root)
             }
             syn::UseTree::Name(name) => {
-                root == UseRootKind::External && name.ident.to_string() == symbol
+                root == UseRootKind::External && symbols.iter().any(|symbol| name.ident == *symbol)
             }
             syn::UseTree::Rename(rename) => {
-                root == UseRootKind::External && rename.rename.to_string() == symbol
+                root == UseRootKind::External
+                    && symbols.iter().any(|symbol| rename.rename == *symbol)
             }
             syn::UseTree::Glob(_) => false,
             syn::UseTree::Group(group) => group
                 .items
                 .iter()
-                .any(|tree| use_tree_imports_external_symbol(tree, symbol, root)),
+                .any(|tree| use_tree_imports_external_symbol(tree, symbols, root)),
         }
     }
 
@@ -2538,7 +2616,10 @@ mod rust_analyzer {
 
     #[cfg(test)]
     mod tests {
-        use super::source_has_external_imported_symbol;
+        use super::{
+            snippet_has_only_primitive_turbofish, source_has_external_imported_path,
+            source_has_external_imported_symbol,
+        };
 
         #[test]
         fn external_use_imported_symbols_are_benign_unresolved_candidates() {
@@ -2570,6 +2651,37 @@ use super::parent::ParentLocalType;
                 "ParentLocalType"
             ));
             assert!(!source_has_external_imported_symbol(source, "Missing"));
+        }
+
+        #[test]
+        fn external_module_import_qualifies_unresolved_child_paths_as_benign() {
+            let source = r#"
+use std::{fmt, io as std_io};
+use crate::local::fmt as local_fmt;
+"#;
+
+            assert!(source_has_external_imported_path(
+                source,
+                &["fmt".to_string(), "Formatter".to_string()]
+            ));
+            assert!(source_has_external_imported_path(
+                source,
+                &["std_io".to_string(), "Error".to_string()]
+            ));
+            assert!(!source_has_external_imported_path(
+                source,
+                &["local_fmt".to_string(), "Formatter".to_string()]
+            ));
+        }
+
+        #[test]
+        fn primitive_turbofish_methods_are_benign_unresolved_candidates() {
+            assert!(snippet_has_only_primitive_turbofish("text.parse::<i64>()"));
+            assert!(snippet_has_only_primitive_turbofish("text.parse::<f64>()"));
+            assert!(!snippet_has_only_primitive_turbofish(
+                "value.parse::<ProjectType>()"
+            ));
+            assert!(!snippet_has_only_primitive_turbofish("value.parse()"));
         }
     }
 }
