@@ -28,3 +28,9 @@ pub struct LazyView {
     pub lazy_score: u32,
     pub dead_lazy_note: Option<String>,
 }
+
+pub struct ReturnedView {
+    pub returned_title: String,
+    pub returned_score: u32,
+    pub dead_returned_note: Option<String>,
+}

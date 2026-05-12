@@ -19634,6 +19634,15 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         self.return_type_item(return_type, &callable)
     }
 
+    fn call_return_iter_item_shape(&self, path: &syn::Path) -> Option<IteratorItemShape> {
+        let callable = self.resolve_callable_path(path)?;
+        let return_type = match &callable {
+            CallableId::Free { .. } => &self.project.functions.get(&callable)?.item.sig.output,
+            CallableId::Method { .. } => &self.project.methods.get(&callable)?.item.sig.output,
+        };
+        self.return_type_iter_item_shape(return_type, &callable)
+    }
+
     fn method_call_return_type_item(&self, call: &syn::ExprMethodCall) -> Option<ItemId> {
         let method = call.method.to_string();
         if matches!(method.as_str(), "get" | "get_mut" | "remove") {
@@ -19664,6 +19673,25 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         self.return_type_item(return_type, &callable)
     }
 
+    fn method_call_return_iter_item_shape(
+        &self,
+        call: &syn::ExprMethodCall,
+    ) -> Option<IteratorItemShape> {
+        let receiver_item = self.expr_type_item(&call.receiver)?;
+        let callable = CallableId::Method {
+            package: receiver_item.package.clone(),
+            type_path: item_type_path(&receiver_item),
+            trait_path: None,
+            trait_input_type_paths: Vec::new(),
+            method: call.method.to_string(),
+        };
+        if !self.project.methods.contains_key(&callable) {
+            return None;
+        }
+        let return_type = &self.project.methods.get(&callable)?.item.sig.output;
+        self.return_type_iter_item_shape(return_type, &callable)
+    }
+
     fn expression_iter_item_shape(&self, expression: &Expr) -> Option<IteratorItemShape> {
         match expression {
             Expr::Array(array) => array
@@ -19673,6 +19701,12 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             Expr::Path(path) if path.path.segments.len() == 1 => {
                 let name = path.path.segments.first()?.ident.to_string();
                 self.current_iterable_binding(&name).cloned()
+            }
+            Expr::Call(call) => {
+                let Expr::Path(path) = call.func.as_ref() else {
+                    return None;
+                };
+                self.call_return_iter_item_shape(&path.path)
             }
             Expr::Field(field) => self
                 .field_expr_type(field)
@@ -19719,7 +19753,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 if iterator_item_passthrough_method(&method) {
                     return self.expression_iter_item_shape(&call.receiver);
                 }
-                None
+                self.method_call_return_iter_item_shape(call)
             }
             _ => None,
         }
@@ -19907,6 +19941,41 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             }
         };
         type_to_type_like_item(self.project, package, module_path, ty, aliases)
+    }
+
+    fn return_type_iter_item_shape(
+        &self,
+        return_type: &'a syn::ReturnType,
+        callable: &CallableId,
+    ) -> Option<IteratorItemShape> {
+        let syn::ReturnType::Type(_, ty) = return_type else {
+            return None;
+        };
+        let (package, module_path, aliases) = match callable {
+            CallableId::Free { package, .. } => {
+                let record = self.project.functions.get(callable)?;
+                (
+                    package.as_str(),
+                    record.module_path.as_slice(),
+                    &record.aliases,
+                )
+            }
+            CallableId::Method { package, .. } => {
+                let record = self.project.methods.get(callable)?;
+                (
+                    package.as_str(),
+                    record.module_path.as_slice(),
+                    &record.aliases,
+                )
+            }
+        };
+        self.sequence_value_type_item(FieldTypeContext {
+            package,
+            module_path,
+            aliases,
+            ty,
+        })
+        .map(IteratorItemShape::Direct)
     }
 
     fn resolve_callable_path(&self, path: &syn::Path) -> Option<CallableId> {

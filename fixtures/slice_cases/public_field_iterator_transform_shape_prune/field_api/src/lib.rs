@@ -78,10 +78,29 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let returned_views = build_returned_views(&snapshot);
+    let returned = returned_views
+        .iter()
+        .map(|view| format!("{}:{}", view.returned_title, view.returned_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}",
         loop_titles.join(",")
     )
+}
+
+fn build_returned_views(snapshot: &source_record::SourceSnapshot) -> Vec<view_record::ReturnedView> {
+    snapshot
+        .records
+        .iter()
+        .map(|record| view_record::ReturnedView {
+            returned_title: record.raw_label.clone(),
+            returned_score: record.raw_value,
+            dead_returned_note: None,
+        })
+        .collect::<Vec<_>>()
 }
 
 pub fn dead_summary(seed: u32) -> String {
