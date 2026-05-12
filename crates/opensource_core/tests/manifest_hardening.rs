@@ -5730,6 +5730,10 @@ pub fn dead_marker() -> &'static str {
         "{provider_wire}"
     );
     assert!(
+        provider_wire.contains("RuntimeTrait"),
+        "{provider_wire}"
+    );
+    assert!(
         provider_manifest.contains("[dependencies.runtime-dep]"),
         "{provider_manifest}"
     );
