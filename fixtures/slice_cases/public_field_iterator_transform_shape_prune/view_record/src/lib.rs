@@ -115,3 +115,17 @@ pub struct GenericAliasView {
     pub generic_score: u32,
     pub dead_generic_note: Option<String>,
 }
+
+pub struct NewtypeViews(pub Vec<NewtypeView>);
+
+impl NewtypeViews {
+    pub fn iter(&self) -> std::slice::Iter<'_, NewtypeView> {
+        self.0.iter()
+    }
+}
+
+pub struct NewtypeView {
+    pub newtype_title: String,
+    pub newtype_score: u32,
+    pub dead_newtype_note: Option<String>,
+}

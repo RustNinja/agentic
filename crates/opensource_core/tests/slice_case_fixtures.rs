@@ -818,6 +818,9 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     );
     assert!(field_api.contains("view.generic_title"), "{field_api}");
     assert!(field_api.contains("view.generic_score"), "{field_api}");
+    assert!(field_api.contains("newtype_views"), "{field_api}");
+    assert!(field_api.contains("view.newtype_title"), "{field_api}");
+    assert!(field_api.contains("view.newtype_score"), "{field_api}");
     assert!(!field_api.contains("dead_view_note"), "{field_api}");
     assert!(!field_api.contains("dead_filter_note"), "{field_api}");
     assert!(!field_api.contains("dead_child_view_note"), "{field_api}");
@@ -843,6 +846,7 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(!field_api.contains("dead_bag_note"), "{field_api}");
     assert!(!field_api.contains("dead_bag_views"), "{field_api}");
     assert!(!field_api.contains("dead_generic_note"), "{field_api}");
+    assert!(!field_api.contains("dead_newtype_note"), "{field_api}");
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
 
     assert!(
@@ -1039,6 +1043,18 @@ fn retains_public_support_fields_used_through_iterator_transform_shapes() {
     assert!(view_record.contains("pub generic_title:"), "{view_record}");
     assert!(view_record.contains("pub generic_score:"), "{view_record}");
     assert!(!view_record.contains("dead_generic_note"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct NewtypeViews"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub fn iter(&self)"), "{view_record}");
+    assert!(
+        view_record.contains("pub struct NewtypeView"),
+        "{view_record}"
+    );
+    assert!(view_record.contains("pub newtype_title:"), "{view_record}");
+    assert!(view_record.contains("pub newtype_score:"), "{view_record}");
+    assert!(!view_record.contains("dead_newtype_note"), "{view_record}");
 
     assert_cargo_check(&output, &target_dir, &root_source, &report);
 }

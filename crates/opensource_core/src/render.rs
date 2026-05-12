@@ -19690,6 +19690,26 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
         let return_type = &self.project.methods.get(&callable)?.item.sig.output;
         self.return_type_iter_item_shape(return_type, &callable)
+            .or_else(|| self.method_body_iter_item_shape(&callable, &receiver_item))
+    }
+
+    fn method_body_iter_item_shape(
+        &self,
+        callable: &CallableId,
+        receiver_item: &ItemId,
+    ) -> Option<IteratorItemShape> {
+        let record = self.project.methods.get(callable)?;
+        let visitor = ConcreteStructFieldUseVisitor::new(
+            self.project,
+            callable.package(),
+            &record.module_path,
+            &record.aliases,
+            self.target_item,
+            self.field_name,
+            Some(receiver_item.clone()),
+        );
+        final_block_expression(&record.item.block)
+            .and_then(|expr| visitor.expression_iter_item_shape(expr))
     }
 
     fn expression_iter_item_shape(&self, expression: &Expr) -> Option<IteratorItemShape> {
@@ -20056,12 +20076,18 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
     }
 
     fn item_field_type(&self, item: &ItemId, member: &Member) -> Option<FieldTypeContext<'a>> {
-        let field_name = member_name(member)?;
         let record = self.project.items.get(item)?;
         let Item::Struct(item_struct) = &record.item else {
             return None;
         };
-        named_struct_field(item_struct, &field_name).map(|field| FieldTypeContext {
+        let field = match member {
+            Member::Named(ident) => named_struct_field(item_struct, &ident.to_string()),
+            Member::Unnamed(index) => match &item_struct.fields {
+                Fields::Unnamed(fields) => fields.unnamed.iter().nth(index.index as usize),
+                _ => None,
+            },
+        }?;
+        Some(FieldTypeContext {
             package: &record.package,
             module_path: &record.module_path,
             aliases: &record.aliases,

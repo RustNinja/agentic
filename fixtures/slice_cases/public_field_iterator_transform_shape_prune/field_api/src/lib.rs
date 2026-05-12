@@ -255,8 +255,25 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>();
     let generic_alias = summarize_generic_alias_views(generic_alias_views);
 
+    let newtype_views = view_record::NewtypeViews(
+        snapshot
+            .records
+            .iter()
+            .map(|record| view_record::NewtypeView {
+                newtype_title: record.raw_label.clone(),
+                newtype_score: record.raw_value,
+                dead_newtype_note: None,
+            })
+            .collect::<Vec<_>>(),
+    );
+    let newtype = newtype_views
+        .iter()
+        .map(|view| format!("{}:{}", view.newtype_title, view.newtype_score))
+        .collect::<Vec<_>>()
+        .join(",");
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}:{bag}:{generic_alias}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}:{bag}:{generic_alias}:{newtype}",
         loop_titles.join(",")
     )
 }
