@@ -2422,10 +2422,7 @@ fn ra_hir_proves_high_risk_fixture_pruning_matrix() {
         RaHardFixture {
             fixture: "static_registry_prune",
             packages: &["registry_api", "registry_support", "root"],
-            hazards: &[
-                ("syntactic_method_fallback_cap", "warning"),
-                ("semantic_unresolved_method_calls", "warning"),
-            ],
+            hazards: &[],
         },
         RaHardFixture {
             fixture: "poll_adapter_prune",

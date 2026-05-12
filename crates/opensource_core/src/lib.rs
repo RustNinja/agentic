@@ -4930,7 +4930,12 @@ fn add_semantic_query_hazards(
         .iter()
         .copied()
         .filter(|diagnostic| {
-            !covered_project_method_unresolved_diagnostic(project, reduced, diagnostic)
+            !covered_project_method_unresolved_diagnostic(
+                project,
+                reduced,
+                &retained_paths,
+                diagnostic,
+            )
         })
         .collect::<Vec<_>>();
     let unresolved_method_calls = if raw_unresolved_method_diagnostics.is_empty() {
@@ -5057,20 +5062,26 @@ fn semantic_unresolved_details(
 fn covered_project_method_unresolved_diagnostic(
     project: &Project,
     reduced: &ReducedProject,
+    retained_paths: &BTreeSet<PathBuf>,
     diagnostic: &SemanticUnresolvedDiagnostic,
 ) -> bool {
     diagnostic.kind == SemanticUnresolvedKind::MethodCall
         && diagnostic.category == SemanticUnresolvedCategory::DependencyRisk
         && diagnostic.reason == "unresolved_method_name_matches_project_method"
-        && diagnostic
-            .symbol
-            .as_deref()
-            .is_some_and(|method| project_method_name_fully_reachable(project, reduced, method))
+        && diagnostic.symbol.as_deref().is_some_and(|method| {
+            project_method_name_fully_reachable_in_retained_paths(
+                project,
+                reduced,
+                retained_paths,
+                method,
+            )
+        })
 }
 
-fn project_method_name_fully_reachable(
+fn project_method_name_fully_reachable_in_retained_paths(
     project: &Project,
     reduced: &ReducedProject,
+    retained_paths: &BTreeSet<PathBuf>,
     method_name: &str,
 ) -> bool {
     let mut found = false;
@@ -5079,6 +5090,9 @@ fn project_method_name_fully_reachable(
             continue;
         };
         if method != method_name {
+            continue;
+        }
+        if !method_source_path_is_retained(project, callable, retained_paths) {
             continue;
         }
         found = true;
@@ -5092,6 +5106,17 @@ fn project_method_name_fully_reachable(
         }
     }
     found
+}
+
+fn method_source_path_is_retained(
+    project: &Project,
+    callable: &CallableId,
+    retained_paths: &BTreeSet<PathBuf>,
+) -> bool {
+    project
+        .methods
+        .get(callable)
+        .is_some_and(|record| retained_paths.contains(&normalize_report_path(&record.span.file)))
 }
 
 fn semantic_hazard_metrics(
@@ -6434,11 +6459,17 @@ fn capped_method_fallback_details(
     reduced: &ReducedProject,
     evidence: &model::ReductionEvidence,
 ) -> Vec<ProductionHazardDetail> {
+    let retained_paths = retained_semantic_file_paths(project, reduced);
     evidence
         .capped_unresolved_method_details
         .iter()
         .filter(|detail| {
-            !project_method_name_fully_reachable(project, reduced, &detail.method_name)
+            !project_method_name_fully_reachable_in_retained_paths(
+                project,
+                reduced,
+                &retained_paths,
+                &detail.method_name,
+            )
         })
         .map(|detail| ProductionHazardDetail {
             subject: format!(
