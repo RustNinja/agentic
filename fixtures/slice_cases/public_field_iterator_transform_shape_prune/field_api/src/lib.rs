@@ -244,8 +244,19 @@ pub fn selected_summary(seed: u32) -> String {
         .collect::<Vec<_>>()
         .join(",");
 
+    let generic_alias_views: view_record::GenericViews<view_record::GenericAliasView> = snapshot
+        .records
+        .iter()
+        .map(|record| view_record::GenericAliasView {
+            generic_title: record.raw_label.clone(),
+            generic_score: record.raw_value,
+            dead_generic_note: None,
+        })
+        .collect::<Vec<_>>();
+    let generic_alias = summarize_generic_alias_views(generic_alias_views);
+
     format!(
-        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}:{bag}",
+        "{titles}:{filtered}:{}:{children}:{local}:{lazy}:{returned}:{method}:{param}:{impl_iter}:{dyn_iter}:{branch}:{if_branch}:{if_collection}:{match_collection}:{alias}:{tuple}:{bag}:{generic_alias}",
         loop_titles.join(",")
     )
 }
@@ -296,6 +307,16 @@ fn summarize_alias_views(views: view_record::AliasViews) -> String {
     views
         .iter()
         .map(|view| format!("{}:{}", view.alias_title, view.alias_score))
+        .collect::<Vec<_>>()
+        .join(",")
+}
+
+fn summarize_generic_alias_views(
+    views: view_record::GenericViews<view_record::GenericAliasView>,
+) -> String {
+    views
+        .iter()
+        .map(|view| format!("{}:{}", view.generic_title, view.generic_score))
         .collect::<Vec<_>>()
         .join(",")
 }

@@ -20168,6 +20168,14 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 ctx.aliases,
             ),
             Type::Path(type_path) => {
+                if let Some(item) = self.generic_alias_sequence_value_type_item(
+                    ctx.package,
+                    ctx.module_path,
+                    ctx.aliases,
+                    &type_path.path,
+                ) {
+                    return Some(item);
+                }
                 if let Some(alias_ctx) = self.type_path_alias_target_context(
                     ctx.package,
                     ctx.module_path,
@@ -20317,6 +20325,289 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         })
     }
 
+    fn type_path_alias_target_context_with_generics<'ctx>(
+        &self,
+        package: &'ctx str,
+        module_path: &'ctx [String],
+        aliases: &'ctx HashMap<String, Vec<String>>,
+        path: &'ctx syn::Path,
+    ) -> Option<(
+        FieldTypeContext<'a>,
+        HashMap<String, FieldTypeContext<'ctx>>,
+    )> {
+        let item = path_to_type_like_item(self.project, package, module_path, path, aliases)?;
+        if item.kind != ItemKind::Type {
+            return None;
+        }
+        let record = self.project.items.get(&item)?;
+        let Item::Type(type_alias) = &record.item else {
+            return None;
+        };
+        let mut generic_types = HashMap::new();
+        for (param, argument) in type_alias
+            .generics
+            .params
+            .iter()
+            .filter_map(|param| match param {
+                syn::GenericParam::Type(param) => Some(param.ident.to_string()),
+                _ => None,
+            })
+            .zip(path_type_arguments(package, module_path, aliases, path))
+        {
+            generic_types.insert(param, argument);
+        }
+        Some((
+            FieldTypeContext {
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                ty: &type_alias.ty,
+            },
+            generic_types,
+        ))
+    }
+
+    fn generic_alias_sequence_value_type_item(
+        &self,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+        path: &syn::Path,
+    ) -> Option<ItemId> {
+        let (alias_ctx, generic_types) =
+            self.type_path_alias_target_context_with_generics(package, module_path, aliases, path)?;
+        if generic_types.is_empty() {
+            return None;
+        }
+        self.sequence_value_type_item_substituted(
+            alias_ctx.package,
+            alias_ctx.module_path,
+            alias_ctx.aliases,
+            alias_ctx.ty,
+            &generic_types,
+        )
+    }
+
+    fn sequence_value_type_item_substituted<'ctx>(
+        &self,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+        ty: &Type,
+        generic_types: &HashMap<String, FieldTypeContext<'ctx>>,
+    ) -> Option<ItemId> {
+        match ty {
+            Type::Reference(reference) => self.sequence_value_type_item_substituted(
+                package,
+                module_path,
+                aliases,
+                &reference.elem,
+                generic_types,
+            ),
+            Type::Group(group) => self.sequence_value_type_item_substituted(
+                package,
+                module_path,
+                aliases,
+                &group.elem,
+                generic_types,
+            ),
+            Type::Paren(paren) => self.sequence_value_type_item_substituted(
+                package,
+                module_path,
+                aliases,
+                &paren.elem,
+                generic_types,
+            ),
+            Type::Slice(slice) => self.type_payload_or_direct_item_in_substituted(
+                package,
+                module_path,
+                aliases,
+                &slice.elem,
+                generic_types,
+            ),
+            Type::Array(array) => self.type_payload_or_direct_item_in_substituted(
+                package,
+                module_path,
+                aliases,
+                &array.elem,
+                generic_types,
+            ),
+            Type::Path(type_path) => {
+                if let Some(actual) = generic_type_context(&type_path.path, generic_types) {
+                    return self.sequence_value_type_item(actual);
+                }
+                let segment = type_path.path.segments.last()?;
+                if matches!(
+                    segment.ident.to_string().as_str(),
+                    "Arc" | "Box" | "Cow" | "Pin" | "Rc"
+                ) {
+                    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                        return None;
+                    };
+                    return arguments
+                        .args
+                        .iter()
+                        .find_map(|argument| match argument {
+                            GenericArgument::Type(ty) => Some(ty),
+                            _ => None,
+                        })
+                        .and_then(|ty| {
+                            self.sequence_value_type_item_substituted(
+                                package,
+                                module_path,
+                                aliases,
+                                ty,
+                                generic_types,
+                            )
+                        });
+                }
+                if !matches!(
+                    segment.ident.to_string().as_str(),
+                    "BinaryHeap"
+                        | "BTreeSet"
+                        | "HashSet"
+                        | "LinkedList"
+                        | "Option"
+                        | "Vec"
+                        | "VecDeque"
+                ) {
+                    return self.sequence_value_type_item(FieldTypeContext {
+                        package,
+                        module_path,
+                        aliases,
+                        ty,
+                    });
+                }
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    return None;
+                };
+                arguments
+                    .args
+                    .iter()
+                    .find_map(|argument| match argument {
+                        GenericArgument::Type(ty) => Some(ty),
+                        _ => None,
+                    })
+                    .and_then(|ty| {
+                        self.type_payload_or_direct_item_in_substituted(
+                            package,
+                            module_path,
+                            aliases,
+                            ty,
+                            generic_types,
+                        )
+                    })
+            }
+            _ => self.sequence_value_type_item(FieldTypeContext {
+                package,
+                module_path,
+                aliases,
+                ty,
+            }),
+        }
+    }
+
+    fn generic_alias_payload_or_direct_item_in(
+        &self,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+        path: &syn::Path,
+    ) -> Option<ItemId> {
+        let (alias_ctx, generic_types) =
+            self.type_path_alias_target_context_with_generics(package, module_path, aliases, path)?;
+        if generic_types.is_empty() {
+            return None;
+        }
+        self.type_payload_or_direct_item_in_substituted(
+            alias_ctx.package,
+            alias_ctx.module_path,
+            alias_ctx.aliases,
+            alias_ctx.ty,
+            &generic_types,
+        )
+    }
+
+    fn type_payload_or_direct_item_in_substituted<'ctx>(
+        &self,
+        package: &str,
+        module_path: &[String],
+        aliases: &HashMap<String, Vec<String>>,
+        ty: &Type,
+        generic_types: &HashMap<String, FieldTypeContext<'ctx>>,
+    ) -> Option<ItemId> {
+        if let Type::Path(type_path) = ty {
+            if let Some(actual) = generic_type_context(&type_path.path, generic_types) {
+                return self.type_payload_or_direct_item_in(
+                    actual.package,
+                    actual.module_path,
+                    actual.aliases,
+                    actual.ty,
+                );
+            }
+        }
+        match ty {
+            Type::Reference(reference) => self.type_payload_or_direct_item_in_substituted(
+                package,
+                module_path,
+                aliases,
+                &reference.elem,
+                generic_types,
+            ),
+            Type::Group(group) => self.type_payload_or_direct_item_in_substituted(
+                package,
+                module_path,
+                aliases,
+                &group.elem,
+                generic_types,
+            ),
+            Type::Paren(paren) => self.type_payload_or_direct_item_in_substituted(
+                package,
+                module_path,
+                aliases,
+                &paren.elem,
+                generic_types,
+            ),
+            Type::Path(type_path) => {
+                let segment = type_path.path.segments.last()?;
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    return self.type_payload_or_direct_item_in(package, module_path, aliases, ty);
+                };
+                let type_args = arguments
+                    .args
+                    .iter()
+                    .filter_map(|argument| match argument {
+                        GenericArgument::Type(ty) => Some(ty),
+                        _ => None,
+                    })
+                    .collect::<Vec<_>>();
+                let index = match segment.ident.to_string().as_str() {
+                    "HashMap" | "BTreeMap" | "IndexMap" => 1,
+                    "Result" => 0,
+                    "Option" | "Vec" | "Box" | "Arc" | "Rc" | "Pin" | "Cow" => 0,
+                    _ => {
+                        return self.type_payload_or_direct_item_in(
+                            package,
+                            module_path,
+                            aliases,
+                            ty,
+                        );
+                    }
+                };
+                type_args.get(index).and_then(|ty| {
+                    self.type_payload_or_direct_item_in_substituted(
+                        package,
+                        module_path,
+                        aliases,
+                        ty,
+                        generic_types,
+                    )
+                })
+            }
+            _ => self.type_payload_or_direct_item_in(package, module_path, aliases, ty),
+        }
+    }
+
     fn type_payload_or_direct_item_in(
         &self,
         package: &str,
@@ -20324,6 +20615,16 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         aliases: &HashMap<String, Vec<String>>,
         ty: &Type,
     ) -> Option<ItemId> {
+        if let Type::Path(type_path) = ty {
+            if let Some(item) = self.generic_alias_payload_or_direct_item_in(
+                package,
+                module_path,
+                aliases,
+                &type_path.path,
+            ) {
+                return Some(item);
+            }
+        }
         if let Some(item) = type_to_type_like_item(self.project, package, module_path, ty, aliases)
         {
             if let Some(alias_ctx) = self.type_alias_target_context(&item) {
@@ -21227,6 +21528,44 @@ fn member_name(member: &Member) -> Option<String> {
         Member::Named(ident) => Some(ident.to_string()),
         Member::Unnamed(_) => None,
     }
+}
+
+fn path_type_arguments<'ctx>(
+    package: &'ctx str,
+    module_path: &'ctx [String],
+    aliases: &'ctx HashMap<String, Vec<String>>,
+    path: &'ctx syn::Path,
+) -> Vec<FieldTypeContext<'ctx>> {
+    let Some(segment) = path.segments.last() else {
+        return Vec::new();
+    };
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return Vec::new();
+    };
+    arguments
+        .args
+        .iter()
+        .filter_map(|argument| match argument {
+            GenericArgument::Type(ty) => Some(FieldTypeContext {
+                package,
+                module_path,
+                aliases,
+                ty,
+            }),
+            _ => None,
+        })
+        .collect()
+}
+
+fn generic_type_context<'ctx>(
+    path: &syn::Path,
+    generic_types: &HashMap<String, FieldTypeContext<'ctx>>,
+) -> Option<FieldTypeContext<'ctx>> {
+    if path.leading_colon.is_some() || path.segments.len() != 1 {
+        return None;
+    }
+    let ident = path.segments.first()?.ident.to_string();
+    generic_types.get(&ident).copied()
 }
 
 fn path_is_self(path: &syn::Path) -> bool {

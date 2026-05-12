@@ -107,3 +107,11 @@ pub struct StructBagView {
     pub bag_score: u32,
     pub dead_bag_note: Option<String>,
 }
+
+pub type GenericViews<T> = Vec<T>;
+
+pub struct GenericAliasView {
+    pub generic_title: String,
+    pub generic_score: u32,
+    pub dead_generic_note: Option<String>,
+}
