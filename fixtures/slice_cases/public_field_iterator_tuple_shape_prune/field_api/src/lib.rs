@@ -22,8 +22,22 @@ pub fn selected_summary(seed: u32) -> String {
         .map(|(_, entry)| entry.code.as_str())
         .collect::<Vec<_>>()
         .join(",");
+    let mut loop_labels = Vec::new();
+    for (_, record) in left.records.iter().enumerate() {
+        loop_labels.push(record.loop_label.as_str());
+    }
+    let mut loop_total = 0;
+    let mut loop_codes = Vec::new();
+    for (left, right) in left.records.iter().zip(right.entries.iter()) {
+        loop_total += left.loop_value + right.loop_weight;
+        loop_codes.push(right.loop_code.as_str());
+    }
 
-    format!("{labels}:{codes}:{total}")
+    format!(
+        "{labels}:{codes}:{total}:{}:{}:{loop_total}",
+        loop_labels.join(","),
+        loop_codes.join(",")
+    )
 }
 
 pub fn dead_summary(seed: u32) -> String {

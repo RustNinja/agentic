@@ -6,6 +6,8 @@ pub struct LeftSnapshot {
 pub struct LeftRecord {
     pub label: String,
     pub value: u32,
+    pub loop_label: String,
+    pub loop_value: u32,
     pub dead_note: Option<String>,
 }
 
@@ -14,6 +16,8 @@ pub fn snapshot(seed: u32) -> LeftSnapshot {
     records.push(LeftRecord {
         label: "left".to_string(),
         value: seed,
+        loop_label: "left-loop".to_string(),
+        loop_value: seed + 10,
         dead_note: None,
     });
     LeftSnapshot {

@@ -669,6 +669,10 @@ fn retains_public_support_fields_used_through_iterator_tuple_shapes() {
     assert!(field_api.contains("left.value"), "{field_api}");
     assert!(field_api.contains("right.weight"), "{field_api}");
     assert!(field_api.contains("entry.code"), "{field_api}");
+    assert!(field_api.contains("record.loop_label"), "{field_api}");
+    assert!(field_api.contains("left.loop_value"), "{field_api}");
+    assert!(field_api.contains("right.loop_weight"), "{field_api}");
+    assert!(field_api.contains("right.loop_code"), "{field_api}");
     assert!(!field_api.contains("dead_note"), "{field_api}");
     assert!(!field_api.contains("unused_note"), "{field_api}");
     assert!(!field_api.contains("pub fn dead_summary"), "{field_api}");
@@ -685,6 +689,8 @@ fn retains_public_support_fields_used_through_iterator_tuple_shapes() {
     );
     assert!(left_record.contains("pub label:"), "{left_record}");
     assert!(left_record.contains("pub value:"), "{left_record}");
+    assert!(left_record.contains("pub loop_label:"), "{left_record}");
+    assert!(left_record.contains("pub loop_value:"), "{left_record}");
     assert!(!left_record.contains("dead_note"), "{left_record}");
     assert!(left_record.contains("pub fn snapshot"), "{left_record}");
     assert!(!left_record.contains("dead_snapshot"), "{left_record}");
@@ -701,6 +707,8 @@ fn retains_public_support_fields_used_through_iterator_tuple_shapes() {
     );
     assert!(right_record.contains("pub code:"), "{right_record}");
     assert!(right_record.contains("pub weight:"), "{right_record}");
+    assert!(right_record.contains("pub loop_code:"), "{right_record}");
+    assert!(right_record.contains("pub loop_weight:"), "{right_record}");
     assert!(!right_record.contains("dead_note"), "{right_record}");
     assert!(right_record.contains("pub fn snapshot"), "{right_record}");
     assert!(!right_record.contains("dead_snapshot"), "{right_record}");

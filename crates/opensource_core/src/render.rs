@@ -20443,6 +20443,17 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
         }
     }
 
+    fn visit_expr_for_loop(&mut self, loop_expr: &syn::ExprForLoop) {
+        self.visit_expr(&loop_expr.expr);
+        let binding_count = self.bindings.len();
+        if let Some(shape) = self.expression_iter_item_shape(&loop_expr.expr) {
+            self.record_pattern_binding_shape(&loop_expr.pat, &shape);
+        }
+        self.visit_pat(&loop_expr.pat);
+        self.visit_block(&loop_expr.body);
+        self.bindings.truncate(binding_count);
+    }
+
     fn visit_expr_method_call(&mut self, call: &syn::ExprMethodCall) {
         self.visit_expr(&call.receiver);
         let method = call.method.to_string();

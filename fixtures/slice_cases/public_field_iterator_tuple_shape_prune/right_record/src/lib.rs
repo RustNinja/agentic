@@ -6,6 +6,8 @@ pub struct RightSnapshot {
 pub struct RightRecord {
     pub code: String,
     pub weight: u32,
+    pub loop_code: String,
+    pub loop_weight: u32,
     pub dead_note: Option<String>,
 }
 
@@ -14,6 +16,8 @@ pub fn snapshot(seed: u32) -> RightSnapshot {
     entries.push(RightRecord {
         code: "right".to_string(),
         weight: seed + 1,
+        loop_code: "right-loop".to_string(),
+        loop_weight: seed + 11,
         dead_note: None,
     });
     RightSnapshot {
