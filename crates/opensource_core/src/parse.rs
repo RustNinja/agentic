@@ -285,7 +285,12 @@ impl Parser {
                     }
                 }
                 Item::Mod(item_mod) => {
-                    if module_attrs_exclude_current_target(&item_mod.attrs) {
+                    if item_mod.attrs.iter().any(is_cfg_test_attr) {
+                        continue;
+                    }
+                    if item_mod.content.is_none()
+                        && module_attrs_exclude_current_target(&item_mod.attrs)
+                    {
                         continue;
                     }
                     let id = ItemId {

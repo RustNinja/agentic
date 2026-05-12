@@ -4036,7 +4036,42 @@ fn decision_log_steps(
         decision: "strip prunable unused symbols and retain used or blocked_by_unknown symbols".to_string(),
         reason: "generated source must not retain known-unused code except where an unknown surface blocks safe deletion".to_string(),
         metrics: usage_metrics,
-        evidence: rendered_usage.invalid.into_iter().take(20).collect(),
+        evidence: rendered_usage.invalid.iter().take(20).cloned().collect(),
+    });
+
+    let rendered_summary = &report.usage.rendered_symbols.summary;
+    let mut import_metrics = BTreeMap::new();
+    import_metrics.insert(
+        "retained_members".to_string(),
+        serde_json::json!(rendered_summary.retained_members),
+    );
+    import_metrics.insert(
+        "blocked_members".to_string(),
+        serde_json::json!(rendered_summary.blocked_members),
+    );
+    import_metrics.insert(
+        "prunable_members".to_string(),
+        serde_json::json!(rendered_summary.prunable_members),
+    );
+    import_metrics.insert(
+        "retained_assoc_items".to_string(),
+        serde_json::json!(rendered_summary.retained_assoc_items),
+    );
+    import_metrics.insert(
+        "prunable_assoc_items".to_string(),
+        serde_json::json!(rendered_summary.prunable_assoc_items),
+    );
+    steps.push(DecisionLogStep {
+        step: "import_pruning".to_string(),
+        status: if rendered_usage.blocked_by_unknown > 0 {
+            "retained_unknown_surfaces".to_string()
+        } else {
+            "exact_used_surface".to_string()
+        },
+        decision: "retain imports only when transformed callable bodies or retained non-callable surfaces still use them".to_string(),
+        reason: "import pruning follows the same top-down retained surface as rendering, so fields and struct literal entries pruned from the output cannot keep stale imports alive".to_string(),
+        metrics: import_metrics,
+        evidence: Vec::new(),
     });
 
     let mut readiness_metrics = BTreeMap::new();

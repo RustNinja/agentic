@@ -123,6 +123,93 @@ fn trims_unused_checked_fixture_workspace_with_default_analyzer() {
 }
 
 #[test]
+#[cfg(feature = "ra-hir")]
+fn indexes_inactive_cfg_inline_modules_before_pruning() {
+    let fixture = repo_root().join("fixtures/slice_cases/inactive_cfg_inline_module_prune");
+    let output = temp_path("slice-case-inactive-cfg-inline-module-prune-output");
+    let target_dir = temp_path("slice-case-inactive-cfg-inline-module-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::RustAnalyzerHir,
+    )
+    .expect("inactive_cfg_inline_module_prune fixture should slice");
+
+    assert_eq!(report.packages, ["root"]);
+    assert_eq!(
+        report.usage.rendered_symbols.summary.unclassified_callables, 0,
+        "inactive cfg inline module callables should be classified: {:?}",
+        report.usage.rendered_decision_map.callables
+    );
+    assert_eq!(
+        report.usage.rendered_symbols.summary.unclassified_items, 0,
+        "inactive cfg inline module items should be classified: {:?}",
+        report.usage.rendered_decision_map.items
+    );
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    assert!(
+        root_source.contains("pub fn selected_log_message"),
+        "{root_source}"
+    );
+    assert!(root_source.contains("mod android_logcat"), "{root_source}");
+    assert!(
+        root_source.contains("struct AndroidLogWriter"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("fn priority_for_level"),
+        "{root_source}"
+    );
+    assert!(
+        root_source.contains("fn write_android_log"),
+        "{root_source}"
+    );
+    assert_absent(
+        "root/src/lib.rs",
+        &root_source,
+        &["dead_log_message", "dead_android_helper"],
+    );
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
+fn prunes_std_ext_trait_import_when_only_pruned_code_uses_it() {
+    let fixture = repo_root().join("fixtures/slice_cases/std_ext_trait_import_prune");
+    let output = temp_path("slice-case-std-ext-trait-import-prune-output");
+    let target_dir = temp_path("slice-case-std-ext-trait-import-prune-target");
+
+    let report = generate_with_analyzer(
+        GenerateOptions {
+            workspace_root: fixture,
+            output_root: output.clone(),
+        },
+        AnalyzerMode::default_for_build(),
+    )
+    .expect("std_ext_trait_import_prune fixture should slice");
+
+    assert_eq!(report.packages, ["root"]);
+
+    let root_source = read(output.join("root/src/lib.rs"));
+    assert!(
+        root_source.contains("pub fn selected_exit_code"),
+        "{root_source}"
+    );
+    assert!(root_source.contains("ExitStatus"), "{root_source}");
+    assert_absent(
+        "root/src/lib.rs",
+        &root_source,
+        &["ExitStatusExt", "dead_exit_status_from_raw", "from_raw"],
+    );
+
+    assert_cargo_check(&output, &target_dir, &root_source, &report);
+}
+
+#[test]
 fn prunes_support_sub_dependencies_to_used_closure_with_default_analyzer() {
     let fixture = repo_root().join("fixtures/slice_cases/sub_dependency_prune");
     let output = temp_path("slice-case-sub-dependency-prune-output");
