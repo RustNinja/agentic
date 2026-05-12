@@ -3021,8 +3021,19 @@ fn event_log_path(options: &CliOptions) -> Option<PathBuf> {
     options.event_log.clone().or_else(|| {
         options
             .production_preset
-            .then(|| options.output_root.join("slice-events.jsonl"))
+            .then(|| default_event_log_path(&options.output_root))
     })
+}
+
+fn default_event_log_path(output_root: &Path) -> PathBuf {
+    let mut path = output_root.to_path_buf();
+    let file_name = output_root
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("slice-output");
+    path.set_file_name(format!("{file_name}-slice-events.jsonl"));
+    path
 }
 
 fn preflight_report_path(options: &CliOptions) -> PathBuf {
@@ -3045,6 +3056,15 @@ fn feedback_report_path(options: &CliOptions) -> Option<PathBuf> {
             .feedback_report
             .clone()
             .unwrap_or_else(|| options.output_root.join("slice-feedback.json"))
+    })
+}
+
+fn repair_report_path(options: &CliOptions) -> Option<PathBuf> {
+    (options.feedback_repair_iterations > 0).then(|| {
+        options
+            .repair_report
+            .clone()
+            .unwrap_or_else(|| options.output_root.join("slice-repair.json"))
     })
 }
 
@@ -3635,6 +3655,8 @@ struct DecisionLogReportPaths {
     #[serde(skip_serializing_if = "Option::is_none")]
     feedback_report: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    repair_report: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     feedback_target_dir: Option<PathBuf>,
 }
 
@@ -3648,6 +3670,7 @@ struct DecisionLogValidationSummary {
     failed_gates: Vec<String>,
     non_passed_gates: Vec<String>,
     gate_outcomes: Vec<DecisionLogGateOutcome>,
+    attempt_outcomes: Vec<DecisionLogAttemptOutcome>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3661,6 +3684,29 @@ struct DecisionLogGateOutcome {
     error_count: Option<usize>,
     #[serde(skip_serializing_if = "Option::is_none")]
     warning_count: Option<usize>,
+}
+
+#[derive(Debug, Serialize)]
+struct DecisionLogAttemptOutcome {
+    stage: String,
+    attempt: usize,
+    status: String,
+    reason: String,
+    report_path: PathBuf,
+    cargo_success: bool,
+    timed_out: bool,
+    error_count: usize,
+    warning_count: usize,
+    semantic_warning_hazards: usize,
+    repairable_warnings: usize,
+    widening_candidates: usize,
+    widening_hazards: usize,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback_widened_roots: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repair_report_path: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    repair_total_changes: Option<usize>,
 }
 
 #[derive(Debug, Serialize)]
@@ -3730,6 +3776,28 @@ fn build_decision_log(
                 warning_count: gate.warning_count,
             })
             .collect(),
+        attempt_outcomes: validation
+            .attempts
+            .iter()
+            .map(|attempt| DecisionLogAttemptOutcome {
+                stage: attempt.stage.clone(),
+                attempt: attempt.attempt,
+                status: attempt.status.clone(),
+                reason: attempt.reason.clone(),
+                report_path: attempt.report_path.clone(),
+                cargo_success: attempt.cargo_success,
+                timed_out: attempt.timed_out,
+                error_count: attempt.error_count,
+                warning_count: attempt.warning_count,
+                semantic_warning_hazards: attempt.semantic_warning_hazards,
+                repairable_warnings: attempt.repairable_warnings,
+                widening_candidates: attempt.widening_candidates,
+                widening_hazards: attempt.widening_hazards,
+                feedback_widened_roots: attempt.feedback_widened_roots,
+                repair_report_path: attempt.repair_report_path.clone(),
+                repair_total_changes: attempt.repair_total_changes,
+            })
+            .collect(),
     });
     DecisionLogReport {
         status: status.to_string(),
@@ -3758,6 +3826,7 @@ fn build_decision_log(
             event_log: event_log_path(options),
             preflight_report: maybe_preflight_report_path(options),
             feedback_report: feedback_report_path(options),
+            repair_report: repair_report_path(options),
             feedback_target_dir: (options.run_check
                 || options.feedback_iterations > 0
                 || options.feedback_repair_iterations > 0)
@@ -4113,6 +4182,91 @@ fn decision_log_steps(
     });
 
     if let Some(validation) = validation {
+        if !validation.attempts.is_empty() {
+            let last_attempt = validation.attempts.last();
+            let mut feedback_metrics = BTreeMap::new();
+            feedback_metrics.insert(
+                "attempts".to_string(),
+                serde_json::json!(validation.attempts.len()),
+            );
+            feedback_metrics.insert(
+                "accepted_attempts".to_string(),
+                serde_json::json!(validation
+                    .attempts
+                    .iter()
+                    .filter(|attempt| attempt.status == "accepted")
+                    .count()),
+            );
+            feedback_metrics.insert(
+                "repaired_attempts".to_string(),
+                serde_json::json!(validation
+                    .attempts
+                    .iter()
+                    .filter(|attempt| attempt.status == "repaired")
+                    .count()),
+            );
+            feedback_metrics.insert(
+                "widened_attempts".to_string(),
+                serde_json::json!(validation
+                    .attempts
+                    .iter()
+                    .filter(|attempt| attempt.status == "widened")
+                    .count()),
+            );
+            feedback_metrics.insert(
+                "rejected_attempts".to_string(),
+                serde_json::json!(validation
+                    .attempts
+                    .iter()
+                    .filter(|attempt| matches!(
+                        attempt.status.as_str(),
+                        "rejected" | "failed" | "timed_out" | "no_progress" | "low_progress"
+                    ))
+                    .count()),
+            );
+            feedback_metrics.insert(
+                "repair_total_changes".to_string(),
+                serde_json::json!(validation
+                    .attempts
+                    .iter()
+                    .filter_map(|attempt| attempt.repair_total_changes)
+                    .sum::<usize>()),
+            );
+            feedback_metrics.insert(
+                "last_errors".to_string(),
+                serde_json::json!(last_attempt.map(|attempt| attempt.error_count)),
+            );
+            feedback_metrics.insert(
+                "last_warnings".to_string(),
+                serde_json::json!(last_attempt.map(|attempt| attempt.warning_count)),
+            );
+            steps.push(DecisionLogStep {
+                step: "compiler_feedback".to_string(),
+                status: last_attempt
+                    .map(|attempt| attempt.status.clone())
+                    .unwrap_or_else(|| "not_run".to_string()),
+                decision: "check generated workspace and choose accept, conservative repair, root widening, or rejection".to_string(),
+                reason: "compiler feedback is the final runtime oracle for generated syntax, imports, lint hazards, and repair progress".to_string(),
+                metrics: feedback_metrics,
+                evidence: validation
+                    .attempts
+                    .iter()
+                    .map(|attempt| {
+                        format!(
+                            "{}#{} {}: {} (errors={}, warnings={}, repair_changes={})",
+                            attempt.stage,
+                            attempt.attempt,
+                            attempt.status,
+                            attempt.reason,
+                            attempt.error_count,
+                            attempt.warning_count,
+                            attempt.repair_total_changes.unwrap_or(0)
+                        )
+                    })
+                    .collect(),
+            });
+        }
+
         let mut validation_metrics = BTreeMap::new();
         validation_metrics.insert(
             "gates".to_string(),
@@ -4280,6 +4434,46 @@ fn try_widen_from_feedback(
     }
 
     state.diagnostics.extend(report.diagnostics.clone());
+    write_event_log(
+        options,
+        "feedback_widening",
+        "started",
+        "rerender generated workspace from compiler feedback roots",
+        "missing symbols and unresolved paths are converted into additional top-down roots before retrying cargo feedback",
+        event_fields(&[
+            ("stage", serde_json::json!(stage)),
+            ("attempt", serde_json::json!(attempt)),
+            ("diagnostics", serde_json::json!(state.diagnostics.len())),
+            (
+                "widening_candidates",
+                serde_json::json!(report.widening.candidates.len()),
+            ),
+            (
+                "widening_hazards",
+                serde_json::json!(report.widening.hazards.len()),
+            ),
+            ("report_path", serde_json::json!(report_path)),
+        ]),
+    )?;
+    let _widening_heartbeat = start_event_heartbeat(
+        options,
+        "feedback_widening",
+        "rerender generated workspace from compiler feedback roots",
+        "feedback widening is still resolving diagnostics, expanding roots, and writing the next candidate workspace",
+        event_fields(&[
+            ("stage", serde_json::json!(stage)),
+            ("attempt", serde_json::json!(attempt)),
+            ("diagnostics", serde_json::json!(state.diagnostics.len())),
+            (
+                "widening_candidates",
+                serde_json::json!(report.widening.candidates.len()),
+            ),
+            (
+                "widening_hazards",
+                serde_json::json!(report.widening.hazards.len()),
+            ),
+        ]),
+    );
     let widened_report = generate_with_analyzer_feedback_and_roots(
         GenerateOptions {
             workspace_root: options.workspace_root.clone(),
@@ -4295,7 +4489,24 @@ fn try_widen_from_feedback(
         .map(ToString::to_string)
         .collect::<Vec<_>>();
     let widened_signature = widened_roots.join("\n");
-    if widened_signature.is_empty() || !state.seen_root_sets.insert(widened_signature) {
+    let widened_signature_is_empty = widened_signature.is_empty();
+    if widened_signature_is_empty || !state.seen_root_sets.insert(widened_signature) {
+        write_event_log(
+            options,
+            "feedback_widening",
+            "skipped",
+            "stop feedback widening without rerun",
+            if widened_signature_is_empty {
+                "compiler feedback produced no additional roots that can be safely widened"
+            } else {
+                "compiler feedback produced the same widened root set as an earlier attempt"
+            },
+            event_fields(&[
+                ("stage", serde_json::json!(stage)),
+                ("attempt", serde_json::json!(attempt)),
+                ("widened_roots", serde_json::json!(widened_roots)),
+            ]),
+        )?;
         return Ok(false);
     }
 
@@ -4306,6 +4517,30 @@ fn try_widen_from_feedback(
         "feedback: widened {} root(s) from compiler diagnostics and re-rendered generated workspace",
         widened_roots.len()
     );
+    write_event_log(
+        options,
+        "feedback_widening",
+        "completed",
+        "rerender generated workspace from compiler feedback roots",
+        "compiler feedback widened the top-down root set and wrote the next candidate workspace",
+        event_fields(&[
+            ("stage", serde_json::json!(stage)),
+            ("attempt", serde_json::json!(attempt)),
+            ("widened_roots", serde_json::json!(&widened_roots)),
+            (
+                "production_status",
+                serde_json::json!(&widened_report.production.status),
+            ),
+            (
+                "production_hazards",
+                serde_json::json!(widened_report.production.hazards.len()),
+            ),
+            (
+                "files_written",
+                serde_json::json!(widened_report.files_written),
+            ),
+        ]),
+    )?;
     record_feedback_attempt(
         validation,
         stage,
@@ -4964,6 +5199,58 @@ fn run_feedback_repair_loop(
         );
 
         let repair_total_changes = repair_report.total_changes();
+        write_event_log(
+            options,
+            "feedback_repair_action",
+            if repair_total_changes > 0 {
+                "changed"
+            } else {
+                "unchanged"
+            },
+            "apply conservative generated-workspace repair from compiler diagnostics",
+            if repair_total_changes > 0 {
+                "repair changed only generated output and the next attempt must prove progress"
+            } else {
+                "no safe conservative repair matched the current diagnostics"
+            },
+            event_fields(&[
+                ("attempt", serde_json::json!(attempt)),
+                (
+                    "removed_items",
+                    serde_json::json!(repair_report.removed_items),
+                ),
+                (
+                    "removed_imports",
+                    serde_json::json!(repair_report.removed_imports),
+                ),
+                (
+                    "normalized_paths",
+                    serde_json::json!(repair_report.normalized_paths),
+                ),
+                (
+                    "applied_suggestions",
+                    serde_json::json!(repair_report.applied_suggestions),
+                ),
+                (
+                    "added_dead_code_allows",
+                    serde_json::json!(repair_report.added_dead_code_allows),
+                ),
+                (
+                    "deferred_dead_code_allows",
+                    serde_json::json!(repair_report.deferred_dead_code_allows),
+                ),
+                (
+                    "skipped_diagnostics",
+                    serde_json::json!(repair_report.skipped_diagnostics),
+                ),
+                (
+                    "changed_files",
+                    serde_json::json!(repair_report.changed_files),
+                ),
+                ("total_changes", serde_json::json!(repair_total_changes)),
+                ("repair_report", serde_json::json!(repair_report_path)),
+            ]),
+        )?;
         record_feedback_attempt(
             validation,
             "feedback-repair",
@@ -7162,7 +7449,7 @@ mod tests {
         );
         assert_eq!(
             event_log_path(&options),
-            Some(PathBuf::from("out/slice-events.jsonl"))
+            Some(PathBuf::from("out-slice-events.jsonl"))
         );
         assert_eq!(options.workspace_root, PathBuf::from("workspace"));
         assert_eq!(options.output_root, PathBuf::from("out"));
