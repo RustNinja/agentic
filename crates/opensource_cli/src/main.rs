@@ -2786,11 +2786,7 @@ fn run_batch_root(
     baseline: Option<&CheckReport>,
 ) -> Result<BatchRootReport, Box<dyn std::error::Error>> {
     let mut diagnostics = Vec::<CheckDiagnostic>::new();
-    let attempts = options
-        .feedback_iterations
-        .max(options.feedback_repair_iterations)
-        .max(usize::from(options.run_check));
-    let attempts = attempts.max(1);
+    let attempts = batch_root_attempts(options);
     let mut last_report = None;
     let mut last_preflight = None;
     let root_options = batch_root_live_artifact_options(options, root, output_root);
@@ -4470,6 +4466,21 @@ fn semantic_proof_warning_count(semantic: &SemanticReport) -> usize {
 
 fn batch_runs_check(options: &CliOptions) -> bool {
     options.run_check || options.feedback_iterations > 0 || options.feedback_repair_iterations > 0
+}
+
+fn batch_root_attempts(options: &CliOptions) -> usize {
+    let attempts = options
+        .feedback_iterations
+        .max(options.feedback_repair_iterations)
+        .max(usize::from(options.run_check))
+        .max(1);
+    if batch_runs_check(options)
+        && (options.feedback_iterations > 0 || options.feedback_repair_iterations > 0)
+    {
+        attempts.saturating_add(1)
+    } else {
+        attempts
+    }
 }
 
 fn batch_feedback_target_dir(options: &CliOptions) -> PathBuf {
@@ -9680,18 +9691,18 @@ mod tests {
 
     use super::{
         apply_default_marked_package_scope, baseline_limited_feedback_is_accepted,
-        baseline_target_dir, cargo_args_have_package_scope, decision_log_feedback_diagnostics,
-        decision_log_path, diagnostics_shape_signature, diagnostics_signature, event_log_path,
-        feedback_errors_are_baseline_known, feedback_is_accepted, feedback_repair_is_accepted,
-        initialize_event_log, parse_args_from, production_readiness_blocks_validation,
-        production_validation_matrix_entries, record_feedback_attempt,
-        record_final_production_readiness, record_production_readiness_gate,
-        refresh_generated_lockfile_for_locked_validation, run_batch_roots,
-        run_feedback_repair_loop, run_plain_check_gate, semantic_hazard_warning_count,
-        semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
-        slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
-        validation_report_path, write_feedback_diagnostics_event, write_report,
-        FeedbackWideningState, ValidationGateReport, ValidationReport,
+        baseline_target_dir, batch_root_attempts, cargo_args_have_package_scope,
+        decision_log_feedback_diagnostics, decision_log_path, diagnostics_shape_signature,
+        diagnostics_signature, event_log_path, feedback_errors_are_baseline_known,
+        feedback_is_accepted, feedback_repair_is_accepted, initialize_event_log, parse_args_from,
+        production_readiness_blocks_validation, production_validation_matrix_entries,
+        record_feedback_attempt, record_final_production_readiness,
+        record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
+        run_batch_roots, run_feedback_repair_loop, run_plain_check_gate,
+        semantic_hazard_warning_count, semantic_proof_block_reason, semantic_proof_status,
+        should_run_deferred_warning_repair, slice_report_path, try_widen_from_feedback,
+        uncovered_validation_targets, validation_report_path, write_feedback_diagnostics_event,
+        write_report, FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -10963,6 +10974,41 @@ resolver = "2"
         assert_eq!(options.random_root_packages, ["codex-ipc"]);
         assert!(options.batch_roots);
         assert_eq!(options.random_seed, 7);
+    }
+
+    #[test]
+    fn batch_feedback_attempts_allow_final_widen_verification() {
+        let check_only = parse_options([
+            "--batch-roots",
+            "--root",
+            "app::selected",
+            "--check",
+            "workspace",
+            "out",
+        ]);
+        assert_eq!(batch_root_attempts(&check_only), 1);
+
+        let repair_once = parse_options([
+            "--batch-roots",
+            "--root",
+            "app::selected",
+            "--feedback-repair-loop",
+            "1",
+            "workspace",
+            "out",
+        ]);
+        assert_eq!(batch_root_attempts(&repair_once), 2);
+
+        let feedback_three = parse_options([
+            "--batch-roots",
+            "--root",
+            "app::selected",
+            "--feedback-loop",
+            "3",
+            "workspace",
+            "out",
+        ]);
+        assert_eq!(batch_root_attempts(&feedback_three), 4);
     }
 
     #[test]

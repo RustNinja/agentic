@@ -1811,3 +1811,17 @@ settings root reported 2 feedback diagnostics, 1 widening candidate, 1 widening
 hazard, and 1 source/API mismatch candidate for `AppAccount` versus the available
 `Account`, so the batch row alone is enough to avoid misclassifying it as a
 generic dependency-retention failure.
+
+That same probe exposed a batch-control-flow mismatch with single-root feedback:
+`--feedback-repair-loop 1` logged a matched widening root, but batch mode had no
+second generation/check pass to verify the final diagnostic-driven root set.
+Batch roots now reserve one extra attempt whenever feedback or repair feedback is
+enabled. Plain `--check` still runs once, while feedback/repair batches get the
+same final-widen verification opportunity as the single-root CLI path.
+
+The follow-up Litter batch confirmed the extra pass is active: the
+message-item root generated attempt 2 with 7 diagnostics available, retained the
+`codex-mobile-client::conversation` module, and moved from an unresolved module
+import to a narrower set of glob-import missing-export candidates under
+`codex_mobile_client::conversation::*`. That is now a separate source/API or
+export-surface question instead of a batch-loop failure.
