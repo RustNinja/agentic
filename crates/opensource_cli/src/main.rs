@@ -1296,6 +1296,12 @@ fn decision_log_feedback_diagnostics(
                                     &mut summary.evidence,
                                     limit,
                                 );
+                            summary.glob_import_missing_export_candidates +=
+                                decision_log_glob_import_missing_export_candidates(
+                                    &resolution,
+                                    &mut summary.evidence,
+                                    limit,
+                                );
                             decision_log_feedback_resolution_evidence(
                                 &resolution,
                                 &mut summary.evidence,
@@ -1477,6 +1483,31 @@ fn decision_log_source_api_mismatch_candidates(
 				));
             }
             break;
+        }
+    }
+    candidates
+}
+
+fn decision_log_glob_import_missing_export_candidates(
+    resolution: &FeedbackRootResolutionReport,
+    evidence: &mut Vec<String>,
+    limit: usize,
+) -> usize {
+    let mut candidates = 0;
+    for entry in &resolution.entries {
+        if entry.matches != 0 || entry.glob_import_module_roots.is_empty() {
+            continue;
+        }
+        candidates += 1;
+        if evidence.len() < limit {
+            let diagnostic_file = entry.diagnostic_file.as_deref().unwrap_or("<unknown>");
+            evidence.push(format!(
+				"glob_import_missing_export_candidate symbol=`{}` diagnostic_file={} glob_imports={} provider_module_roots={} reason=glob provider module resolved but no project-local export/root matched the missing symbol",
+				entry.symbol,
+				diagnostic_file,
+				entry.glob_imports.join(","),
+				entry.glob_import_module_roots.join(",")
+			));
         }
     }
     candidates
@@ -5437,6 +5468,7 @@ struct FeedbackDiagnosticLogSummary {
     resolution_skipped_too_many_matches: usize,
     source_api_mismatch_candidates: usize,
     glob_import_context_entries: usize,
+    glob_import_missing_export_candidates: usize,
     evidence: Vec<String>,
 }
 
@@ -6227,6 +6259,10 @@ fn decision_log_steps(
             diagnostic_metrics.insert(
                 "glob_import_context_entries".to_string(),
                 serde_json::json!(diagnostic_summary.glob_import_context_entries),
+            );
+            diagnostic_metrics.insert(
+                "glob_import_missing_export_candidates".to_string(),
+                serde_json::json!(diagnostic_summary.glob_import_missing_export_candidates),
             );
             steps.push(DecisionLogStep {
                 step: "feedback_diagnostics".to_string(),
@@ -11639,6 +11675,17 @@ pub fn entry() -> usize {
 
         assert_eq!(summary.resolution_reports, 1);
         assert_eq!(summary.glob_import_context_entries, 1);
+        assert_eq!(summary.glob_import_missing_export_candidates, 1);
+        assert!(
+            summary.evidence.iter().any(|entry| {
+                entry.contains("glob_import_missing_export_candidate symbol=`ConversationItem`")
+                    && entry.contains("diagnostic_file=app/src/lib.rs")
+                    && entry.contains("glob_imports=provider::conversation::*")
+                    && entry.contains("provider_module_roots=provider::conversation(Mod)")
+            }),
+            "{:#?}",
+            summary.evidence
+        );
         assert!(
             summary.evidence.iter().any(|entry| {
                 entry.contains("symbol=`ConversationItem`")
