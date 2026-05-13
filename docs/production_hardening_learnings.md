@@ -1726,3 +1726,15 @@ surfaces with zero prunable or unclassified retained members. The settings root
 still failed on `codex_mobile_client::types::AppAccount`; the checked-out source
 defines/reexports `Account` but does not define `AppAccount`, so this probe is
 tracked as a source/upstream mismatch rather than a member-retention regression.
+
+Compiler feedback needs to be visible in the same per-root decision log as the
+top-down retention proof. A rebuilt shared RA-HIR Litter probe over
+`settings::render` and `theme::health_color` now emits `feedback_diagnostics`.
+For the accepted health root the step records one clean feedback report. For the
+settings root it records one report, one error, one widening candidate, and the
+exact `E0432` primary span for
+`codex_mobile_client::types::AppAccount` in `codex-tui/src/screens/settings.rs`.
+That makes the next mining loop actionable: a failed generated workspace can be
+categorized from `slice-decision-log.json` as source mismatch, missing
+downstream dependency, or slicer bug before opening the larger
+`slice-feedback.json`.

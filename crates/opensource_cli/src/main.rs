@@ -1004,6 +1004,136 @@ fn retained_source_file_count(report: &GenerateReport) -> usize {
     files.len()
 }
 
+fn decision_log_feedback_diagnostics(
+    validation: &ValidationReport,
+    limit: usize,
+) -> FeedbackDiagnosticLogSummary {
+    let mut summary = FeedbackDiagnosticLogSummary::default();
+    for report_path in decision_log_feedback_report_paths(validation) {
+        match read_feedback_report_for_decision_log(&report_path) {
+            Ok(report) => {
+                summary.reports += 1;
+                summary.diagnostics += report.diagnostics.len();
+                summary.errors += report.error_count();
+                summary.warnings += report.warning_count();
+                summary.widening_candidates += report.widening.candidates.len();
+                summary.widening_hazards += report.widening.hazards.len();
+                if summary.evidence.len() < limit {
+                    summary.evidence.push(format!(
+                        "report {} success={} errors={} warnings={} duration_ms={}",
+                        report_path.display(),
+                        report.success,
+                        report.error_count(),
+                        report.warning_count(),
+                        report.duration_ms
+                    ));
+                }
+                for candidate in &report.widening.candidates {
+                    if summary.evidence.len() >= limit {
+                        break;
+                    }
+                    let symbol = candidate.symbol.as_deref().unwrap_or("<unknown>");
+                    let location = candidate
+                        .file_name
+                        .as_deref()
+                        .zip(candidate.line_start)
+                        .map(|(file, line)| format!("{file}:{line}"))
+                        .unwrap_or_else(|| "<unknown>".to_string());
+                    summary.evidence.push(format!(
+                        "widening {} `{}` at {}: {}",
+                        candidate.kind, symbol, location, candidate.action
+                    ));
+                }
+                for diagnostic in prioritized_diagnostics(&report.diagnostics) {
+                    if summary.evidence.len() >= limit {
+                        break;
+                    }
+                    summary
+                        .evidence
+                        .push(decision_log_diagnostic_summary(diagnostic));
+                }
+            }
+            Err(error) => {
+                summary.unreadable_reports += 1;
+                if summary.evidence.len() < limit {
+                    summary.evidence.push(format!(
+                        "unreadable report {}: {}",
+                        report_path.display(),
+                        error
+                    ));
+                }
+            }
+        }
+    }
+    summary
+}
+
+fn decision_log_feedback_report_paths(validation: &ValidationReport) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    let mut seen_reports = BTreeSet::new();
+    for attempt in &validation.attempts {
+        if seen_reports.insert(attempt.report_path.clone()) {
+            paths.push(attempt.report_path.clone());
+        }
+    }
+    for gate in &validation.gates {
+        let Some(report_path) = &gate.report_path else {
+            continue;
+        };
+        if !decision_log_gate_has_feedback_report(gate, report_path) {
+            continue;
+        }
+        if seen_reports.insert(report_path.clone()) {
+            paths.push(report_path.clone());
+        }
+    }
+    paths
+}
+
+fn decision_log_gate_has_feedback_report(gate: &ValidationGateReport, report_path: &Path) -> bool {
+    if matches!(gate.name.as_str(), "feedback" | "feedback-repair") {
+        return true;
+    }
+    report_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| name.contains("feedback"))
+}
+
+fn read_feedback_report_for_decision_log(
+    path: &Path,
+) -> Result<CheckReport, Box<dyn std::error::Error>> {
+    let bytes = fs::read(path)?;
+    let report = serde_json::from_slice(&bytes)?;
+    Ok(report)
+}
+
+fn decision_log_diagnostic_summary(diagnostic: &CheckDiagnostic) -> String {
+    let code = diagnostic.code.as_deref().unwrap_or("no_code");
+    let mut primary_spans = diagnostic
+        .spans
+        .iter()
+        .filter(|span| span.is_primary)
+        .take(2)
+        .map(|span| {
+            format!(
+                "{}:{}:{}-{}",
+                span.file_name, span.line_start, span.column_start, span.column_end
+            )
+        })
+        .collect::<Vec<_>>();
+    if primary_spans.is_empty() {
+        primary_spans.push("<no_primary_span>".to_string());
+    }
+    format!(
+        "{}[{}] at {}: {}",
+        diagnostic.level,
+        code,
+        primary_spans.join(", "),
+        diagnostic.message
+    )
+}
+
 fn accumulate_rendered_usage_decisions(
     kind: &str,
     decisions: &BTreeMap<String, String>,
@@ -4252,6 +4382,18 @@ struct DecisionLogStep {
     evidence: Vec<String>,
 }
 
+#[derive(Debug, Default)]
+struct FeedbackDiagnosticLogSummary {
+    reports: usize,
+    unreadable_reports: usize,
+    diagnostics: usize,
+    errors: usize,
+    warnings: usize,
+    widening_candidates: usize,
+    widening_hazards: usize,
+    evidence: Vec<String>,
+}
+
 fn write_decision_log(
     options: &CliOptions,
     report: &GenerateReport,
@@ -4925,6 +5067,56 @@ fn decision_log_steps(
                         )
                     })
                     .collect(),
+            });
+        }
+
+        let diagnostic_summary = decision_log_feedback_diagnostics(validation, 30);
+        if diagnostic_summary.reports > 0 || diagnostic_summary.unreadable_reports > 0 {
+            let mut diagnostic_metrics = BTreeMap::new();
+            diagnostic_metrics.insert(
+                "reports".to_string(),
+                serde_json::json!(diagnostic_summary.reports),
+            );
+            diagnostic_metrics.insert(
+                "unreadable_reports".to_string(),
+                serde_json::json!(diagnostic_summary.unreadable_reports),
+            );
+            diagnostic_metrics.insert(
+                "diagnostics".to_string(),
+                serde_json::json!(diagnostic_summary.diagnostics),
+            );
+            diagnostic_metrics.insert(
+                "errors".to_string(),
+                serde_json::json!(diagnostic_summary.errors),
+            );
+            diagnostic_metrics.insert(
+                "warnings".to_string(),
+                serde_json::json!(diagnostic_summary.warnings),
+            );
+            diagnostic_metrics.insert(
+                "widening_candidates".to_string(),
+                serde_json::json!(diagnostic_summary.widening_candidates),
+            );
+            diagnostic_metrics.insert(
+                "widening_hazards".to_string(),
+                serde_json::json!(diagnostic_summary.widening_hazards),
+            );
+            steps.push(DecisionLogStep {
+                step: "feedback_diagnostics".to_string(),
+                status: if diagnostic_summary.errors > 0 {
+                    "errors".to_string()
+                } else if diagnostic_summary.warnings > 0 {
+                    "warnings".to_string()
+                } else if diagnostic_summary.unreadable_reports > 0 {
+                    "partial".to_string()
+                } else {
+                    "clean".to_string()
+                },
+                decision: "record compiler diagnostic shape for slice mining and failure triage"
+                    .to_string(),
+                reason: "diagnostic codes, primary files, widening candidates, and warning/error counts explain why a generated slice was accepted, repaired, widened, or rejected without opening the raw feedback JSON first".to_string(),
+                metrics: diagnostic_metrics,
+                evidence: diagnostic_summary.evidence,
             });
         }
 
@@ -9357,6 +9549,10 @@ pub fn helper() -> usize {
         );
         assert!(
             decision_log.contains("slice-feedback.json"),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("\"step\": \"feedback_diagnostics\""),
             "{decision_log}"
         );
     }
