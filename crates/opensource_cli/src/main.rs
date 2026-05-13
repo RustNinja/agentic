@@ -1324,12 +1324,20 @@ fn accumulate_feedback_diagnostic_summary(
                     .entries
                     .iter()
                     .filter(|entry| {
-                        !entry.glob_imports.is_empty() || !entry.glob_import_module_roots.is_empty()
+                        !entry.glob_imports.is_empty()
+                            || !entry.glob_import_module_roots.is_empty()
+                            || !entry.glob_import_provider_internal_globs.is_empty()
                     })
                     .count();
                 summary.source_api_mismatch_candidates +=
                     decision_log_source_api_mismatch_candidates(
                         report,
+                        &resolution,
+                        &mut summary.evidence,
+                        limit,
+                    );
+                summary.glob_import_private_upstream_candidates +=
+                    decision_log_glob_import_private_upstream_candidates(
                         &resolution,
                         &mut summary.evidence,
                         limit,
@@ -1465,6 +1473,10 @@ fn feedback_diagnostic_metrics(
         "glob_import_missing_export_candidates".to_string(),
         serde_json::json!(summary.glob_import_missing_export_candidates),
     );
+    metrics.insert(
+        "glob_import_private_upstream_candidates".to_string(),
+        serde_json::json!(summary.glob_import_private_upstream_candidates),
+    );
     metrics
 }
 
@@ -1504,20 +1516,29 @@ fn decision_log_feedback_resolution_evidence(
                 )
             })
             .unwrap_or_default();
+        let provider_internal_globs = (!entry.glob_import_provider_internal_globs.is_empty())
+            .then(|| {
+                format!(
+                    " provider_internal_globs={}",
+                    entry.glob_import_provider_internal_globs.join(",")
+                )
+            })
+            .unwrap_or_default();
         evidence.push(format!(
-			"resolution {} symbol=`{}` package_hint={} matches={} retained_roots={} skipped_marked_roots={} action={} roots={}{}{}{}",
-			entry.code,
-			entry.symbol,
-			package_hint,
-			entry.matches,
-			entry.retained_roots,
+				"resolution {} symbol=`{}` package_hint={} matches={} retained_roots={} skipped_marked_roots={} action={} roots={}{}{}{}{}",
+				entry.code,
+				entry.symbol,
+				package_hint,
+				entry.matches,
+				entry.retained_roots,
 			entry.skipped_marked_roots,
 			entry.action,
-			entry.roots.join(","),
-			diagnostic_file,
-			glob_imports,
-			glob_import_roots
-		));
+				entry.roots.join(","),
+				diagnostic_file,
+				glob_imports,
+				glob_import_roots,
+				provider_internal_globs
+			));
     }
     if resolution.entries_truncated && evidence.len() < limit {
         evidence.push("feedback resolution entries truncated".to_string());
@@ -1599,12 +1620,47 @@ fn decision_log_glob_import_missing_export_candidates(
         candidates += 1;
         if evidence.len() < limit {
             let diagnostic_file = entry.diagnostic_file.as_deref().unwrap_or("<unknown>");
+            let provider_internal_globs = if entry.glob_import_provider_internal_globs.is_empty() {
+                "<none>".to_string()
+            } else {
+                entry.glob_import_provider_internal_globs.join(",")
+            };
             evidence.push(format!(
-				"glob_import_missing_export_candidate symbol=`{}` diagnostic_file={} glob_imports={} provider_module_roots={} reason=glob provider module resolved but no project-local export/root matched the missing symbol",
+					"glob_import_missing_export_candidate symbol=`{}` diagnostic_file={} glob_imports={} provider_module_roots={} provider_internal_globs={} reason=glob provider module resolved but no project-local export/root matched the missing symbol",
+					entry.symbol,
+					diagnostic_file,
+					entry.glob_imports.join(","),
+					entry.glob_import_module_roots.join(","),
+					provider_internal_globs
+				));
+        }
+    }
+    candidates
+}
+
+fn decision_log_glob_import_private_upstream_candidates(
+    resolution: &FeedbackRootResolutionReport,
+    evidence: &mut Vec<String>,
+    limit: usize,
+) -> usize {
+    let mut candidates = 0;
+    for entry in &resolution.entries {
+        if entry.matches != 0
+            || entry.glob_import_module_roots.is_empty()
+            || entry.glob_import_provider_internal_globs.is_empty()
+        {
+            continue;
+        }
+        candidates += 1;
+        if evidence.len() < limit {
+            let diagnostic_file = entry.diagnostic_file.as_deref().unwrap_or("<unknown>");
+            evidence.push(format!(
+				"glob_import_private_upstream_candidate symbol=`{}` diagnostic_file={} glob_imports={} provider_module_roots={} provider_internal_globs={} reason=glob provider module exists but only imports upstream glob names privately; missing symbol is not a public export of the imported module",
 				entry.symbol,
 				diagnostic_file,
 				entry.glob_imports.join(","),
-				entry.glob_import_module_roots.join(",")
+				entry.glob_import_module_roots.join(","),
+				entry.glob_import_provider_internal_globs.join(",")
 			));
         }
     }
@@ -1837,6 +1893,7 @@ struct BatchRootReport {
     source_api_mismatch_candidates: Option<usize>,
     glob_import_context_entries: Option<usize>,
     glob_import_missing_export_candidates: Option<usize>,
+    glob_import_private_upstream_candidates: Option<usize>,
     duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_error: Option<String>,
@@ -2664,6 +2721,7 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 source_api_mismatch_candidates: None,
                 glob_import_context_entries: None,
                 glob_import_missing_export_candidates: None,
+                glob_import_private_upstream_candidates: None,
                 duration_ms: elapsed_ms(started),
                 artifact_error: None,
                 error: Some(error.to_string()),
@@ -2737,6 +2795,10 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 (
                     "glob_import_missing_export_candidates",
                     serde_json::json!(row.glob_import_missing_export_candidates),
+                ),
+                (
+                    "glob_import_private_upstream_candidates",
+                    serde_json::json!(row.glob_import_private_upstream_candidates),
                 ),
             ]),
         )?;
@@ -4044,6 +4106,9 @@ fn batch_row_from_reports(
         glob_import_missing_export_candidates: feedback_summary
             .as_ref()
             .map(|summary| summary.glob_import_missing_export_candidates),
+        glob_import_private_upstream_candidates: feedback_summary
+            .as_ref()
+            .map(|summary| summary.glob_import_private_upstream_candidates),
         duration_ms: 0,
         artifact_error: None,
         error,
@@ -5674,6 +5739,7 @@ struct FeedbackDiagnosticLogSummary {
     source_api_mismatch_candidates: usize,
     glob_import_context_entries: usize,
     glob_import_missing_export_candidates: usize,
+    glob_import_private_upstream_candidates: usize,
     evidence: Vec<String>,
 }
 
@@ -11867,6 +11933,7 @@ pub fn entry() -> usize {
         assert_eq!(summary.resolution_reports, 1);
         assert_eq!(summary.glob_import_context_entries, 1);
         assert_eq!(summary.glob_import_missing_export_candidates, 1);
+        assert_eq!(summary.glob_import_private_upstream_candidates, 0);
         assert!(
             summary.evidence.iter().any(|entry| {
                 entry.contains("glob_import_missing_export_candidate symbol=`ConversationItem`")
@@ -11892,7 +11959,133 @@ pub fn entry() -> usize {
         let events = fs::read_to_string(event_log).unwrap();
         assert!(events.contains("\"event\":\"feedback_diagnostics\""));
         assert!(events.contains("\"glob_import_missing_export_candidates\":1"));
+        assert!(events.contains("\"glob_import_private_upstream_candidates\":0"));
         assert!(events.contains("glob_import_missing_export_candidate symbol=`ConversationItem`"));
+    }
+
+    #[test]
+    fn feedback_diagnostics_log_private_provider_glob_for_bare_missing_symbol() {
+        let source = temp_path("cli-feedback-diagnostics-private-glob-source");
+        let output = temp_path("cli-feedback-diagnostics-private-glob-output");
+        let event_log =
+            temp_path("cli-feedback-diagnostics-private-glob-events").join("events.jsonl");
+        let opensourced_path = repo_root().join("crates/opensourced");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"provider\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nprovider = {{ path = \"../provider\" }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use provider::conversation::*;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            source.join("provider/Cargo.toml"),
+            "[package]\nname = \"provider\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            source.join("provider/src/lib.rs"),
+            r#"pub mod conversation;
+pub mod conversation_uniffi;
+"#,
+        );
+        write(
+            source.join("provider/src/conversation.rs"),
+            r#"use crate::conversation_uniffi::*;
+
+pub fn hydrate() -> HydratedConversationItem {
+    HydratedConversationItem
+}
+"#,
+        );
+        write(
+            source.join("provider/src/conversation_uniffi.rs"),
+            r#"pub struct HydratedConversationItem;
+"#,
+        );
+        let options = parse_args_from(vec![
+            OsString::from("--event-log"),
+            event_log.clone().into_os_string(),
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        initialize_event_log(&options).expect("event log should initialize");
+        let mut validation = ValidationReport::new(&options);
+        let feedback_path = output.join("slice-feedback.json");
+        let mut unresolved = diagnostic_with_span(
+            "E0412",
+            "cannot find type `ConversationItem` in this scope",
+            "app/src/lib.rs",
+            5,
+            22,
+            38,
+        );
+        unresolved.package_id = Some("app 0.1.0 (path+file:///tmp/app)".to_string());
+        let check_report = report(false, vec![unresolved]);
+        write_report(&check_report, &feedback_path).expect("feedback report should write");
+        record_feedback_attempt(
+            &mut validation,
+            "feedback-repair",
+            2,
+            "rejected_after_widen",
+            "final verification after compiler feedback widening did not pass",
+            &check_report,
+            feedback_path,
+            false,
+            0,
+            0,
+            None,
+            None,
+        );
+
+        let summary = decision_log_feedback_diagnostics(&options, &validation, 40);
+        write_feedback_diagnostics_event(&options, &validation)
+            .expect("feedback diagnostics event should write");
+
+        assert_eq!(summary.resolution_reports, 1);
+        assert_eq!(summary.glob_import_context_entries, 1);
+        assert_eq!(summary.glob_import_missing_export_candidates, 1);
+        assert_eq!(summary.glob_import_private_upstream_candidates, 1);
+        assert!(
+            summary.evidence.iter().any(|entry| {
+                entry.contains("glob_import_private_upstream_candidate symbol=`ConversationItem`")
+                    && entry.contains("diagnostic_file=app/src/lib.rs")
+                    && entry.contains("glob_imports=provider::conversation::*")
+                    && entry.contains("provider_module_roots=provider::conversation(Mod)")
+                    && entry.contains("provider_internal_globs=provider::conversation_uniffi::*")
+            }),
+            "{:#?}",
+            summary.evidence
+        );
+        assert!(
+            summary.evidence.iter().any(|entry| {
+                entry.contains("symbol=`ConversationItem`")
+                    && entry.contains("glob_imports=provider::conversation::*")
+                    && entry.contains("glob_import_module_roots=provider::conversation(Mod)")
+                    && entry.contains("provider_internal_globs=provider::conversation_uniffi::*")
+            }),
+            "{:#?}",
+            summary.evidence
+        );
+        let events = fs::read_to_string(event_log).unwrap();
+        assert!(events.contains("\"event\":\"feedback_diagnostics\""));
+        assert!(events.contains("\"glob_import_missing_export_candidates\":1"));
+        assert!(events.contains("\"glob_import_private_upstream_candidates\":1"));
+        assert!(events.contains("glob_import_private_upstream_candidate symbol=`ConversationItem`"));
     }
 
     #[test]

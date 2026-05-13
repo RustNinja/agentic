@@ -1825,3 +1825,14 @@ message-item root generated attempt 2 with 7 diagnostics available, retained the
 import to a narrower set of glob-import missing-export candidates under
 `codex_mobile_client::conversation::*`. That is now a separate source/API or
 export-surface question instead of a batch-loop failure.
+
+The next classifier split makes that export-surface question explicit. If a
+diagnostic file imports `provider::module::*`, the provider module resolves, no
+project-local item/export matches the missing bare symbol, and that provider
+module only has private upstream glob imports such as
+`use crate::conversation_uniffi::*`, feedback now reports
+`glob_import_private_upstream_candidates`. This mirrors the Litter
+`message_item::render` shape where `conversation::*` is present but the missing
+unprefixed names are not public exports of `conversation`. The slicer still
+fails closed, but miners can now separate private-upstream export/API drift from
+ordinary missing dependency retention.

@@ -121,6 +121,8 @@ pub struct FeedbackRootResolutionEntry {
     pub glob_imports: Vec<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub glob_import_module_roots: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub glob_import_provider_internal_globs: Vec<String>,
     pub matches: usize,
     pub retained_roots: usize,
     pub skipped_marked_roots: usize,
@@ -2193,6 +2195,7 @@ fn feedback_extra_roots_with_report(
                     diagnostic_file: None,
                     glob_imports: Vec::new(),
                     glob_import_module_roots: Vec::new(),
+                    glob_import_provider_internal_globs: Vec::new(),
                     matches: retained_roots.len() + skipped_marked_roots,
                     retained_roots: retained_roots.len(),
                     skipped_marked_roots,
@@ -2237,6 +2240,9 @@ fn feedback_extra_roots_with_report(
                         glob_import_module_roots: glob_import_context
                             .glob_import_module_roots
                             .clone(),
+                        glob_import_provider_internal_globs: glob_import_context
+                            .glob_import_provider_internal_globs
+                            .clone(),
                         matches: 0,
                         retained_roots: 0,
                         skipped_marked_roots: 0,
@@ -2258,6 +2264,7 @@ fn feedback_extra_roots_with_report(
                         diagnostic_file: None,
                         glob_imports: Vec::new(),
                         glob_import_module_roots: Vec::new(),
+                        glob_import_provider_internal_globs: Vec::new(),
                         matches: candidates.len(),
                         retained_roots: 0,
                         skipped_marked_roots: 0,
@@ -2282,6 +2289,7 @@ fn feedback_extra_roots_with_report(
                     diagnostic_file: None,
                     glob_imports: Vec::new(),
                     glob_import_module_roots: Vec::new(),
+                    glob_import_provider_internal_globs: Vec::new(),
                     matches,
                     retained_roots: retained_roots.len(),
                     skipped_marked_roots,
@@ -2337,6 +2345,7 @@ struct FeedbackGlobImportContext {
     diagnostic_file: Option<String>,
     glob_imports: Vec<String>,
     glob_import_module_roots: Vec<String>,
+    glob_import_provider_internal_globs: Vec<String>,
 }
 
 fn diagnostic_glob_import_context(
@@ -2363,21 +2372,28 @@ fn diagnostic_glob_import_context(
 
     let mut glob_imports = Vec::new();
     let mut glob_import_module_roots = Vec::new();
+    let mut glob_import_provider_internal_globs = Vec::new();
     for segments in glob_paths {
         glob_imports.push(format!("{}::*", segments.join("::")));
         glob_import_module_roots.extend(
             glob_import_module_root(project, source, &segments).map(|root| root.to_string()),
         );
+        glob_import_provider_internal_globs.extend(provider_internal_globs_for_glob_import(
+            project, source, &segments,
+        ));
     }
     glob_imports.sort();
     glob_imports.dedup();
     glob_import_module_roots.sort();
     glob_import_module_roots.dedup();
+    glob_import_provider_internal_globs.sort();
+    glob_import_provider_internal_globs.dedup();
 
     FeedbackGlobImportContext {
         diagnostic_file,
         glob_imports,
         glob_import_module_roots,
+        glob_import_provider_internal_globs,
     }
 }
 
@@ -2445,6 +2461,57 @@ fn glob_import_module_root(
         .items
         .contains_key(&item)
         .then_some(RootId::Item(item))
+}
+
+fn provider_internal_globs_for_glob_import(
+    project: &Project,
+    source: &model::SourceFile,
+    segments: &[String],
+) -> Vec<String> {
+    let Some((package, module_segments)) =
+        resolve_glob_import_module_segments(project, source, segments)
+    else {
+        return Vec::new();
+    };
+    let Some(provider_source) = project
+        .files
+        .values()
+        .find(|candidate| candidate.package == package && candidate.module_path == module_segments)
+    else {
+        return Vec::new();
+    };
+    let mut provider_globs = Vec::new();
+    for item in &provider_source.syntax.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        if !matches!(item_use.vis, syn::Visibility::Inherited) {
+            continue;
+        }
+        let mut glob_paths = Vec::new();
+        collect_glob_import_paths(&item_use.tree, Vec::new(), &mut glob_paths);
+        for glob_path in glob_paths {
+            if let Some((glob_package, glob_module_segments)) =
+                resolve_glob_import_module_segments(project, provider_source, &glob_path)
+            {
+                provider_globs.push(format_package_module_glob(
+                    &glob_package,
+                    &glob_module_segments,
+                ));
+            } else {
+                provider_globs.push(format!("{}::*", glob_path.join("::")));
+            }
+        }
+    }
+    provider_globs
+}
+
+fn format_package_module_glob(package: &str, module_segments: &[String]) -> String {
+    if module_segments.is_empty() {
+        format!("{package}::*")
+    } else {
+        format!("{package}::{}::*", module_segments.join("::"))
+    }
 }
 
 fn resolve_glob_import_module_segments(
@@ -18227,6 +18294,100 @@ pub fn entry() -> usize {
         assert_eq!(
             entry.action,
             "no matching project-local root; inspect glob import provider module roots"
+        );
+    }
+
+    #[test]
+    fn feedback_resolution_logs_private_provider_globs_for_missing_bare_symbol() {
+        let root = temp_output("feedback-private-provider-glob-context-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"provider\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nprovider = {{ path = \"../provider\" }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use provider::conversation::*;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            root.join("provider/Cargo.toml"),
+            "[package]\nname = \"provider\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("provider/src/lib.rs"),
+            r#"pub mod conversation;
+pub mod conversation_uniffi;
+"#,
+        );
+        write(
+            root.join("provider/src/conversation.rs"),
+            r#"use crate::conversation_uniffi::*;
+
+pub fn hydrate() -> HydratedConversationItem {
+    HydratedConversationItem
+}
+"#,
+        );
+        write(
+            root.join("provider/src/conversation_uniffi.rs"),
+            r#"pub struct HydratedConversationItem;
+"#,
+        );
+
+        let diagnostic = CheckDiagnostic {
+            level: "error".to_string(),
+            message: "cannot find type `ConversationItem` in this scope".to_string(),
+            code: Some("E0412".to_string()),
+            package_id: Some("app 0.1.0 (path+file:///tmp/app)".to_string()),
+            target: None,
+            rendered: None,
+            spans: vec![CheckSpan {
+                file_name: "app/src/lib.rs".to_string(),
+                line_start: 5,
+                line_end: 5,
+                column_start: 22,
+                column_end: 38,
+                is_primary: true,
+                text: Vec::new(),
+            }],
+            suggestions: Vec::new(),
+        };
+        let resolution =
+            resolve_feedback_widening_roots(&root, std::slice::from_ref(&diagnostic), &[])
+                .expect("feedback root resolution should load");
+
+        assert!(resolution.matched_roots.is_empty(), "{resolution:#?}");
+        assert_eq!(resolution.skipped_no_match, 1);
+        let entry = resolution
+            .entries
+            .iter()
+            .find(|entry| entry.symbol == "ConversationItem")
+            .expect("missing symbol should have a resolution entry");
+        assert_eq!(
+            entry.glob_imports,
+            vec!["provider::conversation::*".to_string()]
+        );
+        assert_eq!(
+            entry.glob_import_module_roots,
+            vec!["provider::conversation(Mod)".to_string()]
+        );
+        assert_eq!(
+            entry.glob_import_provider_internal_globs,
+            vec!["provider::conversation_uniffi::*".to_string()]
         );
     }
 
