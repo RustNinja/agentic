@@ -1,6 +1,6 @@
 # Production Hardening Learnings
 
-Last updated: 2026-05-11
+Last updated: 2026-05-13
 
 This document captures the implementation lessons from moving the slicer from a
 small proof-of-concept toward a production Rust workspace slicer. It is written
@@ -183,6 +183,13 @@ Generic source repair wins came from recognizing patterns, not projects:
 - Exact repeated diagnostics and repeated diagnostic shapes now stop feedback,
   repair, and production-matrix loops early with structured reports. This keeps
   repeated builds from consuming time when the graph has stopped changing.
+- Feedback diagnostics for bare missing symbols must record nearby glob-import
+  context before widening. A retained `use provider::module::*` plus a missing
+  `TypeName` can mean the provider module itself was retained correctly but the
+  source checkout no longer exports that name. The decision log now records the
+  diagnostic file, matching glob imports, and resolved provider module roots so
+  corpus mining can distinguish source/API mismatch from a missing dependency
+  edge without broadening unrelated code.
 - Real compiler feedback widening must be part of the retained render plan, not
   just the first reduction. A 2026-05-06 Litter codex-ipc run exposed that
   unknown-retention re-rendering could drop feedback-widened roots when both

@@ -1281,6 +1281,14 @@ fn decision_log_feedback_diagnostics(
                             summary.resolution_skipped_no_match += resolution.skipped_no_match;
                             summary.resolution_skipped_too_many_matches +=
                                 resolution.skipped_too_many_matches;
+                            summary.glob_import_context_entries += resolution
+                                .entries
+                                .iter()
+                                .filter(|entry| {
+                                    !entry.glob_imports.is_empty()
+                                        || !entry.glob_import_module_roots.is_empty()
+                                })
+                                .count();
                             summary.source_api_mismatch_candidates +=
                                 decision_log_source_api_mismatch_candidates(
                                     &report,
@@ -1376,8 +1384,24 @@ fn decision_log_feedback_resolution_evidence(
             break;
         }
         let package_hint = entry.package_hint.as_deref().unwrap_or("<none>");
+        let diagnostic_file = entry
+            .diagnostic_file
+            .as_deref()
+            .map(|file| format!(" diagnostic_file={file}"))
+            .unwrap_or_default();
+        let glob_imports = (!entry.glob_imports.is_empty())
+            .then(|| format!(" glob_imports={}", entry.glob_imports.join(",")))
+            .unwrap_or_default();
+        let glob_import_roots = (!entry.glob_import_module_roots.is_empty())
+            .then(|| {
+                format!(
+                    " glob_import_module_roots={}",
+                    entry.glob_import_module_roots.join(",")
+                )
+            })
+            .unwrap_or_default();
         evidence.push(format!(
-			"resolution {} symbol=`{}` package_hint={} matches={} retained_roots={} skipped_marked_roots={} action={} roots={}",
+			"resolution {} symbol=`{}` package_hint={} matches={} retained_roots={} skipped_marked_roots={} action={} roots={}{}{}{}",
 			entry.code,
 			entry.symbol,
 			package_hint,
@@ -1385,7 +1409,10 @@ fn decision_log_feedback_resolution_evidence(
 			entry.retained_roots,
 			entry.skipped_marked_roots,
 			entry.action,
-			entry.roots.join(",")
+			entry.roots.join(","),
+			diagnostic_file,
+			glob_imports,
+			glob_import_roots
 		));
     }
     if resolution.entries_truncated && evidence.len() < limit {
@@ -5409,6 +5436,7 @@ struct FeedbackDiagnosticLogSummary {
     resolution_skipped_no_match: usize,
     resolution_skipped_too_many_matches: usize,
     source_api_mismatch_candidates: usize,
+    glob_import_context_entries: usize,
     evidence: Vec<String>,
 }
 
@@ -6195,6 +6223,10 @@ fn decision_log_steps(
             diagnostic_metrics.insert(
                 "source_api_mismatch_candidates".to_string(),
                 serde_json::json!(diagnostic_summary.source_api_mismatch_candidates),
+            );
+            diagnostic_metrics.insert(
+                "glob_import_context_entries".to_string(),
+                serde_json::json!(diagnostic_summary.glob_import_context_entries),
             );
             steps.push(DecisionLogStep {
                 step: "feedback_diagnostics".to_string(),
@@ -11526,6 +11558,92 @@ pub fn entry() -> usize {
                 entry.contains("resolution E0432 symbol=`Account`")
                     && entry.contains("package_hint=provider")
                     && entry.contains("matches=1")
+            }),
+            "{:#?}",
+            summary.evidence
+        );
+    }
+
+    #[test]
+    fn feedback_diagnostics_log_glob_import_context_for_bare_missing_symbol() {
+        let source = temp_path("cli-feedback-diagnostics-glob-source");
+        let output = temp_path("cli-feedback-diagnostics-glob-output");
+        let opensourced_path = repo_root().join("crates/opensourced");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"provider\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nprovider = {{ path = \"../provider\" }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use provider::conversation::*;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            source.join("provider/Cargo.toml"),
+            "[package]\nname = \"provider\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            source.join("provider/src/lib.rs"),
+            r#"pub mod conversation {
+    pub struct Existing;
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        let mut validation = ValidationReport::new(&options);
+        let feedback_path = output.join("slice-feedback.json");
+        let mut unresolved = diagnostic_with_span(
+            "E0412",
+            "cannot find type `ConversationItem` in this scope",
+            "app/src/lib.rs",
+            5,
+            22,
+            38,
+        );
+        unresolved.package_id = Some("app 0.1.0 (path+file:///tmp/app)".to_string());
+        let check_report = report(false, vec![unresolved]);
+        write_report(&check_report, &feedback_path).expect("feedback report should write");
+        record_feedback_attempt(
+            &mut validation,
+            "feedback-repair",
+            2,
+            "rejected_after_widen",
+            "final verification after compiler feedback widening did not pass",
+            &check_report,
+            feedback_path,
+            false,
+            0,
+            0,
+            None,
+            None,
+        );
+
+        let summary = decision_log_feedback_diagnostics(&options, &validation, 40);
+
+        assert_eq!(summary.resolution_reports, 1);
+        assert_eq!(summary.glob_import_context_entries, 1);
+        assert!(
+            summary.evidence.iter().any(|entry| {
+                entry.contains("symbol=`ConversationItem`")
+                    && entry.contains("glob_imports=provider::conversation::*")
+                    && entry.contains("glob_import_module_roots=provider::conversation(Mod)")
             }),
             "{:#?}",
             summary.evidence

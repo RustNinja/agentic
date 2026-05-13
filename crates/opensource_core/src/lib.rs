@@ -115,6 +115,12 @@ pub struct FeedbackRootResolutionEntry {
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub package_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub diagnostic_file: Option<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub glob_imports: Vec<String>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub glob_import_module_roots: Vec<String>,
     pub matches: usize,
     pub retained_roots: usize,
     pub skipped_marked_roots: usize,
@@ -2169,6 +2175,8 @@ fn feedback_extra_roots_with_report(
         };
         let symbols = diagnostic_symbols(diagnostic);
         let package_hint = diagnostic_scoped_package_hint(project, diagnostic, &symbols);
+        let glob_import_context =
+            diagnostic_glob_import_context(project, diagnostic, package_hint.as_deref());
         let diagnostic_candidates =
             feedback_diagnostic_root_candidates(project, diagnostic, package_hint.as_deref());
         if !diagnostic_candidates.is_empty() {
@@ -2182,6 +2190,9 @@ fn feedback_extra_roots_with_report(
                     symbol: "<diagnostic>".to_string(),
                     name: None,
                     package_hint: package_hint.clone(),
+                    diagnostic_file: None,
+                    glob_imports: Vec::new(),
+                    glob_import_module_roots: Vec::new(),
                     matches: retained_roots.len() + skipped_marked_roots,
                     retained_roots: retained_roots.len(),
                     skipped_marked_roots,
@@ -2216,6 +2227,11 @@ fn feedback_extra_roots_with_report(
                         symbol,
                         name: Some(name),
                         package_hint: package_hint.clone(),
+                        diagnostic_file: glob_import_context.diagnostic_file.clone(),
+                        glob_imports: glob_import_context.glob_imports.clone(),
+                        glob_import_module_roots: glob_import_context
+                            .glob_import_module_roots
+                            .clone(),
                         matches: 0,
                         retained_roots: 0,
                         skipped_marked_roots: 0,
@@ -2234,6 +2250,9 @@ fn feedback_extra_roots_with_report(
                         symbol,
                         name: Some(name),
                         package_hint: package_hint.clone(),
+                        diagnostic_file: None,
+                        glob_imports: Vec::new(),
+                        glob_import_module_roots: Vec::new(),
                         matches: candidates.len(),
                         retained_roots: 0,
                         skipped_marked_roots: 0,
@@ -2255,6 +2274,9 @@ fn feedback_extra_roots_with_report(
                     symbol,
                     name: Some(name),
                     package_hint: package_hint.clone(),
+                    diagnostic_file: None,
+                    glob_imports: Vec::new(),
+                    glob_import_module_roots: Vec::new(),
                     matches,
                     retained_roots: retained_roots.len(),
                     skipped_marked_roots,
@@ -2302,6 +2324,152 @@ fn push_feedback_resolution_entry(
         report.entries.push(entry);
     } else {
         report.entries_truncated = true;
+    }
+}
+
+#[derive(Clone, Default)]
+struct FeedbackGlobImportContext {
+    diagnostic_file: Option<String>,
+    glob_imports: Vec<String>,
+    glob_import_module_roots: Vec<String>,
+}
+
+fn diagnostic_glob_import_context(
+    project: &Project,
+    diagnostic: &feedback::CheckDiagnostic,
+    package_hint: Option<&str>,
+) -> FeedbackGlobImportContext {
+    let diagnostic_file = diagnostic_primary_file_name(diagnostic).map(ToString::to_string);
+    let Some(source) = source_file_for_diagnostic(project, diagnostic, package_hint) else {
+        return FeedbackGlobImportContext {
+            diagnostic_file,
+            ..FeedbackGlobImportContext::default()
+        };
+    };
+    let mut glob_paths = Vec::new();
+    for item in &source.syntax.items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_glob_import_paths(&item_use.tree, Vec::new(), &mut glob_paths);
+    }
+    glob_paths.sort();
+    glob_paths.dedup();
+
+    let mut glob_imports = Vec::new();
+    let mut glob_import_module_roots = Vec::new();
+    for segments in glob_paths {
+        glob_imports.push(format!("{}::*", segments.join("::")));
+        glob_import_module_roots.extend(
+            glob_import_module_root(project, source, &segments).map(|root| root.to_string()),
+        );
+    }
+    glob_imports.sort();
+    glob_imports.dedup();
+    glob_import_module_roots.sort();
+    glob_import_module_roots.dedup();
+
+    FeedbackGlobImportContext {
+        diagnostic_file,
+        glob_imports,
+        glob_import_module_roots,
+    }
+}
+
+fn diagnostic_primary_file_name(diagnostic: &feedback::CheckDiagnostic) -> Option<&str> {
+    diagnostic
+        .spans
+        .iter()
+        .find(|span| span.is_primary)
+        .or_else(|| diagnostic.spans.first())
+        .map(|span| span.file_name.as_str())
+}
+
+fn source_file_for_diagnostic<'project>(
+    project: &'project Project,
+    diagnostic: &feedback::CheckDiagnostic,
+    package_hint: Option<&str>,
+) -> Option<&'project model::SourceFile> {
+    let file_name = diagnostic_primary_file_name(diagnostic)?;
+    let diagnostic_path = Path::new(file_name);
+    project.files.values().find(|source| {
+        package_hint.is_none_or(|package| source.package == package)
+            && (source.path == diagnostic_path || source.path.ends_with(diagnostic_path))
+    })
+}
+
+fn collect_glob_import_paths(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    paths: &mut Vec<Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_glob_import_paths(&path.tree, prefix, paths);
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_glob_import_paths(nested, prefix.clone(), paths);
+            }
+        }
+        UseTree::Glob(_) => {
+            if !prefix.is_empty() {
+                paths.push(prefix);
+            }
+        }
+        UseTree::Name(_) | UseTree::Rename(_) => {}
+    }
+}
+
+fn glob_import_module_root(
+    project: &Project,
+    source: &model::SourceFile,
+    segments: &[String],
+) -> Option<RootId> {
+    let (package, module_segments) =
+        resolve_glob_import_module_segments(project, source, segments)?;
+    let (name, module_path) = module_segments.split_last()?;
+    let item = ItemId {
+        package,
+        module_path: module_path.to_vec(),
+        name: name.clone(),
+        kind: model::ItemKind::Mod,
+    };
+    project
+        .items
+        .contains_key(&item)
+        .then_some(RootId::Item(item))
+}
+
+fn resolve_glob_import_module_segments(
+    project: &Project,
+    source: &model::SourceFile,
+    segments: &[String],
+) -> Option<(String, Vec<String>)> {
+    let (first, rest) = segments.split_first()?;
+    match first.as_str() {
+        "crate" => Some((source.package.clone(), rest.to_vec())),
+        "self" => {
+            let mut module_path = source.module_path.clone();
+            module_path.extend(rest.iter().cloned());
+            Some((source.package.clone(), module_path))
+        }
+        "super" => {
+            let mut module_path = source.module_path.clone();
+            module_path.pop();
+            module_path.extend(rest.iter().cloned());
+            Some((source.package.clone(), module_path))
+        }
+        _ => {
+            if let Some(package) = feedback_symbol_package_hint(project, first) {
+                Some((package, rest.to_vec()))
+            } else {
+                let mut module_path = source.module_path.clone();
+                module_path.extend(segments.iter().cloned());
+                Some((source.package.clone(), module_path))
+            }
+        }
     }
 }
 
@@ -12366,7 +12534,7 @@ mod tests {
         semantic_unresolved_owner_is_retained, unknown_surface_category,
         usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
         write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
-        GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
+        CheckSpan, GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
         PublicReexportProofReport, PublicReexportProofSummary, ReducedProject,
         RenderedSymbolProofEntry, RenderedSymbolProofReport, RenderedSymbolProofSummary, RootId,
         SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
@@ -17974,6 +18142,83 @@ pub fn entry() -> usize {
             .iter()
             .any(|root| root == "support::SupportType(Struct)"));
         assert_eq!(resolution.skipped_no_match, 0);
+    }
+
+    #[test]
+    fn feedback_resolution_logs_glob_import_context_for_missing_bare_symbol() {
+        let root = temp_output("feedback-glob-context-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"provider\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nprovider = {{ path = \"../provider\" }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use provider::conversation::*;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            root.join("provider/Cargo.toml"),
+            "[package]\nname = \"provider\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("provider/src/lib.rs"),
+            r#"pub mod conversation {
+    pub struct Existing;
+}
+"#,
+        );
+
+        let diagnostic = CheckDiagnostic {
+            level: "error".to_string(),
+            message: "cannot find type `ConversationItem` in this scope".to_string(),
+            code: Some("E0412".to_string()),
+            package_id: Some("app 0.1.0 (path+file:///tmp/app)".to_string()),
+            target: None,
+            rendered: None,
+            spans: vec![CheckSpan {
+                file_name: "app/src/lib.rs".to_string(),
+                line_start: 5,
+                line_end: 5,
+                column_start: 22,
+                column_end: 38,
+                is_primary: true,
+                text: Vec::new(),
+            }],
+            suggestions: Vec::new(),
+        };
+        let resolution =
+            resolve_feedback_widening_roots(&root, std::slice::from_ref(&diagnostic), &[])
+                .expect("feedback root resolution should load");
+
+        assert!(resolution.matched_roots.is_empty(), "{resolution:#?}");
+        assert_eq!(resolution.skipped_no_match, 1);
+        let entry = resolution
+            .entries
+            .iter()
+            .find(|entry| entry.symbol == "ConversationItem")
+            .expect("missing symbol should have a resolution entry");
+        assert_eq!(
+            entry.glob_imports,
+            vec!["provider::conversation::*".to_string()]
+        );
+        assert_eq!(
+            entry.glob_import_module_roots,
+            vec!["provider::conversation(Mod)".to_string()]
+        );
     }
 
     #[test]
