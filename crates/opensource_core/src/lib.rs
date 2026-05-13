@@ -11,6 +11,7 @@ mod repair;
 
 use std::{
     collections::{BTreeMap, BTreeSet},
+    ffi::OsStr,
     fs,
     path::{Component, Path, PathBuf},
     time::Instant,
@@ -59,6 +60,15 @@ pub struct GenerateSession {
     manifest_ms: u64,
     parse_ms: u64,
     analyzer_ms: u64,
+}
+
+#[derive(Debug, Clone)]
+pub struct GenerateSessionLoadProgress {
+    pub event: &'static str,
+    pub status: &'static str,
+    pub decision: &'static str,
+    pub reason: String,
+    pub fields: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone)]
@@ -1327,22 +1337,199 @@ impl GenerateSession {
         analyzer_mode: AnalyzerMode,
         selected_roots: &[RootId],
     ) -> Result<Self, Box<dyn std::error::Error>> {
-        let (project, manifest_ms, parse_ms) = if selected_roots.is_empty() {
-            load_project(workspace_root)?
+        Self::load_with_selected_roots_with_progress(
+            workspace_root,
+            analyzer_mode,
+            selected_roots,
+            None,
+        )
+    }
+
+    pub fn load_with_selected_roots_with_progress(
+        workspace_root: &Path,
+        analyzer_mode: AnalyzerMode,
+        selected_roots: &[RootId],
+        progress: Option<&dyn Fn(GenerateSessionLoadProgress)>,
+    ) -> Result<Self, Box<dyn std::error::Error>> {
+        let selected_packages = root_packages(selected_roots);
+        let mut base_fields = load_progress_base_fields(analyzer_mode, selected_roots);
+        base_fields.insert(
+            "workspace_root".to_string(),
+            workspace_root.display().to_string(),
+        );
+        base_fields.insert(
+            "workspace_manifest".to_string(),
+            workspace_manifest_path(workspace_root)
+                .display()
+                .to_string(),
+        );
+        if !selected_packages.is_empty() {
+            base_fields.insert(
+                "root_packages".to_string(),
+                selected_packages
+                    .iter()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(","),
+            );
+        }
+
+        emit_load_progress(
+            progress,
+            "session_manifest",
+            "started",
+            "load source workspace manifests for selected roots",
+            "manifest loading decides which package graph will be parsed before semantic analysis",
+            base_fields.clone(),
+        );
+        let manifest_started = Instant::now();
+        let workspace_result = if selected_roots.is_empty() {
+            manifest::load_workspace(workspace_root)
         } else {
-            load_project_without_marker_targets_for_root_packages(
-                workspace_root,
-                &root_packages(selected_roots),
-            )?
+            manifest::load_workspace_without_marker_targets(workspace_root)
         };
+        let (workspace, manifest_ms) = match workspace_result {
+            Ok(workspace) => {
+                let manifest_ms = elapsed_ms(manifest_started);
+                let mut fields = base_fields.clone();
+                fields.insert("manifest_ms".to_string(), manifest_ms.to_string());
+                emit_load_progress(
+                    progress,
+                    "session_manifest",
+                    "completed",
+                    "load source workspace manifests for selected roots",
+                    "manifest graph is ready for package-scoped parsing",
+                    fields,
+                );
+                (workspace, manifest_ms)
+            }
+            Err(error) => {
+                let mut fields = base_fields.clone();
+                fields.insert(
+                    "manifest_ms".to_string(),
+                    elapsed_ms(manifest_started).to_string(),
+                );
+                emit_load_progress(
+                    progress,
+                    "session_manifest",
+                    "failed",
+                    "load source workspace manifests for selected roots",
+                    error.to_string(),
+                    fields,
+                );
+                return Err(error);
+            }
+        };
+
+        let parse_scope = if selected_roots.is_empty() {
+            "workspace"
+        } else {
+            "selected_root_package_closure"
+        };
+        let mut parse_start_fields = base_fields.clone();
+        parse_start_fields.insert("parse_scope".to_string(), parse_scope.to_string());
+        emit_load_progress(
+            progress,
+            "session_parse",
+            "started",
+            "parse source files for selected root dependency closure",
+            "top-down slicing starts from the selected root packages and parses only their downstream package closure",
+            parse_start_fields,
+        );
+        let parse_started = Instant::now();
+        let project_result = if selected_roots.is_empty() {
+            parse::parse_workspace(workspace)
+        } else {
+            parse::parse_workspace_package_closure(workspace, &selected_packages)
+        };
+        let project = match project_result {
+            Ok(project) => {
+                let parse_ms = elapsed_ms(parse_started);
+                let mut fields = base_fields.clone();
+                fields.insert("parse_scope".to_string(), parse_scope.to_string());
+                fields.insert("parse_ms".to_string(), parse_ms.to_string());
+                fields.insert("source_files".to_string(), project.files.len().to_string());
+                fields.insert(
+                    "callables".to_string(),
+                    (project.functions.len() + project.methods.len()).to_string(),
+                );
+                fields.insert("items".to_string(), project.items.len().to_string());
+                emit_load_progress(
+                    progress,
+                    "session_parse",
+                    "completed",
+                    "parse source files for selected root dependency closure",
+                    "project syntax index is ready for semantic analysis",
+                    fields,
+                );
+                (project, parse_ms)
+            }
+            Err(error) => {
+                let mut fields = base_fields.clone();
+                fields.insert("parse_scope".to_string(), parse_scope.to_string());
+                fields.insert(
+                    "parse_ms".to_string(),
+                    elapsed_ms(parse_started).to_string(),
+                );
+                emit_load_progress(
+                    progress,
+                    "session_parse",
+                    "failed",
+                    "parse source files for selected root dependency closure",
+                    error.to_string(),
+                    fields,
+                );
+                return Err(error);
+            }
+        };
+        let (project, parse_ms) = project;
+
+        emit_load_progress(
+            progress,
+            "session_analyzer",
+            "started",
+            "load semantic analyzer for selected root dependency closure",
+            "rust-analyzer semantics are loaded after the top-down syntax package closure is known",
+            base_fields.clone(),
+        );
         let phase_started = Instant::now();
-        let analyzer = analyzer::load_report_for_project_and_roots(
+        let analyzer_result = analyzer::load_report_for_project_and_roots(
             workspace_root,
             analyzer_mode,
             &project,
             selected_roots,
-        )?;
+        );
         let analyzer_ms = elapsed_ms(phase_started);
+        let analyzer = match analyzer_result {
+            Ok(analyzer) => {
+                let mut fields = base_fields;
+                fields.insert("analyzer_ms".to_string(), analyzer_ms.to_string());
+                fields.insert("engine".to_string(), analyzer.engine.clone());
+                fields.insert("notes".to_string(), analyzer.notes.len().to_string());
+                emit_load_progress(
+                    progress,
+                    "session_analyzer",
+                    "completed",
+                    "load semantic analyzer for selected root dependency closure",
+                    "semantic analyzer report is ready for top-down reduction",
+                    fields,
+                );
+                analyzer
+            }
+            Err(error) => {
+                let mut fields = base_fields;
+                fields.insert("analyzer_ms".to_string(), analyzer_ms.to_string());
+                emit_load_progress(
+                    progress,
+                    "session_analyzer",
+                    "failed",
+                    "load semantic analyzer for selected root dependency closure",
+                    error.to_string(),
+                    fields,
+                );
+                return Err(error);
+            }
+        };
 
         Ok(Self {
             workspace_root: workspace_root.to_path_buf(),
@@ -1531,21 +1718,6 @@ fn load_project_without_marker_targets_for_root_selector_packages(
     Ok((project, manifest_ms, parse_ms))
 }
 
-fn load_project_without_marker_targets_for_root_packages(
-    workspace_root: &Path,
-    packages: &BTreeSet<String>,
-) -> Result<(Project, u64, u64), Box<dyn std::error::Error>> {
-    let phase_started = Instant::now();
-    let workspace = manifest::load_workspace_without_marker_targets(workspace_root)?;
-    let manifest_ms = elapsed_ms(phase_started);
-
-    let phase_started = Instant::now();
-    let project = parse::parse_workspace_package_closure(workspace, packages)?;
-    let parse_ms = elapsed_ms(phase_started);
-
-    Ok((project, manifest_ms, parse_ms))
-}
-
 fn root_selector_package_filter(root_selectors: &[String]) -> Option<BTreeSet<String>> {
     let mut packages = BTreeSet::new();
     for selector in root_selectors {
@@ -1565,6 +1737,56 @@ fn root_packages(roots: &[RootId]) -> BTreeSet<String> {
         .iter()
         .map(|root| root.package().to_string())
         .collect()
+}
+
+fn load_progress_base_fields(
+    analyzer_mode: AnalyzerMode,
+    selected_roots: &[RootId],
+) -> BTreeMap<String, String> {
+    let mut fields = BTreeMap::new();
+    fields.insert("analyzer".to_string(), analyzer_mode.as_str().to_string());
+    fields.insert(
+        "selected_roots".to_string(),
+        selected_roots.len().to_string(),
+    );
+    if !selected_roots.is_empty() {
+        fields.insert(
+            "roots".to_string(),
+            selected_roots
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+                .join(","),
+        );
+    }
+    fields
+}
+
+fn workspace_manifest_path(workspace_root: &Path) -> PathBuf {
+    if workspace_root.file_name() == Some(OsStr::new("Cargo.toml")) {
+        workspace_root.to_path_buf()
+    } else {
+        workspace_root.join("Cargo.toml")
+    }
+}
+
+fn emit_load_progress(
+    progress: Option<&dyn Fn(GenerateSessionLoadProgress)>,
+    event: &'static str,
+    status: &'static str,
+    decision: &'static str,
+    reason: impl Into<String>,
+    fields: BTreeMap<String, String>,
+) {
+    if let Some(progress) = progress {
+        progress(GenerateSessionLoadProgress {
+            event,
+            status,
+            decision,
+            reason: reason.into(),
+            fields,
+        });
+    }
 }
 
 fn resolve_root_selectors_in_project(

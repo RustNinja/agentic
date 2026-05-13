@@ -19,8 +19,8 @@ use opensource_core::{
     repair_workspace, resolve_feedback_widening_roots, write_generate_report,
     write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
     CheckOptions, CheckReport, GenerateOptions, GenerateReport, GenerateSession,
-    GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
-    RepairReport, RootId, SemanticReport,
+    GenerateSessionLoadProgress, GeneratedTargetReport, PreflightDiagnostic, PreflightOptions,
+    PreflightReport, RepairOptions, RepairReport, RootId, SemanticReport,
 };
 
 fn main() {
@@ -1835,6 +1835,17 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
         ]),
     )?;
 
+    let session_load_progress = |progress: GenerateSessionLoadProgress| {
+        let _ = write_event_log(
+            options,
+            progress.event,
+            progress.status,
+            progress.decision,
+            &progress.reason,
+            load_progress_event_fields(&progress),
+        );
+    };
+
     let session = if options.analyzer_mode == AnalyzerMode::Syn {
         if let Some(resolver_session) = resolver_session {
             resolver_session
@@ -1861,10 +1872,11 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                     ),
                 ]),
             );
-            match GenerateSession::load_with_selected_roots(
+            match GenerateSession::load_with_selected_roots_with_progress(
                 &options.workspace_root,
                 options.analyzer_mode,
                 &roots,
+                Some(&session_load_progress),
             ) {
                 Ok(session) => session,
                 Err(error) => {
@@ -1926,10 +1938,11 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 ),
             ]),
         );
-        match GenerateSession::load_with_selected_roots(
+        match GenerateSession::load_with_selected_roots_with_progress(
             &options.workspace_root,
             options.analyzer_mode,
             &roots,
+            Some(&session_load_progress),
         ) {
             Ok(session) => session,
             Err(error) => {
@@ -4793,6 +4806,16 @@ fn event_fields(pairs: &[(&str, serde_json::Value)]) -> BTreeMap<String, serde_j
     pairs
         .iter()
         .map(|(key, value)| ((*key).to_string(), value.clone()))
+        .collect()
+}
+
+fn load_progress_event_fields(
+    progress: &GenerateSessionLoadProgress,
+) -> BTreeMap<String, serde_json::Value> {
+    progress
+        .fields
+        .iter()
+        .map(|(key, value)| (key.clone(), serde_json::json!(value)))
         .collect()
 }
 
@@ -9970,16 +9993,18 @@ resolver = "2"
         );
         write(
             source.join("app/src/lib.rs"),
-            r#"pub fn selected() -> usize {
-    helper()
-}
+            r#"pub mod api {
+    pub fn selected() -> usize {
+        helper()
+    }
 
-pub fn helper() -> usize {
-    1
-}
+    pub fn helper() -> usize {
+        1
+    }
 
-pub fn dead() -> usize {
-    0
+    pub fn dead() -> usize {
+        0
+    }
 }
 "#,
         );
@@ -9988,7 +10013,7 @@ pub fn dead() -> usize {
             OsString::from("syn"),
             OsString::from("--batch-roots"),
             OsString::from("--root"),
-            OsString::from("app::selected"),
+            OsString::from("app::api::selected"),
             OsString::from("--preflight"),
             source.clone().into_os_string(),
             output.clone().into_os_string(),
@@ -9997,7 +10022,7 @@ pub fn dead() -> usize {
 
         run_batch_roots(&options).expect("rootless batch should generate");
 
-        let generated = fs::read_to_string(output.join("0001-app_selected/app/src/lib.rs"))
+        let generated = fs::read_to_string(output.join("0001-app_api_selected/app/src/lib.rs"))
             .expect("generated source should exist");
         assert!(generated.contains("pub fn selected"), "{generated}");
         assert!(generated.contains("pub fn helper"), "{generated}");
@@ -10008,6 +10033,14 @@ pub fn dead() -> usize {
         assert!(report.contains("\"status\":\"generated\""), "{report}");
         let batch_events = fs::read_to_string(output.join("batch-events.jsonl")).unwrap();
         assert!(
+            batch_events.contains("\"event\":\"session_manifest\""),
+            "{batch_events}"
+        );
+        assert!(
+            batch_events.contains("\"event\":\"session_parse\""),
+            "{batch_events}"
+        );
+        assert!(
             batch_events.contains("\"event\":\"batch_analyzer\""),
             "{batch_events}"
         );
@@ -10015,7 +10048,7 @@ pub fn dead() -> usize {
             batch_events.contains("\"event\":\"batch_root_context\""),
             "{batch_events}"
         );
-        let root_output = output.join("0001-app_selected");
+        let root_output = output.join("0001-app_api_selected");
         let decision_log = fs::read_to_string(root_output.join("slice-decision-log.json")).unwrap();
         assert!(
             decision_log.contains("\"step\": \"top_down_closure\""),

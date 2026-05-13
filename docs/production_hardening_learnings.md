@@ -1756,3 +1756,14 @@ had a chance to appear. `--batch-roots` now defaults the process event log to
 `--event-log`. That gives each concurrent CLI run its own resolver/analyzer
 startup, heartbeat, selected-root, and root-context timeline without requiring
 production mode or source checkout edits.
+
+The batch analyzer event used to cover more than rust-analyzer startup: it also
+included source manifest loading and the selected-root package-closure parse.
+When a real Litter probe slept with an open source file descriptor, the stack
+showed the process was blocked in `parse_workspace_package_closure`, not inside
+RA. `GenerateSession::load_with_selected_roots_with_progress` now emits
+`session_manifest`, `session_parse`, and `session_analyzer` events into the same
+batch log so future mining can separate slow source I/O, oversized downstream
+package-closure parsing, and true RA database loading. The manifest event also
+records `workspace_root` and `workspace_manifest`, so a stuck run can identify a
+source checkout/filesystem read problem without sampling the process first.
