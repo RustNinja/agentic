@@ -1897,6 +1897,9 @@ struct BatchRootReport {
     feedback_widening_hazards: Option<usize>,
     feedback_resolution_matched_roots: Option<usize>,
     feedback_resolution_skipped_no_match: Option<usize>,
+    feedback_baseline_compared: Option<bool>,
+    feedback_baseline_known_errors: Option<usize>,
+    feedback_baseline_new_errors: Option<usize>,
     source_api_mismatch_candidates: Option<usize>,
     glob_import_context_entries: Option<usize>,
     glob_import_missing_export_candidates: Option<usize>,
@@ -1935,6 +1938,13 @@ struct ValidationAttemptReport {
 struct FeedbackWideningState {
     diagnostics: Vec<CheckDiagnostic>,
     seen_root_sets: BTreeSet<String>,
+}
+
+#[derive(Debug, Clone, Copy, Default)]
+struct BaselineErrorComparison {
+    compared: bool,
+    known_errors: usize,
+    new_errors: usize,
 }
 
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -2725,6 +2735,9 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 feedback_widening_hazards: None,
                 feedback_resolution_matched_roots: None,
                 feedback_resolution_skipped_no_match: None,
+                feedback_baseline_compared: None,
+                feedback_baseline_known_errors: None,
+                feedback_baseline_new_errors: None,
                 source_api_mismatch_candidates: None,
                 glob_import_context_entries: None,
                 glob_import_missing_export_candidates: None,
@@ -2790,6 +2803,18 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 (
                     "feedback_resolution_skipped_no_match",
                     serde_json::json!(row.feedback_resolution_skipped_no_match),
+                ),
+                (
+                    "feedback_baseline_compared",
+                    serde_json::json!(row.feedback_baseline_compared),
+                ),
+                (
+                    "feedback_baseline_known_errors",
+                    serde_json::json!(row.feedback_baseline_known_errors),
+                ),
+                (
+                    "feedback_baseline_new_errors",
+                    serde_json::json!(row.feedback_baseline_new_errors),
                 ),
                 (
                     "source_api_mismatch_candidates",
@@ -3038,6 +3063,7 @@ fn run_batch_root(
                 last_report.as_ref(),
                 last_preflight.as_ref(),
                 None,
+                baseline,
                 Some(format!(
                     "rendered source contains invalid usage decisions: {}",
                     rendered_usage_contract.invalid_preview()
@@ -3063,6 +3089,7 @@ fn run_batch_root(
                 last_report.as_ref(),
                 last_preflight.as_ref(),
                 None,
+                baseline,
                 Some(reason),
             );
         }
@@ -3086,6 +3113,7 @@ fn run_batch_root(
                 last_report.as_ref(),
                 last_preflight.as_ref(),
                 None,
+                baseline,
                 Some(reason),
             );
         }
@@ -3146,6 +3174,7 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         None,
+                        baseline,
                         Some(reason),
                     );
                 }
@@ -3194,6 +3223,7 @@ fn run_batch_root(
                     last_report.as_ref(),
                     Some(&preflight),
                     None,
+                    baseline,
                     None,
                 );
             }
@@ -3219,6 +3249,7 @@ fn run_batch_root(
                 last_report.as_ref(),
                 last_preflight.as_ref(),
                 None,
+                baseline,
                 None,
             );
         }
@@ -3293,6 +3324,7 @@ fn run_batch_root(
                     last_report.as_ref(),
                     last_preflight.as_ref(),
                     None,
+                    baseline,
                     Some(reason),
                 );
             }
@@ -3336,6 +3368,7 @@ fn run_batch_root(
                 last_report.as_ref(),
                 last_preflight.as_ref(),
                 Some(&check),
+                baseline,
                 None,
             );
         }
@@ -3384,6 +3417,7 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
+                            baseline,
                             Some(reason),
                         );
                     }
@@ -3410,6 +3444,7 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
+                        baseline,
                         Some(reason),
                     );
                 }
@@ -3497,6 +3532,7 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
+                            baseline,
                             Some(reason),
                         );
                     }
@@ -3523,6 +3559,7 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
+                        baseline,
                         Some(reason),
                     );
                 }
@@ -3559,6 +3596,7 @@ fn run_batch_root(
                         last_report.as_ref(),
                         Some(&preflight),
                         Some(&check),
+                        baseline,
                         Some("batch repair produced a structurally invalid workspace".to_string()),
                     );
                 }
@@ -3608,6 +3646,7 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
+                            baseline,
                             Some(reason),
                         );
                     }
@@ -3634,6 +3673,7 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
+                        baseline,
                         Some(reason),
                     );
                 }
@@ -3679,6 +3719,7 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
+                        baseline,
                         None,
                     );
                 }
@@ -3722,6 +3763,7 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
+                            baseline,
                             Some(reason),
                         );
                     }
@@ -3745,6 +3787,7 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
+                        baseline,
                         Some(reason),
                     );
                 }
@@ -3814,6 +3857,7 @@ fn run_batch_root(
                                 last_report.as_ref(),
                                 last_preflight.as_ref(),
                                 Some(&repaired_check),
+                                baseline,
                                 Some(reason),
                             );
                         }
@@ -3838,6 +3882,7 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
+                            baseline,
                             Some(reason),
                         );
                     }
@@ -3869,6 +3914,7 @@ fn run_batch_root(
                             last_report.as_ref(),
                             Some(&preflight),
                             Some(&repaired_check),
+                            baseline,
                             Some(
                                 "batch warning repair produced a structurally invalid workspace"
                                     .to_string(),
@@ -3917,6 +3963,7 @@ fn run_batch_root(
                                 last_report.as_ref(),
                                 last_preflight.as_ref(),
                                 Some(&repaired_check),
+                                baseline,
                                 Some(reason),
                             );
                         }
@@ -3940,6 +3987,7 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
+                            baseline,
                             Some(reason),
                         );
                     }
@@ -3983,6 +4031,7 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
+                            baseline,
                             None,
                         );
                     }
@@ -3997,6 +4046,7 @@ fn run_batch_root(
                     last_report.as_ref(),
                     last_preflight.as_ref(),
                     Some(&repaired_check),
+                    baseline,
                     Some("repaired workspace did not pass batch feedback gate".to_string()),
                 );
             }
@@ -4012,6 +4062,7 @@ fn run_batch_root(
                 last_report.as_ref(),
                 last_preflight.as_ref(),
                 Some(&check),
+                baseline,
                 Some("generated workspace did not pass batch feedback gate".to_string()),
             );
         }
@@ -4026,6 +4077,7 @@ fn run_batch_root(
         last_report.as_ref(),
         last_preflight.as_ref(),
         None,
+        baseline,
         Some("batch loop ended without a final report".to_string()),
     )
 }
@@ -4038,12 +4090,15 @@ fn batch_row_from_reports(
     report: Option<&GenerateReport>,
     preflight: Option<&PreflightReport>,
     check: Option<&CheckReport>,
+    baseline: Option<&CheckReport>,
     error: Option<String>,
 ) -> BatchRootReport {
     let rendered_usage = report.map(rendered_usage_contract);
     let semantic = report.and_then(|report| report.analyzer.semantic.as_ref());
     let feedback_summary =
         check.map(|check| feedback_diagnostic_summary_for_check(options, check, 0));
+    let baseline_comparison =
+        check.map(|check| feedback_baseline_error_comparison(check, baseline));
     BatchRootReport {
         root: root.to_string(),
         output_root: output_root.to_path_buf(),
@@ -4104,6 +4159,10 @@ fn batch_row_from_reports(
         feedback_resolution_skipped_no_match: feedback_summary
             .as_ref()
             .map(|summary| summary.resolution_skipped_no_match),
+        feedback_baseline_compared: baseline_comparison.map(|comparison| comparison.compared),
+        feedback_baseline_known_errors: baseline_comparison
+            .map(|comparison| comparison.known_errors),
+        feedback_baseline_new_errors: baseline_comparison.map(|comparison| comparison.new_errors),
         source_api_mismatch_candidates: feedback_summary
             .as_ref()
             .map(|summary| summary.source_api_mismatch_candidates),
@@ -4130,6 +4189,7 @@ fn finish_batch_root(
     report: Option<&GenerateReport>,
     preflight: Option<&PreflightReport>,
     check: Option<&CheckReport>,
+    baseline: Option<&CheckReport>,
     error: Option<String>,
 ) -> Result<BatchRootReport, Box<dyn std::error::Error>> {
     let root_options = batch_root_artifact_options(options, root, output_root);
@@ -4141,6 +4201,7 @@ fn finish_batch_root(
         report,
         preflight,
         check,
+        baseline,
         error.clone(),
     );
     if let Some(report) = report {
@@ -9358,6 +9419,33 @@ fn feedback_errors_are_baseline_known(
             .all(|error| baseline_errors.contains(error))
 }
 
+fn feedback_baseline_error_comparison(
+    report: &CheckReport,
+    baseline: Option<&CheckReport>,
+) -> BaselineErrorComparison {
+    let Some(baseline) = baseline else {
+        return BaselineErrorComparison::default();
+    };
+    let baseline_errors = diagnostic_error_keys(&baseline.diagnostics);
+    let mut comparison = BaselineErrorComparison {
+        compared: true,
+        known_errors: 0,
+        new_errors: 0,
+    };
+    for diagnostic in report
+        .diagnostics
+        .iter()
+        .filter(|diagnostic| diagnostic.level == "error")
+    {
+        if baseline_errors.contains(&diagnostic_baseline_key(diagnostic)) {
+            comparison.known_errors += 1;
+        } else {
+            comparison.new_errors += 1;
+        }
+    }
+    comparison
+}
+
 fn diagnostic_error_keys(diagnostics: &[CheckDiagnostic]) -> BTreeSet<String> {
     diagnostics
         .iter()
@@ -9758,24 +9846,25 @@ mod tests {
     use std::{ffi::OsString, fs, path::PathBuf};
 
     use opensource_core::{
-        AnalyzerMode, CheckDiagnostic, CheckReport, CheckTarget, FeedbackWideningReport,
-        GeneratedTargetReport, SemanticReport,
+        AnalyzerMode, CallableId, CheckDiagnostic, CheckReport, CheckTarget,
+        FeedbackWideningReport, GeneratedTargetReport, RootId, SemanticReport,
     };
 
     use super::{
         apply_default_marked_package_scope, baseline_limited_feedback_is_accepted,
         baseline_target_dir, batch_root_attempts, cargo_args_have_package_scope,
         decision_log_feedback_diagnostics, decision_log_path, diagnostics_shape_signature,
-        diagnostics_signature, event_log_path, feedback_errors_are_baseline_known,
-        feedback_is_accepted, feedback_repair_is_accepted, initialize_event_log, parse_args_from,
-        production_readiness_blocks_validation, production_validation_matrix_entries,
-        record_feedback_attempt, record_final_production_readiness,
-        record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
-        run_batch_roots, run_feedback_repair_loop, run_plain_check_gate,
-        semantic_hazard_warning_count, semantic_proof_block_reason, semantic_proof_status,
-        should_run_deferred_warning_repair, slice_report_path, try_widen_from_feedback,
-        uncovered_validation_targets, validation_report_path, write_feedback_diagnostics_event,
-        write_report, FeedbackWideningState, ValidationGateReport, ValidationReport,
+        diagnostics_signature, event_log_path, feedback_baseline_error_comparison,
+        feedback_errors_are_baseline_known, feedback_is_accepted, feedback_repair_is_accepted,
+        initialize_event_log, parse_args_from, production_readiness_blocks_validation,
+        production_validation_matrix_entries, record_feedback_attempt,
+        record_final_production_readiness, record_production_readiness_gate,
+        refresh_generated_lockfile_for_locked_validation, run_batch_roots,
+        run_feedback_repair_loop, run_plain_check_gate, semantic_hazard_warning_count,
+        semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
+        slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
+        validation_report_path, write_feedback_diagnostics_event, write_report,
+        FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -10023,6 +10112,68 @@ pub fn selected() -> usize {
             &generated,
             Some(&baseline)
         ));
+    }
+
+    #[test]
+    fn baseline_error_comparison_counts_known_and_new_generated_errors() {
+        let baseline = report(
+            false,
+            vec![diagnostic("E0425", "cannot find value `x` in this scope")],
+        );
+        let generated = report(
+            false,
+            vec![
+                diagnostic("E0425", "cannot find value `x` in this scope"),
+                diagnostic("E0432", "unresolved import `crate::missing`"),
+            ],
+        );
+
+        let comparison = feedback_baseline_error_comparison(&generated, Some(&baseline));
+        assert!(comparison.compared);
+        assert_eq!(comparison.known_errors, 1);
+        assert_eq!(comparison.new_errors, 1);
+
+        let no_baseline = feedback_baseline_error_comparison(&generated, None);
+        assert!(!no_baseline.compared);
+        assert_eq!(no_baseline.known_errors, 0);
+        assert_eq!(no_baseline.new_errors, 0);
+    }
+
+    #[test]
+    fn batch_row_records_baseline_error_attribution() {
+        let options = parse_options(["--check", "workspace", "out"]);
+        let root = RootId::Callable(CallableId::Free {
+            package: "app".to_string(),
+            module_path: Vec::new(),
+            name: "selected".to_string(),
+        });
+        let baseline = report(
+            false,
+            vec![diagnostic("E0425", "cannot find value `x` in this scope")],
+        );
+        let generated = report(
+            false,
+            vec![
+                diagnostic("E0425", "cannot find value `x` in this scope"),
+                diagnostic("E0432", "unresolved import `crate::missing`"),
+            ],
+        );
+
+        let row = super::batch_row_from_reports(
+            &options,
+            &root,
+            &PathBuf::from("/tmp/slice"),
+            "check_failed",
+            None,
+            None,
+            Some(&generated),
+            Some(&baseline),
+            None,
+        );
+
+        assert_eq!(row.feedback_baseline_compared, Some(true));
+        assert_eq!(row.feedback_baseline_known_errors, Some(1));
+        assert_eq!(row.feedback_baseline_new_errors, Some(1));
     }
 
     #[test]
@@ -11318,6 +11469,18 @@ pub fn helper() -> usize {
         );
         assert!(
             report.contains("\"glob_import_missing_export_candidates\":0"),
+            "{report}"
+        );
+        assert!(
+            report.contains("\"feedback_baseline_compared\":false"),
+            "{report}"
+        );
+        assert!(
+            report.contains("\"feedback_baseline_known_errors\":0"),
+            "{report}"
+        );
+        assert!(
+            report.contains("\"feedback_baseline_new_errors\":0"),
             "{report}"
         );
         assert!(root_output.join("slice-feedback.json").exists());

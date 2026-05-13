@@ -1840,3 +1840,12 @@ bucket is exclusive from the broader missing-export bucket, so batch miners do
 not double-count one root cause as two independent failures. The slicer still
 fails closed, but miners can now separate private-upstream export/API drift from
 ordinary missing dependency retention.
+
+Batch mining also has to distinguish source-baseline failures from new slice
+regressions. A root can be rejected because the original checkout already fails
+for the same compiler error shape, but the batch summary previously exposed only
+the generated error count unless the whole root was accepted as baseline-limited.
+Batch rows now record whether a baseline was compared and split generated errors
+into `feedback_baseline_known_errors` and `feedback_baseline_new_errors`. That
+lets miners rank true slicer regressions first while still preserving the exact
+fail-closed compiler report for roots blocked by upstream source/API drift.
