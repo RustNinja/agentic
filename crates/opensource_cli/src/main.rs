@@ -1261,6 +1261,19 @@ fn decision_log_feedback_diagnostics(
     limit: usize,
 ) -> FeedbackDiagnosticLogSummary {
     let mut summary = FeedbackDiagnosticLogSummary::default();
+    summary.feedback_baseline_compared = validation.feedback_baseline_compared;
+    summary.feedback_baseline_known_errors = validation.feedback_baseline_known_errors;
+    summary.feedback_baseline_new_errors = validation.feedback_baseline_new_errors;
+    if let Some(compared) = summary.feedback_baseline_compared {
+        if summary.evidence.len() < limit {
+            summary.evidence.push(format!(
+                "source baseline compared={} known_errors={} new_errors={}",
+                compared,
+                summary.feedback_baseline_known_errors.unwrap_or(0),
+                summary.feedback_baseline_new_errors.unwrap_or(0)
+            ));
+        }
+    }
     for report_path in decision_log_feedback_report_paths(validation) {
         match read_feedback_report_for_decision_log(&report_path) {
             Ok(report) => {
@@ -1478,6 +1491,24 @@ fn feedback_diagnostic_metrics(
         "glob_import_private_upstream_candidates".to_string(),
         serde_json::json!(summary.glob_import_private_upstream_candidates),
     );
+    if let Some(compared) = summary.feedback_baseline_compared {
+        metrics.insert(
+            "feedback_baseline_compared".to_string(),
+            serde_json::json!(compared),
+        );
+    }
+    if let Some(known_errors) = summary.feedback_baseline_known_errors {
+        metrics.insert(
+            "feedback_baseline_known_errors".to_string(),
+            serde_json::json!(known_errors),
+        );
+    }
+    if let Some(new_errors) = summary.feedback_baseline_new_errors {
+        metrics.insert(
+            "feedback_baseline_new_errors".to_string(),
+            serde_json::json!(new_errors),
+        );
+    }
     metrics
 }
 
@@ -1835,6 +1866,12 @@ struct ValidationReport {
     cargo_check_args: Vec<String>,
     deny_warnings: bool,
     allow_baseline_failures: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback_baseline_compared: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback_baseline_known_errors: Option<usize>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    feedback_baseline_new_errors: Option<usize>,
     gates: Vec<ValidationGateReport>,
     attempts: Vec<ValidationAttemptReport>,
 }
@@ -1965,6 +2002,9 @@ impl ValidationReport {
             cargo_check_args: options.cargo_check_args.clone(),
             deny_warnings: options.deny_warnings,
             allow_baseline_failures: options.allow_baseline_failures,
+            feedback_baseline_compared: None,
+            feedback_baseline_known_errors: None,
+            feedback_baseline_new_errors: None,
             gates: Vec::new(),
             attempts: Vec::new(),
         }
@@ -4214,6 +4254,7 @@ fn finish_batch_root(
             report,
             preflight,
             check,
+            baseline,
             &error,
         ) {
             let artifact_error = artifact_error.to_string();
@@ -4244,6 +4285,7 @@ fn write_batch_root_artifacts(
     report: &GenerateReport,
     preflight: Option<&PreflightReport>,
     check: Option<&CheckReport>,
+    baseline: Option<&CheckReport>,
     error: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
     preserve_batch_root_live_event_log(output_root, root_options)?;
@@ -4269,8 +4311,15 @@ fn write_batch_root_artifacts(
             ("error", serde_json::json!(error)),
         ]),
     )?;
-    let mut validation =
-        batch_root_validation_report(root_options, status, report, preflight, check, error);
+    let mut validation = batch_root_validation_report(
+        root_options,
+        status,
+        report,
+        preflight,
+        check,
+        baseline,
+        error,
+    );
     write_feedback_diagnostics_event(root_options, &validation)?;
     finish_validation(
         root_options,
@@ -4360,6 +4409,7 @@ fn batch_root_validation_report(
     report: &GenerateReport,
     preflight: Option<&PreflightReport>,
     check: Option<&CheckReport>,
+    baseline: Option<&CheckReport>,
     error: &Option<String>,
 ) -> ValidationReport {
     let mut validation = ValidationReport::new(options);
@@ -4426,6 +4476,10 @@ fn batch_root_validation_report(
     }
 
     if let Some(check) = check {
+        let baseline_comparison = feedback_baseline_error_comparison(check, baseline);
+        validation.feedback_baseline_compared = Some(baseline_comparison.compared);
+        validation.feedback_baseline_known_errors = Some(baseline_comparison.known_errors);
+        validation.feedback_baseline_new_errors = Some(baseline_comparison.new_errors);
         validation.add_check_gate(
             "feedback",
             if check.success && status == "accepted" {
@@ -5808,6 +5862,9 @@ struct FeedbackDiagnosticLogSummary {
     glob_import_context_entries: usize,
     glob_import_missing_export_candidates: usize,
     glob_import_private_upstream_candidates: usize,
+    feedback_baseline_compared: Option<bool>,
+    feedback_baseline_known_errors: Option<usize>,
+    feedback_baseline_new_errors: Option<usize>,
     evidence: Vec<String>,
 }
 
@@ -11497,6 +11554,19 @@ pub fn helper() -> usize {
             decision_log.contains("\"step\": \"feedback_diagnostics\""),
             "{decision_log}"
         );
+        assert!(
+            decision_log.contains("\"feedback_baseline_compared\": false"),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("source baseline compared=false known_errors=0 new_errors=0"),
+            "{decision_log}"
+        );
+        let validation = fs::read_to_string(root_output.join("slice-validation.json")).unwrap();
+        assert!(
+            validation.contains("\"feedback_baseline_compared\": false"),
+            "{validation}"
+        );
         let events = fs::read_to_string(root_output.join("slice-events.jsonl")).unwrap();
         assert!(events.contains("\"event\":\"batch_check\""), "{events}");
         assert!(
@@ -11505,6 +11575,10 @@ pub fn helper() -> usize {
         );
         assert!(
             events.contains("\"event\":\"feedback_diagnostics\""),
+            "{events}"
+        );
+        assert!(
+            events.contains("\"feedback_baseline_compared\":false"),
             "{events}"
         );
         assert!(events.contains("\"widening_candidates\":0"), "{events}");

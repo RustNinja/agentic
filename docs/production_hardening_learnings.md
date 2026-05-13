@@ -1849,3 +1849,6 @@ Batch rows now record whether a baseline was compared and split generated errors
 into `feedback_baseline_known_errors` and `feedback_baseline_new_errors`. That
 lets miners rank true slicer regressions first while still preserving the exact
 fail-closed compiler report for roots blocked by upstream source/API drift.
+The same attribution is also copied into per-root validation reports, event-log
+`feedback_diagnostics` metrics, and decision-log evidence so a single root
+folder contains the reason a failure was treated as baseline-known or new.
