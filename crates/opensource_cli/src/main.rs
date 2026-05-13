@@ -4135,10 +4135,18 @@ fn decision_log_path(options: &CliOptions) -> Option<PathBuf> {
 
 fn event_log_path(options: &CliOptions) -> Option<PathBuf> {
     options.event_log.clone().or_else(|| {
-        options
-            .production_preset
-            .then(|| default_event_log_path(&options.output_root))
+        if options.batch_roots {
+            Some(default_batch_event_log_path(&options.output_root))
+        } else {
+            options
+                .production_preset
+                .then(|| default_event_log_path(&options.output_root))
+        }
     })
+}
+
+fn default_batch_event_log_path(output_root: &Path) -> PathBuf {
+    output_root.join("batch-events.jsonl")
 }
 
 fn default_event_log_path(output_root: &Path) -> PathBuf {
@@ -9873,6 +9881,40 @@ resolver = "2"
     }
 
     #[test]
+    fn batch_roots_default_to_batch_event_log() {
+        let options = parse_options([
+            "--batch-roots",
+            "--root",
+            "app::selected",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(
+            event_log_path(&options),
+            Some(PathBuf::from("out/batch-events.jsonl"))
+        );
+    }
+
+    #[test]
+    fn explicit_event_log_overrides_batch_default() {
+        let options = parse_options([
+            "--event-log",
+            "events.jsonl",
+            "--batch-roots",
+            "--root",
+            "app::selected",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(
+            event_log_path(&options),
+            Some(PathBuf::from("events.jsonl"))
+        );
+    }
+
+    #[test]
     fn explicit_root_options_select_roots_without_source_markers() {
         let options = parse_options([
             "--analyzer",
@@ -9964,6 +10006,15 @@ pub fn dead() -> usize {
         assert!(!original.contains("opensourced"), "{original}");
         let report = fs::read_to_string(output.join("batch-report.jsonl")).unwrap();
         assert!(report.contains("\"status\":\"generated\""), "{report}");
+        let batch_events = fs::read_to_string(output.join("batch-events.jsonl")).unwrap();
+        assert!(
+            batch_events.contains("\"event\":\"batch_analyzer\""),
+            "{batch_events}"
+        );
+        assert!(
+            batch_events.contains("\"event\":\"batch_root_context\""),
+            "{batch_events}"
+        );
         let root_output = output.join("0001-app_selected");
         let decision_log = fs::read_to_string(root_output.join("slice-decision-log.json")).unwrap();
         assert!(

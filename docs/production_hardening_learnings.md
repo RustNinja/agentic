@@ -1748,3 +1748,11 @@ folder after rendering succeeds. Per-root logs now include generation,
 artifact-write, preflight, cargo check, repair, deferred-warning repair, and
 final batch context decisions, while the global batch log still aggregates all
 roots.
+
+Batch mining also needs startup logs before any root output exists. A Litter
+shared-RA probe stalled before root generation, which meant per-root logs never
+had a chance to appear. `--batch-roots` now defaults the process event log to
+`batch-events.jsonl` under the batch output directory unless the caller supplies
+`--event-log`. That gives each concurrent CLI run its own resolver/analyzer
+startup, heartbeat, selected-root, and root-context timeline without requiring
+production mode or source checkout edits.
