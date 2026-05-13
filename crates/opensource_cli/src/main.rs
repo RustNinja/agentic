@@ -18,9 +18,10 @@ use opensource_core::{
     generate_with_analyzer_feedback_and_roots, marked_workspace_packages, preflight_workspace,
     repair_workspace, resolve_feedback_widening_roots, write_generate_report,
     write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
-    CheckOptions, CheckReport, FeedbackRootResolutionReport, GenerateOptions, GenerateReport,
-    GenerateSession, GenerateSessionLoadProgress, GeneratedTargetReport, PreflightDiagnostic,
-    PreflightOptions, PreflightReport, RepairOptions, RepairReport, RootId, SemanticReport,
+    CheckOptions, CheckReport, FeedbackRootResolutionEntry, FeedbackRootResolutionReport,
+    GenerateOptions, GenerateReport, GenerateSession, GenerateSessionLoadProgress,
+    GeneratedTargetReport, PreflightDiagnostic, PreflightOptions, PreflightReport, RepairOptions,
+    RepairReport, RootId, SemanticReport,
 };
 
 fn main() {
@@ -1614,7 +1615,10 @@ fn decision_log_glob_import_missing_export_candidates(
 ) -> usize {
     let mut candidates = 0;
     for entry in &resolution.entries {
-        if entry.matches != 0 || entry.glob_import_module_roots.is_empty() {
+        if entry.matches != 0
+            || entry.glob_import_module_roots.is_empty()
+            || is_glob_import_private_upstream_candidate(entry)
+        {
             continue;
         }
         candidates += 1;
@@ -1645,10 +1649,7 @@ fn decision_log_glob_import_private_upstream_candidates(
 ) -> usize {
     let mut candidates = 0;
     for entry in &resolution.entries {
-        if entry.matches != 0
-            || entry.glob_import_module_roots.is_empty()
-            || entry.glob_import_provider_internal_globs.is_empty()
-        {
+        if !is_glob_import_private_upstream_candidate(entry) {
             continue;
         }
         candidates += 1;
@@ -1665,6 +1666,12 @@ fn decision_log_glob_import_private_upstream_candidates(
         }
     }
     candidates
+}
+
+fn is_glob_import_private_upstream_candidate(entry: &FeedbackRootResolutionEntry) -> bool {
+    entry.matches == 0
+        && !entry.glob_import_module_roots.is_empty()
+        && !entry.glob_import_provider_internal_globs.is_empty()
 }
 
 fn decision_log_suggestion_replacements(diagnostic: &CheckDiagnostic) -> Vec<String> {
@@ -12058,7 +12065,7 @@ pub fn hydrate() -> HydratedConversationItem {
 
         assert_eq!(summary.resolution_reports, 1);
         assert_eq!(summary.glob_import_context_entries, 1);
-        assert_eq!(summary.glob_import_missing_export_candidates, 1);
+        assert_eq!(summary.glob_import_missing_export_candidates, 0);
         assert_eq!(summary.glob_import_private_upstream_candidates, 1);
         assert!(
             summary.evidence.iter().any(|entry| {
@@ -12083,9 +12090,10 @@ pub fn hydrate() -> HydratedConversationItem {
         );
         let events = fs::read_to_string(event_log).unwrap();
         assert!(events.contains("\"event\":\"feedback_diagnostics\""));
-        assert!(events.contains("\"glob_import_missing_export_candidates\":1"));
+        assert!(events.contains("\"glob_import_missing_export_candidates\":0"));
         assert!(events.contains("\"glob_import_private_upstream_candidates\":1"));
         assert!(events.contains("glob_import_private_upstream_candidate symbol=`ConversationItem`"));
+        assert!(!events.contains("glob_import_missing_export_candidate symbol=`ConversationItem`"));
     }
 
     #[test]

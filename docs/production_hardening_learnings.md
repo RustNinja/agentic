@@ -191,7 +191,9 @@ Generic source repair wins came from recognizing patterns, not projects:
   corpus mining can distinguish source/API mismatch from a missing dependency
   edge without broadening unrelated code. These cases are also bucketed as
   `glob_import_missing_export_candidate` when the provider module root resolves
-  but no project-local export/root matches the missing symbol. The same
+  but no project-local export/root matches the missing symbol. If the provider
+  module itself only privately glob-imports upstream names, the more specific
+  `glob_import_private_upstream_candidate` bucket is used instead. The same
   diagnostic buckets are emitted to the per-run JSONL event log so parallel
   miners can stream failure categories without waiting to inspect the final
   decision log.
@@ -1833,6 +1835,8 @@ module only has private upstream glob imports such as
 `use crate::conversation_uniffi::*`, feedback now reports
 `glob_import_private_upstream_candidates`. This mirrors the Litter
 `message_item::render` shape where `conversation::*` is present but the missing
-unprefixed names are not public exports of `conversation`. The slicer still
+unprefixed names are not public exports of `conversation`. The private-upstream
+bucket is exclusive from the broader missing-export bucket, so batch miners do
+not double-count one root cause as two independent failures. The slicer still
 fails closed, but miners can now separate private-upstream export/API drift from
 ordinary missing dependency retention.
