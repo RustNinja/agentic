@@ -5843,6 +5843,7 @@ fn covered_project_path_unresolved_diagnostic(
             proof.status == "proven"
                 && (covered_project_associated_callable_path(project, proof, diagnostic)
                     || covered_project_enum_variant_path(project, proof, diagnostic)
+                    || covered_project_item_path(project, proof, diagnostic)
                     || covered_build_generated_path(project, proof, diagnostic))
         })
 }
@@ -5895,6 +5896,146 @@ fn covered_project_enum_variant_path(
             && path_qualifier_matches_item_path(&qualifier, item)
             && rendered_symbol_is_used_or_unknown(proof, "member", &format!("{item}::{symbol}"))
     })
+}
+
+fn covered_project_item_path(
+    project: &Project,
+    proof: &RenderedSymbolProofReport,
+    diagnostic: &SemanticUnresolvedDiagnostic,
+) -> bool {
+    let Some(symbol) = diagnostic.symbol.as_deref() else {
+        return false;
+    };
+    let segments = syn_path_segments(&diagnostic.snippet);
+    if segments.last().is_none_or(|segment| segment != symbol) {
+        return false;
+    }
+    let owner_package = diagnostic_owner_package(diagnostic);
+
+    let mut matches = project.items.keys().filter(|item| {
+        item.name == symbol
+            && rendered_symbol_is_used_or_unknown(proof, "item", &item.to_string())
+            && unresolved_path_segments_can_target_item(project, owner_package, &segments, item)
+    });
+    let Some(_first) = matches.next() else {
+        return false;
+    };
+    matches.next().is_none()
+}
+
+fn diagnostic_owner_package(diagnostic: &SemanticUnresolvedDiagnostic) -> Option<&str> {
+    match diagnostic.owner.as_ref()? {
+        SemanticOwnerId::Callable(callable) => Some(callable.package()),
+        SemanticOwnerId::Item(item) => Some(item.package()),
+    }
+}
+
+fn unresolved_path_segments_can_target_item(
+    project: &Project,
+    owner_package: Option<&str>,
+    segments: &[String],
+    item: &ItemId,
+) -> bool {
+    if segments.len() == 1 {
+        return true;
+    }
+
+    let Some((target_package, module_path)) =
+        unresolved_project_path_module(project, owner_package, &segments[..segments.len() - 1])
+    else {
+        return false;
+    };
+    if target_package != item.package {
+        return false;
+    }
+
+    let mut item_path = item.module_path.clone();
+    item_path.push(item.name.clone());
+    let mut direct_path = module_path.clone();
+    direct_path.push(item.name.clone());
+    if direct_path == item_path {
+        return true;
+    }
+
+    project
+        .module_aliases
+        .get(&(target_package, module_path.clone()))
+        .and_then(|aliases| aliases.get(&item.name))
+        .is_some_and(|target| local_alias_target_path(&module_path, target) == item_path)
+}
+
+fn unresolved_project_path_module(
+    project: &Project,
+    owner_package: Option<&str>,
+    prefix: &[String],
+) -> Option<(String, Vec<String>)> {
+    let first = prefix.first()?;
+    match first.as_str() {
+        "crate" | "self" => {
+            let owner_package = owner_package?;
+            Some((owner_package.to_string(), prefix[1..].to_vec()))
+        }
+        _ => {
+            if let Some(owner_package) = owner_package {
+                if let Some(package) = project.workspace.packages.get(owner_package) {
+                    if let Some(dependency) = package
+                        .dependencies
+                        .iter()
+                        .find(|dependency| dependency_name_matches(dependency, first))
+                    {
+                        return Some((dependency.package.clone(), prefix[1..].to_vec()));
+                    }
+                }
+            }
+
+            project
+                .workspace
+                .packages
+                .keys()
+                .find(|package| package_name_matches_path_root(package, first))
+                .map(|package| (package.clone(), prefix[1..].to_vec()))
+        }
+    }
+}
+
+fn local_alias_target_path(module_path: &[String], target: &[String]) -> Vec<String> {
+    let Some((first, rest)) = target.split_first() else {
+        return module_path.to_vec();
+    };
+    match first.as_str() {
+        "crate" => rest.to_vec(),
+        "self" => module_path
+            .iter()
+            .cloned()
+            .chain(rest.iter().cloned())
+            .collect(),
+        "super" => {
+            let mut path = module_path.to_vec();
+            path.pop();
+            path.extend(rest.iter().cloned());
+            path
+        }
+        _ => module_path
+            .iter()
+            .cloned()
+            .chain(target.iter().cloned())
+            .collect(),
+    }
+}
+
+fn dependency_name_matches(dependency: &manifest::Dependency, name: &str) -> bool {
+    dependency.alias == name
+        || dependency.package == name
+        || dependency_code_name(&dependency.alias) == name
+        || dependency_code_name(&dependency.package) == name
+}
+
+fn package_name_matches_path_root(package: &str, root: &str) -> bool {
+    package == root || dependency_code_name(package) == root
+}
+
+fn dependency_code_name(alias: &str) -> String {
+    alias.replace('-', "_")
 }
 
 fn covered_build_generated_path(
@@ -12166,7 +12307,7 @@ fn semantic_owner_to_string(owner: &SemanticOwnerId) -> String {
 #[cfg(test)]
 mod tests {
     use std::{
-        collections::{BTreeMap, BTreeSet},
+        collections::{BTreeMap, BTreeSet, HashMap, HashSet},
         fs,
         path::{Path, PathBuf},
         process::Command,
@@ -12177,12 +12318,12 @@ mod tests {
     use super::non_benign_unresolved_count;
     use super::{
         add_public_reexport_proof_hazards, add_rendered_symbol_proof_hazards,
-        add_semantic_inventory_hazard, default_feature_closure,
-        direct_free_function_root_selectors, generate, generate_with_analyzer_feedback,
-        generated_package_source_roots, production_hazard_with_details,
-        production_readiness_status, public_reexport_proof_report, rendered_symbol_proof_report,
-        rendered_symbol_proof_report_with_members, resolve_feedback_widening_roots,
-        semantic_hazard_metrics, semantic_unresolved_details,
+        add_semantic_inventory_hazard, covered_project_path_unresolved_diagnostic,
+        default_feature_closure, direct_free_function_root_selectors, generate,
+        generate_with_analyzer_feedback, generated_package_source_roots,
+        production_hazard_with_details, production_readiness_status, public_reexport_proof_report,
+        rendered_symbol_proof_report, rendered_symbol_proof_report_with_members,
+        resolve_feedback_widening_roots, semantic_hazard_metrics, semantic_unresolved_details,
         semantic_unresolved_owner_is_retained, unknown_surface_category,
         usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
         write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
@@ -12191,7 +12332,7 @@ mod tests {
         RenderedSymbolProofEntry, RenderedSymbolProofReport, RenderedSymbolProofSummary, RootId,
         SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
         SemanticReport, SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic,
-        SemanticUnresolvedKind, SemanticUsageReport, UsageDecision, UsageDecisionIndex,
+        SemanticUnresolvedKind, SemanticUsageReport, SourceSpan, UsageDecision, UsageDecisionIndex,
     };
     #[cfg(feature = "ra-hir")]
     use super::{generate_with_analyzer, generate_with_analyzer_roots};
@@ -15015,6 +15156,123 @@ pub use dead::Dead;
         assert!(!semantic_unresolved_owner_is_retained(
             &reduced,
             &pruned_diagnostic
+        ));
+    }
+
+    #[test]
+    fn semantic_unresolved_project_reexport_paths_are_covered_by_rendered_items() {
+        let owner = CallableId::Free {
+            package: "app".to_string(),
+            module_path: vec!["theme".to_string()],
+            name: "health_color".to_string(),
+        };
+        let item = ItemId {
+            package: "dep-crate".to_string(),
+            module_path: vec!["store".to_string(), "snapshot".to_string()],
+            name: "ServerHealthSnapshot".to_string(),
+            kind: ItemKind::Enum,
+        };
+        let project = super::model::Project {
+            workspace: manifest::Workspace {
+                root: PathBuf::from("/tmp/workspace"),
+                packages: HashMap::from([
+                    (
+                        "app".to_string(),
+                        manifest::Package {
+                            name: "app".to_string(),
+                            root: PathBuf::from("/tmp/workspace/app"),
+                            lib_path: PathBuf::from("/tmp/workspace/app/src/lib.rs"),
+                            entry_target: manifest::PackageTarget {
+                                name: "app".to_string(),
+                                kind: vec!["lib".to_string()],
+                                src_path: PathBuf::from("/tmp/workspace/app/src/lib.rs"),
+                                required_features: Vec::new(),
+                            },
+                            dependencies: vec![manifest::Dependency {
+                                alias: "dep_crate".to_string(),
+                                package: "dep-crate".to_string(),
+                            }],
+                            manifest: toml::Value::Table(Default::default()),
+                        },
+                    ),
+                    (
+                        "dep-crate".to_string(),
+                        manifest::Package {
+                            name: "dep-crate".to_string(),
+                            root: PathBuf::from("/tmp/workspace/dep-crate"),
+                            lib_path: PathBuf::from("/tmp/workspace/dep-crate/src/lib.rs"),
+                            entry_target: manifest::PackageTarget {
+                                name: "dep-crate".to_string(),
+                                kind: vec!["lib".to_string()],
+                                src_path: PathBuf::from("/tmp/workspace/dep-crate/src/lib.rs"),
+                                required_features: Vec::new(),
+                            },
+                            dependencies: Vec::new(),
+                            manifest: toml::Value::Table(Default::default()),
+                        },
+                    ),
+                ]),
+                manifest: toml::Value::Table(Default::default()),
+            },
+            files: HashMap::new(),
+            functions: HashMap::new(),
+            methods: HashMap::new(),
+            items: HashMap::from([(
+                item.clone(),
+                super::model::ItemRecord {
+                    package: item.package.clone(),
+                    module_path: item.module_path.clone(),
+                    span: SourceSpan {
+                        file: PathBuf::from("/tmp/workspace/dep-crate/src/store/snapshot.rs"),
+                        start_line: 1,
+                        start_column: 0,
+                        end_line: 3,
+                        end_column: 1,
+                    },
+                    item: syn::parse_str("pub enum ServerHealthSnapshot { Connected }").unwrap(),
+                    aliases: HashMap::new(),
+                },
+            )]),
+            module_aliases: HashMap::from([(
+                ("dep-crate".to_string(), vec!["store".to_string()]),
+                HashMap::from([(
+                    "ServerHealthSnapshot".to_string(),
+                    vec!["snapshot".to_string(), "ServerHealthSnapshot".to_string()],
+                )]),
+            )]),
+            source_files_by_module: HashMap::new(),
+            methods_by_receiver: HashMap::new(),
+            receivers_with_methods: HashSet::new(),
+        };
+        let proof = RenderedSymbolProofReport {
+            status: "proven".to_string(),
+            summary: RenderedSymbolProofSummary::default(),
+            entries: vec![RenderedSymbolProofEntry {
+                kind: "item".to_string(),
+                id: item.to_string(),
+                classification: "retained".to_string(),
+            }],
+        };
+        let mut diagnostic = semantic_unresolved_diagnostic(
+            SemanticUnresolvedKind::Path,
+            SemanticUnresolvedCategory::DependencyRisk,
+            "unresolved_path_anchor_matches_project_local_identifier",
+        );
+        diagnostic.symbol = Some("ServerHealthSnapshot".to_string());
+        diagnostic.snippet = "dep_crate::store::ServerHealthSnapshot".to_string();
+        diagnostic.owner = Some(SemanticOwnerId::Callable(owner.clone()));
+        assert!(covered_project_path_unresolved_diagnostic(
+            &project,
+            Some(&proof),
+            &diagnostic
+        ));
+
+        diagnostic.snippet = "ServerHealthSnapshot".to_string();
+        diagnostic.owner = Some(SemanticOwnerId::Callable(owner));
+        assert!(covered_project_path_unresolved_diagnostic(
+            &project,
+            Some(&proof),
+            &diagnostic
         ));
     }
 
