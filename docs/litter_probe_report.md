@@ -270,6 +270,19 @@ passed deliberately.
   `semantic_inventory_partially_applied` warnings are suppressed when
   retained-package pruning is fully proven; concrete unresolved/query,
   macro/generated/dyn/cfg hazards remain fail-closed.
+- The two-root support-package probe for `codex-tui::theme::health_color` and
+  `codex-tui::theme::health_symbol` exposed unmapped RA proof debt inside
+  pruned `codex-mobile-client` platform/support files. The semantic proof now
+  separates three generic discharge categories: definitely inactive current
+  target `#[cfg]` code, callables/items whose source file is not rendered, and
+  module declarations whose subtree has no retained symbols. Re-running the
+  same Litter probe kept both generated slices accepted and feedback-clean,
+  retained only `codex-mobile-client/src/lib.rs`, `store/mod.rs`, and
+  `store/snapshot.rs`, and moved both roots to
+  `complete_for_retained_packages` with zero unproven/unmapped proof debt. The
+  source baseline still fails in this environment before slicing because the
+  external git dependency `alleycat-bridge-core` cannot be fetched, so the probe
+  was accepted with baseline failure attribution enabled.
 
 ## Next Rule Targets
 

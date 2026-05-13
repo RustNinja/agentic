@@ -24,7 +24,7 @@ use quote::ToTokens;
 use serde::Serialize;
 use syn::{
     parse::Parser, punctuated::Punctuated, spanned::Spanned, visit::Visit, Attribute, Expr, Item,
-    Macro, Meta, UseTree,
+    Lit, Macro, Meta, UseTree,
 };
 
 pub use analyzer::{
@@ -364,6 +364,11 @@ pub struct SemanticUsageProofSummary {
     pub proven_items: usize,
     pub unproven_callables: usize,
     pub unproven_items: usize,
+    pub cfg_inactive_callables: usize,
+    pub cfg_inactive_items: usize,
+    pub source_file_pruned_callables: usize,
+    pub source_file_pruned_items: usize,
+    pub structural_pruned_items: usize,
     pub unmapped_callables: usize,
     pub unmapped_items: usize,
     pub failed_reference_query_callables: usize,
@@ -1937,7 +1942,7 @@ fn generate_loaded(
     let targets = target_report(project, &packages);
     let source_map = source_map_report(project, &render_reduced);
     let macro_surfaces = macro_surface_report(project, &render_reduced);
-    let semantic_proof = semantic_usage_proof_report(&analyzer, &usage_decisions);
+    let semantic_proof = semantic_usage_proof_report(project, &analyzer, &usage_decisions);
     let public_reexport_proof =
         public_reexport_proof_report(&options.output_root, &usage_decisions);
     let member_decisions =
@@ -3455,7 +3460,7 @@ fn usage_classification_report(
         prunable_items: &prunable_items,
     };
     let evidence = usage_classification_evidence(project, reduced, &evidence_input);
-    let semantic_proof = semantic_usage_proof_report(analyzer, decisions);
+    let semantic_proof = semantic_usage_proof_report(project, analyzer, decisions);
     let rendered_decision_map =
         RenderedUsageDecisionMap::from_rendered_symbols_and_decisions(&rendered_symbols, decisions);
 
@@ -5285,6 +5290,7 @@ fn semantic_unresolved_hazard_category(hazard: &ProductionHazardReport) -> &'sta
 }
 
 fn semantic_usage_proof_report(
+    project: &Project,
     analyzer: &AnalyzerReport,
     decisions: &UsageDecisionIndex,
 ) -> SemanticUsageProofReport {
@@ -5305,6 +5311,8 @@ fn semantic_usage_proof_report(
         .union(&decisions.blocked_by_unknown_items)
         .cloned()
         .collect::<BTreeSet<_>>();
+    let retained_source_files =
+        retained_source_files(project, &retained_callables, &retained_items);
 
     let mut unproven_callables = Vec::new();
     let mut unproven_items = Vec::new();
@@ -5316,13 +5324,29 @@ fn semantic_usage_proof_report(
         summary.proof_required_callables += 1;
         if let Some(usage) = &analyzer.semantic_usage {
             let mut unproven = false;
+            let discharge =
+                callable_semantic_proof_discharge(project, callable, &retained_source_files);
+            let mut cfg_discharged = false;
+            let mut source_file_discharged = false;
             if !usage.is_callable_mapped(callable) {
-                summary.unmapped_callables += 1;
-                unproven = true;
+                match discharge {
+                    SemanticProofDischarge::CfgInactive => cfg_discharged = true,
+                    SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::None | SemanticProofDischarge::StructuralPruned => {
+                        summary.unmapped_callables += 1;
+                        unproven = true;
+                    }
+                }
             }
             if usage.callable_reference_query_failed(callable) {
-                summary.failed_reference_query_callables += 1;
-                unproven = true;
+                match discharge {
+                    SemanticProofDischarge::CfgInactive => cfg_discharged = true,
+                    SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::None | SemanticProofDischarge::StructuralPruned => {
+                        summary.failed_reference_query_callables += 1;
+                        unproven = true;
+                    }
+                }
             }
             if usage.callable_has_retained_reference(callable, &retained_callables, &retained_items)
             {
@@ -5332,6 +5356,11 @@ fn semantic_usage_proof_report(
             if unproven {
                 unproven_callables.push(callable.clone());
             } else {
+                if cfg_discharged {
+                    summary.cfg_inactive_callables += 1;
+                } else if source_file_discharged {
+                    summary.source_file_pruned_callables += 1;
+                }
                 summary.proven_callables += 1;
             }
         } else {
@@ -5346,13 +5375,37 @@ fn semantic_usage_proof_report(
         summary.proof_required_items += 1;
         if let Some(usage) = &analyzer.semantic_usage {
             let mut unproven = false;
+            let discharge = item_semantic_proof_discharge(
+                project,
+                item,
+                &retained_source_files,
+                &retained_callables,
+                &retained_items,
+            );
+            let mut cfg_discharged = false;
+            let mut source_file_discharged = false;
+            let mut structural_discharged = false;
             if !usage.is_item_mapped(item) {
-                summary.unmapped_items += 1;
-                unproven = true;
+                match discharge {
+                    SemanticProofDischarge::CfgInactive => cfg_discharged = true,
+                    SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::StructuralPruned => structural_discharged = true,
+                    SemanticProofDischarge::None => {
+                        summary.unmapped_items += 1;
+                        unproven = true;
+                    }
+                }
             }
             if usage.item_reference_query_failed(item) {
-                summary.failed_reference_query_items += 1;
-                unproven = true;
+                match discharge {
+                    SemanticProofDischarge::CfgInactive => cfg_discharged = true,
+                    SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::StructuralPruned => structural_discharged = true,
+                    SemanticProofDischarge::None => {
+                        summary.failed_reference_query_items += 1;
+                        unproven = true;
+                    }
+                }
             }
             if usage.item_has_retained_reference(item, &retained_callables, &retained_items) {
                 summary.retained_reference_items += 1;
@@ -5361,6 +5414,13 @@ fn semantic_usage_proof_report(
             if unproven {
                 unproven_items.push(item.clone());
             } else {
+                if cfg_discharged {
+                    summary.cfg_inactive_items += 1;
+                } else if source_file_discharged {
+                    summary.source_file_pruned_items += 1;
+                } else if structural_discharged {
+                    summary.structural_pruned_items += 1;
+                }
                 summary.proven_items += 1;
             }
         } else {
@@ -5391,6 +5451,253 @@ fn semantic_usage_proof_report(
             items: unproven_items,
         },
     }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SemanticProofDischarge {
+    None,
+    CfgInactive,
+    SourceFilePruned,
+    StructuralPruned,
+}
+
+fn callable_semantic_proof_discharge(
+    project: &Project,
+    callable: &CallableId,
+    retained_source_files: &BTreeSet<PathBuf>,
+) -> SemanticProofDischarge {
+    if callable_is_current_target_inactive(project, callable) {
+        return SemanticProofDischarge::CfgInactive;
+    }
+    if callable_source_file_is_pruned(project, callable, retained_source_files) {
+        return SemanticProofDischarge::SourceFilePruned;
+    }
+    SemanticProofDischarge::None
+}
+
+fn item_semantic_proof_discharge(
+    project: &Project,
+    item: &ItemId,
+    retained_source_files: &BTreeSet<PathBuf>,
+    retained_callables: &BTreeSet<CallableId>,
+    retained_items: &BTreeSet<ItemId>,
+) -> SemanticProofDischarge {
+    if item_is_current_target_inactive(project, item) {
+        return SemanticProofDischarge::CfgInactive;
+    }
+    if item_source_file_is_pruned(project, item, retained_source_files) {
+        return SemanticProofDischarge::SourceFilePruned;
+    }
+    if pruned_module_has_no_retained_subtree(project, item, retained_callables, retained_items) {
+        return SemanticProofDischarge::StructuralPruned;
+    }
+    SemanticProofDischarge::None
+}
+
+fn retained_source_files(
+    project: &Project,
+    retained_callables: &BTreeSet<CallableId>,
+    retained_items: &BTreeSet<ItemId>,
+) -> BTreeSet<PathBuf> {
+    retained_callables
+        .iter()
+        .filter_map(|callable| callable_source_file(project, callable).cloned())
+        .chain(
+            retained_items
+                .iter()
+                .filter_map(|item| item_source_file(project, item).cloned()),
+        )
+        .collect()
+}
+
+fn callable_source_file<'a>(project: &'a Project, callable: &CallableId) -> Option<&'a PathBuf> {
+    project
+        .functions
+        .get(callable)
+        .map(|record| &record.span.file)
+        .or_else(|| {
+            project
+                .methods
+                .get(callable)
+                .map(|record| &record.span.file)
+        })
+}
+
+fn item_source_file<'a>(project: &'a Project, item: &ItemId) -> Option<&'a PathBuf> {
+    project.items.get(item).map(|record| &record.span.file)
+}
+
+fn callable_source_file_is_pruned(
+    project: &Project,
+    callable: &CallableId,
+    retained_source_files: &BTreeSet<PathBuf>,
+) -> bool {
+    callable_source_file(project, callable)
+        .is_some_and(|file| !retained_source_files.contains(file))
+}
+
+fn item_source_file_is_pruned(
+    project: &Project,
+    item: &ItemId,
+    retained_source_files: &BTreeSet<PathBuf>,
+) -> bool {
+    item_source_file(project, item).is_some_and(|file| !retained_source_files.contains(file))
+}
+
+fn pruned_module_has_no_retained_subtree(
+    project: &Project,
+    item: &ItemId,
+    retained_callables: &BTreeSet<CallableId>,
+    retained_items: &BTreeSet<ItemId>,
+) -> bool {
+    if item.kind != model::ItemKind::Mod {
+        return false;
+    }
+    let mut child_module_path = item.module_path.clone();
+    child_module_path.push(item.name.clone());
+    let retained_callables_in_module = retained_callables.iter().any(|callable| {
+        callable.package() == item.package
+            && callable_module_path(project, callable)
+                .as_deref()
+                .is_some_and(|module_path| path_has_prefix(module_path, &child_module_path))
+    });
+    let retained_items_in_module = retained_items.iter().any(|retained| {
+        retained.package == item.package
+            && path_has_prefix(&retained.module_path, &child_module_path)
+    });
+    !retained_callables_in_module && !retained_items_in_module
+}
+
+fn callable_is_current_target_inactive(project: &Project, callable: &CallableId) -> bool {
+    if let Some(record) = project.functions.get(callable) {
+        return attrs_disable_current_target(&record.item.attrs)
+            || module_path_disables_current_target(
+                project,
+                callable.package(),
+                &record.module_path,
+            );
+    }
+    if let Some(record) = project.methods.get(callable) {
+        return attrs_disable_current_target(&record.item.attrs)
+            || attrs_disable_current_target(&record.impl_attrs)
+            || module_path_disables_current_target(
+                project,
+                callable.package(),
+                &record.module_path,
+            );
+    }
+    false
+}
+
+fn item_is_current_target_inactive(project: &Project, item: &ItemId) -> bool {
+    let Some(record) = project.items.get(item) else {
+        return false;
+    };
+    attrs_disable_current_target(item_attrs(&record.item))
+        || module_path_disables_current_target(project, &item.package, &item.module_path)
+}
+
+fn module_path_disables_current_target(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    module_path_cfg_gates(project, package, module_path)
+        .iter()
+        .any(|(_, attribute)| cfg_attribute_is_definitely_false_for_current_target(attribute))
+}
+
+fn attrs_disable_current_target(attrs: &[Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(cfg_attribute_is_definitely_false_for_current_target)
+}
+
+fn cfg_attribute_is_definitely_false_for_current_target(attribute: &Attribute) -> bool {
+    if !attribute.path().is_ident("cfg") {
+        return false;
+    }
+    attribute
+        .parse_args::<Meta>()
+        .ok()
+        .and_then(|meta| cfg_meta_eval_current_target(&meta))
+        .is_some_and(|active| !active)
+}
+
+fn cfg_meta_eval_current_target(meta: &Meta) -> Option<bool> {
+    match meta {
+        Meta::Path(path) => cfg_path_eval_current_target(path),
+        Meta::NameValue(name_value) => {
+            let key = name_value.path.segments.last()?.ident.to_string();
+            let value = expr_string_literal(&name_value.value)?;
+            cfg_key_value_eval_current_target(&key, &value)
+        }
+        Meta::List(list) => {
+            let key = list.path.segments.last()?.ident.to_string();
+            let args = Punctuated::<Meta, syn::Token![,]>::parse_terminated
+                .parse2(list.tokens.clone())
+                .ok()?
+                .into_iter()
+                .collect::<Vec<_>>();
+            match key.as_str() {
+                "all" => {
+                    let mut has_unknown = false;
+                    for arg in &args {
+                        match cfg_meta_eval_current_target(arg) {
+                            Some(true) => {}
+                            Some(false) => return Some(false),
+                            None => has_unknown = true,
+                        }
+                    }
+                    (!has_unknown).then_some(true)
+                }
+                "any" => {
+                    let mut has_unknown = false;
+                    for arg in &args {
+                        match cfg_meta_eval_current_target(arg) {
+                            Some(true) => return Some(true),
+                            Some(false) => {}
+                            None => has_unknown = true,
+                        }
+                    }
+                    (!has_unknown).then_some(false)
+                }
+                "not" if args.len() == 1 => cfg_meta_eval_current_target(&args[0]).map(|v| !v),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn cfg_path_eval_current_target(path: &syn::Path) -> Option<bool> {
+    let key = path.segments.last()?.ident.to_string();
+    match key.as_str() {
+        "test" => Some(false),
+        "unix" => Some(cfg!(unix)),
+        "windows" => Some(cfg!(windows)),
+        "debug_assertions" => Some(cfg!(debug_assertions)),
+        _ => None,
+    }
+}
+
+fn cfg_key_value_eval_current_target(key: &str, value: &str) -> Option<bool> {
+    match key {
+        "target_arch" => Some(value == std::env::consts::ARCH),
+        "target_family" => Some(value == std::env::consts::FAMILY),
+        "target_os" => Some(value == std::env::consts::OS),
+        "target_pointer_width" => Some(value == (std::mem::size_of::<usize>() * 8).to_string()),
+        _ => None,
+    }
+}
+
+fn expr_string_literal(expr: &Expr) -> Option<String> {
+    let Expr::Lit(expr_lit) = expr else {
+        return None;
+    };
+    let Lit::Str(lit) = &expr_lit.lit else {
+        return None;
+    };
+    Some(lit.value())
 }
 
 struct UsageEvidenceInput<'a> {
@@ -11923,6 +12230,11 @@ struct SemanticUsageProofSummaryJson {
     proven_items: usize,
     unproven_callables: usize,
     unproven_items: usize,
+    cfg_inactive_callables: usize,
+    cfg_inactive_items: usize,
+    source_file_pruned_callables: usize,
+    source_file_pruned_items: usize,
+    structural_pruned_items: usize,
     unmapped_callables: usize,
     unmapped_items: usize,
     failed_reference_query_callables: usize,
@@ -11946,6 +12258,11 @@ impl SemanticUsageProofSummaryJson {
             proven_items: summary.proven_items,
             unproven_callables: summary.unproven_callables,
             unproven_items: summary.unproven_items,
+            cfg_inactive_callables: summary.cfg_inactive_callables,
+            cfg_inactive_items: summary.cfg_inactive_items,
+            source_file_pruned_callables: summary.source_file_pruned_callables,
+            source_file_pruned_items: summary.source_file_pruned_items,
+            structural_pruned_items: summary.structural_pruned_items,
             unmapped_callables: summary.unmapped_callables,
             unmapped_items: summary.unmapped_items,
             failed_reference_query_callables: summary.failed_reference_query_callables,
@@ -12600,18 +12917,20 @@ mod tests {
         add_semantic_inventory_hazard, covered_project_path_unresolved_diagnostic,
         default_feature_closure, direct_free_function_root_selectors, generate,
         generate_with_analyzer_feedback, generated_package_source_roots,
-        production_hazard_with_details, production_readiness_status, public_reexport_proof_report,
-        rendered_symbol_proof_report, rendered_symbol_proof_report_with_members,
-        resolve_feedback_widening_roots, semantic_hazard_metrics, semantic_unresolved_details,
-        semantic_unresolved_owner_is_retained, unknown_surface_category,
-        usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
-        write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
-        CheckSpan, GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
-        PublicReexportProofReport, PublicReexportProofSummary, ReducedProject,
-        RenderedSymbolProofEntry, RenderedSymbolProofReport, RenderedSymbolProofSummary, RootId,
-        SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
-        SemanticReport, SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic,
-        SemanticUnresolvedKind, SemanticUsageReport, SourceSpan, UsageDecision, UsageDecisionIndex,
+        production_hazard_with_details, production_readiness_report, production_readiness_status,
+        public_reexport_proof_report, rendered_symbol_proof_report,
+        rendered_symbol_proof_report_with_members, resolve_feedback_widening_roots,
+        semantic_hazard_metrics, semantic_unresolved_details,
+        semantic_unresolved_owner_is_retained, semantic_usage_proof_report,
+        unknown_surface_category, usage_classification_report, usage_evidence_reason,
+        usage_guarded_render_reduction, write_generate_report, AnalyzerMode, AnalyzerReport,
+        CallableId, CheckDiagnostic, CheckSpan, GenerateOptions, ItemId, ProductionHazardDetail,
+        PublicReexportProofEntry, PublicReexportProofReport, PublicReexportProofSummary,
+        ReducedProject, RenderedSymbolProofEntry, RenderedSymbolProofReport,
+        RenderedSymbolProofSummary, RootId, SemanticFileReport, SemanticHazardScope,
+        SemanticOwnerId, SemanticReductionHints, SemanticReport, SemanticUnresolvedCategory,
+        SemanticUnresolvedDiagnostic, SemanticUnresolvedKind, SemanticUsageReport, SourceSpan,
+        UsageDecision, UsageDecisionIndex,
     };
     #[cfg(feature = "ra-hir")]
     use super::{generate_with_analyzer, generate_with_analyzer_roots};
@@ -13616,6 +13935,222 @@ pub fn mapped_dead_code() -> i32 {
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(!generated.contains("pub fn unmapped_dead_code"));
         assert!(!generated.contains("pub fn mapped_dead_code"));
+    }
+
+    #[test]
+    fn semantic_usage_proof_discharges_current_target_inactive_prunable_code() {
+        let root = temp_output("semantic-usage-inactive-cfg-source");
+        let output = temp_output("semantic-usage-inactive-cfg-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        let inactive_os = inactive_target_os();
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            &format!(
+                r#"use opensourced::opensourced;
+
+#[cfg(target_os = "{inactive_os}")]
+pub mod inactive {{
+    pub struct InactiveDeadType;
+
+    pub fn inactive_dead_code() -> i32 {{
+        2
+    }}
+}}
+
+#[opensourced]
+pub fn entry() -> i32 {{
+    1
+}}
+"#,
+            ),
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let inactive_function = project_callable_named(&project, "inactive_dead_code");
+        let inactive_module = project_item_named(&project, "inactive", ItemKind::Mod);
+        let inactive_type = project_item_named(&project, "InactiveDeadType", ItemKind::Struct);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: 1,
+            unmapped_callables: project.functions.len().saturating_sub(1),
+            mapped_callable_ids: BTreeSet::from([entry.clone()]),
+            unmapped_items: project.items.len(),
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerHir,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
+            .expect("render should succeed");
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+            RenderedSymbolProofReport::default(),
+            PublicReexportProofReport::default(),
+        );
+
+        assert_eq!(
+            usage.semantic_proof.status, "complete_for_retained_packages",
+            "{:#?}",
+            usage.semantic_proof
+        );
+        assert_eq!(usage.semantic_proof.summary.cfg_inactive_callables, 1);
+        assert_eq!(usage.semantic_proof.summary.cfg_inactive_items, 2);
+        assert_eq!(usage.semantic_proof.summary.unmapped_callables, 0);
+        assert_eq!(usage.semantic_proof.summary.unmapped_items, 0);
+        assert!(usage.unused.callables.contains(&inactive_function));
+        assert!(usage.unused.items.contains(&inactive_module));
+        assert!(usage.unused.items.contains(&inactive_type));
+
+        let semantic_proof = semantic_usage_proof_report(&project, &analyzer, &usage_decisions);
+        let production = production_readiness_report(
+            &analyzer,
+            &project,
+            &render_reduced,
+            &output,
+            Some(&semantic_proof),
+            Some(&RenderedSymbolProofReport::default()),
+            Some(&PublicReexportProofReport::default()),
+        );
+        assert!(
+            !production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "semantic_inventory_available"),
+            "current-target inactive prunable code should not leave generic semantic proof debt: {production:#?}"
+        );
+        let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(!generated.contains("inactive_dead_code"));
+        assert!(!generated.contains("InactiveDeadType"));
+    }
+
+    #[test]
+    fn semantic_usage_proof_discharges_pruned_source_file_contents() {
+        let root = temp_output("semantic-usage-source-file-pruned-source");
+        let output = temp_output("semantic-usage-source-file-pruned-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub mod dead_support;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+"#,
+        );
+        write(
+            root.join("app/src/dead_support.rs"),
+            r#"pub const DEAD_TIMEOUT: u64 = 30;
+
+pub fn dead_helper() -> u64 {
+    DEAD_TIMEOUT
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let dead_helper = project_callable_named(&project, "dead_helper");
+        let dead_module = project_item_named(&project, "dead_support", ItemKind::Mod);
+        let dead_timeout = project_item_named(&project, "DEAD_TIMEOUT", ItemKind::Const);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: 1,
+            unmapped_callables: project.functions.len().saturating_sub(1),
+            mapped_callable_ids: BTreeSet::from([entry]),
+            unmapped_items: project.items.len(),
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerHir,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        render::write_reduced_workspace(&project, &render_reduced, &usage_decisions, &output)
+            .expect("render should succeed");
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+            RenderedSymbolProofReport::default(),
+            PublicReexportProofReport::default(),
+        );
+
+        assert_eq!(
+            usage.semantic_proof.status, "complete_for_retained_packages",
+            "{:#?}",
+            usage.semantic_proof
+        );
+        assert_eq!(usage.semantic_proof.summary.source_file_pruned_callables, 1);
+        assert_eq!(usage.semantic_proof.summary.source_file_pruned_items, 1);
+        assert_eq!(usage.semantic_proof.summary.structural_pruned_items, 1);
+        assert_eq!(usage.semantic_proof.summary.unmapped_callables, 0);
+        assert_eq!(usage.semantic_proof.summary.unmapped_items, 0);
+        assert!(usage.unused.callables.contains(&dead_helper));
+        assert!(usage.unused.items.contains(&dead_module));
+        assert!(usage.unused.items.contains(&dead_timeout));
+        assert!(!output.join("app/src/dead_support.rs").exists());
+        let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(!generated.contains("dead_support"));
     }
 
     #[test]
@@ -18703,6 +19238,14 @@ pub fn entry() -> usize {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
+    }
+
+    fn inactive_target_os() -> &'static str {
+        if std::env::consts::OS == "windows" {
+            "linux"
+        } else {
+            "windows"
+        }
     }
 
     fn semantic_unresolved_diagnostic(
