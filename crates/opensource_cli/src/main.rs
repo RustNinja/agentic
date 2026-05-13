@@ -1241,6 +1241,50 @@ fn decision_log_usage_samples(
     evidence
 }
 
+fn decision_log_semantic_usage_proof_evidence(
+    report: &GenerateReport,
+    limit: usize,
+) -> Vec<String> {
+    let proof = &report.usage.semantic_proof;
+    let summary = &proof.summary;
+    let mut evidence = Vec::new();
+    if summary.cfg_inactive_callables + summary.cfg_inactive_items > 0 {
+        evidence.push(format!(
+            "cfg_inactive_discharge callables={} items={} reason=current target cfg excludes these prunable candidates",
+            summary.cfg_inactive_callables, summary.cfg_inactive_items
+        ));
+    }
+    if summary.source_file_pruned_callables + summary.source_file_pruned_items > 0 {
+        evidence.push(format!(
+            "source_file_pruned_discharge callables={} items={} reason=source files containing only prunable candidates were not rendered",
+            summary.source_file_pruned_callables, summary.source_file_pruned_items
+        ));
+    }
+    if summary.structural_pruned_items > 0 {
+        evidence.push(format!(
+            "structural_pruned_discharge items={} reason=module declarations whose subtrees contain no retained symbols were not rendered",
+            summary.structural_pruned_items
+        ));
+    }
+    push_usage_samples(
+        &mut evidence,
+        limit,
+        "unproven semantic callable",
+        proof.unproven.callables.iter().map(ToString::to_string),
+    );
+    push_usage_samples(
+        &mut evidence,
+        limit,
+        "unproven semantic item",
+        proof.unproven.items.iter().map(ToString::to_string),
+    );
+    if evidence.is_empty() {
+        evidence.push("all retained-package prunable candidates are semantically proven or explicitly discharged".to_string());
+    }
+    evidence.truncate(limit);
+    evidence
+}
+
 fn push_usage_samples(
     evidence: &mut Vec<String>,
     limit: usize,
@@ -6361,6 +6405,102 @@ fn decision_log_steps(
         evidence: decision_log_usage_samples(report, &rendered_usage, 36),
     });
 
+    let semantic_usage_proof = &report.usage.semantic_proof;
+    let semantic_usage_summary = &semantic_usage_proof.summary;
+    let mut semantic_usage_metrics = BTreeMap::new();
+    semantic_usage_metrics.insert(
+        "analyzer_available".to_string(),
+        serde_json::json!(semantic_usage_summary.analyzer_available),
+    );
+    semantic_usage_metrics.insert(
+        "retained_packages".to_string(),
+        serde_json::json!(semantic_usage_summary.retained_packages),
+    );
+    semantic_usage_metrics.insert(
+        "prunable_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.prunable_callables),
+    );
+    semantic_usage_metrics.insert(
+        "prunable_items".to_string(),
+        serde_json::json!(semantic_usage_summary.prunable_items),
+    );
+    semantic_usage_metrics.insert(
+        "proof_required_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.proof_required_callables),
+    );
+    semantic_usage_metrics.insert(
+        "proof_required_items".to_string(),
+        serde_json::json!(semantic_usage_summary.proof_required_items),
+    );
+    semantic_usage_metrics.insert(
+        "proven_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.proven_callables),
+    );
+    semantic_usage_metrics.insert(
+        "proven_items".to_string(),
+        serde_json::json!(semantic_usage_summary.proven_items),
+    );
+    semantic_usage_metrics.insert(
+        "unproven_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.unproven_callables),
+    );
+    semantic_usage_metrics.insert(
+        "unproven_items".to_string(),
+        serde_json::json!(semantic_usage_summary.unproven_items),
+    );
+    semantic_usage_metrics.insert(
+        "cfg_inactive_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.cfg_inactive_callables),
+    );
+    semantic_usage_metrics.insert(
+        "cfg_inactive_items".to_string(),
+        serde_json::json!(semantic_usage_summary.cfg_inactive_items),
+    );
+    semantic_usage_metrics.insert(
+        "source_file_pruned_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.source_file_pruned_callables),
+    );
+    semantic_usage_metrics.insert(
+        "source_file_pruned_items".to_string(),
+        serde_json::json!(semantic_usage_summary.source_file_pruned_items),
+    );
+    semantic_usage_metrics.insert(
+        "structural_pruned_items".to_string(),
+        serde_json::json!(semantic_usage_summary.structural_pruned_items),
+    );
+    semantic_usage_metrics.insert(
+        "unmapped_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.unmapped_callables),
+    );
+    semantic_usage_metrics.insert(
+        "unmapped_items".to_string(),
+        serde_json::json!(semantic_usage_summary.unmapped_items),
+    );
+    semantic_usage_metrics.insert(
+        "failed_reference_query_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.failed_reference_query_callables),
+    );
+    semantic_usage_metrics.insert(
+        "failed_reference_query_items".to_string(),
+        serde_json::json!(semantic_usage_summary.failed_reference_query_items),
+    );
+    semantic_usage_metrics.insert(
+        "retained_reference_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.retained_reference_callables),
+    );
+    semantic_usage_metrics.insert(
+        "retained_reference_items".to_string(),
+        serde_json::json!(semantic_usage_summary.retained_reference_items),
+    );
+    steps.push(DecisionLogStep {
+        step: "semantic_usage_proof".to_string(),
+        status: semantic_usage_proof.status.clone(),
+        decision: "accept pruning only when retained-package candidates are proven unused or explicitly discharged".to_string(),
+        reason: "rust-analyzer reference results are the proof source; cfg-inactive, source-file-pruned, and structural-pruned buckets explain safe pruning when RA cannot map or query a candidate that is not rendered".to_string(),
+        metrics: semantic_usage_metrics,
+        evidence: decision_log_semantic_usage_proof_evidence(report, 32),
+    });
+
     let rendered_summary = &report.usage.rendered_symbols.summary;
     let rendered_decisions = &report.usage.rendered_decision_map;
     let mut member_metrics = BTreeMap::new();
@@ -11400,6 +11540,14 @@ resolver = "2"
         );
         assert!(
             decision_log.contains("\"step\": \"usage_pruning\""),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("\"step\": \"semantic_usage_proof\""),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("\"source_file_pruned_callables\""),
             "{decision_log}"
         );
         assert!(
