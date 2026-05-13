@@ -1370,6 +1370,76 @@ fn decision_log_feedback_diagnostics(
     summary
 }
 
+fn feedback_diagnostic_status(summary: &FeedbackDiagnosticLogSummary) -> String {
+    if summary.errors > 0 {
+        "errors".to_string()
+    } else if summary.warnings > 0 {
+        "warnings".to_string()
+    } else if summary.unreadable_reports > 0 {
+        "partial".to_string()
+    } else {
+        "clean".to_string()
+    }
+}
+
+fn feedback_diagnostic_metrics(
+    summary: &FeedbackDiagnosticLogSummary,
+) -> BTreeMap<String, serde_json::Value> {
+    let mut metrics = BTreeMap::new();
+    metrics.insert("reports".to_string(), serde_json::json!(summary.reports));
+    metrics.insert(
+        "unreadable_reports".to_string(),
+        serde_json::json!(summary.unreadable_reports),
+    );
+    metrics.insert(
+        "diagnostics".to_string(),
+        serde_json::json!(summary.diagnostics),
+    );
+    metrics.insert("errors".to_string(), serde_json::json!(summary.errors));
+    metrics.insert("warnings".to_string(), serde_json::json!(summary.warnings));
+    metrics.insert(
+        "widening_candidates".to_string(),
+        serde_json::json!(summary.widening_candidates),
+    );
+    metrics.insert(
+        "widening_hazards".to_string(),
+        serde_json::json!(summary.widening_hazards),
+    );
+    metrics.insert(
+        "resolution_reports".to_string(),
+        serde_json::json!(summary.resolution_reports),
+    );
+    metrics.insert(
+        "resolution_errors".to_string(),
+        serde_json::json!(summary.resolution_errors),
+    );
+    metrics.insert(
+        "resolution_matched_roots".to_string(),
+        serde_json::json!(summary.resolution_matched_roots),
+    );
+    metrics.insert(
+        "resolution_skipped_no_match".to_string(),
+        serde_json::json!(summary.resolution_skipped_no_match),
+    );
+    metrics.insert(
+        "resolution_skipped_too_many_matches".to_string(),
+        serde_json::json!(summary.resolution_skipped_too_many_matches),
+    );
+    metrics.insert(
+        "source_api_mismatch_candidates".to_string(),
+        serde_json::json!(summary.source_api_mismatch_candidates),
+    );
+    metrics.insert(
+        "glob_import_context_entries".to_string(),
+        serde_json::json!(summary.glob_import_context_entries),
+    );
+    metrics.insert(
+        "glob_import_missing_export_candidates".to_string(),
+        serde_json::json!(summary.glob_import_missing_export_candidates),
+    );
+    metrics
+}
+
 fn decision_log_feedback_resolution_evidence(
     resolution: &FeedbackRootResolutionReport,
     evidence: &mut Vec<String>,
@@ -5070,8 +5140,29 @@ fn finish_validation_with_decision_log(
     status: &str,
     reason: Option<&str>,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    write_feedback_diagnostics_event(options, validation)?;
     finish_validation(options, validation, status, reason)?;
     write_decision_log(options, report, Some(validation), status, reason)
+}
+
+fn write_feedback_diagnostics_event(
+    options: &CliOptions,
+    validation: &ValidationReport,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let summary = decision_log_feedback_diagnostics(options, validation, 10);
+    if summary.reports == 0 && summary.unreadable_reports == 0 {
+        return Ok(());
+    }
+    let mut fields = feedback_diagnostic_metrics(&summary);
+    fields.insert("evidence".to_string(), serde_json::json!(summary.evidence));
+    write_event_log(
+        options,
+        "feedback_diagnostics",
+        &feedback_diagnostic_status(&summary),
+        "classify compiler diagnostics for live slice mining",
+        "the event stream mirrors the final decision-log diagnostic buckets so parallel runners can triage failures without opening the full report first",
+        fields,
+    )
 }
 
 #[derive(Debug, Serialize)]
@@ -6203,82 +6294,13 @@ fn decision_log_steps(
 
         let diagnostic_summary = decision_log_feedback_diagnostics(options, validation, 40);
         if diagnostic_summary.reports > 0 || diagnostic_summary.unreadable_reports > 0 {
-            let mut diagnostic_metrics = BTreeMap::new();
-            diagnostic_metrics.insert(
-                "reports".to_string(),
-                serde_json::json!(diagnostic_summary.reports),
-            );
-            diagnostic_metrics.insert(
-                "unreadable_reports".to_string(),
-                serde_json::json!(diagnostic_summary.unreadable_reports),
-            );
-            diagnostic_metrics.insert(
-                "diagnostics".to_string(),
-                serde_json::json!(diagnostic_summary.diagnostics),
-            );
-            diagnostic_metrics.insert(
-                "errors".to_string(),
-                serde_json::json!(diagnostic_summary.errors),
-            );
-            diagnostic_metrics.insert(
-                "warnings".to_string(),
-                serde_json::json!(diagnostic_summary.warnings),
-            );
-            diagnostic_metrics.insert(
-                "widening_candidates".to_string(),
-                serde_json::json!(diagnostic_summary.widening_candidates),
-            );
-            diagnostic_metrics.insert(
-                "widening_hazards".to_string(),
-                serde_json::json!(diagnostic_summary.widening_hazards),
-            );
-            diagnostic_metrics.insert(
-                "resolution_reports".to_string(),
-                serde_json::json!(diagnostic_summary.resolution_reports),
-            );
-            diagnostic_metrics.insert(
-                "resolution_errors".to_string(),
-                serde_json::json!(diagnostic_summary.resolution_errors),
-            );
-            diagnostic_metrics.insert(
-                "resolution_matched_roots".to_string(),
-                serde_json::json!(diagnostic_summary.resolution_matched_roots),
-            );
-            diagnostic_metrics.insert(
-                "resolution_skipped_no_match".to_string(),
-                serde_json::json!(diagnostic_summary.resolution_skipped_no_match),
-            );
-            diagnostic_metrics.insert(
-                "resolution_skipped_too_many_matches".to_string(),
-                serde_json::json!(diagnostic_summary.resolution_skipped_too_many_matches),
-            );
-            diagnostic_metrics.insert(
-                "source_api_mismatch_candidates".to_string(),
-                serde_json::json!(diagnostic_summary.source_api_mismatch_candidates),
-            );
-            diagnostic_metrics.insert(
-                "glob_import_context_entries".to_string(),
-                serde_json::json!(diagnostic_summary.glob_import_context_entries),
-            );
-            diagnostic_metrics.insert(
-                "glob_import_missing_export_candidates".to_string(),
-                serde_json::json!(diagnostic_summary.glob_import_missing_export_candidates),
-            );
             steps.push(DecisionLogStep {
                 step: "feedback_diagnostics".to_string(),
-                status: if diagnostic_summary.errors > 0 {
-                    "errors".to_string()
-                } else if diagnostic_summary.warnings > 0 {
-                    "warnings".to_string()
-                } else if diagnostic_summary.unreadable_reports > 0 {
-                    "partial".to_string()
-                } else {
-                    "clean".to_string()
-                },
+                status: feedback_diagnostic_status(&diagnostic_summary),
                 decision: "record compiler diagnostic shape for slice mining and failure triage"
                     .to_string(),
                 reason: "diagnostic codes, primary files, widening candidates, and warning/error counts explain why a generated slice was accepted, repaired, widened, or rejected without opening the raw feedback JSON first".to_string(),
-                metrics: diagnostic_metrics,
+                metrics: feedback_diagnostic_metrics(&diagnostic_summary),
                 evidence: diagnostic_summary.evidence,
             });
         }
@@ -9565,8 +9587,8 @@ mod tests {
         run_feedback_repair_loop, run_plain_check_gate, semantic_hazard_warning_count,
         semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
         slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
-        validation_report_path, write_report, FeedbackWideningState, ValidationGateReport,
-        ValidationReport,
+        validation_report_path, write_feedback_diagnostics_event, write_report,
+        FeedbackWideningState, ValidationGateReport, ValidationReport,
     };
 
     #[test]
@@ -11604,6 +11626,7 @@ pub fn entry() -> usize {
     fn feedback_diagnostics_log_glob_import_context_for_bare_missing_symbol() {
         let source = temp_path("cli-feedback-diagnostics-glob-source");
         let output = temp_path("cli-feedback-diagnostics-glob-output");
+        let event_log = temp_path("cli-feedback-diagnostics-glob-events").join("events.jsonl");
         let opensourced_path = repo_root().join("crates/opensourced");
         write(
             source.join("Cargo.toml"),
@@ -11639,10 +11662,13 @@ pub fn entry() -> usize {
 "#,
         );
         let options = parse_args_from(vec![
+            OsString::from("--event-log"),
+            event_log.clone().into_os_string(),
             source.clone().into_os_string(),
             output.clone().into_os_string(),
         ])
         .expect("arguments should parse");
+        initialize_event_log(&options).expect("event log should initialize");
         let mut validation = ValidationReport::new(&options);
         let feedback_path = output.join("slice-feedback.json");
         let mut unresolved = diagnostic_with_span(
@@ -11672,6 +11698,8 @@ pub fn entry() -> usize {
         );
 
         let summary = decision_log_feedback_diagnostics(&options, &validation, 40);
+        write_feedback_diagnostics_event(&options, &validation)
+            .expect("feedback diagnostics event should write");
 
         assert_eq!(summary.resolution_reports, 1);
         assert_eq!(summary.glob_import_context_entries, 1);
@@ -11698,6 +11726,10 @@ pub fn entry() -> usize {
             "{:#?}",
             summary.evidence
         );
+        let events = fs::read_to_string(event_log).unwrap();
+        assert!(events.contains("\"event\":\"feedback_diagnostics\""));
+        assert!(events.contains("\"glob_import_missing_export_candidates\":1"));
+        assert!(events.contains("glob_import_missing_export_candidate symbol=`ConversationItem`"));
     }
 
     #[test]

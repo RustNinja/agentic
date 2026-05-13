@@ -191,7 +191,10 @@ Generic source repair wins came from recognizing patterns, not projects:
   corpus mining can distinguish source/API mismatch from a missing dependency
   edge without broadening unrelated code. These cases are also bucketed as
   `glob_import_missing_export_candidate` when the provider module root resolves
-  but no project-local export/root matches the missing symbol.
+  but no project-local export/root matches the missing symbol. The same
+  diagnostic buckets are emitted to the per-run JSONL event log so parallel
+  miners can stream failure categories without waiting to inspect the final
+  decision log.
 - Real compiler feedback widening must be part of the retained render plan, not
   just the first reduction. A 2026-05-06 Litter codex-ipc run exposed that
   unknown-retention re-rendering could drop feedback-widened roots when both
