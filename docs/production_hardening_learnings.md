@@ -1739,6 +1739,19 @@ categorized from `slice-decision-log.json` as source mismatch, missing
 downstream dependency, or slicer bug before opening the larger
 `slice-feedback.json`.
 
+One-iteration feedback widening also needs a current failure report, not only
+the diagnostic that triggered widening. A parallel Litter probe over
+`codex-tui::widgets::message_item::render` and
+`codex-tui::screens::settings::render` showed that both roots widened on the
+only configured feedback-repair attempt. The CLI now immediately runs a
+post-widen `cargo check`, overwrites `slice-feedback.json` with the current
+widened workspace result, records a `rejected_after_widen` or accepted attempt,
+and emits `feedback_widening_verification` events. The settings root is now
+classified from the final report as a source/API mismatch
+(`AppAccount` vs `Account`), while the message-item root exposes the next
+downstream missing-type surface after `codex-mobile-client::conversation` is
+retained.
+
 Batch root event logs must not make the output directory non-empty before the
 renderer starts. A first live-log attempt wrote `slice-events.jsonl` directly
 inside the root output path and correctly tripped the overwrite guard. The batch

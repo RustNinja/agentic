@@ -6589,6 +6589,232 @@ fn try_widen_from_feedback(
     Ok(true)
 }
 
+#[derive(Debug, Clone, Copy)]
+enum FeedbackAcceptancePolicy {
+    Feedback,
+    Repair,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct PostWidenVerificationOutcome {
+    accepted: bool,
+    baseline_limited: bool,
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_post_widen_feedback_verification(
+    options: &CliOptions,
+    baseline: Option<&CheckReport>,
+    validation: &mut ValidationReport,
+    stage: &str,
+    gate_name: &str,
+    attempt: usize,
+    report_path: &Path,
+    cargo_args: Vec<String>,
+    acceptance_policy: FeedbackAcceptancePolicy,
+) -> Result<PostWidenVerificationOutcome, Box<dyn std::error::Error>> {
+    println!("{stage} post-widen verification: cargo check --message-format=json");
+    write_event_log(
+        options,
+        "feedback_widening_verification",
+        "started",
+        "run cargo check after compiler feedback widening",
+        "a final-attempt widening must be verified immediately so reports describe the current widened workspace",
+        event_fields(&[
+            ("stage", serde_json::json!(stage)),
+            ("gate", serde_json::json!(gate_name)),
+            ("attempt", serde_json::json!(attempt)),
+            ("target_dir", serde_json::json!(feedback_target_dir(options))),
+            ("feedback_report", serde_json::json!(report_path)),
+            ("cargo_args", serde_json::json!(cargo_args)),
+        ]),
+    )?;
+    let widened_check = check_workspace(CheckOptions {
+        manifest_path: options.output_root.join("Cargo.toml"),
+        target_dir: Some(feedback_target_dir(options)),
+        timeout: options.feedback_timeout,
+        cargo_args,
+    })?;
+    write_report(&widened_check, report_path)?;
+    print_feedback(&widened_check, options.feedback_limit, report_path);
+
+    let semantic_warnings = semantic_hazard_warning_count(&widened_check.diagnostics, baseline);
+    let repairable_warnings = repairable_warning_count(&widened_check.diagnostics);
+    write_event_log(
+        options,
+        "feedback_widening_verification",
+        if widened_check.success {
+            "checked"
+        } else {
+            "failed"
+        },
+        "classify compiler feedback after widening",
+        "post-widen verification decides whether the current top-down slice is accepted, baseline-limited, or rejected",
+        event_fields(&[
+            ("stage", serde_json::json!(stage)),
+            ("gate", serde_json::json!(gate_name)),
+            ("attempt", serde_json::json!(attempt)),
+            ("success", serde_json::json!(widened_check.success)),
+            ("errors", serde_json::json!(widened_check.error_count())),
+            ("warnings", serde_json::json!(widened_check.warning_count())),
+            ("semantic_warnings", serde_json::json!(semantic_warnings)),
+            ("repairable_warnings", serde_json::json!(repairable_warnings)),
+            ("timed_out", serde_json::json!(widened_check.timed_out)),
+            ("duration_ms", serde_json::json!(widened_check.duration_ms)),
+        ]),
+    )?;
+
+    let accepted = match acceptance_policy {
+        FeedbackAcceptancePolicy::Feedback => {
+            feedback_is_accepted(&widened_check, baseline, options.deny_warnings)
+        }
+        FeedbackAcceptancePolicy::Repair => {
+            feedback_repair_is_accepted(&widened_check, baseline, options.deny_warnings)
+        }
+    };
+    if accepted {
+        write_event_log(
+            options,
+            "feedback_widening_verification",
+            "accepted",
+            "accept generated workspace after compiler feedback widening",
+            "cargo check passed after widening the top-down roots from compiler feedback",
+            event_fields(&[
+                ("stage", serde_json::json!(stage)),
+                ("gate", serde_json::json!(gate_name)),
+                ("attempt", serde_json::json!(attempt)),
+            ]),
+        )?;
+        record_feedback_attempt(
+            validation,
+            stage,
+            attempt,
+            "accepted",
+            "generated workspace cargo check passed after compiler feedback widening",
+            &widened_check,
+            report_path.to_path_buf(),
+            false,
+            semantic_warnings,
+            repairable_warnings,
+            None,
+            None,
+        );
+        record_feedback_gate(
+            validation,
+            gate_name,
+            "accepted",
+            "generated workspace cargo check passed after compiler feedback widening",
+            &widened_check,
+            report_path.to_path_buf(),
+            semantic_warnings,
+        );
+        return Ok(PostWidenVerificationOutcome {
+            accepted: true,
+            baseline_limited: false,
+        });
+    }
+
+    let baseline_limited = options.allow_baseline_failures
+        && match acceptance_policy {
+            FeedbackAcceptancePolicy::Feedback => baseline_limited_feedback_is_accepted(
+                &widened_check,
+                baseline,
+                options.deny_warnings,
+            ),
+            FeedbackAcceptancePolicy::Repair => baseline_limited_feedback_repair_is_accepted(
+                &widened_check,
+                baseline,
+                options.deny_warnings,
+            ),
+        };
+    if baseline_limited {
+        write_event_log(
+            options,
+            "feedback_widening_verification",
+            "baseline_limited",
+            "accept baseline-limited generated workspace after widening",
+            "post-widen generated errors match the source baseline and remaining gates passed",
+            event_fields(&[
+                ("stage", serde_json::json!(stage)),
+                ("gate", serde_json::json!(gate_name)),
+                ("attempt", serde_json::json!(attempt)),
+            ]),
+        )?;
+        record_feedback_attempt(
+            validation,
+            stage,
+            attempt,
+            "baseline_limited",
+            "generated errors match the source baseline after compiler feedback widening",
+            &widened_check,
+            report_path.to_path_buf(),
+            true,
+            semantic_warnings,
+            repairable_warnings,
+            None,
+            None,
+        );
+        record_feedback_gate(
+            validation,
+            gate_name,
+            "baseline_limited",
+            "generated errors match the source baseline after compiler feedback widening",
+            &widened_check,
+            report_path.to_path_buf(),
+            semantic_warnings,
+        );
+        return Ok(PostWidenVerificationOutcome {
+            accepted: true,
+            baseline_limited: true,
+        });
+    }
+
+    let reason = if widened_check.timed_out {
+        "post-widen feedback cargo check timed out"
+    } else {
+        "final verification after compiler feedback widening did not pass"
+    };
+    write_event_log(
+        options,
+        "feedback_widening_verification",
+        "rejected",
+        "reject generated workspace after compiler feedback widening",
+        reason,
+        event_fields(&[
+            ("stage", serde_json::json!(stage)),
+            ("gate", serde_json::json!(gate_name)),
+            ("attempt", serde_json::json!(attempt)),
+        ]),
+    )?;
+    record_feedback_attempt(
+        validation,
+        stage,
+        attempt,
+        "rejected_after_widen",
+        reason,
+        &widened_check,
+        report_path.to_path_buf(),
+        false,
+        semantic_warnings,
+        repairable_warnings,
+        None,
+        None,
+    );
+    record_feedback_gate(
+        validation,
+        gate_name,
+        "failed",
+        reason,
+        &widened_check,
+        report_path.to_path_buf(),
+        semantic_warnings,
+    );
+    Ok(PostWidenVerificationOutcome {
+        accepted: false,
+        baseline_limited: false,
+    })
+}
+
 fn run_feedback_loop(
     options: &CliOptions,
     baseline: Option<&CheckReport>,
@@ -6765,6 +6991,27 @@ fn run_feedback_loop(
             semantic_warnings,
             repairable_warning_count(&report.diagnostics),
         )? {
+            if attempt == options.feedback_iterations {
+                let outcome = run_post_widen_feedback_verification(
+                    options,
+                    baseline,
+                    validation,
+                    "feedback",
+                    "feedback",
+                    attempt + 1,
+                    &report_path,
+                    options.cargo_check_args.clone(),
+                    FeedbackAcceptancePolicy::Feedback,
+                )?;
+                if outcome.accepted {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "generated workspace failed post-widen feedback verification; report written to {}",
+                    report_path.display()
+                )
+                .into());
+            }
             continue;
         }
 
@@ -7122,6 +7369,27 @@ fn run_feedback_repair_loop(
             repairable_warnings,
         )? {
             repaired_previous_attempt = false;
+            if attempt == options.feedback_repair_iterations {
+                let outcome = run_post_widen_feedback_verification(
+                    options,
+                    baseline,
+                    validation,
+                    "feedback-repair",
+                    "feedback-repair",
+                    attempt + 1,
+                    &feedback_report_path,
+                    options.cargo_check_args.clone(),
+                    FeedbackAcceptancePolicy::Repair,
+                )?;
+                if outcome.accepted {
+                    return Ok(());
+                }
+                return Err(format!(
+                    "generated workspace failed post-widen feedback repair verification; feedback report written to {}",
+                    feedback_report_path.display()
+                )
+                .into());
+            }
             continue;
         }
 
@@ -7653,6 +7921,30 @@ fn run_production_validation_matrix(
                 semantic_warnings,
                 repairable_warnings,
             )? {
+                if attempt == production_matrix_iterations(options) {
+                    let outcome = run_post_widen_feedback_verification(
+                        options,
+                        Some(&baseline),
+                        validation,
+                        "production-matrix",
+                        "production_matrix",
+                        attempt + 1,
+                        &feedback_report_path,
+                        entry.cargo_args.clone(),
+                        FeedbackAcceptancePolicy::Feedback,
+                    )?;
+                    if outcome.accepted {
+                        accepted = true;
+                        entry_baseline_limited = outcome.baseline_limited;
+                        break;
+                    }
+                    return Err(format!(
+                        "production matrix {} failed post-widen verification; report written to {}",
+                        entry.name,
+                        feedback_report_path.display()
+                    )
+                    .into());
+                }
                 continue;
             }
 
@@ -10973,6 +11265,94 @@ pub fn helper() -> usize {
         let report_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(slice_report).unwrap()).unwrap();
         assert_eq!(report_json["feedback_widened_roots"][0], "app::helper");
+    }
+
+    #[test]
+    fn feedback_repair_loop_verifies_final_widening_before_exhausting() {
+        let source = temp_path("cli-feedback-final-widen-source");
+        let output = temp_path("cli-feedback-final-widen-output");
+        let event_log = temp_path("cli-feedback-final-widen-events").join("events.jsonl");
+        let opensourced_path = repo_root().join("crates/opensourced");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            source.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            source.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+
+pub fn helper() -> usize {
+    2
+}
+"#,
+        );
+        write(
+            output.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            output.join(".slicers-output"),
+            "generated by slicers; safe to replace on the next slicers run\n",
+        );
+        write(
+            output.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            output.join("app/src/lib.rs"),
+            r#"pub fn entry() -> usize {
+    helper()
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            OsString::from("--feedback-repair-loop"),
+            OsString::from("1"),
+            OsString::from("--event-log"),
+            event_log.clone().into_os_string(),
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        initialize_event_log(&options).expect("event log should initialize");
+        let mut validation = ValidationReport::new(&options);
+
+        run_feedback_repair_loop(&options, None, &mut validation)
+            .expect("final-attempt widening should be verified and accepted");
+
+        assert_eq!(validation.attempts.len(), 2);
+        assert_eq!(validation.attempts[0].status, "widened");
+        assert_eq!(validation.attempts[1].status, "accepted");
+        assert_eq!(validation.attempts[1].attempt, 2);
+        assert!(validation
+            .gates
+            .iter()
+            .any(|gate| { gate.name == "feedback-repair" && gate.status == "accepted" }));
+        let feedback_json: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string(output.join("slice-feedback.json")).unwrap())
+                .unwrap();
+        assert_eq!(feedback_json["success"], true);
+        let events = fs::read_to_string(event_log).unwrap();
+        assert!(
+            events.contains("\"event\":\"feedback_widening_verification\""),
+            "{events}"
+        );
+        assert!(
+            events.contains("reports describe the current widened workspace"),
+            "{events}"
+        );
     }
 
     #[test]
