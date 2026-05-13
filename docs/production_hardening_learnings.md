@@ -1792,3 +1792,22 @@ batch log so future mining can separate slow source I/O, oversized downstream
 package-closure parsing, and true RA database loading. The manifest event also
 records `workspace_root` and `workspace_manifest`, so a stuck run can identify a
 source checkout/filesystem read problem without sampling the process first.
+
+Batch summaries need the same classifier buckets as the per-root logs. A miner
+that slices many roots should be able to rank failures from `batch-report.jsonl`
+without opening every `slice-feedback.json`. Batch rows now copy the
+`feedback_diagnostics` summary counters, widening counts, source/API mismatch
+candidate count, glob-import context count, and missing-export candidate count.
+The final per-root `slice-events.jsonl` also includes the same
+`feedback_diagnostics` event emitted by single-root runs.
+
+The first Litter two-root batch using the shared RA analyzer validates the split.
+Both `codex-tui::widgets::message_item::render` and
+`codex-tui::screens::settings::render` passed the rendered-usage contract with
+zero invalid retained symbols. The message-item root reported 7 feedback
+diagnostics, 1 widening candidate, 2 widening hazards, and no source/API mismatch
+bucket, pointing to a real unresolved downstream dependency candidate. The
+settings root reported 2 feedback diagnostics, 1 widening candidate, 1 widening
+hazard, and 1 source/API mismatch candidate for `AppAccount` versus the available
+`Account`, so the batch row alone is enough to avoid misclassifying it as a
+generic dependency-retention failure.

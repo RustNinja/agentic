@@ -1263,97 +1263,13 @@ fn decision_log_feedback_diagnostics(
     for report_path in decision_log_feedback_report_paths(validation) {
         match read_feedback_report_for_decision_log(&report_path) {
             Ok(report) => {
-                summary.reports += 1;
-                summary.diagnostics += report.diagnostics.len();
-                summary.errors += report.error_count();
-                summary.warnings += report.warning_count();
-                summary.widening_candidates += report.widening.candidates.len();
-                summary.widening_hazards += report.widening.hazards.len();
-                if report.error_count() > 0 {
-                    match resolve_feedback_widening_roots(
-                        &options.workspace_root,
-                        &report.diagnostics,
-                        &options.root_selectors,
-                    ) {
-                        Ok(resolution) => {
-                            summary.resolution_reports += 1;
-                            summary.resolution_matched_roots += resolution.matched_roots.len();
-                            summary.resolution_skipped_no_match += resolution.skipped_no_match;
-                            summary.resolution_skipped_too_many_matches +=
-                                resolution.skipped_too_many_matches;
-                            summary.glob_import_context_entries += resolution
-                                .entries
-                                .iter()
-                                .filter(|entry| {
-                                    !entry.glob_imports.is_empty()
-                                        || !entry.glob_import_module_roots.is_empty()
-                                })
-                                .count();
-                            summary.source_api_mismatch_candidates +=
-                                decision_log_source_api_mismatch_candidates(
-                                    &report,
-                                    &resolution,
-                                    &mut summary.evidence,
-                                    limit,
-                                );
-                            summary.glob_import_missing_export_candidates +=
-                                decision_log_glob_import_missing_export_candidates(
-                                    &resolution,
-                                    &mut summary.evidence,
-                                    limit,
-                                );
-                            decision_log_feedback_resolution_evidence(
-                                &resolution,
-                                &mut summary.evidence,
-                                limit,
-                            );
-                        }
-                        Err(error) => {
-                            summary.resolution_errors += 1;
-                            if summary.evidence.len() < limit {
-                                summary.evidence.push(format!(
-                                    "feedback resolution unreadable for {}: {}",
-                                    report_path.display(),
-                                    error
-                                ));
-                            }
-                        }
-                    }
-                }
-                if summary.evidence.len() < limit {
-                    summary.evidence.push(format!(
-                        "report {} success={} errors={} warnings={} duration_ms={}",
-                        report_path.display(),
-                        report.success,
-                        report.error_count(),
-                        report.warning_count(),
-                        report.duration_ms
-                    ));
-                }
-                for candidate in &report.widening.candidates {
-                    if summary.evidence.len() >= limit {
-                        break;
-                    }
-                    let symbol = candidate.symbol.as_deref().unwrap_or("<unknown>");
-                    let location = candidate
-                        .file_name
-                        .as_deref()
-                        .zip(candidate.line_start)
-                        .map(|(file, line)| format!("{file}:{line}"))
-                        .unwrap_or_else(|| "<unknown>".to_string());
-                    summary.evidence.push(format!(
-                        "widening {} `{}` at {}: {}",
-                        candidate.kind, symbol, location, candidate.action
-                    ));
-                }
-                for diagnostic in prioritized_diagnostics(&report.diagnostics) {
-                    if summary.evidence.len() >= limit {
-                        break;
-                    }
-                    summary
-                        .evidence
-                        .push(decision_log_diagnostic_summary(diagnostic));
-                }
+                accumulate_feedback_diagnostic_summary(
+                    options,
+                    &report,
+                    Some(&report_path),
+                    &mut summary,
+                    limit,
+                );
             }
             Err(error) => {
                 summary.unreadable_reports += 1;
@@ -1368,6 +1284,118 @@ fn decision_log_feedback_diagnostics(
         }
     }
     summary
+}
+
+fn feedback_diagnostic_summary_for_check(
+    options: &CliOptions,
+    report: &CheckReport,
+    limit: usize,
+) -> FeedbackDiagnosticLogSummary {
+    let mut summary = FeedbackDiagnosticLogSummary::default();
+    accumulate_feedback_diagnostic_summary(options, report, None, &mut summary, limit);
+    summary
+}
+
+fn accumulate_feedback_diagnostic_summary(
+    options: &CliOptions,
+    report: &CheckReport,
+    report_path: Option<&Path>,
+    summary: &mut FeedbackDiagnosticLogSummary,
+    limit: usize,
+) {
+    summary.reports += 1;
+    summary.diagnostics += report.diagnostics.len();
+    summary.errors += report.error_count();
+    summary.warnings += report.warning_count();
+    summary.widening_candidates += report.widening.candidates.len();
+    summary.widening_hazards += report.widening.hazards.len();
+    if report.error_count() > 0 {
+        match resolve_feedback_widening_roots(
+            &options.workspace_root,
+            &report.diagnostics,
+            &options.root_selectors,
+        ) {
+            Ok(resolution) => {
+                summary.resolution_reports += 1;
+                summary.resolution_matched_roots += resolution.matched_roots.len();
+                summary.resolution_skipped_no_match += resolution.skipped_no_match;
+                summary.resolution_skipped_too_many_matches += resolution.skipped_too_many_matches;
+                summary.glob_import_context_entries += resolution
+                    .entries
+                    .iter()
+                    .filter(|entry| {
+                        !entry.glob_imports.is_empty() || !entry.glob_import_module_roots.is_empty()
+                    })
+                    .count();
+                summary.source_api_mismatch_candidates +=
+                    decision_log_source_api_mismatch_candidates(
+                        report,
+                        &resolution,
+                        &mut summary.evidence,
+                        limit,
+                    );
+                summary.glob_import_missing_export_candidates +=
+                    decision_log_glob_import_missing_export_candidates(
+                        &resolution,
+                        &mut summary.evidence,
+                        limit,
+                    );
+                decision_log_feedback_resolution_evidence(
+                    &resolution,
+                    &mut summary.evidence,
+                    limit,
+                );
+            }
+            Err(error) => {
+                summary.resolution_errors += 1;
+                if summary.evidence.len() < limit {
+                    let report_label = report_path
+                        .map(|path| path.display().to_string())
+                        .unwrap_or_else(|| "<in-memory>".to_string());
+                    summary.evidence.push(format!(
+                        "feedback resolution unreadable for {report_label}: {error}",
+                    ));
+                }
+            }
+        }
+    }
+    if summary.evidence.len() < limit {
+        let report_label = report_path
+            .map(|path| path.display().to_string())
+            .unwrap_or_else(|| "<in-memory>".to_string());
+        summary.evidence.push(format!(
+            "report {} success={} errors={} warnings={} duration_ms={}",
+            report_label,
+            report.success,
+            report.error_count(),
+            report.warning_count(),
+            report.duration_ms
+        ));
+    }
+    for candidate in &report.widening.candidates {
+        if summary.evidence.len() >= limit {
+            break;
+        }
+        let symbol = candidate.symbol.as_deref().unwrap_or("<unknown>");
+        let location = candidate
+            .file_name
+            .as_deref()
+            .zip(candidate.line_start)
+            .map(|(file, line)| format!("{file}:{line}"))
+            .unwrap_or_else(|| "<unknown>".to_string());
+        summary.evidence.push(format!(
+            "widening {} `{}` at {}: {}",
+            candidate.kind, symbol, location, candidate.action
+        ));
+    }
+    for diagnostic in prioritized_diagnostics(&report.diagnostics) {
+        if summary.evidence.len() >= limit {
+            break;
+        }
+        summary
+            .evidence
+            .push(decision_log_diagnostic_summary(diagnostic));
+    }
 }
 
 fn feedback_diagnostic_status(summary: &FeedbackDiagnosticLogSummary) -> String {
@@ -1801,6 +1829,14 @@ struct BatchRootReport {
     check_success: Option<bool>,
     check_errors: Option<usize>,
     check_warnings: Option<usize>,
+    feedback_diagnostics: Option<usize>,
+    feedback_widening_candidates: Option<usize>,
+    feedback_widening_hazards: Option<usize>,
+    feedback_resolution_matched_roots: Option<usize>,
+    feedback_resolution_skipped_no_match: Option<usize>,
+    source_api_mismatch_candidates: Option<usize>,
+    glob_import_context_entries: Option<usize>,
+    glob_import_missing_export_candidates: Option<usize>,
     duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     artifact_error: Option<String>,
@@ -2620,6 +2656,14 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 check_success: None,
                 check_errors: None,
                 check_warnings: None,
+                feedback_diagnostics: None,
+                feedback_widening_candidates: None,
+                feedback_widening_hazards: None,
+                feedback_resolution_matched_roots: None,
+                feedback_resolution_skipped_no_match: None,
+                source_api_mismatch_candidates: None,
+                glob_import_context_entries: None,
+                glob_import_missing_export_candidates: None,
                 duration_ms: elapsed_ms(started),
                 artifact_error: None,
                 error: Some(error.to_string()),
@@ -2662,6 +2706,38 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 ("check_success", serde_json::json!(row.check_success)),
                 ("check_errors", serde_json::json!(row.check_errors)),
                 ("check_warnings", serde_json::json!(row.check_warnings)),
+                (
+                    "feedback_diagnostics",
+                    serde_json::json!(row.feedback_diagnostics),
+                ),
+                (
+                    "feedback_widening_candidates",
+                    serde_json::json!(row.feedback_widening_candidates),
+                ),
+                (
+                    "feedback_widening_hazards",
+                    serde_json::json!(row.feedback_widening_hazards),
+                ),
+                (
+                    "feedback_resolution_matched_roots",
+                    serde_json::json!(row.feedback_resolution_matched_roots),
+                ),
+                (
+                    "feedback_resolution_skipped_no_match",
+                    serde_json::json!(row.feedback_resolution_skipped_no_match),
+                ),
+                (
+                    "source_api_mismatch_candidates",
+                    serde_json::json!(row.source_api_mismatch_candidates),
+                ),
+                (
+                    "glob_import_context_entries",
+                    serde_json::json!(row.glob_import_context_entries),
+                ),
+                (
+                    "glob_import_missing_export_candidates",
+                    serde_json::json!(row.glob_import_missing_export_candidates),
+                ),
             ]),
         )?;
         append_batch_report_row(&report_path, &row)?;
@@ -3890,6 +3966,7 @@ fn run_batch_root(
 }
 
 fn batch_row_from_reports(
+    options: &CliOptions,
     root: &RootId,
     output_root: &Path,
     status: &str,
@@ -3900,6 +3977,8 @@ fn batch_row_from_reports(
 ) -> BatchRootReport {
     let rendered_usage = report.map(rendered_usage_contract);
     let semantic = report.and_then(|report| report.analyzer.semantic.as_ref());
+    let feedback_summary =
+        check.map(|check| feedback_diagnostic_summary_for_check(options, check, 0));
     BatchRootReport {
         root: root.to_string(),
         output_root: output_root.to_path_buf(),
@@ -3947,6 +4026,28 @@ fn batch_row_from_reports(
         check_success: check.map(|check| check.success),
         check_errors: check.map(CheckReport::error_count),
         check_warnings: check.map(CheckReport::warning_count),
+        feedback_diagnostics: feedback_summary.as_ref().map(|summary| summary.diagnostics),
+        feedback_widening_candidates: feedback_summary
+            .as_ref()
+            .map(|summary| summary.widening_candidates),
+        feedback_widening_hazards: feedback_summary
+            .as_ref()
+            .map(|summary| summary.widening_hazards),
+        feedback_resolution_matched_roots: feedback_summary
+            .as_ref()
+            .map(|summary| summary.resolution_matched_roots),
+        feedback_resolution_skipped_no_match: feedback_summary
+            .as_ref()
+            .map(|summary| summary.resolution_skipped_no_match),
+        source_api_mismatch_candidates: feedback_summary
+            .as_ref()
+            .map(|summary| summary.source_api_mismatch_candidates),
+        glob_import_context_entries: feedback_summary
+            .as_ref()
+            .map(|summary| summary.glob_import_context_entries),
+        glob_import_missing_export_candidates: feedback_summary
+            .as_ref()
+            .map(|summary| summary.glob_import_missing_export_candidates),
         duration_ms: 0,
         artifact_error: None,
         error,
@@ -3963,7 +4064,9 @@ fn finish_batch_root(
     check: Option<&CheckReport>,
     error: Option<String>,
 ) -> Result<BatchRootReport, Box<dyn std::error::Error>> {
+    let root_options = batch_root_artifact_options(options, root, output_root);
     let mut row = batch_row_from_reports(
+        &root_options,
         root,
         output_root,
         status,
@@ -3973,7 +4076,6 @@ fn finish_batch_root(
         error.clone(),
     );
     if let Some(report) = report {
-        let root_options = batch_root_artifact_options(options, root, output_root);
         if let Err(artifact_error) = write_batch_root_artifacts(
             options,
             &root_options,
@@ -4040,6 +4142,7 @@ fn write_batch_root_artifacts(
     )?;
     let mut validation =
         batch_root_validation_report(root_options, status, report, preflight, check, error);
+    write_feedback_diagnostics_event(root_options, &validation)?;
     finish_validation(
         root_options,
         &mut validation,
@@ -11089,6 +11192,15 @@ pub fn helper() -> usize {
         let root_output = output.join("0001-app_selected");
         let report = fs::read_to_string(output.join("batch-report.jsonl")).unwrap();
         assert!(report.contains("\"status\":\"accepted\""), "{report}");
+        assert!(report.contains("\"feedback_diagnostics\":0"), "{report}");
+        assert!(
+            report.contains("\"feedback_widening_candidates\":0"),
+            "{report}"
+        );
+        assert!(
+            report.contains("\"glob_import_missing_export_candidates\":0"),
+            "{report}"
+        );
         assert!(root_output.join("slice-feedback.json").exists());
         let decision_log = fs::read_to_string(root_output.join("slice-decision-log.json")).unwrap();
         assert!(
@@ -11109,6 +11221,11 @@ pub fn helper() -> usize {
             events.contains("\"event\":\"batch_root_context\""),
             "{events}"
         );
+        assert!(
+            events.contains("\"event\":\"feedback_diagnostics\""),
+            "{events}"
+        );
+        assert!(events.contains("\"widening_candidates\":0"), "{events}");
     }
 
     #[test]
