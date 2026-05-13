@@ -170,6 +170,40 @@ fn retains_multi_hop_dependency_barrel_reexports_without_dead_support_code() {
 }
 
 #[test]
+fn retains_dependency_glob_imports_that_feed_selected_root_surface() {
+    let workspace = temp_path("rule-dependency-glob-import-workspace");
+    let output = temp_path("rule-dependency-glob-import-output");
+    let target_dir = temp_path("rule-dependency-glob-import-target");
+    write_dependency_glob_import_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("dependency glob import rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("dependency_glob_app/src/lib.rs"));
+    assert!(app.contains("use glob_dep_model::conversation::*"), "{app}");
+    assert!(app.contains("ConversationItemContent::User"), "{app}");
+    assert!(!app.contains("dead_render"), "{app}");
+
+    let manifest = read(output.join("dependency_glob_app/Cargo.toml"));
+    assert!(manifest.contains("glob_dep_model"), "{manifest}");
+
+    let model = read(output.join("glob_dep_model/src/conversation.rs"));
+    assert!(model.contains("pub struct ConversationItem"), "{model}");
+    assert!(
+        model.contains("pub enum ConversationItemContent"),
+        "{model}"
+    );
+    assert!(model.contains("pub struct UserMessageData"), "{model}");
+    assert!(model.contains("pub struct AssistantMessageData"), "{model}");
+    assert!(!model.contains("DeadMessageData"), "{model}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
 fn prunes_public_support_enum_variants_outside_root_signature_surface() {
     let workspace = temp_path("rule-public-support-enum-prune-workspace");
     let output = temp_path("rule-public-support-enum-prune-output");
@@ -2958,6 +2992,41 @@ fn retains_map_payload_dto_surface_without_dead_snapshot_siblings() {
 }
 
 #[test]
+fn retains_map_field_iteration_value_fields_without_dead_siblings() {
+    let workspace = temp_path("rule-map-field-iteration-workspace");
+    let output = temp_path("rule-map-field-iteration-output");
+    let target_dir = temp_path("rule-map-field-iteration-target");
+    write_map_field_iteration_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("map field iteration rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("map_field_iteration_rule/src/lib.rs"));
+    assert!(
+        lib.contains("pub threads: BTreeMap<String, ThreadSnapshot>"),
+        "{lib}"
+    );
+    assert!(lib.contains("pub info: ThreadInfo"), "{lib}");
+    assert!(lib.contains("pub model: String"), "{lib}");
+    assert!(lib.contains("pub active_turn_id: Option<String>"), "{lib}");
+    assert!(lib.contains("pub title: Option<String>"), "{lib}");
+    assert!(lib.contains("pub cwd: Option<String>"), "{lib}");
+    assert!(lib.contains("pub status: ThreadStatus"), "{lib}");
+    assert!(
+        lib.contains("pub parent_thread_id: Option<String>"),
+        "{lib}"
+    );
+    assert!(!lib.contains("unused_snapshot_note"), "{lib}");
+    assert!(!lib.contains("unused_info_note"), "{lib}");
+    assert!(!lib.contains("dead_threads"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn prunes_dead_inherent_impl_methods_for_function_roots() {
     let workspace = temp_path("rule-dead-impl-method-workspace");
     let output = temp_path("rule-dead-impl-method-output");
@@ -4749,6 +4818,90 @@ pub struct DeadLeaf;
 
 pub fn dead_leaf_value() -> u32 {
     99
+}
+"#,
+    );
+}
+
+fn write_dependency_glob_import_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["dependency_glob_app", "glob_dep_model"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("dependency_glob_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "dependency_glob_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+glob_dep_model = {{ path = "../glob_dep_model" }}
+opensourced = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("dependency_glob_app/src/lib.rs"),
+        r#"use glob_dep_model::conversation::*;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected(item: &ConversationItem) -> String {
+    match &item.content {
+        ConversationItemContent::User(data) => data.text.clone(),
+        ConversationItemContent::Assistant(data) => data.text.clone(),
+    }
+}
+
+pub fn dead_render(_data: &DeadMessageData) -> String {
+    "dead".to_string()
+}
+"#,
+    );
+    write(
+        root.join("glob_dep_model/Cargo.toml"),
+        r#"[package]
+name = "glob_dep_model"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("glob_dep_model/src/lib.rs"),
+        r#"pub mod conversation;
+"#,
+    );
+    write(
+        root.join("glob_dep_model/src/conversation.rs"),
+        r#"pub struct ConversationItem {
+    pub content: ConversationItemContent,
+    pub unused_id: String,
+}
+
+pub enum ConversationItemContent {
+    User(UserMessageData),
+    Assistant(AssistantMessageData),
+    Dead(DeadMessageData),
+}
+
+pub struct UserMessageData {
+    pub text: String,
+    pub unused_image_count: u32,
+}
+
+pub struct AssistantMessageData {
+    pub text: String,
+    pub unused_phase: String,
+}
+
+pub struct DeadMessageData {
+    pub text: String,
 }
 "#,
     );
@@ -7389,6 +7542,64 @@ pub fn selected(id: String) -> AppSnapshot {
     let mut threads = BTreeMap::new();
     threads.insert(id.clone(), ThreadSnapshot { id });
     AppSnapshot { threads }
+}
+"#,
+    );
+}
+
+fn write_map_field_iteration_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "map_field_iteration_rule",
+        r#"use opensourced::opensourced;
+use std::collections::BTreeMap;
+
+pub struct AppSnapshot {
+    pub threads: BTreeMap<String, ThreadSnapshot>,
+    pub dead_threads: BTreeMap<String, DeadThreadSnapshot>,
+}
+
+pub struct SessionState {
+    pub snapshot: AppSnapshot,
+    pub dead_state_note: String,
+}
+
+pub struct ThreadSnapshot {
+    pub info: ThreadInfo,
+    pub model: String,
+    pub active_turn_id: Option<String>,
+    pub unused_snapshot_note: String,
+}
+
+pub struct ThreadInfo {
+    pub title: Option<String>,
+    pub cwd: Option<String>,
+    pub status: ThreadStatus,
+    pub parent_thread_id: Option<String>,
+    pub unused_info_note: String,
+}
+
+pub enum ThreadStatus {
+    Active,
+    Inactive,
+}
+
+pub struct DeadThreadSnapshot {
+    pub id: String,
+}
+
+#[opensourced]
+pub fn selected(state: &SessionState) -> Vec<String> {
+    let mut rows = Vec::new();
+    for (_key, thread) in &state.snapshot.threads {
+        let title = thread.info.title.as_deref().unwrap_or("untitled");
+        let cwd = thread.info.cwd.as_deref().unwrap_or("unknown");
+        let active = thread.active_turn_id.is_some()
+            || matches!(thread.info.status, ThreadStatus::Active);
+        let fork = thread.info.parent_thread_id.is_some();
+        rows.push(format!("{title}:{cwd}:{}:{active}:{fork}", thread.model));
+    }
+    rows
 }
 "#,
     );

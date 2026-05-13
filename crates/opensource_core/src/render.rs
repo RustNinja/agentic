@@ -246,6 +246,14 @@ impl RenderPlan {
             .module_mentions_ident(package, module_path, ident)
     }
 
+    fn module_mentioned_idents(
+        &self,
+        package: &str,
+        module_path: &[String],
+    ) -> Option<&BTreeSet<String>> {
+        self.mentions.module_idents(package, module_path)
+    }
+
     fn module_non_callable_mentions_ident(
         &self,
         package: &str,
@@ -416,7 +424,14 @@ fn record_enum_member_decisions(
         let name = variant.ident.to_string();
         let member = rendered_member_symbol_path(item_id, &name);
         let should_remain = preserves_full_surface
-            || enum_variant_should_remain(project, reduced, &item_id.package, &name);
+            || enum_variant_should_remain(
+                project,
+                reduced,
+                &item_id.package,
+                &item_id.module_path,
+                &item_id.name,
+                &name,
+            );
         record_rendered_member_decision(decisions, member, should_remain, parent_is_blocked);
     }
 }
@@ -871,6 +886,11 @@ impl ReachableMentionIndex {
         self.modules
             .get(&ModuleMentionKey::new(package, module_path))
             .is_some_and(|idents| idents.contains(ident))
+    }
+
+    fn module_idents(&self, package: &str, module_path: &[String]) -> Option<&BTreeSet<String>> {
+        self.modules
+            .get(&ModuleMentionKey::new(package, module_path))
     }
 }
 
@@ -2545,6 +2565,10 @@ fn build_support_source_plan(
     let dependency_roots = support_source_dependency_roots(&package_root, manifest, workspace)?;
     let macro_expansions =
         support_macro_expansions_for_manifest(&package_root, manifest, workspace)?;
+    debug_support_prune(
+        &package_root,
+        &format!("restricted required public names {required_names:?}"),
+    );
     let Some(transformed_sources) = build_restricted_support_sources(
         &package_root,
         &lib_path,
@@ -8981,6 +9005,8 @@ fn droppable_pruned_enum_payload_item_names_by_package(
                 project,
                 reduced,
                 &item_id.package,
+                &item_id.module_path,
+                &item_id.name,
                 &variant.ident.to_string(),
             ) {
                 collect_token_idents(
@@ -9111,6 +9137,8 @@ fn collect_enum_surface_idents(
             project,
             reduced,
             &item_id.package,
+            &item_id.module_path,
+            &item_id.name,
             &variant.ident.to_string(),
         ) {
             collect_token_idents(&variant.to_token_stream(), idents);
@@ -12283,6 +12311,32 @@ impl TokenUsage {
         for root in &roots {
             if let Some(prefixes) = self.dependency_glob_prefixes.get(root) {
                 for prefix in prefixes {
+                    for candidate in &self.path_candidates {
+                        let Some(visible_name) = candidate.first() else {
+                            continue;
+                        };
+                        if visible_name == alias
+                            || visible_name == &code_name
+                            || visible_name == root
+                            || prefix.contains(visible_name)
+                            || matches!(
+                                visible_name.as_str(),
+                                "crate" | "self" | "super" | "std" | "core" | "alloc"
+                            )
+                        {
+                            continue;
+                        }
+                        if !support_type_like_ident(visible_name)
+                            && !self.dependency_glob_visible_names.contains(visible_name)
+                        {
+                            continue;
+                        }
+                        let mut path = prefix.clone();
+                        path.extend(candidate.iter().cloned());
+                        if let Some(path) = dependency_required_path_string(&path) {
+                            names.insert(path);
+                        }
+                    }
                     for visible_name in self.path_roots.union(&self.dependency_glob_visible_names) {
                         if visible_name == alias
                             || visible_name == &code_name
@@ -14172,8 +14226,15 @@ fn retained_enum_variants_for_rendered_module(
                 .iter()
                 .filter_map(|variant| {
                     let variant_name = variant.ident.to_string();
-                    enum_variant_should_remain(project, reduced, package, &variant_name)
-                        .then_some(variant_name)
+                    enum_variant_should_remain(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        &item_enum.ident.to_string(),
+                        &variant_name,
+                    )
+                    .then_some(variant_name)
                 })
                 .collect()
         };
@@ -19223,6 +19284,100 @@ fn module_glob_is_used_in_module(
     })
 }
 
+fn dependency_module_glob_has_import_scope_pressure(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    target_package: &str,
+    target_path: &[String],
+) -> bool {
+    if target_package == package
+        || !project.workspace.packages.contains_key(target_package)
+        || module_items_for_path(project, target_package, target_path).is_none()
+    {
+        return false;
+    }
+
+    let Some(mentioned_idents) = render_plan.module_mentioned_idents(package, module_path) else {
+        return false;
+    };
+    let explicit_imports = module_explicit_use_visible_names(project, package, module_path);
+    mentioned_idents
+        .iter()
+        .filter(|ident| support_type_like_ident(ident))
+        .filter(|ident| !explicit_imports.contains(*ident))
+        .filter(|ident| !target_path.iter().any(|segment| segment == *ident))
+        .any(|ident| {
+            reachable_module_import_scope_uses_imported_ident(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                ident,
+            ) || reachable_module_import_scope_mentions_ident_excluding(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                ident,
+                Some(target_path),
+            )
+        })
+}
+
+fn module_explicit_use_visible_names(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    let Some(items) = module_items_for_path(project, package, module_path) else {
+        return names;
+    };
+    for item in items {
+        let Item::Use(item_use) = item else {
+            continue;
+        };
+        collect_explicit_use_visible_names(&item_use.tree, Vec::new(), &mut names);
+    }
+    names
+}
+
+fn collect_explicit_use_visible_names(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    names: &mut BTreeSet<String>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_explicit_use_visible_names(&path.tree, prefix, names);
+        }
+        UseTree::Name(name) => {
+            if name.ident == "self" {
+                if let Some(prefix) = prefix.last() {
+                    names.insert(prefix.clone());
+                }
+            } else {
+                names.insert(name.ident.to_string());
+            }
+        }
+        UseTree::Rename(rename) => {
+            names.insert(rename.rename.to_string());
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_explicit_use_visible_names(nested, prefix.clone(), names);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
 fn callable_mentions_ident(callable: &CallableId, ident: &str) -> bool {
     match callable {
         CallableId::Free {
@@ -19571,7 +19726,14 @@ fn prune_private_enum_variants(
         .variants
         .iter()
         .filter(|variant| {
-            enum_variant_should_remain(project, reduced, package, &variant.ident.to_string())
+            enum_variant_should_remain(
+                project,
+                reduced,
+                package,
+                _module_path,
+                &item_enum.ident.to_string(),
+                &variant.ident.to_string(),
+            )
         })
         .cloned()
         .collect();
@@ -19581,9 +19743,155 @@ fn enum_variant_should_remain(
     project: &Project,
     reduced: &ReducedProject,
     package: &str,
+    module_path: &[String],
+    enum_name: &str,
     variant_name: &str,
 ) -> bool {
     reachable_callables_mention_ident(project, reduced, package, variant_name)
+        || reachable_imported_enum_variant_usage(
+            project,
+            reduced,
+            package,
+            module_path,
+            enum_name,
+            variant_name,
+        )
+}
+
+fn reachable_imported_enum_variant_usage(
+    project: &Project,
+    reduced: &ReducedProject,
+    target_package: &str,
+    target_module_path: &[String],
+    enum_name: &str,
+    variant_name: &str,
+) -> bool {
+    let enum_path = {
+        let mut path = target_module_path.to_vec();
+        path.push(enum_name.to_string());
+        path
+    };
+    let variant_path = {
+        let mut path = enum_path.clone();
+        path.push(variant_name.to_string());
+        path
+    };
+
+    project.files.values().any(|source| {
+        if source.package == target_package && source.module_path == target_module_path {
+            return false;
+        }
+        if !reduced.packages.contains(&source.package) {
+            return false;
+        }
+
+        let mut imports_enum_surface = false;
+        let mut imports_variant_directly = false;
+        for glob_path in visible_glob_use_paths(&source.syntax.items) {
+            if resolve_use_target_path(project, &source.package, &source.module_path, &glob_path)
+                .is_some_and(|(package, module_path)| {
+                    package == target_package && module_path == target_module_path
+                })
+            {
+                imports_enum_surface = true;
+            }
+        }
+        for item in &source.syntax.items {
+            let Item::Use(item_use) = item else {
+                continue;
+            };
+            let mut visible_targets = Vec::new();
+            collect_use_tree_visible_targets(&item_use.tree, Vec::new(), &mut visible_targets);
+            for (visible_name, target) in visible_targets {
+                let Some((package, resolved_path)) =
+                    resolve_use_target_path(project, &source.package, &source.module_path, &target)
+                else {
+                    continue;
+                };
+                if package != target_package {
+                    continue;
+                }
+                if visible_name == enum_name && resolved_path == enum_path {
+                    imports_enum_surface = true;
+                } else if visible_name == variant_name && resolved_path == variant_path {
+                    imports_variant_directly = true;
+                }
+            }
+        }
+
+        (imports_enum_surface || imports_variant_directly)
+            && reachable_module_mentions_imported_enum_variant(
+                project,
+                reduced,
+                &source.package,
+                &source.module_path,
+                enum_name,
+                variant_name,
+                imports_variant_directly,
+            )
+    })
+}
+
+fn reachable_module_mentions_imported_enum_variant(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    enum_name: &str,
+    variant_name: &str,
+    allow_unqualified_variant: bool,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && token_stream_mentions_imported_enum_variant(
+                        &record.item.to_token_stream(),
+                        enum_name,
+                        variant_name,
+                        allow_unqualified_variant,
+                    )
+            }) || project.methods.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && token_stream_mentions_imported_enum_variant(
+                        &record.item.to_token_stream(),
+                        enum_name,
+                        variant_name,
+                        allow_unqualified_variant,
+                    )
+            })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package == package && item.module_path == module_path)
+            .any(|item| {
+                project.items.get(item).is_some_and(|record| {
+                    token_stream_mentions_imported_enum_variant(
+                        &record.item.to_token_stream(),
+                        enum_name,
+                        variant_name,
+                        allow_unqualified_variant,
+                    )
+                })
+            })
+}
+
+fn token_stream_mentions_imported_enum_variant(
+    tokens: &TokenStream,
+    enum_name: &str,
+    variant_name: &str,
+    allow_unqualified_variant: bool,
+) -> bool {
+    token_path_candidates(tokens).into_iter().any(|candidate| {
+        candidate
+            .windows(2)
+            .any(|window| window == [enum_name, variant_name])
+    }) || (allow_unqualified_variant
+        && token_stream_mentions_unqualified_ident(tokens, variant_name))
 }
 
 fn prune_private_struct_fields(
@@ -20225,6 +20533,12 @@ enum IteratorItemShape {
     Tuple(Vec<IteratorItemShape>),
 }
 
+#[derive(Default)]
+struct EnumVariantPayloadItems {
+    unnamed: Vec<Option<ItemId>>,
+    named: BTreeMap<String, ItemId>,
+}
+
 #[derive(Clone, Copy)]
 enum IteratorTransformShape {
     Value,
@@ -20421,7 +20735,8 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             Expr::Field(field) => self
                 .field_expr_type(field)
                 .and_then(|ty| self.sequence_value_type_item(ty))
-                .map(IteratorItemShape::Direct),
+                .map(IteratorItemShape::Direct)
+                .or_else(|| self.expression_map_entry_iter_shape(expression)),
             Expr::Reference(reference) => self.expression_iter_item_shape(&reference.expr),
             Expr::Paren(paren) => self.expression_iter_item_shape(&paren.expr),
             Expr::Block(block) => final_block_expression(&block.block)
@@ -21832,6 +22147,144 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
     }
 
+    fn record_variant_payload_bindings_from_pattern(&mut self, pat: &Pat) {
+        match pat {
+            Pat::TupleStruct(tuple_struct) => {
+                let Some(payloads) = self.enum_variant_payload_items_for_path(&tuple_struct.path)
+                else {
+                    return;
+                };
+                for (index, elem) in tuple_struct.elems.iter().enumerate() {
+                    let Some(item) = payloads.unnamed.get(index).and_then(Option::as_ref) else {
+                        continue;
+                    };
+                    self.record_pattern_binding_item(elem, item);
+                    self.record_pattern_iterable_bindings_from_item(elem, item);
+                }
+            }
+            Pat::Struct(pat_struct) => {
+                let Some(payloads) = self.enum_variant_payload_items_for_path(&pat_struct.path)
+                else {
+                    return;
+                };
+                for field in &pat_struct.fields {
+                    let member = match &field.member {
+                        syn::Member::Named(ident) => ident.to_string(),
+                        syn::Member::Unnamed(index) => index.index.to_string(),
+                    };
+                    let Some(item) = payloads.named.get(&member) else {
+                        continue;
+                    };
+                    self.record_pattern_binding_item(&field.pat, item);
+                    self.record_pattern_iterable_bindings_from_item(&field.pat, item);
+                }
+            }
+            Pat::Or(pat_or) => {
+                for case in &pat_or.cases {
+                    self.record_variant_payload_bindings_from_pattern(case);
+                }
+            }
+            Pat::Reference(reference) => {
+                self.record_variant_payload_bindings_from_pattern(&reference.pat);
+            }
+            Pat::Paren(paren) => self.record_variant_payload_bindings_from_pattern(&paren.pat),
+            _ => {}
+        }
+    }
+
+    fn enum_variant_payload_items_for_path(
+        &self,
+        path: &syn::Path,
+    ) -> Option<EnumVariantPayloadItems> {
+        let segments = path_segments(path);
+        let (variant_name, enum_segments) = segments.split_last()?;
+        let enum_item = self.resolve_enum_item_from_segments(enum_segments)?;
+        let record = self.project.items.get(&enum_item)?;
+        let Item::Enum(item_enum) = &record.item else {
+            return None;
+        };
+        let variant = item_enum
+            .variants
+            .iter()
+            .find(|variant| variant.ident == variant_name)?;
+        let empty_aliases = HashMap::new();
+        let aliases = self
+            .project
+            .module_aliases
+            .get(&(enum_item.package.clone(), enum_item.module_path.clone()))
+            .unwrap_or(&empty_aliases);
+        let mut payloads = EnumVariantPayloadItems::default();
+        match &variant.fields {
+            Fields::Unnamed(fields) => {
+                payloads.unnamed = fields
+                    .unnamed
+                    .iter()
+                    .map(|field| {
+                        self.type_payload_or_direct_item_in(
+                            &enum_item.package,
+                            &enum_item.module_path,
+                            aliases,
+                            &field.ty,
+                        )
+                    })
+                    .collect();
+            }
+            Fields::Named(fields) => {
+                for field in &fields.named {
+                    let Some(field_name) = field.ident.as_ref().map(ToString::to_string) else {
+                        continue;
+                    };
+                    if let Some(item) = self.type_payload_or_direct_item_in(
+                        &enum_item.package,
+                        &enum_item.module_path,
+                        aliases,
+                        &field.ty,
+                    ) {
+                        payloads.named.insert(field_name, item);
+                    }
+                }
+            }
+            Fields::Unit => {}
+        }
+        Some(payloads)
+    }
+
+    fn resolve_enum_item_from_segments(&self, segments: &[String]) -> Option<ItemId> {
+        let item = path_segments_to_type_like_item(self.project, self.package, segments)
+            .or_else(|| {
+                let aliased = apply_alias(segments.to_vec(), self.aliases);
+                let (target_package, target_path) = resolve_use_target_path(
+                    self.project,
+                    self.package,
+                    self.module_path,
+                    &aliased,
+                )?;
+                path_segments_to_type_like_item(self.project, &target_package, &target_path)
+            })
+            .or_else(|| self.resolve_glob_imported_type_like_item(segments))?;
+        matches!(item.kind, ItemKind::Enum).then_some(item)
+    }
+
+    fn resolve_glob_imported_type_like_item(&self, segments: &[String]) -> Option<ItemId> {
+        let [name] = segments else {
+            return None;
+        };
+        let source = self.project.files.values().find(|source| {
+            source.package == self.package && source.module_path == self.module_path
+        })?;
+        for glob_path in visible_glob_use_paths(&source.syntax.items) {
+            let (target_package, mut target_path) =
+                resolve_use_target_path(self.project, self.package, self.module_path, &glob_path)?;
+            target_path.push(name.clone());
+            if let Some(item) =
+                path_segments_to_type_like_item(self.project, &target_package, &target_path)
+            {
+                return Some(item);
+            }
+        }
+        None
+    }
+
     fn record_binding_from_typed_pat(&mut self, pat: &Pat, ty: &Type) {
         if let Some(item) =
             self.type_direct_item_in(self.package, self.module_path, self.aliases, ty)
@@ -22251,6 +22704,23 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
             }
         } else {
             visit::visit_expr_if(self, expr_if);
+        }
+    }
+
+    fn visit_expr_match(&mut self, expr_match: &syn::ExprMatch) {
+        self.visit_expr(&expr_match.expr);
+        for arm in &expr_match.arms {
+            let binding_count = self.bindings.len();
+            let iterable_binding_count = self.iterable_bindings.len();
+            self.record_bindings_from_pattern_expr(&arm.pat, &expr_match.expr);
+            self.record_variant_payload_bindings_from_pattern(&arm.pat);
+            self.visit_pat(&arm.pat);
+            if let Some((_if, guard)) = &arm.guard {
+                self.visit_expr(guard);
+            }
+            self.visit_expr(&arm.body);
+            self.bindings.truncate(binding_count);
+            self.iterable_bindings.truncate(iterable_binding_count);
         }
     }
 
@@ -23848,6 +24318,14 @@ fn use_prefix_should_drop(
                 return !exposes_referenced_name;
             }
             let glob_is_used = module_glob_is_used_in_module(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &target_package,
+                &target_path,
+            ) || dependency_module_glob_has_import_scope_pressure(
                 project,
                 reduced,
                 render_plan,

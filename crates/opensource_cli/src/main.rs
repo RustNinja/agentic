@@ -904,6 +904,18 @@ impl RenderedUsageContract {
         }
         preview.join(", ")
     }
+
+    fn summary_fields(&self) -> BTreeMap<String, serde_json::Value> {
+        event_fields(&[
+            ("used", serde_json::json!(self.used)),
+            (
+                "blocked_by_unknown",
+                serde_json::json!(self.blocked_by_unknown),
+            ),
+            ("invalid", serde_json::json!(self.invalid.len())),
+            ("invalid_preview", serde_json::json!(self.invalid_preview())),
+        ])
+    }
 }
 
 fn rendered_usage_contract(report: &GenerateReport) -> RenderedUsageContract {
@@ -1002,6 +1014,244 @@ fn retained_source_file_count(report: &GenerateReport) -> usize {
         }
     }
     files.len()
+}
+
+#[derive(Debug, Default)]
+struct PackageSurfaceCounts {
+    reachable_callables: usize,
+    reachable_items: usize,
+    rendered_callables: usize,
+    rendered_items: usize,
+    rendered_members: usize,
+    rendered_assoc_items: usize,
+    used_callables: usize,
+    used_items: usize,
+    blocked_by_unknown_callables: usize,
+    blocked_by_unknown_items: usize,
+    prunable_callables: usize,
+    prunable_items: usize,
+    unknown_surfaces: usize,
+    macro_surfaces: usize,
+}
+
+fn decision_log_package_surface_audit(
+    report: &GenerateReport,
+) -> BTreeMap<String, PackageSurfaceCounts> {
+    let mut audit: BTreeMap<String, PackageSurfaceCounts> = BTreeMap::new();
+    for package in &report.packages {
+        audit.entry(package.clone()).or_default();
+    }
+    for root in &report.roots {
+        audit.entry(root.package().to_string()).or_default();
+    }
+    for callable in &report.reachable {
+        audit
+            .entry(callable.package().to_string())
+            .or_default()
+            .reachable_callables += 1;
+    }
+    for item in &report.reachable_items {
+        audit
+            .entry(item.package.clone())
+            .or_default()
+            .reachable_items += 1;
+    }
+    for callable in &report.usage.used.callables {
+        audit
+            .entry(callable.package().to_string())
+            .or_default()
+            .used_callables += 1;
+    }
+    for item in &report.usage.used.items {
+        audit.entry(item.package.clone()).or_default().used_items += 1;
+    }
+    for callable in &report.usage.blocked_by_unknown.callables {
+        audit
+            .entry(callable.package().to_string())
+            .or_default()
+            .blocked_by_unknown_callables += 1;
+    }
+    for item in &report.usage.blocked_by_unknown.items {
+        audit
+            .entry(item.package.clone())
+            .or_default()
+            .blocked_by_unknown_items += 1;
+    }
+    for callable in &report.usage.prunable.callables {
+        audit
+            .entry(callable.package().to_string())
+            .or_default()
+            .prunable_callables += 1;
+    }
+    for item in &report.usage.prunable.items {
+        audit
+            .entry(item.package.clone())
+            .or_default()
+            .prunable_items += 1;
+    }
+    count_rendered_decisions_by_package(
+        &mut audit,
+        &report.usage.rendered_decision_map.callables,
+        |counts| counts.rendered_callables += 1,
+    );
+    count_rendered_decisions_by_package(
+        &mut audit,
+        &report.usage.rendered_decision_map.items,
+        |counts| counts.rendered_items += 1,
+    );
+    count_rendered_decisions_by_package(
+        &mut audit,
+        &report.usage.rendered_decision_map.members,
+        |counts| counts.rendered_members += 1,
+    );
+    count_rendered_decisions_by_package(
+        &mut audit,
+        &report.usage.rendered_decision_map.assoc_items,
+        |counts| counts.rendered_assoc_items += 1,
+    );
+    for surface in &report.usage.unknown {
+        let package = surface
+            .details
+            .iter()
+            .find_map(|detail| detail.package.clone())
+            .unwrap_or_else(|| "<unknown-package>".to_string());
+        audit.entry(package).or_default().unknown_surfaces += 1;
+    }
+    for surface in &report.macro_surfaces.surfaces {
+        audit
+            .entry(surface.package.clone())
+            .or_default()
+            .macro_surfaces += 1;
+    }
+    audit
+}
+
+fn count_rendered_decisions_by_package(
+    audit: &mut BTreeMap<String, PackageSurfaceCounts>,
+    decisions: &BTreeMap<String, String>,
+    mut count: impl FnMut(&mut PackageSurfaceCounts),
+) {
+    for id in decisions.keys() {
+        count(audit.entry(symbol_package(id)).or_default());
+    }
+}
+
+fn symbol_package(id: &str) -> String {
+    id.split("::").next().unwrap_or(id).to_string()
+}
+
+fn decision_log_package_surface_samples(
+    audit: &BTreeMap<String, PackageSurfaceCounts>,
+    root_packages: &BTreeSet<String>,
+    limit: usize,
+) -> Vec<String> {
+    audit
+        .iter()
+        .take(limit)
+        .map(|(package, counts)| {
+            let role = if root_packages.contains(package) {
+                "root"
+            } else {
+                "downstream_dependency"
+            };
+            format!(
+                "package {package} [{role}] reachable(callables={}, items={}) rendered(callables={}, items={}, members={}, assoc_items={}) used(callables={}, items={}) blocked_unknown(callables={}, items={}, surfaces={}) prunable(callables={}, items={}) macro_surfaces={}",
+                counts.reachable_callables,
+                counts.reachable_items,
+                counts.rendered_callables,
+                counts.rendered_items,
+                counts.rendered_members,
+                counts.rendered_assoc_items,
+                counts.used_callables,
+                counts.used_items,
+                counts.blocked_by_unknown_callables,
+                counts.blocked_by_unknown_items,
+                counts.unknown_surfaces,
+                counts.prunable_callables,
+                counts.prunable_items,
+                counts.macro_surfaces,
+            )
+        })
+        .collect()
+}
+
+fn decision_log_usage_samples(
+    report: &GenerateReport,
+    rendered_usage: &RenderedUsageContract,
+    limit: usize,
+) -> Vec<String> {
+    let mut evidence = rendered_usage
+        .invalid
+        .iter()
+        .take(limit)
+        .map(|invalid| format!("invalid rendered decision {invalid}"))
+        .collect::<Vec<_>>();
+    push_usage_samples(
+        &mut evidence,
+        limit,
+        "used callable",
+        report.usage.used.callables.iter().map(ToString::to_string),
+    );
+    push_usage_samples(
+        &mut evidence,
+        limit,
+        "used item",
+        report.usage.used.items.iter().map(ToString::to_string),
+    );
+    push_usage_samples(
+        &mut evidence,
+        limit,
+        "blocked_by_unknown callable",
+        report
+            .usage
+            .blocked_by_unknown
+            .callables
+            .iter()
+            .map(ToString::to_string),
+    );
+    push_usage_samples(
+        &mut evidence,
+        limit,
+        "blocked_by_unknown item",
+        report
+            .usage
+            .blocked_by_unknown
+            .items
+            .iter()
+            .map(ToString::to_string),
+    );
+    push_usage_samples(
+        &mut evidence,
+        limit,
+        "pruned callable",
+        report
+            .usage
+            .prunable
+            .callables
+            .iter()
+            .map(ToString::to_string),
+    );
+    push_usage_samples(
+        &mut evidence,
+        limit,
+        "pruned item",
+        report.usage.prunable.items.iter().map(ToString::to_string),
+    );
+    evidence
+}
+
+fn push_usage_samples(
+    evidence: &mut Vec<String>,
+    limit: usize,
+    label: &str,
+    ids: impl Iterator<Item = String>,
+) {
+    for id in ids {
+        if evidence.len() >= limit {
+            break;
+        }
+        evidence.push(format!("{label} {id}"));
+    }
 }
 
 fn decision_log_feedback_diagnostics(
@@ -2278,6 +2528,18 @@ fn run_batch_root(
                 ("attempt", serde_json::json!(attempt)),
                 ("packages", serde_json::json!(&report.packages)),
                 ("files_written", serde_json::json!(report.files_written)),
+                (
+                    "production_status",
+                    serde_json::json!(&report.production.status),
+                ),
+                (
+                    "production_hazards",
+                    serde_json::json!(report.production.hazards.len()),
+                ),
+                (
+                    "rendered_usage",
+                    serde_json::json!(rendered_usage_contract(&report).summary_fields()),
+                ),
                 (
                     "reachable_callables",
                     serde_json::json!(report.reachable.len()),
@@ -5312,6 +5574,59 @@ fn decision_log_steps(
         evidence: file_evidence,
     });
 
+    let package_audit = decision_log_package_surface_audit(report);
+    let root_packages = report
+        .roots
+        .iter()
+        .map(|root| root.package().to_string())
+        .collect::<BTreeSet<_>>();
+    let mut package_metrics = BTreeMap::new();
+    package_metrics.insert(
+        "root_packages".to_string(),
+        serde_json::json!(root_packages.len()),
+    );
+    package_metrics.insert(
+        "dependency_packages".to_string(),
+        serde_json::json!(package_audit
+            .keys()
+            .filter(|package| !root_packages.contains(*package))
+            .count()),
+    );
+    package_metrics.insert(
+        "packages_with_used_surface".to_string(),
+        serde_json::json!(package_audit
+            .values()
+            .filter(|counts| counts.used_callables + counts.used_items > 0)
+            .count()),
+    );
+    package_metrics.insert(
+        "packages_with_unknown_surface".to_string(),
+        serde_json::json!(package_audit
+            .values()
+            .filter(|counts| counts.blocked_by_unknown_callables
+                + counts.blocked_by_unknown_items
+                + counts.unknown_surfaces
+                > 0)
+            .count()),
+    );
+    steps.push(DecisionLogStep {
+        step: "dependency_retention".to_string(),
+        status: if report.usage.summary.blocked_by_unknown_callables
+            + report.usage.summary.blocked_by_unknown_items
+            + report.usage.summary.unknown_surfaces
+            > 0
+        {
+            "retained_used_and_unknown".to_string()
+        } else {
+            "retained_used_only".to_string()
+        },
+        decision: "retain downstream package surfaces only when selected roots depend on them"
+            .to_string(),
+        reason: "package retention is top-down: root packages are selected explicitly, dependency packages survive only when reachable callables/items, rendered public surfaces, or scoped unknown guards require them; reverse dependents do not keep code alive".to_string(),
+        metrics: package_metrics,
+        evidence: decision_log_package_surface_samples(&package_audit, &root_packages, 32),
+    });
+
     let macro_summary = &report.macro_surfaces.summary;
     let mut macro_metrics = BTreeMap::new();
     macro_metrics.insert("total".to_string(), serde_json::json!(macro_summary.total));
@@ -5408,7 +5723,7 @@ fn decision_log_steps(
         decision: "strip prunable unused symbols and retain used or blocked_by_unknown symbols".to_string(),
         reason: "generated source must not retain known-unused code except where an unknown surface blocks safe deletion".to_string(),
         metrics: usage_metrics,
-        evidence: rendered_usage.invalid.iter().take(20).cloned().collect(),
+        evidence: decision_log_usage_samples(report, &rendered_usage, 36),
     });
 
     let rendered_summary = &report.usage.rendered_symbols.summary;
@@ -6004,6 +6319,7 @@ fn try_widen_from_feedback(
     if let Some(report_path) = slice_report_path(options) {
         write_generate_report(&widened_report, &report_path)?;
     }
+    write_report(report, report_path)?;
     println!(
         "feedback: widened {} root(s) from compiler diagnostics and re-rendered generated workspace",
         widened_roots.len()
@@ -10059,6 +10375,14 @@ resolver = "2"
             "{decision_log}"
         );
         assert!(
+            decision_log.contains("\"step\": \"dependency_retention\""),
+            "{decision_log}"
+        );
+        assert!(
+            decision_log.contains("package app [root]"),
+            "{decision_log}"
+        );
+        assert!(
             decision_log.contains("\"step\": \"usage_pruning\""),
             "{decision_log}"
         );
@@ -10080,6 +10404,8 @@ resolver = "2"
             events.contains("\"event\":\"batch_generation\""),
             "{events}"
         );
+        assert!(events.contains("\"rendered_usage\""), "{events}");
+        assert!(events.contains("\"production_hazards\""), "{events}");
         assert!(events.contains("\"event\":\"batch_preflight\""), "{events}");
         assert!(events.contains("\"event\":\"batch_gate\""), "{events}");
     }
@@ -10435,6 +10761,11 @@ pub fn helper() -> usize {
         assert_eq!(validation.attempts[0].feedback_widened_roots, Some(1));
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(generated.contains("pub fn helper"));
+        let preserved_feedback = fs::read_to_string(output.join("slice-feedback.json")).unwrap();
+        assert!(
+            preserved_feedback.contains("cannot find value `helper`"),
+            "{preserved_feedback}"
+        );
         let report_json: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(slice_report).unwrap()).unwrap();
         assert_eq!(report_json["feedback_widened_roots"][0], "app::helper");
