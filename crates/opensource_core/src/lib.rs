@@ -2220,6 +2220,11 @@ fn feedback_extra_roots_with_report(
                 feedback_root_candidates(project, code, package_hint.as_deref(), &name);
             if candidates.is_empty() {
                 report.skipped_no_match += 1;
+                let action = if glob_import_context.glob_import_module_roots.is_empty() {
+                    "no matching project-local root"
+                } else {
+                    "no matching project-local root; inspect glob import provider module roots"
+                };
                 push_feedback_resolution_entry(
                     &mut report,
                     FeedbackRootResolutionEntry {
@@ -2235,7 +2240,7 @@ fn feedback_extra_roots_with_report(
                         matches: 0,
                         retained_roots: 0,
                         skipped_marked_roots: 0,
-                        action: "no matching project-local root".to_string(),
+                        action: action.to_string(),
                         roots: Vec::new(),
                     },
                 );
@@ -18218,6 +18223,10 @@ pub fn entry() -> usize {
         assert_eq!(
             entry.glob_import_module_roots,
             vec!["provider::conversation(Mod)".to_string()]
+        );
+        assert_eq!(
+            entry.action,
+            "no matching project-local root; inspect glob import provider module roots"
         );
     }
 

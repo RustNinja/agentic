@@ -11642,6 +11642,9 @@ pub fn entry() -> usize {
         assert!(
             summary.evidence.iter().any(|entry| {
                 entry.contains("symbol=`ConversationItem`")
+                    && entry.contains(
+                        "action=no matching project-local root; inspect glob import provider module roots",
+                    )
                     && entry.contains("glob_imports=provider::conversation::*")
                     && entry.contains("glob_import_module_roots=provider::conversation(Mod)")
             }),
