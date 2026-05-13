@@ -70,6 +70,11 @@ pub fn reduce_with_extra_roots_and_semantics(
         .collect::<Vec<_>>();
     item_roots.sort();
     item_roots.dedup();
+    let module_roots = item_roots
+        .iter()
+        .filter(|item| item.kind == ItemKind::Mod)
+        .cloned()
+        .collect::<BTreeSet<_>>();
 
     for root in extra_roots {
         match root {
@@ -150,7 +155,7 @@ pub fn reduce_with_extra_roots_and_semantics(
                 continue;
             }
 
-            let mut dependencies = item_dependencies(project, &item);
+            let mut dependencies = item_dependencies(project, &item, &module_roots);
             dependencies.extend(semantic_item_dependencies(semantic_hints, &item));
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
@@ -297,6 +302,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &mut packages,
         &mut reachable,
         &mut reachable_items,
+        &module_roots,
         &mut evidence,
     );
     let proc_macro_dependency_packages = local_proc_macro_dependency_packages(project, &packages);
@@ -306,6 +312,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &packages,
         &mut reachable,
         &mut reachable_items,
+        &module_roots,
         &mut evidence,
     );
     let build_dependency_packages = add_local_build_dependency_packages(project, &mut packages);
@@ -328,6 +335,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &mut packages,
         &mut reachable,
         &mut reachable_items,
+        &module_roots,
         &mut evidence,
     );
     retain_reachable_module_items(project, &packages, &reachable, &mut reachable_items);
@@ -1033,6 +1041,7 @@ fn retain_referenced_public_reexport_dependencies(
     packages: &mut BTreeSet<String>,
     reachable: &mut BTreeSet<CallableId>,
     reachable_items: &mut BTreeSet<ItemId>,
+    expanded_module_roots: &BTreeSet<ItemId>,
     evidence: &mut ReductionEvidence,
 ) {
     loop {
@@ -1051,6 +1060,7 @@ fn retain_referenced_public_reexport_dependencies(
             reachable,
             reachable_items,
             dependencies,
+            expanded_module_roots,
             evidence,
         );
         if !changed && !packages_changed {
@@ -1065,6 +1075,7 @@ fn retain_dependency_set(
     reachable: &mut BTreeSet<CallableId>,
     reachable_items: &mut BTreeSet<ItemId>,
     dependencies: DependencySet,
+    expanded_module_roots: &BTreeSet<ItemId>,
     evidence: &mut ReductionEvidence,
 ) -> bool {
     let mut changed = false;
@@ -1114,7 +1125,7 @@ fn retain_dependency_set(
                 continue;
             }
             changed = true;
-            let dependencies = item_dependencies(project, &item);
+            let dependencies = item_dependencies(project, &item, expanded_module_roots);
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -2139,6 +2150,7 @@ fn retain_proc_macro_exports(
     candidate_packages: &BTreeSet<String>,
     reachable: &mut BTreeSet<CallableId>,
     reachable_items: &mut BTreeSet<ItemId>,
+    expanded_module_roots: &BTreeSet<ItemId>,
     evidence: &mut ReductionEvidence,
 ) {
     if proc_macro_packages.is_empty() {
@@ -2199,7 +2211,7 @@ fn retain_proc_macro_exports(
             {
                 continue;
             }
-            let dependencies = item_dependencies(project, &item);
+            let dependencies = item_dependencies(project, &item, expanded_module_roots);
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -3354,13 +3366,21 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
     }
 }
 
-fn item_dependencies(project: &Project, item: &ItemId) -> DependencySet {
+fn item_dependencies(
+    project: &Project,
+    item: &ItemId,
+    expanded_module_roots: &BTreeSet<ItemId>,
+) -> DependencySet {
     let Some(record) = project.items.get(item) else {
         return DependencySet::default();
     };
 
     if item.kind == ItemKind::Mod {
-        return module_root_dependencies(project, item);
+        return if expanded_module_roots.contains(item) {
+            module_root_dependencies(project, item)
+        } else {
+            DependencySet::default()
+        };
     }
 
     let resolver = Resolver {

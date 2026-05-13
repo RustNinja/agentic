@@ -5643,6 +5643,7 @@ fn add_semantic_query_hazards(
     let unresolved_method_diagnostics = raw_unresolved_method_diagnostics
         .iter()
         .copied()
+        .filter(|diagnostic| semantic_unresolved_owner_is_retained(reduced, diagnostic))
         .filter(|diagnostic| {
             !covered_project_method_unresolved_diagnostic(
                 project,
@@ -5680,12 +5681,19 @@ fn add_semantic_query_hazards(
     let unresolved_path_diagnostics = raw_unresolved_path_diagnostics
         .iter()
         .copied()
+        .filter(|diagnostic| semantic_unresolved_owner_is_retained(reduced, diagnostic))
         .filter(|diagnostic| {
             !covered_project_path_unresolved_diagnostic(project, rendered_symbol_proof, diagnostic)
         })
         .collect::<Vec<_>>();
-    let unresolved_paths =
-        non_benign_unresolved_count(metrics.unresolved_paths, &unresolved_path_diagnostics);
+    let unresolved_paths = if raw_unresolved_path_diagnostics.is_empty() {
+        metrics.unresolved_paths
+    } else {
+        unresolved_path_diagnostics
+            .iter()
+            .filter(|diagnostic| diagnostic.category == SemanticUnresolvedCategory::DependencyRisk)
+            .count()
+    };
     if unresolved_paths > 0 {
         hazards.push(production_hazard(
             "semantic_unresolved_paths",
@@ -5736,6 +5744,30 @@ fn unresolved_diagnostics_for_kind(
         .collect()
 }
 
+fn semantic_unresolved_owner_is_retained(
+    reduced: &ReducedProject,
+    diagnostic: &SemanticUnresolvedDiagnostic,
+) -> bool {
+    match &diagnostic.owner {
+        None => true,
+        Some(SemanticOwnerId::Callable(callable)) => {
+            reduced.reachable.contains(callable)
+                || reduced
+                    .roots
+                    .iter()
+                    .any(|root| matches!(root, RootId::Callable(root) if root == callable))
+        }
+        Some(SemanticOwnerId::Item(item)) => {
+            reduced.reachable_items.contains(item)
+                || reduced
+                    .roots
+                    .iter()
+                    .any(|root| matches!(root, RootId::Item(root) if root == item))
+        }
+    }
+}
+
+#[cfg(test)]
 fn non_benign_unresolved_count(
     fallback_count: usize,
     diagnostics: &[&SemanticUnresolvedDiagnostic],
@@ -12141,7 +12173,7 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
-    use super::model::ItemKind;
+    use super::model::{ItemKind, ReductionEvidence};
     use super::non_benign_unresolved_count;
     use super::{
         add_public_reexport_proof_hazards, add_rendered_symbol_proof_hazards,
@@ -12150,15 +12182,16 @@ mod tests {
         generated_package_source_roots, production_hazard_with_details,
         production_readiness_status, public_reexport_proof_report, rendered_symbol_proof_report,
         rendered_symbol_proof_report_with_members, resolve_feedback_widening_roots,
-        semantic_hazard_metrics, semantic_unresolved_details, unknown_surface_category,
+        semantic_hazard_metrics, semantic_unresolved_details,
+        semantic_unresolved_owner_is_retained, unknown_surface_category,
         usage_classification_report, usage_evidence_reason, usage_guarded_render_reduction,
         write_generate_report, AnalyzerMode, AnalyzerReport, CallableId, CheckDiagnostic,
         GenerateOptions, ItemId, ProductionHazardDetail, PublicReexportProofEntry,
-        PublicReexportProofReport, PublicReexportProofSummary, RenderedSymbolProofEntry,
-        RenderedSymbolProofReport, RenderedSymbolProofSummary, SemanticFileReport,
-        SemanticHazardScope, SemanticOwnerId, SemanticReductionHints, SemanticReport,
-        SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic, SemanticUnresolvedKind,
-        SemanticUsageReport, UsageDecision, UsageDecisionIndex,
+        PublicReexportProofReport, PublicReexportProofSummary, ReducedProject,
+        RenderedSymbolProofEntry, RenderedSymbolProofReport, RenderedSymbolProofSummary, RootId,
+        SemanticFileReport, SemanticHazardScope, SemanticOwnerId, SemanticReductionHints,
+        SemanticReport, SemanticUnresolvedCategory, SemanticUnresolvedDiagnostic,
+        SemanticUnresolvedKind, SemanticUsageReport, UsageDecision, UsageDecisionIndex,
     };
     #[cfg(feature = "ra-hir")]
     use super::{generate_with_analyzer, generate_with_analyzer_roots};
@@ -14940,6 +14973,49 @@ pub use dead::Dead;
             details,
         );
         assert_eq!(unknown_surface_category(&hazard), "dependency_risk");
+    }
+
+    #[test]
+    fn semantic_unresolved_diagnostics_ignore_pruned_owners() {
+        let retained = CallableId::Free {
+            package: "app".to_string(),
+            module_path: vec!["ui".to_string()],
+            name: "selected".to_string(),
+        };
+        let pruned = CallableId::Free {
+            package: "app".to_string(),
+            module_path: vec!["ui".to_string()],
+            name: "dead_sibling".to_string(),
+        };
+        let reduced = ReducedProject {
+            root: RootId::Callable(retained.clone()),
+            roots: vec![RootId::Callable(retained.clone())],
+            packages: BTreeSet::from(["app".to_string()]),
+            reachable: BTreeSet::from([retained.clone()]),
+            reachable_items: BTreeSet::new(),
+            evidence: ReductionEvidence::default(),
+        };
+        let mut retained_diagnostic = semantic_unresolved_diagnostic(
+            SemanticUnresolvedKind::Path,
+            SemanticUnresolvedCategory::DependencyRisk,
+            "retained owner",
+        );
+        retained_diagnostic.owner = Some(SemanticOwnerId::Callable(retained));
+        let mut pruned_diagnostic = semantic_unresolved_diagnostic(
+            SemanticUnresolvedKind::Path,
+            SemanticUnresolvedCategory::DependencyRisk,
+            "pruned owner",
+        );
+        pruned_diagnostic.owner = Some(SemanticOwnerId::Callable(pruned));
+
+        assert!(semantic_unresolved_owner_is_retained(
+            &reduced,
+            &retained_diagnostic
+        ));
+        assert!(!semantic_unresolved_owner_is_retained(
+            &reduced,
+            &pruned_diagnostic
+        ));
     }
 
     #[test]

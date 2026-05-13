@@ -298,6 +298,32 @@ fn prunes_module_scoped_imports_used_only_by_dead_items() {
 }
 
 #[test]
+fn prunes_module_alias_children_unused_by_qualified_member_paths() {
+    let workspace = temp_path("rule-qualified-module-alias-workspace");
+    let output = temp_path("rule-qualified-module-alias-output");
+    let target_dir = temp_path("rule-qualified-module-alias-target");
+    write_qualified_module_alias_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("qualified module alias rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("qualified_module_alias_rule/src/lib.rs"));
+    let widgets = read(output.join("qualified_module_alias_rule/src/widgets.rs"));
+    let theme = read(output.join("qualified_module_alias_rule/src/theme.rs"));
+    assert!(widgets.contains("use crate::theme"), "{widgets}");
+    assert!(theme.contains("pub const FG"), "{theme}");
+    assert!(theme.contains("pub const FG_DIM"), "{theme}");
+    assert!(!theme.contains("pub const ACCENT"), "{theme}");
+    assert!(!theme.contains("pub fn accent"), "{theme}");
+    assert!(!theme.contains("pub fn dead_helper"), "{theme}");
+    assert_cargo_check(&output, &target_dir, &format!("{lib}\n{widgets}\n{theme}"));
+}
+
+#[test]
 fn prunes_thiserror_import_when_only_serde_json_error_paths_remain() {
     let workspace = temp_path("rule-thiserror-import-liveness-workspace");
     let output = temp_path("rule-thiserror-import-liveness-output");
@@ -4768,6 +4794,42 @@ pub fn selected() -> wire::LiveWire {
     wire::LiveWire {
         id: client::live_client(),
     }
+}
+"#,
+    );
+}
+
+fn write_qualified_module_alias_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "qualified_module_alias_rule",
+        r#"mod theme;
+pub mod widgets;
+"#,
+    );
+    write(
+        root.join("qualified_module_alias_rule/src/widgets.rs"),
+        r#"use crate::theme;
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> u8 {
+    theme::FG + theme::FG_DIM
+}
+"#,
+    );
+    write(
+        root.join("qualified_module_alias_rule/src/theme.rs"),
+        r#"pub const FG: u8 = 1;
+pub const FG_DIM: u8 = 2;
+pub const ACCENT: u8 = 3;
+
+pub fn accent() -> u8 {
+    ACCENT
+}
+
+pub fn dead_helper() -> u8 {
+    99
 }
 "#,
     );

@@ -23845,16 +23845,6 @@ fn use_prefix_should_drop(
                     &target_package,
                     &target_path,
                 );
-                if !module_should_render(
-                    project,
-                    reduced,
-                    render_plan,
-                    &target_package,
-                    &target_path,
-                ) && !exposes_referenced_name
-                {
-                    return true;
-                }
                 return !exposes_referenced_name;
             }
             let glob_is_used = module_glob_is_used_in_module(
@@ -24574,7 +24564,7 @@ fn public_glob_exposed_name_is_used(
     }
 
     if source_module_path.is_empty()
-        && reachable_module_import_scope_uses_imported_ident(
+        && reachable_module_import_scope_uses_public_glob_ident(
             project,
             reduced,
             render_plan,
@@ -24594,6 +24584,66 @@ fn public_glob_exposed_name_is_used(
                 target_package,
                 name,
             ))
+}
+
+fn reachable_module_import_scope_uses_public_glob_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    if reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project.functions.get(callable).is_some_and(|record| {
+                record.module_path == module_path
+                    && function_uses_imported_ident(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        &record.item,
+                        ident,
+                    )
+            }) || project.methods.get(callable).is_some_and(|record| {
+                let current_type_path = match callable {
+                    CallableId::Method { type_path, .. } => Some(type_path.as_slice()),
+                    CallableId::Free { .. } => None,
+                };
+                record.module_path == module_path
+                    && method_uses_imported_ident(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        current_type_path,
+                        &record.item,
+                        ident,
+                    )
+            })
+        })
+    {
+        return true;
+    }
+
+    reduced
+        .reachable_items
+        .iter()
+        .filter(|item| item.package == package && item.module_path == module_path)
+        .any(|item| {
+            project.items.get(item).is_some_and(|record| {
+                let mut visitor = ImportUsageVisitor::new(ident);
+                visitor.push_scope();
+                visitor.visit_item(&record.item);
+                visitor.found
+            })
+        })
 }
 
 fn public_reexport_path_name_is_referenced_by_reduced_package(
