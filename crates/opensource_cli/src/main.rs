@@ -1948,6 +1948,22 @@ struct BatchRootReport {
     rendered_usage_used: Option<usize>,
     rendered_usage_blocked_by_unknown: Option<usize>,
     rendered_usage_invalid: Option<usize>,
+    usage_semantic_proof_status: Option<String>,
+    usage_semantic_proof_required_callables: Option<usize>,
+    usage_semantic_proof_required_items: Option<usize>,
+    usage_semantic_proven_callables: Option<usize>,
+    usage_semantic_proven_items: Option<usize>,
+    usage_semantic_unproven_callables: Option<usize>,
+    usage_semantic_unproven_items: Option<usize>,
+    usage_semantic_cfg_inactive_callables: Option<usize>,
+    usage_semantic_cfg_inactive_items: Option<usize>,
+    usage_semantic_source_file_pruned_callables: Option<usize>,
+    usage_semantic_source_file_pruned_items: Option<usize>,
+    usage_semantic_structural_pruned_items: Option<usize>,
+    usage_semantic_unmapped_callables: Option<usize>,
+    usage_semantic_unmapped_items: Option<usize>,
+    usage_semantic_failed_reference_query_callables: Option<usize>,
+    usage_semantic_failed_reference_query_items: Option<usize>,
     semantic_proof_status: Option<String>,
     semantic_file_budget: Option<usize>,
     semantic_method_call_budget: Option<usize>,
@@ -2789,6 +2805,22 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 rendered_usage_used: None,
                 rendered_usage_blocked_by_unknown: None,
                 rendered_usage_invalid: None,
+                usage_semantic_proof_status: None,
+                usage_semantic_proof_required_callables: None,
+                usage_semantic_proof_required_items: None,
+                usage_semantic_proven_callables: None,
+                usage_semantic_proven_items: None,
+                usage_semantic_unproven_callables: None,
+                usage_semantic_unproven_items: None,
+                usage_semantic_cfg_inactive_callables: None,
+                usage_semantic_cfg_inactive_items: None,
+                usage_semantic_source_file_pruned_callables: None,
+                usage_semantic_source_file_pruned_items: None,
+                usage_semantic_structural_pruned_items: None,
+                usage_semantic_unmapped_callables: None,
+                usage_semantic_unmapped_items: None,
+                usage_semantic_failed_reference_query_callables: None,
+                usage_semantic_failed_reference_query_items: None,
                 semantic_proof_status: None,
                 semantic_file_budget: None,
                 semantic_method_call_budget: None,
@@ -2864,6 +2896,38 @@ fn run_batch_roots(options: &CliOptions) -> Result<(), Box<dyn std::error::Error
                 (
                     "rendered_usage_invalid",
                     serde_json::json!(row.rendered_usage_invalid),
+                ),
+                (
+                    "usage_semantic_proof_status",
+                    serde_json::json!(row.usage_semantic_proof_status),
+                ),
+                (
+                    "usage_semantic_unproven_callables",
+                    serde_json::json!(row.usage_semantic_unproven_callables),
+                ),
+                (
+                    "usage_semantic_unproven_items",
+                    serde_json::json!(row.usage_semantic_unproven_items),
+                ),
+                (
+                    "usage_semantic_cfg_inactive_callables",
+                    serde_json::json!(row.usage_semantic_cfg_inactive_callables),
+                ),
+                (
+                    "usage_semantic_cfg_inactive_items",
+                    serde_json::json!(row.usage_semantic_cfg_inactive_items),
+                ),
+                (
+                    "usage_semantic_source_file_pruned_callables",
+                    serde_json::json!(row.usage_semantic_source_file_pruned_callables),
+                ),
+                (
+                    "usage_semantic_source_file_pruned_items",
+                    serde_json::json!(row.usage_semantic_source_file_pruned_items),
+                ),
+                (
+                    "usage_semantic_structural_pruned_items",
+                    serde_json::json!(row.usage_semantic_structural_pruned_items),
                 ),
                 ("check_success", serde_json::json!(row.check_success)),
                 ("check_errors", serde_json::json!(row.check_errors)),
@@ -4179,6 +4243,8 @@ fn batch_row_from_reports(
 ) -> BatchRootReport {
     let rendered_usage = report.map(rendered_usage_contract);
     let semantic = report.and_then(|report| report.analyzer.semantic.as_ref());
+    let usage_semantic_proof = report.map(|report| &report.usage.semantic_proof);
+    let usage_semantic_summary = usage_semantic_proof.map(|proof| &proof.summary);
     let feedback_summary =
         check.map(|check| feedback_diagnostic_summary_for_check(options, check, 0));
     let baseline_comparison =
@@ -4197,6 +4263,34 @@ fn batch_row_from_reports(
         rendered_usage_invalid: rendered_usage
             .as_ref()
             .map(|contract| contract.invalid.len()),
+        usage_semantic_proof_status: usage_semantic_proof.map(|proof| proof.status.clone()),
+        usage_semantic_proof_required_callables: usage_semantic_summary
+            .map(|summary| summary.proof_required_callables),
+        usage_semantic_proof_required_items: usage_semantic_summary
+            .map(|summary| summary.proof_required_items),
+        usage_semantic_proven_callables: usage_semantic_summary
+            .map(|summary| summary.proven_callables),
+        usage_semantic_proven_items: usage_semantic_summary.map(|summary| summary.proven_items),
+        usage_semantic_unproven_callables: usage_semantic_summary
+            .map(|summary| summary.unproven_callables),
+        usage_semantic_unproven_items: usage_semantic_summary.map(|summary| summary.unproven_items),
+        usage_semantic_cfg_inactive_callables: usage_semantic_summary
+            .map(|summary| summary.cfg_inactive_callables),
+        usage_semantic_cfg_inactive_items: usage_semantic_summary
+            .map(|summary| summary.cfg_inactive_items),
+        usage_semantic_source_file_pruned_callables: usage_semantic_summary
+            .map(|summary| summary.source_file_pruned_callables),
+        usage_semantic_source_file_pruned_items: usage_semantic_summary
+            .map(|summary| summary.source_file_pruned_items),
+        usage_semantic_structural_pruned_items: usage_semantic_summary
+            .map(|summary| summary.structural_pruned_items),
+        usage_semantic_unmapped_callables: usage_semantic_summary
+            .map(|summary| summary.unmapped_callables),
+        usage_semantic_unmapped_items: usage_semantic_summary.map(|summary| summary.unmapped_items),
+        usage_semantic_failed_reference_query_callables: usage_semantic_summary
+            .map(|summary| summary.failed_reference_query_callables),
+        usage_semantic_failed_reference_query_items: usage_semantic_summary
+            .map(|summary| summary.failed_reference_query_items),
         semantic_proof_status: semantic.map(semantic_proof_status),
         semantic_file_budget: semantic.map(|semantic| semantic.file_budget),
         semantic_method_call_budget: semantic.map(|semantic| semantic.method_call_budget),
@@ -11503,6 +11597,18 @@ resolver = "2"
         assert!(!original.contains("opensourced"), "{original}");
         let report = fs::read_to_string(output.join("batch-report.jsonl")).unwrap();
         assert!(report.contains("\"status\":\"generated\""), "{report}");
+        assert!(
+            report.contains("\"usage_semantic_proof_status\":\"semantic_usage_unavailable\""),
+            "{report}"
+        );
+        assert!(
+            report.contains("\"usage_semantic_unproven_callables\":1"),
+            "{report}"
+        );
+        assert!(
+            report.contains("\"usage_semantic_unproven_items\":0"),
+            "{report}"
+        );
         let batch_events = fs::read_to_string(output.join("batch-events.jsonl")).unwrap();
         assert!(
             batch_events.contains("\"event\":\"session_manifest\""),

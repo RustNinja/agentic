@@ -119,6 +119,11 @@ including batch mode, so selected-root files are visible even when the source
 does not contain `#[opensourced]` markers. Batch production validation also
 reconciles generated lockfiles before locked feedback, preferring offline lock
 resolution and falling back online only when allowed.
+Batch mining rows include retained-package usage semantic proof counters:
+status, required/proven/unproven callables and items, RA unmapped/query-failure
+debt, and cfg-inactive/source-file-pruned/structural-pruned discharge buckets.
+This keeps large Litter sweeps sortable by real dependency-pruning risk without
+opening every per-root decision log first.
 
 The fixture hard audit resolves generated package roots from every rendered
 `Cargo.toml`, including nested `support/<package>` copies, before scanning Rust

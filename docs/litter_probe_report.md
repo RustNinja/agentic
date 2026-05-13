@@ -326,3 +326,8 @@ passed deliberately.
 - `import.module_scoped.dead_item_only.001`: imports used only by dead items in
   a retained module must be pruned even when the same symbol is live in another
   module in the package.
+- `mining.batch_usage_semantic_proof.001`: batch root rows now expose retained
+  package semantic proof status and debt directly, including required/proven/
+  unproven callable and item counts plus cfg-inactive, source-file-pruned, and
+  structural-pruned discharge buckets. This lets Litter mining sort roots by
+  real dependency-pruning risk without opening each per-root decision log first.
