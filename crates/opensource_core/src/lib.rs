@@ -2168,7 +2168,7 @@ fn feedback_extra_roots_with_report(
             continue;
         };
         let symbols = diagnostic_symbols(diagnostic);
-        let package_hint = diagnostic_package_hint(diagnostic);
+        let package_hint = diagnostic_scoped_package_hint(project, diagnostic, &symbols);
         let diagnostic_candidates =
             feedback_diagnostic_root_candidates(project, diagnostic, package_hint.as_deref());
         if !diagnostic_candidates.is_empty() {
@@ -2329,6 +2329,45 @@ fn feedback_root_candidates(
         return scoped;
     }
     feedback_root_candidates_in_scope(project, code, None, name)
+}
+
+fn diagnostic_scoped_package_hint(
+    project: &Project,
+    diagnostic: &feedback::CheckDiagnostic,
+    symbols: &[String],
+) -> Option<String> {
+    symbols
+        .iter()
+        .find_map(|symbol| feedback_symbol_package_hint(project, symbol))
+        .or_else(|| diagnostic_package_hint(diagnostic))
+}
+
+fn feedback_symbol_package_hint(project: &Project, symbol: &str) -> Option<String> {
+    let crate_segment = symbol.split("::").next()?.trim();
+    if matches!(crate_segment, "" | "crate" | "self" | "super")
+        || !crate_segment
+            .chars()
+            .next()
+            .is_some_and(|character| character.is_ascii_alphabetic() || character == '_')
+    {
+        return None;
+    }
+    let crate_package = crate_segment.replace('_', "-");
+    project_has_package(project, &crate_package)
+        .then_some(crate_package)
+        .or_else(|| project_has_package(project, crate_segment).then(|| crate_segment.to_string()))
+}
+
+fn project_has_package(project: &Project, package: &str) -> bool {
+    project
+        .files
+        .values()
+        .any(|source| source.package == package)
+        || project
+            .functions
+            .keys()
+            .any(|callable| callable.package() == package)
+        || project.items.keys().any(|item| item.package() == package)
 }
 
 fn feedback_root_candidates_in_scope(
@@ -17935,6 +17974,106 @@ pub fn entry() -> usize {
             .iter()
             .any(|root| root == "support::SupportType(Struct)"));
         assert_eq!(resolution.skipped_no_match, 0);
+    }
+
+    #[test]
+    fn feedback_unresolved_external_import_prefers_crate_prefix_package_over_target_leaf_module() {
+        let root = temp_output("feedback-widen-external-module-source");
+        let output = temp_output("feedback-widen-external-module-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"model-crate\"]\nresolver = \"2\"\n",
+        );
+        write(
+			root.join("app/Cargo.toml"),
+			&format!(
+				"[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nmodel-crate = {{ path = \"../model-crate\" }}\n",
+				opensourced_path
+			),
+		);
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub mod screens {
+    pub mod conversation {
+        pub struct WrongPackage;
+    }
+}
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            root.join("model-crate/Cargo.toml"),
+            "[package]\nname = \"model-crate\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("model-crate/src/lib.rs"),
+            "pub mod conversation;\n",
+        );
+        write(
+            root.join("model-crate/src/conversation.rs"),
+            r#"pub struct Needed {
+    pub value: usize,
+}
+"#,
+        );
+
+        let diagnostic = CheckDiagnostic {
+			level: "error".to_string(),
+			message: "unresolved import `model_crate::conversation`".to_string(),
+			code: Some("E0432".to_string()),
+			package_id: Some("app 0.1.0 (path+file:///tmp/app)".to_string()),
+			target: None,
+			rendered: Some(
+				"error[E0432]: unresolved import `model_crate::conversation`\n  |\n  | use model_crate::conversation::*;\n  |                  ^^^^^^^^^^^^ could not find `conversation` in `model_crate`\n"
+					.to_string(),
+			),
+			spans: Vec::new(),
+			suggestions: Vec::new(),
+		};
+        let resolution =
+            resolve_feedback_widening_roots(&root, std::slice::from_ref(&diagnostic), &[])
+                .expect("feedback root resolution should load");
+
+        assert!(
+            resolution
+                .matched_roots
+                .iter()
+                .any(|root| root == "model-crate::conversation(Mod)"),
+            "{resolution:#?}"
+        );
+        assert!(
+            !resolution
+                .matched_roots
+                .iter()
+                .any(|root| root == "app::screens::conversation(Mod)"),
+            "{resolution:#?}"
+        );
+
+        let report = generate_with_analyzer_feedback(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output.clone(),
+            },
+            AnalyzerMode::Syn,
+            &[diagnostic],
+        )
+        .expect("feedback widening should render the dependency module");
+
+        assert!(report
+            .feedback_widened_roots
+            .iter()
+            .any(|root| root.to_string() == "model-crate::conversation(Mod)"));
+        let model_lib = fs::read_to_string(output.join("model-crate/src/lib.rs")).unwrap();
+        assert!(model_lib.contains("pub mod conversation;"), "{model_lib}");
+        let app_lib = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(!app_lib.contains("WrongPackage"), "{app_lib}");
     }
 
     #[test]

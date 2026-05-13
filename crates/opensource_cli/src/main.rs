@@ -18,9 +18,9 @@ use opensource_core::{
     generate_with_analyzer_feedback_and_roots, marked_workspace_packages, preflight_workspace,
     repair_workspace, resolve_feedback_widening_roots, write_generate_report,
     write_preflight_report, write_repair_report, write_report, AnalyzerMode, CheckDiagnostic,
-    CheckOptions, CheckReport, GenerateOptions, GenerateReport, GenerateSession,
-    GenerateSessionLoadProgress, GeneratedTargetReport, PreflightDiagnostic, PreflightOptions,
-    PreflightReport, RepairOptions, RepairReport, RootId, SemanticReport,
+    CheckOptions, CheckReport, FeedbackRootResolutionReport, GenerateOptions, GenerateReport,
+    GenerateSession, GenerateSessionLoadProgress, GeneratedTargetReport, PreflightDiagnostic,
+    PreflightOptions, PreflightReport, RepairOptions, RepairReport, RootId, SemanticReport,
 };
 
 fn main() {
@@ -1255,6 +1255,7 @@ fn push_usage_samples(
 }
 
 fn decision_log_feedback_diagnostics(
+    options: &CliOptions,
     validation: &ValidationReport,
     limit: usize,
 ) -> FeedbackDiagnosticLogSummary {
@@ -1268,6 +1269,43 @@ fn decision_log_feedback_diagnostics(
                 summary.warnings += report.warning_count();
                 summary.widening_candidates += report.widening.candidates.len();
                 summary.widening_hazards += report.widening.hazards.len();
+                if report.error_count() > 0 {
+                    match resolve_feedback_widening_roots(
+                        &options.workspace_root,
+                        &report.diagnostics,
+                        &options.root_selectors,
+                    ) {
+                        Ok(resolution) => {
+                            summary.resolution_reports += 1;
+                            summary.resolution_matched_roots += resolution.matched_roots.len();
+                            summary.resolution_skipped_no_match += resolution.skipped_no_match;
+                            summary.resolution_skipped_too_many_matches +=
+                                resolution.skipped_too_many_matches;
+                            summary.source_api_mismatch_candidates +=
+                                decision_log_source_api_mismatch_candidates(
+                                    &report,
+                                    &resolution,
+                                    &mut summary.evidence,
+                                    limit,
+                                );
+                            decision_log_feedback_resolution_evidence(
+                                &resolution,
+                                &mut summary.evidence,
+                                limit,
+                            );
+                        }
+                        Err(error) => {
+                            summary.resolution_errors += 1;
+                            if summary.evidence.len() < limit {
+                                summary.evidence.push(format!(
+                                    "feedback resolution unreadable for {}: {}",
+                                    report_path.display(),
+                                    error
+                                ));
+                            }
+                        }
+                    }
+                }
                 if summary.evidence.len() < limit {
                     summary.evidence.push(format!(
                         "report {} success={} errors={} warnings={} duration_ms={}",
@@ -1316,6 +1354,141 @@ fn decision_log_feedback_diagnostics(
         }
     }
     summary
+}
+
+fn decision_log_feedback_resolution_evidence(
+    resolution: &FeedbackRootResolutionReport,
+    evidence: &mut Vec<String>,
+    limit: usize,
+) {
+    if evidence.len() < limit {
+        evidence.push(format!(
+			"feedback resolution matched_roots={} skipped_no_match={} skipped_too_many_matches={} skipped_marked_roots={} candidate_symbols={}",
+			resolution.matched_roots.len(),
+			resolution.skipped_no_match,
+			resolution.skipped_too_many_matches,
+			resolution.skipped_marked_roots,
+			resolution.candidate_symbols
+		));
+    }
+    for entry in &resolution.entries {
+        if evidence.len() >= limit {
+            break;
+        }
+        let package_hint = entry.package_hint.as_deref().unwrap_or("<none>");
+        evidence.push(format!(
+			"resolution {} symbol=`{}` package_hint={} matches={} retained_roots={} skipped_marked_roots={} action={} roots={}",
+			entry.code,
+			entry.symbol,
+			package_hint,
+			entry.matches,
+			entry.retained_roots,
+			entry.skipped_marked_roots,
+			entry.action,
+			entry.roots.join(",")
+		));
+    }
+    if resolution.entries_truncated && evidence.len() < limit {
+        evidence.push("feedback resolution entries truncated".to_string());
+    }
+}
+
+fn decision_log_source_api_mismatch_candidates(
+    report: &CheckReport,
+    resolution: &FeedbackRootResolutionReport,
+    evidence: &mut Vec<String>,
+    limit: usize,
+) -> usize {
+    let mut candidates = 0;
+    for diagnostic in &report.diagnostics {
+        if !matches!(diagnostic.code.as_deref(), Some("E0432" | "E0433")) {
+            continue;
+        }
+        let suggestions = decision_log_suggestion_replacements(diagnostic);
+        if suggestions.is_empty() {
+            continue;
+        }
+        let suggestion_matches = suggestions
+            .iter()
+            .filter(|replacement| {
+                resolution.entries.iter().any(|entry| {
+                    entry.name.as_deref() == Some(replacement.as_str()) && entry.matches > 0
+                })
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        if suggestion_matches.is_empty() {
+            continue;
+        }
+        for symbol in decision_log_backticked_symbols(&diagnostic.message)
+            .into_iter()
+            .chain(
+                diagnostic
+                    .rendered
+                    .as_deref()
+                    .into_iter()
+                    .flat_map(decision_log_backticked_symbols),
+            )
+        {
+            if !symbol.contains("::") {
+                continue;
+            }
+            let exact_missing = resolution
+                .entries
+                .iter()
+                .any(|entry| entry.symbol == symbol && entry.matches == 0);
+            if !exact_missing {
+                continue;
+            }
+            candidates += 1;
+            if evidence.len() < limit {
+                evidence.push(format!(
+					"source_api_mismatch_candidate unresolved_path=`{}` exact_matches=0 suggested_symbol_matches={} suggestions={}",
+					symbol,
+					suggestion_matches.join(","),
+					suggestions.join(",")
+				));
+            }
+            break;
+        }
+    }
+    candidates
+}
+
+fn decision_log_suggestion_replacements(diagnostic: &CheckDiagnostic) -> Vec<String> {
+    let mut replacements = diagnostic
+        .suggestions
+        .iter()
+        .map(|suggestion| suggestion.suggested_replacement.trim().to_string())
+        .filter(|replacement| !replacement.is_empty())
+        .collect::<Vec<_>>();
+    if replacements.is_empty() {
+        if let Some(rendered) = &diagnostic.rendered {
+            replacements.extend(
+                decision_log_backticked_symbols(rendered)
+                    .into_iter()
+                    .filter(|symbol| !symbol.contains("::")),
+            );
+        }
+    }
+    replacements.sort();
+    replacements.dedup();
+    replacements
+}
+
+fn decision_log_backticked_symbols(text: &str) -> Vec<String> {
+    let mut symbols = Vec::new();
+    let mut remaining = text;
+    while let Some((_, tail)) = remaining.split_once('`') {
+        let Some((symbol, after)) = tail.split_once('`') else {
+            break;
+        };
+        if !symbol.is_empty() {
+            symbols.push(symbol.to_string());
+        }
+        remaining = after;
+    }
+    symbols
 }
 
 fn decision_log_feedback_report_paths(validation: &ValidationReport) -> Vec<PathBuf> {
@@ -5230,6 +5403,12 @@ struct FeedbackDiagnosticLogSummary {
     warnings: usize,
     widening_candidates: usize,
     widening_hazards: usize,
+    resolution_reports: usize,
+    resolution_errors: usize,
+    resolution_matched_roots: usize,
+    resolution_skipped_no_match: usize,
+    resolution_skipped_too_many_matches: usize,
+    source_api_mismatch_candidates: usize,
     evidence: Vec<String>,
 }
 
@@ -5962,7 +6141,7 @@ fn decision_log_steps(
             });
         }
 
-        let diagnostic_summary = decision_log_feedback_diagnostics(validation, 30);
+        let diagnostic_summary = decision_log_feedback_diagnostics(options, validation, 40);
         if diagnostic_summary.reports > 0 || diagnostic_summary.unreadable_reports > 0 {
             let mut diagnostic_metrics = BTreeMap::new();
             diagnostic_metrics.insert(
@@ -5992,6 +6171,30 @@ fn decision_log_steps(
             diagnostic_metrics.insert(
                 "widening_hazards".to_string(),
                 serde_json::json!(diagnostic_summary.widening_hazards),
+            );
+            diagnostic_metrics.insert(
+                "resolution_reports".to_string(),
+                serde_json::json!(diagnostic_summary.resolution_reports),
+            );
+            diagnostic_metrics.insert(
+                "resolution_errors".to_string(),
+                serde_json::json!(diagnostic_summary.resolution_errors),
+            );
+            diagnostic_metrics.insert(
+                "resolution_matched_roots".to_string(),
+                serde_json::json!(diagnostic_summary.resolution_matched_roots),
+            );
+            diagnostic_metrics.insert(
+                "resolution_skipped_no_match".to_string(),
+                serde_json::json!(diagnostic_summary.resolution_skipped_no_match),
+            );
+            diagnostic_metrics.insert(
+                "resolution_skipped_too_many_matches".to_string(),
+                serde_json::json!(diagnostic_summary.resolution_skipped_too_many_matches),
+            );
+            diagnostic_metrics.insert(
+                "source_api_mismatch_candidates".to_string(),
+                serde_json::json!(diagnostic_summary.source_api_mismatch_candidates),
             );
             steps.push(DecisionLogStep {
                 step: "feedback_diagnostics".to_string(),
@@ -8992,17 +9195,18 @@ mod tests {
 
     use super::{
         apply_default_marked_package_scope, baseline_limited_feedback_is_accepted,
-        baseline_target_dir, cargo_args_have_package_scope, decision_log_path,
-        diagnostics_shape_signature, diagnostics_signature, event_log_path,
+        baseline_target_dir, cargo_args_have_package_scope, decision_log_feedback_diagnostics,
+        decision_log_path, diagnostics_shape_signature, diagnostics_signature, event_log_path,
         feedback_errors_are_baseline_known, feedback_is_accepted, feedback_repair_is_accepted,
         initialize_event_log, parse_args_from, production_readiness_blocks_validation,
-        production_validation_matrix_entries, record_final_production_readiness,
-        record_production_readiness_gate, refresh_generated_lockfile_for_locked_validation,
-        run_batch_roots, run_feedback_repair_loop, run_plain_check_gate,
-        semantic_hazard_warning_count, semantic_proof_block_reason, semantic_proof_status,
-        should_run_deferred_warning_repair, slice_report_path, try_widen_from_feedback,
-        uncovered_validation_targets, validation_report_path, FeedbackWideningState,
-        ValidationGateReport, ValidationReport,
+        production_validation_matrix_entries, record_feedback_attempt,
+        record_final_production_readiness, record_production_readiness_gate,
+        refresh_generated_lockfile_for_locked_validation, run_batch_roots,
+        run_feedback_repair_loop, run_plain_check_gate, semantic_hazard_warning_count,
+        semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
+        slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
+        validation_report_path, write_report, FeedbackWideningState, ValidationGateReport,
+        ValidationReport,
     };
 
     #[test]
@@ -10833,6 +11037,119 @@ pub fn entry() -> usize {
         assert!(events.contains("\"event\":\"feedback_widening_resolution\""));
         assert!(events.contains("\"skipped_no_match\":1"));
         assert!(events.contains("compiler feedback produced no additional roots"));
+    }
+
+    #[test]
+    fn feedback_diagnostics_log_resolution_and_source_api_mismatch_candidates() {
+        let source = temp_path("cli-feedback-diagnostics-source-api-source");
+        let output = temp_path("cli-feedback-diagnostics-source-api-output");
+        let opensourced_path = repo_root().join("crates/opensourced");
+        write(
+            source.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"provider\"]\nresolver = \"2\"\n",
+        );
+        write(
+			source.join("app/Cargo.toml"),
+			&format!(
+				"[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nprovider = {{ path = \"../provider\" }}\n",
+				opensourced_path
+			),
+		);
+        write(
+            source.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            source.join("provider/Cargo.toml"),
+            "[package]\nname = \"provider\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            source.join("provider/src/lib.rs"),
+            r#"pub mod types {
+    pub struct Account;
+}
+"#,
+        );
+        let options = parse_args_from(vec![
+            source.clone().into_os_string(),
+            output.clone().into_os_string(),
+        ])
+        .expect("arguments should parse");
+        let mut validation = ValidationReport::new(&options);
+        let feedback_path = output.join("slice-feedback.json");
+        let mut unresolved = diagnostic_with_span(
+            "E0432",
+            "unresolved import `provider::types::AppAccount`",
+            "app/src/lib.rs",
+            3,
+            5,
+            32,
+        );
+        unresolved.package_id = Some("app 0.1.0 (path+file:///tmp/app)".to_string());
+        unresolved.rendered = Some(
+			"error[E0432]: unresolved import `provider::types::AppAccount`\n   |\n   | use provider::types::AppAccount;\n   |                      ---------- help: a similar name exists in the module: `Account`\n   |                      no `AppAccount` in `types`\n"
+				.to_string(),
+		);
+        unresolved
+            .suggestions
+            .push(opensource_core::CheckSuggestion {
+                level: "help".to_string(),
+                message: "a similar name exists in the module".to_string(),
+                file_name: "app/src/lib.rs".to_string(),
+                line_start: 3,
+                line_end: 3,
+                column_start: 22,
+                column_end: 32,
+                byte_start: None,
+                byte_end: None,
+                suggested_replacement: "Account".to_string(),
+                suggestion_applicability: Some("MaybeIncorrect".to_string()),
+            });
+        let check_report = report(false, vec![unresolved]);
+        write_report(&check_report, &feedback_path).expect("feedback report should write");
+        record_feedback_attempt(
+            &mut validation,
+            "feedback",
+            1,
+            "rejected",
+            "generated workspace failed",
+            &check_report,
+            feedback_path,
+            false,
+            0,
+            0,
+            None,
+            None,
+        );
+
+        let summary = decision_log_feedback_diagnostics(&options, &validation, 40);
+
+        assert_eq!(summary.resolution_reports, 1);
+        assert_eq!(summary.source_api_mismatch_candidates, 1);
+        assert!(
+            summary.evidence.iter().any(|entry| {
+                entry.contains(
+                    "source_api_mismatch_candidate unresolved_path=`provider::types::AppAccount`",
+                ) && entry.contains("suggested_symbol_matches=Account")
+            }),
+            "{:#?}",
+            summary.evidence
+        );
+        assert!(
+            summary.evidence.iter().any(|entry| {
+                entry.contains("resolution E0432 symbol=`Account`")
+                    && entry.contains("package_hint=provider")
+                    && entry.contains("matches=1")
+            }),
+            "{:#?}",
+            summary.evidence
+        );
     }
 
     #[test]
