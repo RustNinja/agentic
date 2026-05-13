@@ -66,6 +66,19 @@ passed deliberately.
   external trait imports no longer win on raw uppercase type mentions from
   pruned surfaces, and public glob reexports are checked against the rendered
   public surface instead of the original module.
+- A 2026-05-13 rebuilt shared-RA batch against
+  `/private/tmp/litter-agentic-clean/shared/rust-bridge/Cargo.toml` sliced
+  `codex-tui::theme::health_color` and `codex-tui::theme::health_symbol` with
+  `--analyzer ra-feedback`, `--batch-roots`, `--check`,
+  `--feedback-repair-loop 1`, `--deny-warnings`, `--baseline-check`, and
+  selected-root Cargo args for `codex-tui --bin codex-tui`. The source baseline
+  failed before slicing on the uncached `alleycat-bridge-core` git dependency,
+  but both generated slices accepted: 9 files each, zero preflight errors, zero
+  feedback errors/warnings, zero rendered invalid usage, selected-root semantic
+  proof complete with wider workspace budget limits, and batch rows now exposed
+  `feedback_baseline_compared=true` plus `feedback_baseline_known_errors=0` and
+  `feedback_baseline_new_errors=0`. This validates that the new batch summary
+  can separate source-baseline drift from actual generated-slice regressions.
 - Support-package production hazard parity did not add blockers to the pinned
   five-root codex-ipc run: copied support packages had no retained support
   build-script/OUT_DIR/compile-env/file-include hazard debt, and the run stayed
