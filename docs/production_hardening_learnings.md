@@ -1738,3 +1738,13 @@ That makes the next mining loop actionable: a failed generated workspace can be
 categorized from `slice-decision-log.json` as source mismatch, missing
 downstream dependency, or slicer bug before opening the larger
 `slice-feedback.json`.
+
+Batch root event logs must not make the output directory non-empty before the
+renderer starts. A first live-log attempt wrote `slice-events.jsonl` directly
+inside the root output path and correctly tripped the overwrite guard. The batch
+runner now writes live per-root events to a sibling `*-slice-events.jsonl` path
+while the root is being generated, then preserves that log into the final root
+folder after rendering succeeds. Per-root logs now include generation,
+artifact-write, preflight, cargo check, repair, deferred-warning repair, and
+final batch context decisions, while the global batch log still aggregates all
+roots.

@@ -2153,10 +2153,58 @@ fn run_batch_root(
     let attempts = attempts.max(1);
     let mut last_report = None;
     let mut last_preflight = None;
+    let root_options = batch_root_live_artifact_options(options, root, output_root);
+    initialize_event_log(&root_options)?;
+    write_batch_root_event_log(
+        options,
+        &root_options,
+        root,
+        output_root,
+        "batch_root_context",
+        "started",
+        "start shared-analyzer batch root artifact logging",
+        "this root-local event log records generation, validation, repair, and final decisions for one selected top-down root",
+        event_fields(&[
+            ("attempts", serde_json::json!(attempts)),
+            (
+                "shared_analyzer",
+                serde_json::json!(options.analyzer_mode != AnalyzerMode::Syn),
+            ),
+        ]),
+    )?;
+
+    macro_rules! root_event {
+        ($event:expr, $status:expr, $decision:expr, $reason:expr, $fields:expr $(,)?) => {
+            write_batch_root_event_log(
+                options,
+                &root_options,
+                root,
+                output_root,
+                $event,
+                $status,
+                $decision,
+                $reason,
+                $fields,
+            )
+        };
+    }
+    macro_rules! root_heartbeat {
+        ($event:expr, $decision:expr, $reason:expr, $fields:expr $(,)?) => {
+            start_batch_root_event_heartbeat(
+                options,
+                &root_options,
+                root,
+                output_root,
+                $event,
+                $decision,
+                $reason,
+                $fields,
+            )
+        };
+    }
 
     for attempt in 1..=attempts {
-        write_event_log(
-            options,
+        root_event!(
             "batch_generation",
             "started",
             "generate one top-down root slice",
@@ -2172,8 +2220,7 @@ fn run_batch_root(
                 ),
             ]),
         )?;
-        let _heartbeat = start_event_heartbeat(
-            options,
+        let _heartbeat = root_heartbeat!(
             "batch_generation",
             "generate one top-down root slice",
             "generation starts from the selected root and walks only downstream dependencies",
@@ -2193,8 +2240,7 @@ fn run_batch_root(
                 Ok(report) => report,
                 Err(error) => {
                     let reason = error.to_string();
-                    write_event_log(
-                        options,
+                    root_event!(
                         "batch_generation",
                         "failed",
                         "generate one top-down root slice",
@@ -2209,8 +2255,7 @@ fn run_batch_root(
                     return Err(error);
                 }
             };
-        write_event_log(
-            options,
+        root_event!(
             "batch_generation",
             "completed",
             "render selected root plus downstream closure",
@@ -2234,6 +2279,19 @@ fn run_batch_root(
             ]),
         )?;
         write_generate_report(&report, &output_root.join("slice-report.json"))?;
+        root_event!(
+            "batch_artifact",
+            "written",
+            "write generated slice report for root",
+            "slice-report.json captures the top-down closure, usage classification, production hazards, and rendered file inventory for this root",
+            event_fields(&[
+                (
+                    "report_path",
+                    serde_json::json!(output_root.join("slice-report.json")),
+                ),
+                ("files_written", serde_json::json!(report.files_written)),
+            ]),
+        )?;
         let rendered_usage_contract = rendered_usage_contract(&report);
         let semantic_proof_block = options
             .production_preset
@@ -2241,8 +2299,7 @@ fn run_batch_root(
             .flatten();
         last_report = Some(report);
         if !rendered_usage_contract.invalid.is_empty() {
-            write_event_log(
-                options,
+            root_event!(
                 "batch_gate",
                 "failed",
                 "stop batch root on rendered usage contract",
@@ -2271,8 +2328,7 @@ fn run_batch_root(
             );
         }
         if let Some(reason) = semantic_proof_block {
-            write_event_log(
-                options,
+            root_event!(
                 "batch_gate",
                 "failed",
                 "stop batch root on semantic proof gate",
@@ -2295,8 +2351,7 @@ fn run_batch_root(
         }
         if let Err(error) = refresh_generated_lockfile_for_output(options, output_root) {
             let reason = error.to_string();
-            write_event_log(
-                options,
+            root_event!(
                 "batch_gate",
                 "failed",
                 "stop batch root on lockfile refresh",
@@ -2319,8 +2374,7 @@ fn run_batch_root(
         }
 
         if options.run_preflight || attempts > 1 {
-            write_event_log(
-                options,
+            root_event!(
                 "batch_preflight",
                 "started",
                 "run fast structural validation for batch root",
@@ -2334,8 +2388,7 @@ fn run_batch_root(
                     ),
                 ]),
             )?;
-            let _heartbeat = start_event_heartbeat(
-                options,
+            let _heartbeat = root_heartbeat!(
                 "batch_preflight",
                 "run fast structural validation for batch root",
                 "preflight catches malformed generated workspaces before cargo check",
@@ -2354,8 +2407,7 @@ fn run_batch_root(
                 Ok(preflight) => preflight,
                 Err(error) => {
                     let reason = error.to_string();
-                    let _ = write_event_log(
-                        options,
+                    let _ = root_event!(
                         "batch_preflight",
                         "failed",
                         "run fast structural validation for batch root",
@@ -2382,8 +2434,7 @@ fn run_batch_root(
                 }
             };
             write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))?;
-            write_event_log(
-                options,
+            root_event!(
                 "batch_preflight",
                 if preflight.success {
                     "passed"
@@ -2406,8 +2457,7 @@ fn run_batch_root(
                 ]),
             )?;
             if !preflight.success {
-                write_event_log(
-                    options,
+                root_event!(
                     "batch_gate",
                     "failed",
                     "stop batch root on preflight gate",
@@ -2434,8 +2484,7 @@ fn run_batch_root(
         }
 
         if !batch_runs_check(options) {
-            write_event_log(
-                options,
+            root_event!(
                 "batch_gate",
                 "passed",
                 "finish batch root after generation",
@@ -2457,8 +2506,7 @@ fn run_batch_root(
             );
         }
 
-        write_event_log(
-            options,
+        root_event!(
             "batch_check",
             "started",
             "run cargo check for generated batch root",
@@ -2476,8 +2524,7 @@ fn run_batch_root(
                 ),
             ]),
         )?;
-        let _heartbeat = start_event_heartbeat(
-            options,
+        let _heartbeat = root_heartbeat!(
             "batch_check",
             "run cargo check for generated batch root",
             "cargo check validates that the top-down generated workspace builds",
@@ -2503,8 +2550,7 @@ fn run_batch_root(
             Ok(check) => check,
             Err(error) => {
                 let reason = error.to_string();
-                let _ = write_event_log(
-                    options,
+                let _ = root_event!(
                     "batch_check",
                     "failed",
                     "run cargo check for generated batch root",
@@ -2540,8 +2586,7 @@ fn run_batch_root(
         } else {
             feedback_is_accepted(&check, baseline, options.deny_warnings)
         };
-        write_event_log(
-            options,
+        root_event!(
             "batch_check",
             if accepted { "accepted" } else { "failed" },
             "classify cargo check result for generated batch root",
@@ -2580,13 +2625,40 @@ fn run_batch_root(
         if options.feedback_repair_iterations > 0 {
             let mut repaired_check = check.clone();
             let mut saw_deferred_warning_allows = false;
-            for _repair_attempt in 1..=options.feedback_repair_iterations {
+            for repair_attempt in 1..=options.feedback_repair_iterations {
+                root_event!(
+                    "batch_repair",
+                    "started",
+                    "apply conservative repair to generated root",
+                    "repair uses compiler diagnostics only to adjust generated output before rechecking the same top-down root",
+                    event_fields(&[
+                        ("attempt", serde_json::json!(attempt)),
+                        ("repair_attempt", serde_json::json!(repair_attempt)),
+                        (
+                            "diagnostics",
+                            serde_json::json!(repaired_check.diagnostics.len()),
+                        ),
+                        ("errors", serde_json::json!(repaired_check.error_count())),
+                        ("warnings", serde_json::json!(repaired_check.warning_count())),
+                    ]),
+                )?;
                 let repair = match repair_workspace(RepairOptions {
                     output_root: output_root.to_path_buf(),
                     diagnostics: repaired_check.diagnostics.clone(),
                 }) {
                     Ok(repair) => repair,
                     Err(error) => {
+                        let reason = error.to_string();
+                        let _ = root_event!(
+                            "batch_repair",
+                            "failed",
+                            "apply conservative repair to generated root",
+                            &reason,
+                            event_fields(&[
+                                ("attempt", serde_json::json!(attempt)),
+                                ("repair_attempt", serde_json::json!(repair_attempt)),
+                            ]),
+                        );
                         return finish_batch_root(
                             options,
                             root,
@@ -2595,13 +2667,24 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
-                            Some(error.to_string()),
+                            Some(reason),
                         );
                     }
                 };
                 if let Err(error) =
                     write_repair_report(&repair, &output_root.join("slice-repair.json"))
                 {
+                    let reason = error.to_string();
+                    let _ = root_event!(
+                        "batch_repair",
+                        "failed",
+                        "write generated repair report",
+                        &reason,
+                        event_fields(&[
+                            ("attempt", serde_json::json!(attempt)),
+                            ("repair_attempt", serde_json::json!(repair_attempt)),
+                        ]),
+                    );
                     return finish_batch_root(
                         options,
                         root,
@@ -2610,18 +2693,85 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
-                        Some(error.to_string()),
+                        Some(reason),
                     );
                 }
                 saw_deferred_warning_allows |= repair_has_deferred_warning_allows(&repair);
+                root_event!(
+                    "batch_repair",
+                    if repair.total_changes() > 0 {
+                        "changed"
+                    } else {
+                        "unchanged"
+                    },
+                    "record conservative repair result for generated root",
+                    if repair.total_changes() > 0 {
+                        "repair changed generated files and the root must pass preflight and cargo check again"
+                    } else {
+                        "no safe repair matched the current diagnostics"
+                    },
+                    event_fields(&[
+                        ("attempt", serde_json::json!(attempt)),
+                        ("repair_attempt", serde_json::json!(repair_attempt)),
+                        ("removed_items", serde_json::json!(repair.removed_items)),
+                        ("removed_imports", serde_json::json!(repair.removed_imports)),
+                        (
+                            "normalized_paths",
+                            serde_json::json!(repair.normalized_paths)
+                        ),
+                        (
+                            "applied_suggestions",
+                            serde_json::json!(repair.applied_suggestions),
+                        ),
+                        (
+                            "added_dead_code_allows",
+                            serde_json::json!(repair.added_dead_code_allows),
+                        ),
+                        (
+                            "deferred_dead_code_allows",
+                            serde_json::json!(repair.deferred_dead_code_allows),
+                        ),
+                        ("changed_files", serde_json::json!(repair.changed_files)),
+                        ("total_changes", serde_json::json!(repair.total_changes())),
+                        (
+                            "repair_report",
+                            serde_json::json!(output_root.join("slice-repair.json")),
+                        ),
+                    ]),
+                )?;
                 if repair.total_changes() == 0 {
                     break;
                 }
+                root_event!(
+                    "batch_repair_preflight",
+                    "started",
+                    "run preflight after conservative repair",
+                    "a repair must preserve generated workspace structure before cargo check is rerun",
+                    event_fields(&[
+                        ("attempt", serde_json::json!(attempt)),
+                        ("repair_attempt", serde_json::json!(repair_attempt)),
+                        (
+                            "manifest",
+                            serde_json::json!(output_root.join("Cargo.toml")),
+                        ),
+                    ]),
+                )?;
                 let preflight = match preflight_workspace(PreflightOptions {
                     manifest_path: output_root.join("Cargo.toml"),
                 }) {
                     Ok(preflight) => preflight,
                     Err(error) => {
+                        let reason = error.to_string();
+                        let _ = root_event!(
+                            "batch_repair_preflight",
+                            "failed",
+                            "run preflight after conservative repair",
+                            &reason,
+                            event_fields(&[
+                                ("attempt", serde_json::json!(attempt)),
+                                ("repair_attempt", serde_json::json!(repair_attempt)),
+                            ]),
+                        );
                         return finish_batch_root(
                             options,
                             root,
@@ -2630,13 +2780,24 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
-                            Some(error.to_string()),
+                            Some(reason),
                         );
                     }
                 };
                 if let Err(error) =
                     write_preflight_report(&preflight, &output_root.join("slice-preflight.json"))
                 {
+                    let reason = error.to_string();
+                    let _ = root_event!(
+                        "batch_repair_preflight",
+                        "failed",
+                        "write preflight report after conservative repair",
+                        &reason,
+                        event_fields(&[
+                            ("attempt", serde_json::json!(attempt)),
+                            ("repair_attempt", serde_json::json!(repair_attempt)),
+                        ]),
+                    );
                     return finish_batch_root(
                         options,
                         root,
@@ -2645,9 +2806,33 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
-                        Some(error.to_string()),
+                        Some(reason),
                     );
                 }
+                root_event!(
+                    "batch_repair_preflight",
+                    if preflight.success {
+                        "passed"
+                    } else {
+                        "failed"
+                    },
+                    "run preflight after conservative repair",
+                    if preflight.success {
+                        "repaired workspace passed structural validation"
+                    } else {
+                        "repaired workspace failed structural validation"
+                    },
+                    event_fields(&[
+                        ("attempt", serde_json::json!(attempt)),
+                        ("repair_attempt", serde_json::json!(repair_attempt)),
+                        ("errors", serde_json::json!(preflight.error_count())),
+                        ("warnings", serde_json::json!(preflight.warning_count())),
+                        (
+                            "preflight_report",
+                            serde_json::json!(output_root.join("slice-preflight.json")),
+                        ),
+                    ]),
+                )?;
                 if !preflight.success {
                     return finish_batch_root(
                         options,
@@ -2661,6 +2846,24 @@ fn run_batch_root(
                     );
                 }
                 last_preflight = Some(preflight);
+                root_event!(
+                    "batch_repair_check",
+                    "started",
+                    "rerun cargo check after conservative repair",
+                    "repair acceptance requires a fresh compiler check of the repaired generated workspace",
+                    event_fields(&[
+                        ("attempt", serde_json::json!(attempt)),
+                        ("repair_attempt", serde_json::json!(repair_attempt)),
+                        (
+                            "target_dir",
+                            serde_json::json!(batch_feedback_target_dir(options)),
+                        ),
+                        (
+                            "cargo_args",
+                            serde_json::json!(batch_cargo_args(options, root)),
+                        ),
+                    ]),
+                )?;
                 repaired_check = match check_workspace(CheckOptions {
                     manifest_path: output_root.join("Cargo.toml"),
                     target_dir: Some(batch_feedback_target_dir(options)),
@@ -2669,6 +2872,17 @@ fn run_batch_root(
                 }) {
                     Ok(check) => check,
                     Err(error) => {
+                        let reason = error.to_string();
+                        let _ = root_event!(
+                            "batch_repair_check",
+                            "failed",
+                            "rerun cargo check after conservative repair",
+                            &reason,
+                            event_fields(&[
+                                ("attempt", serde_json::json!(attempt)),
+                                ("repair_attempt", serde_json::json!(repair_attempt)),
+                            ]),
+                        );
                         return finish_batch_root(
                             options,
                             root,
@@ -2677,13 +2891,24 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
-                            Some(error.to_string()),
+                            Some(reason),
                         );
                     }
                 };
                 if let Err(error) =
                     write_report(&repaired_check, &output_root.join("slice-feedback.json"))
                 {
+                    let reason = error.to_string();
+                    let _ = root_event!(
+                        "batch_repair_check",
+                        "failed",
+                        "write compiler feedback report after conservative repair",
+                        &reason,
+                        event_fields(&[
+                            ("attempt", serde_json::json!(attempt)),
+                            ("repair_attempt", serde_json::json!(repair_attempt)),
+                        ]),
+                    );
                     return finish_batch_root(
                         options,
                         root,
@@ -2692,10 +2917,43 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
-                        Some(error.to_string()),
+                        Some(reason),
                     );
                 }
-                if feedback_repair_is_accepted(&repaired_check, baseline, options.deny_warnings) {
+                let repaired_accepted =
+                    feedback_repair_is_accepted(&repaired_check, baseline, options.deny_warnings);
+                root_event!(
+                    "batch_repair_check",
+                    if repaired_accepted {
+                        "accepted"
+                    } else {
+                        "failed"
+                    },
+                    "classify cargo check after conservative repair",
+                    if repaired_accepted {
+                        "repaired generated workspace passed the requested check policy"
+                    } else {
+                        "repaired generated workspace still did not pass the requested check policy"
+                    },
+                    event_fields(&[
+                        ("attempt", serde_json::json!(attempt)),
+                        ("repair_attempt", serde_json::json!(repair_attempt)),
+                        ("success", serde_json::json!(repaired_check.success)),
+                        ("timed_out", serde_json::json!(repaired_check.timed_out)),
+                        ("exit_code", serde_json::json!(repaired_check.exit_code)),
+                        ("duration_ms", serde_json::json!(repaired_check.duration_ms)),
+                        ("errors", serde_json::json!(repaired_check.error_count())),
+                        (
+                            "warnings",
+                            serde_json::json!(repaired_check.warning_count())
+                        ),
+                        (
+                            "report_path",
+                            serde_json::json!(output_root.join("slice-feedback.json")),
+                        ),
+                    ]),
+                )?;
+                if repaired_accepted {
                     return finish_batch_root(
                         options,
                         root,
@@ -2714,12 +2972,31 @@ fn run_batch_root(
                 options.deny_warnings,
                 saw_deferred_warning_allows,
             ) {
+                root_event!(
+                    "batch_deferred_warning_repair",
+                    "started",
+                    "apply deferred warning repair after feedback loop",
+                    "deferred warning repair runs only when dead-code allow cleanup may make the repaired generated workspace acceptable",
+                    event_fields(&[
+                        ("attempt", serde_json::json!(attempt)),
+                        ("errors", serde_json::json!(repaired_check.error_count())),
+                        ("warnings", serde_json::json!(repaired_check.warning_count())),
+                    ]),
+                )?;
                 let repair = match repair_workspace(RepairOptions {
                     output_root: output_root.to_path_buf(),
                     diagnostics: repaired_check.diagnostics.clone(),
                 }) {
                     Ok(repair) => repair,
                     Err(error) => {
+                        let reason = error.to_string();
+                        let _ = root_event!(
+                            "batch_deferred_warning_repair",
+                            "failed",
+                            "apply deferred warning repair after feedback loop",
+                            &reason,
+                            event_fields(&[("attempt", serde_json::json!(attempt))]),
+                        );
                         return finish_batch_root(
                             options,
                             root,
@@ -2728,13 +3005,21 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
-                            Some(error.to_string()),
+                            Some(reason),
                         );
                     }
                 };
                 if let Err(error) =
                     write_repair_report(&repair, &output_root.join("slice-repair.json"))
                 {
+                    let reason = error.to_string();
+                    let _ = root_event!(
+                        "batch_deferred_warning_repair",
+                        "failed",
+                        "write deferred warning repair report",
+                        &reason,
+                        event_fields(&[("attempt", serde_json::json!(attempt))]),
+                    );
                     return finish_batch_root(
                         options,
                         root,
@@ -2743,15 +3028,67 @@ fn run_batch_root(
                         last_report.as_ref(),
                         last_preflight.as_ref(),
                         Some(&repaired_check),
-                        Some(error.to_string()),
+                        Some(reason),
                     );
                 }
+                root_event!(
+                    "batch_deferred_warning_repair",
+                    if repair.total_changes() > 0 {
+                        "changed"
+                    } else {
+                        "unchanged"
+                    },
+                    "record deferred warning repair result",
+                    if repair.total_changes() > 0 {
+                        "deferred warning repair changed generated files and requires preflight plus cargo check"
+                    } else {
+                        "deferred warning repair had no safe generated change to apply"
+                    },
+                    event_fields(&[
+                        ("attempt", serde_json::json!(attempt)),
+                        ("removed_items", serde_json::json!(repair.removed_items)),
+                        ("removed_imports", serde_json::json!(repair.removed_imports)),
+                        (
+                            "normalized_paths",
+                            serde_json::json!(repair.normalized_paths)
+                        ),
+                        (
+                            "applied_suggestions",
+                            serde_json::json!(repair.applied_suggestions),
+                        ),
+                        (
+                            "deferred_dead_code_allows",
+                            serde_json::json!(repair.deferred_dead_code_allows),
+                        ),
+                        ("changed_files", serde_json::json!(repair.changed_files)),
+                        ("total_changes", serde_json::json!(repair.total_changes())),
+                        (
+                            "repair_report",
+                            serde_json::json!(output_root.join("slice-repair.json")),
+                        ),
+                    ]),
+                )?;
                 if repair.total_changes() > 0 {
+                    root_event!(
+                        "batch_deferred_warning_preflight",
+                        "started",
+                        "run preflight after deferred warning repair",
+                        "deferred warning repair must preserve generated workspace structure before cargo check",
+                        event_fields(&[("attempt", serde_json::json!(attempt))]),
+                    )?;
                     let preflight = match preflight_workspace(PreflightOptions {
                         manifest_path: output_root.join("Cargo.toml"),
                     }) {
                         Ok(preflight) => preflight,
                         Err(error) => {
+                            let reason = error.to_string();
+                            let _ = root_event!(
+                                "batch_deferred_warning_preflight",
+                                "failed",
+                                "run preflight after deferred warning repair",
+                                &reason,
+                                event_fields(&[("attempt", serde_json::json!(attempt))]),
+                            );
                             return finish_batch_root(
                                 options,
                                 root,
@@ -2760,7 +3097,7 @@ fn run_batch_root(
                                 last_report.as_ref(),
                                 last_preflight.as_ref(),
                                 Some(&repaired_check),
-                                Some(error.to_string()),
+                                Some(reason),
                             );
                         }
                     };
@@ -2768,6 +3105,14 @@ fn run_batch_root(
                         &preflight,
                         &output_root.join("slice-preflight.json"),
                     ) {
+                        let reason = error.to_string();
+                        let _ = root_event!(
+                            "batch_deferred_warning_preflight",
+                            "failed",
+                            "write deferred warning preflight report",
+                            &reason,
+                            event_fields(&[("attempt", serde_json::json!(attempt))]),
+                        );
                         return finish_batch_root(
                             options,
                             root,
@@ -2776,9 +3121,28 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
-                            Some(error.to_string()),
+                            Some(reason),
                         );
                     }
+                    root_event!(
+                        "batch_deferred_warning_preflight",
+                        if preflight.success {
+                            "passed"
+                        } else {
+                            "failed"
+                        },
+                        "run preflight after deferred warning repair",
+                        if preflight.success {
+                            "deferred-warning repaired workspace passed structural validation"
+                        } else {
+                            "deferred-warning repaired workspace failed structural validation"
+                        },
+                        event_fields(&[
+                            ("attempt", serde_json::json!(attempt)),
+                            ("errors", serde_json::json!(preflight.error_count())),
+                            ("warnings", serde_json::json!(preflight.warning_count())),
+                        ]),
+                    )?;
                     if !preflight.success {
                         return finish_batch_root(
                             options,
@@ -2795,6 +3159,23 @@ fn run_batch_root(
                         );
                     }
                     last_preflight = Some(preflight);
+                    root_event!(
+                        "batch_deferred_warning_check",
+                        "started",
+                        "rerun cargo check after deferred warning repair",
+                        "deferred warning repair acceptance requires fresh compiler feedback",
+                        event_fields(&[
+                            ("attempt", serde_json::json!(attempt)),
+                            (
+                                "target_dir",
+                                serde_json::json!(batch_feedback_target_dir(options)),
+                            ),
+                            (
+                                "cargo_args",
+                                serde_json::json!(batch_cargo_args(options, root)),
+                            ),
+                        ]),
+                    )?;
                     repaired_check = match check_workspace(CheckOptions {
                         manifest_path: output_root.join("Cargo.toml"),
                         target_dir: Some(batch_feedback_target_dir(options)),
@@ -2803,6 +3184,14 @@ fn run_batch_root(
                     }) {
                         Ok(check) => check,
                         Err(error) => {
+                            let reason = error.to_string();
+                            let _ = root_event!(
+                                "batch_deferred_warning_check",
+                                "failed",
+                                "rerun cargo check after deferred warning repair",
+                                &reason,
+                                event_fields(&[("attempt", serde_json::json!(attempt))]),
+                            );
                             return finish_batch_root(
                                 options,
                                 root,
@@ -2811,13 +3200,21 @@ fn run_batch_root(
                                 last_report.as_ref(),
                                 last_preflight.as_ref(),
                                 Some(&repaired_check),
-                                Some(error.to_string()),
+                                Some(reason),
                             );
                         }
                     };
                     if let Err(error) =
                         write_report(&repaired_check, &output_root.join("slice-feedback.json"))
                     {
+                        let reason = error.to_string();
+                        let _ = root_event!(
+                            "batch_deferred_warning_check",
+                            "failed",
+                            "write deferred warning feedback report",
+                            &reason,
+                            event_fields(&[("attempt", serde_json::json!(attempt))]),
+                        );
                         return finish_batch_root(
                             options,
                             root,
@@ -2826,11 +3223,41 @@ fn run_batch_root(
                             last_report.as_ref(),
                             last_preflight.as_ref(),
                             Some(&repaired_check),
-                            Some(error.to_string()),
+                            Some(reason),
                         );
                     }
-                    if feedback_repair_is_accepted(&repaired_check, baseline, options.deny_warnings)
-                    {
+                    let deferred_accepted = feedback_repair_is_accepted(
+                        &repaired_check,
+                        baseline,
+                        options.deny_warnings,
+                    );
+                    root_event!(
+                        "batch_deferred_warning_check",
+                        if deferred_accepted {
+                            "accepted"
+                        } else {
+                            "failed"
+                        },
+                        "classify cargo check after deferred warning repair",
+                        if deferred_accepted {
+                            "deferred-warning repaired workspace passed the requested check policy"
+                        } else {
+                            "deferred-warning repaired workspace still did not pass the requested check policy"
+                        },
+                        event_fields(&[
+                            ("attempt", serde_json::json!(attempt)),
+                            ("success", serde_json::json!(repaired_check.success)),
+                            ("timed_out", serde_json::json!(repaired_check.timed_out)),
+                            ("exit_code", serde_json::json!(repaired_check.exit_code)),
+                            ("duration_ms", serde_json::json!(repaired_check.duration_ms)),
+                            ("errors", serde_json::json!(repaired_check.error_count())),
+                            (
+                                "warnings",
+                                serde_json::json!(repaired_check.warning_count())
+                            ),
+                        ]),
+                    )?;
+                    if deferred_accepted {
                         return finish_batch_root(
                             options,
                             root,
@@ -3012,7 +3439,8 @@ fn write_batch_root_artifacts(
     check: Option<&CheckReport>,
     error: &Option<String>,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    initialize_event_log(root_options)?;
+    preserve_batch_root_live_event_log(output_root, root_options)?;
+    initialize_event_log_if_absent(root_options)?;
     write_event_log(
         root_options,
         "batch_root_context",
@@ -3049,6 +3477,44 @@ fn write_batch_root_artifacts(
         batch_root_validation_status(status),
         error.as_deref(),
     )
+}
+
+fn batch_root_live_artifact_options(
+    options: &CliOptions,
+    root: &RootId,
+    output_root: &Path,
+) -> CliOptions {
+    let mut root_options = batch_root_artifact_options(options, root, output_root);
+    root_options.event_log = Some(batch_root_live_event_log_path(output_root));
+    root_options
+}
+
+fn batch_root_live_event_log_path(output_root: &Path) -> PathBuf {
+    let parent = output_root.parent().unwrap_or_else(|| Path::new("."));
+    let file_name = output_root
+        .file_name()
+        .and_then(OsStr::to_str)
+        .filter(|name| !name.is_empty())
+        .unwrap_or("batch-root");
+    parent.join(format!("{file_name}-slice-events.jsonl"))
+}
+
+fn preserve_batch_root_live_event_log(
+    output_root: &Path,
+    root_options: &CliOptions,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(final_path) = event_log_path(root_options) else {
+        return Ok(());
+    };
+    let live_path = batch_root_live_event_log_path(output_root);
+    if live_path == final_path || !live_path.exists() || final_path.exists() {
+        return Ok(());
+    }
+    if let Some(parent) = final_path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    fs::copy(live_path, final_path)?;
+    Ok(())
 }
 
 fn batch_root_artifact_options(
@@ -4150,6 +4616,16 @@ fn initialize_event_log(options: &CliOptions) -> Result<(), Box<dyn std::error::
     )
 }
 
+fn initialize_event_log_if_absent(options: &CliOptions) -> Result<(), Box<dyn std::error::Error>> {
+    let Some(path) = event_log_path(options) else {
+        return Ok(());
+    };
+    if path.exists() {
+        return Ok(());
+    }
+    initialize_event_log(options)
+}
+
 fn start_event_heartbeat(
     options: &CliOptions,
     event: &str,
@@ -4195,6 +4671,28 @@ fn start_event_heartbeat(
     }
 }
 
+struct BatchRootEventHeartbeat {
+    _batch: EventHeartbeat,
+    _root: EventHeartbeat,
+}
+
+fn start_batch_root_event_heartbeat(
+    batch_options: &CliOptions,
+    root_options: &CliOptions,
+    root: &RootId,
+    output_root: &Path,
+    event: &str,
+    decision: &str,
+    reason: &str,
+    fields: BTreeMap<String, serde_json::Value>,
+) -> BatchRootEventHeartbeat {
+    let fields = batch_root_event_fields(batch_options, root_options, root, output_root, fields);
+    BatchRootEventHeartbeat {
+        _batch: start_event_heartbeat(batch_options, event, decision, reason, fields.clone()),
+        _root: start_event_heartbeat(root_options, event, decision, reason, fields),
+    }
+}
+
 fn write_event_log(
     options: &CliOptions,
     event: &str,
@@ -4207,6 +4705,54 @@ fn write_event_log(
         return Ok(());
     };
     append_event_log_path(&path, event, status, decision, reason, fields)
+}
+
+fn write_batch_root_event_log(
+    batch_options: &CliOptions,
+    root_options: &CliOptions,
+    root: &RootId,
+    output_root: &Path,
+    event: &str,
+    status: &str,
+    decision: &str,
+    reason: &str,
+    fields: BTreeMap<String, serde_json::Value>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    let fields = batch_root_event_fields(batch_options, root_options, root, output_root, fields);
+    write_event_log(
+        batch_options,
+        event,
+        status,
+        decision,
+        reason,
+        fields.clone(),
+    )?;
+    write_event_log(root_options, event, status, decision, reason, fields)
+}
+
+fn batch_root_event_fields(
+    batch_options: &CliOptions,
+    root_options: &CliOptions,
+    root: &RootId,
+    output_root: &Path,
+    mut fields: BTreeMap<String, serde_json::Value>,
+) -> BTreeMap<String, serde_json::Value> {
+    fields
+        .entry("root".to_string())
+        .or_insert_with(|| serde_json::json!(root.to_string()));
+    fields
+        .entry("root_output_root".to_string())
+        .or_insert_with(|| serde_json::json!(output_root));
+    fields
+        .entry("batch_output_root".to_string())
+        .or_insert_with(|| serde_json::json!(&batch_options.output_root));
+    fields
+        .entry("root_event_log".to_string())
+        .or_insert_with(|| serde_json::json!(event_log_path(root_options)));
+    fields
+        .entry("batch_event_log".to_string())
+        .or_insert_with(|| serde_json::json!(event_log_path(batch_options)));
+    fields
 }
 
 fn append_event_log_path(
@@ -9446,6 +9992,12 @@ pub fn dead() -> usize {
             events.contains("\"event\":\"batch_root_context\""),
             "{events}"
         );
+        assert!(
+            events.contains("\"event\":\"batch_generation\""),
+            "{events}"
+        );
+        assert!(events.contains("\"event\":\"batch_preflight\""), "{events}");
+        assert!(events.contains("\"event\":\"batch_gate\""), "{events}");
     }
 
     #[test]
@@ -9554,6 +10106,12 @@ pub fn helper() -> usize {
         assert!(
             decision_log.contains("\"step\": \"feedback_diagnostics\""),
             "{decision_log}"
+        );
+        let events = fs::read_to_string(root_output.join("slice-events.jsonl")).unwrap();
+        assert!(events.contains("\"event\":\"batch_check\""), "{events}");
+        assert!(
+            events.contains("\"event\":\"batch_root_context\""),
+            "{events}"
         );
     }
 

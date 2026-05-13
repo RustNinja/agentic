@@ -127,6 +127,12 @@ shared target directory under the batch output by default, or the explicit
 Production batch validation also reconciles each generated `Cargo.lock` before
 running locked checks, using Cargo's offline resolver first and falling back to
 online resolution only when the user did not request `--offline`/`--frozen`.
+Each batch root also gets its own `slice-events.jsonl` in the generated root
+folder. During generation the live root log is written to a sibling path so it
+does not trip the output overwrite guard, then it is preserved into the final
+root folder with the same generation, preflight, check, repair, and final
+classification events. This lets multiple mined roots be inspected independently
+without filtering the global batch log first.
 Rows also include rendered usage contract counts and RA semantic budget coverage
 (`semantic_*` and `selected_root_*` counters), so mining can separate clean,
 well-proven slices from accepted slices that still spent or skipped too much
