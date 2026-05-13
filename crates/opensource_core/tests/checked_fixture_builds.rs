@@ -1,4 +1,5 @@
 use std::{
+    collections::BTreeSet,
     fs,
     path::{Path, PathBuf},
     process::Command,
@@ -65,29 +66,16 @@ impl FixtureWorkspace {
 }
 
 fn assert_all_fixture_manifests_covered(repo: &Path, fixtures: &[FixtureWorkspace]) {
-    let root_workspace_members = workspace_member_roots(&repo.join("Cargo.toml"));
-    let fixture_workspace_roots = fixtures
-        .iter()
-        .filter_map(|workspace| {
-            workspace
-                .manifest
-                .strip_prefix(repo.join("fixtures"))
-                .ok()
-                .and_then(|_| workspace.manifest.parent())
-        })
-        .map(Path::to_path_buf)
-        .collect::<Vec<_>>();
+    let covered_roots = covered_fixture_roots(repo, fixtures);
 
     let uncovered = cargo_manifests(&repo.join("fixtures"))
         .into_iter()
         .filter(|manifest| {
             let package_root = manifest.parent().expect("manifest should have parent");
-            !fixture_workspace_roots
+            let package_root = canonical_existing_path(package_root);
+            !covered_roots
                 .iter()
-                .any(|workspace_root| package_root.starts_with(workspace_root))
-                && !root_workspace_members
-                    .iter()
-                    .any(|member_root| package_root.starts_with(member_root))
+                .any(|covered_root| package_root.starts_with(covered_root))
         })
         .collect::<Vec<_>>();
 
@@ -100,6 +88,100 @@ fn assert_all_fixture_manifests_covered(repo: &Path, fixtures: &[FixtureWorkspac
             .collect::<Vec<_>>()
             .join("\n")
     );
+}
+
+fn covered_fixture_roots(repo: &Path, fixtures: &[FixtureWorkspace]) -> Vec<PathBuf> {
+    let mut covered = BTreeSet::new();
+    let mut pending = Vec::new();
+
+    for member_root in workspace_member_roots(&repo.join("Cargo.toml")) {
+        push_covered_root(&mut covered, &mut pending, member_root);
+    }
+
+    for workspace in fixtures {
+        let Some(workspace_root) = workspace.manifest.parent() else {
+            continue;
+        };
+        push_covered_root(&mut covered, &mut pending, workspace_root.to_path_buf());
+        for member_root in workspace_member_roots(&workspace.manifest) {
+            push_covered_root(&mut covered, &mut pending, member_root);
+        }
+    }
+
+    while let Some(root) = pending.pop() {
+        for dependency_root in path_dependency_roots(&root.join("Cargo.toml")) {
+            push_covered_root(&mut covered, &mut pending, dependency_root);
+        }
+    }
+
+    covered.into_iter().collect()
+}
+
+fn push_covered_root(covered: &mut BTreeSet<PathBuf>, pending: &mut Vec<PathBuf>, root: PathBuf) {
+    let root = canonical_existing_path(&root);
+    if covered.insert(root.clone()) {
+        pending.push(root);
+    }
+}
+
+fn path_dependency_roots(manifest: &Path) -> Vec<PathBuf> {
+    let Ok(contents) = fs::read_to_string(manifest) else {
+        return Vec::new();
+    };
+    let Ok(value) = contents.parse::<toml::Value>() else {
+        return Vec::new();
+    };
+    let Some(manifest_dir) = manifest.parent() else {
+        return Vec::new();
+    };
+
+    let mut roots = Vec::new();
+    collect_dependency_table_path_roots(value.get("dependencies"), manifest_dir, &mut roots);
+    collect_dependency_table_path_roots(value.get("dev-dependencies"), manifest_dir, &mut roots);
+    collect_dependency_table_path_roots(value.get("build-dependencies"), manifest_dir, &mut roots);
+    if let Some(targets) = value.get("target").and_then(toml::Value::as_table) {
+        for target in targets.values() {
+            collect_dependency_table_path_roots(
+                target.get("dependencies"),
+                manifest_dir,
+                &mut roots,
+            );
+            collect_dependency_table_path_roots(
+                target.get("dev-dependencies"),
+                manifest_dir,
+                &mut roots,
+            );
+            collect_dependency_table_path_roots(
+                target.get("build-dependencies"),
+                manifest_dir,
+                &mut roots,
+            );
+        }
+    }
+    roots
+}
+
+fn collect_dependency_table_path_roots(
+    value: Option<&toml::Value>,
+    manifest_dir: &Path,
+    roots: &mut Vec<PathBuf>,
+) {
+    let Some(table) = value.and_then(toml::Value::as_table) else {
+        return;
+    };
+    for dependency in table.values() {
+        let Some(dependency_table) = dependency.as_table() else {
+            continue;
+        };
+        let Some(path) = dependency_table.get("path").and_then(toml::Value::as_str) else {
+            continue;
+        };
+        roots.push(canonical_existing_path(&manifest_dir.join(path)));
+    }
+}
+
+fn canonical_existing_path(path: &Path) -> PathBuf {
+    fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf())
 }
 
 fn fixture_workspace_manifests(repo: &Path) -> Vec<PathBuf> {

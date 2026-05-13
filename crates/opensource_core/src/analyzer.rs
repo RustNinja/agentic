@@ -1740,6 +1740,12 @@ mod rust_analyzer {
                 "unresolved_path_has_external_root",
             );
         }
+        if index.is_some_and(|index| index.path_has_external_dependency_root(segments)) {
+            return (
+                SemanticUnresolvedCategory::Benign,
+                "unresolved_path_has_external_dependency_root",
+            );
+        }
         if source_has_external_imported_path(source_text, segments) {
             return (
                 SemanticUnresolvedCategory::Benign,
@@ -1891,6 +1897,10 @@ mod rust_analyzer {
         segments
             .first()
             .is_some_and(|segment| matches!(segment.as_str(), "std" | "core" | "alloc"))
+    }
+
+    fn rust_crate_root_ident(package_or_alias: &str) -> String {
+        package_or_alias.replace('-', "_")
     }
 
     fn source_has_external_imported_path(source_text: &str, segments: &[String]) -> bool {
@@ -2234,6 +2244,7 @@ mod rust_analyzer {
         retained_owners: BTreeSet<SemanticOwnerId>,
         selected_roots: Vec<RootId>,
         local_idents: BTreeSet<String>,
+        external_crate_roots: BTreeSet<String>,
         method_names: BTreeSet<String>,
         derived_default_types: BTreeSet<String>,
     }
@@ -2243,10 +2254,18 @@ mod rust_analyzer {
             let mut files = HashMap::new();
             let mut root_files = BTreeSet::new();
             let mut local_idents = BTreeSet::new();
+            let mut external_crate_roots = BTreeSet::new();
             let mut method_names = BTreeSet::new();
             let mut derived_default_types = BTreeSet::new();
             let retention =
                 retained_scope(project, &SemanticReductionHints::default(), selected_roots);
+            for package in project.workspace.packages.values() {
+                for dependency in &package.dependencies {
+                    if !project.workspace.packages.contains_key(&dependency.package) {
+                        external_crate_roots.insert(rust_crate_root_ident(&dependency.alias));
+                    }
+                }
+            }
             for source in project.files.values() {
                 let path = normalize_fs_path(&source.path);
                 files.entry(path).or_insert_with(|| IndexedSourceFile {
@@ -2319,6 +2338,7 @@ mod rust_analyzer {
                 retained_owners: retention.owners,
                 selected_roots: selected_roots.to_vec(),
                 local_idents,
+                external_crate_roots,
                 method_names,
                 derived_default_types,
             }
@@ -2415,6 +2435,14 @@ mod rust_analyzer {
                 }
                 [] => false,
             }
+        }
+
+        fn path_has_external_dependency_root(&self, segments: &[String]) -> bool {
+            matches!(
+                segments,
+                [first, ..] if !is_relative_path_anchor(first)
+                    && self.external_crate_roots.contains(first)
+            )
         }
 
         fn path_is_derived_default_call(&self, segments: &[String]) -> bool {
@@ -2885,12 +2913,15 @@ mod rust_analyzer {
     #[cfg(test)]
     mod tests {
         use super::{
-            item_derives_default, method_receiver_snippet, receiver_is_plain_value_or_field_chain,
+            classify_unresolved_path, item_derives_default, method_receiver_snippet, path_segments,
+            receiver_is_plain_value_or_field_chain, rust_crate_root_ident,
             snippet_has_only_primitive_turbofish, source_has_external_imported_path,
             source_has_external_imported_symbol,
             unresolved_method_looks_like_common_external_receiver,
-            unresolved_method_receiver_has_external_anchor,
+            unresolved_method_receiver_has_external_anchor, ProjectSemanticIndex,
         };
+        use crate::analyzer::SemanticUnresolvedCategory;
+        use ra_ap_syntax::AstNode;
 
         #[test]
         fn external_use_imported_symbols_are_benign_unresolved_candidates() {
@@ -2943,6 +2974,43 @@ use crate::local::fmt as local_fmt;
                 source,
                 &["local_fmt".to_string(), "Formatter".to_string()]
             ));
+        }
+
+        #[test]
+        fn external_dependency_roots_qualify_fully_qualified_paths_as_benign() {
+            let source = "fn demo() { let _ = ratatui::widgets::BorderType::Rounded; }";
+            let file =
+                ra_ap_syntax::SourceFile::parse(source, ra_ap_syntax::Edition::Edition2021).tree();
+            let path = file
+                .syntax()
+                .descendants()
+                .filter_map(ra_ap_syntax::ast::Path::cast)
+                .find(|path| {
+                    path_segments(path)
+                        == ["ratatui", "widgets", "BorderType", "Rounded"]
+                            .map(str::to_string)
+                            .to_vec()
+                })
+                .expect("fully qualified external path should parse");
+            let mut index = empty_project_semantic_index();
+            index.external_crate_roots.insert("ratatui".to_string());
+            index.local_idents.insert("BorderType".to_string());
+            let segments = path_segments(&path);
+
+            let (category, reason) =
+                classify_unresolved_path(Some(&index), path.syntax(), source, &segments);
+
+            assert_eq!(category, SemanticUnresolvedCategory::Benign);
+            assert_eq!(reason, "unresolved_path_has_external_dependency_root");
+        }
+
+        #[test]
+        fn dependency_aliases_use_rust_crate_root_spelling() {
+            assert_eq!(
+                rust_crate_root_ident("my-external-crate"),
+                "my_external_crate"
+            );
+            assert_eq!(rust_crate_root_ident("renamed_crate"), "renamed_crate");
         }
 
         #[test]
@@ -3019,6 +3087,20 @@ use crate::local::fmt as local_fmt;
 
             assert!(item_derives_default(&item));
             assert!(!item_derives_default(&non_default));
+        }
+
+        fn empty_project_semantic_index() -> ProjectSemanticIndex {
+            ProjectSemanticIndex {
+                files: std::collections::HashMap::new(),
+                root_files: std::collections::BTreeSet::new(),
+                retained_files: std::collections::BTreeSet::new(),
+                retained_owners: std::collections::BTreeSet::new(),
+                selected_roots: Vec::new(),
+                local_idents: std::collections::BTreeSet::new(),
+                external_crate_roots: std::collections::BTreeSet::new(),
+                method_names: std::collections::BTreeSet::new(),
+                derived_default_types: std::collections::BTreeSet::new(),
+            }
         }
     }
 }
