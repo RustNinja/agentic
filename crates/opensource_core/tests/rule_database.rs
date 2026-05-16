@@ -2727,6 +2727,33 @@ fn retains_result_ok_into_conversion_dependencies() {
 }
 
 #[test]
+fn retains_function_argument_collect_into_conversion_dependencies() {
+    let workspace = temp_path("rule-call-arg-collect-into-workspace");
+    let output = temp_path("rule-call-arg-collect-into-output");
+    let target_dir = temp_path("rule-call-arg-collect-into-target");
+    write_call_arg_collect_into_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("call argument collect into rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("call_arg_collect_into_rule/src/lib.rs"));
+    assert!(
+        lib.contains("impl From<AppDiscoveredServer> for DiscoveredServer"),
+        "{lib}"
+    );
+    assert!(
+        lib.contains("impl From<DiscoveredServer> for AppDiscoveredServer"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadDiscoveredServer"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
     let workspace = temp_path("rule-option-arc-callback-workspace");
     let output = temp_path("rule-option-arc-callback-output");
@@ -7707,6 +7734,57 @@ fn parse_pair_payload(value: String) -> Result<ParsedPairPayload, ClientError> {
 pub fn selected(value: String) -> Result<AppAlleycatPairPayload, ClientError> {
     let parsed = parse_pair_payload(value)?;
     Ok(parsed.into())
+}
+"#,
+    );
+}
+
+fn write_call_arg_collect_into_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "call_arg_collect_into_rule",
+        r#"use opensourced::opensourced;
+
+pub struct DiscoveredServer {
+    pub id: String,
+}
+
+pub struct AppDiscoveredServer {
+    pub id: String,
+}
+
+impl From<AppDiscoveredServer> for DiscoveredServer {
+    fn from(value: AppDiscoveredServer) -> Self {
+        Self { id: value.id }
+    }
+}
+
+impl From<DiscoveredServer> for AppDiscoveredServer {
+    fn from(value: DiscoveredServer) -> Self {
+        Self { id: value.id }
+    }
+}
+
+pub struct DeadDiscoveredServer {
+    pub id: String,
+}
+
+impl From<DeadDiscoveredServer> for DiscoveredServer {
+    fn from(value: DeadDiscoveredServer) -> Self {
+        Self { id: value.id }
+    }
+}
+
+fn reconcile_discovered_servers(candidates: Vec<DiscoveredServer>) -> Vec<DiscoveredServer> {
+    candidates
+}
+
+#[opensourced]
+pub fn selected(candidates: Vec<AppDiscoveredServer>) -> Vec<AppDiscoveredServer> {
+    reconcile_discovered_servers(candidates.into_iter().map(Into::into).collect())
+        .into_iter()
+        .map(AppDiscoveredServer::from)
+        .collect()
 }
 "#,
     );

@@ -25,7 +25,7 @@ use crate::{
     reduce::{
         callable_signature_resolves_item, is_cfg_test_attr, is_opensourced_attr, is_test_attr,
     },
-    UsageDecisionIndex,
+    UsageDecision, UsageDecisionIndex,
 };
 
 const OUTPUT_MARKER: &str = ".slicers-output";
@@ -264,7 +264,7 @@ impl RenderPlan {
         if self.is_droppable_pruned_enum_payload(item) {
             return false;
         }
-        self.reachable_items.contains(item) || self.usage.is_blocked_by_unknown_item(item)
+        self.item_is_retained_or_blocked(item)
     }
 
     fn can_remove_callable(&self, callable: &CallableId) -> bool {
@@ -272,7 +272,20 @@ impl RenderPlan {
     }
 
     fn can_remove_item(&self, item: &ItemId) -> bool {
-        !self.item_should_render(item)
+        self.usage.can_remove_item(item) || !self.item_is_retained_or_blocked(item)
+    }
+
+    fn item_is_retained_or_blocked(&self, item: &ItemId) -> bool {
+        if self.usage.can_remove_item(item) {
+            return false;
+        }
+        self.reachable_items.contains(item)
+            || self.usage.item_decision(item).is_some_and(|decision| {
+                matches!(
+                    decision,
+                    UsageDecision::Used | UsageDecision::BlockedByUnknown
+                )
+            })
     }
 
     fn package_mentions_ident(&self, package: &str, ident: &str) -> bool {
@@ -3602,6 +3615,14 @@ fn build_restricted_support_sources(
                 return Ok(None);
             };
             let named_items = support_named_item_names(&module.syntax.items);
+            let pruned_struct_fields = support_pruned_struct_fields(
+                &ctx,
+                &live,
+                &source_file,
+                &module.syntax,
+                &live_set,
+                &named_items,
+            );
             let mut live_usage = TokenUsage::default();
 
             for name in &live_set.item_names {
@@ -3618,7 +3639,11 @@ fn build_restricted_support_sources(
                 let Some(inserted) = mark_support_token_dependencies(
                     &ctx,
                     &source_file,
-                    &support_item_dependency_tokens(item, &live_set),
+                    &support_item_dependency_tokens_with_pruned_fields(
+                        item,
+                        &live_set,
+                        &pruned_struct_fields,
+                    ),
                     &named_items,
                     &mut live,
                     &mut live_usage,
@@ -3782,7 +3807,8 @@ fn build_restricted_support_sources(
                 changed |= inserted;
             }
 
-            let mut live_import_usage = support_live_non_use_item_usage(&module.syntax, &live_set);
+            let mut live_import_usage =
+                support_live_non_use_item_usage(&module.syntax, &live_set, &pruned_struct_fields);
             let mut macro_probe_usage = live_import_usage.clone();
             let live_assoc_import_items = support_combined_assoc_items(
                 &live_set.assoc_item_names,
@@ -4020,6 +4046,14 @@ fn prune_empty_restricted_support_modules(
 }
 
 fn support_item_dependency_tokens(item: &Item, live_set: &SupportLiveSet) -> TokenStream {
+    support_item_dependency_tokens_with_pruned_fields(item, live_set, &BTreeMap::new())
+}
+
+fn support_item_dependency_tokens_with_pruned_fields(
+    item: &Item,
+    live_set: &SupportLiveSet,
+    pruned_struct_fields: &BTreeMap<String, BTreeSet<String>>,
+) -> TokenStream {
     match item {
         Item::Mod(item_mod) if item_mod.content.is_some() => {
             let mut item_mod = item_mod.clone();
@@ -4032,6 +4066,10 @@ fn support_item_dependency_tokens(item: &Item, live_set: &SupportLiveSet) -> Tok
             let mut item_enum = item_enum.clone();
             item_enum.variants = Punctuated::new();
             item_enum.to_token_stream()
+        }
+        Item::Struct(item_struct) => {
+            Item::Struct(transform_support_struct(item_struct, pruned_struct_fields))
+                .to_token_stream()
         }
         _ => item.to_token_stream(),
     }
@@ -5662,7 +5700,8 @@ fn transform_restricted_support_file(
         live_set,
         &named_items,
     );
-    let live_import_usage = support_live_non_use_item_usage(syntax, live_set);
+    let live_import_usage =
+        support_live_non_use_item_usage(syntax, live_set, &pruned_struct_fields);
     let mut live_import_names = support_live_import_names(&live_import_usage);
     let non_enum_usage = support_live_non_enum_usage_across_live_files(ctx, live_by_file);
     let retained_enum_variants = support_retained_enum_variants(syntax, live_set, &non_enum_usage);
@@ -6423,7 +6462,11 @@ fn support_live_enum_variant_names(
         .collect()
 }
 
-fn support_live_non_use_item_usage(syntax: &syn::File, live_set: &SupportLiveSet) -> TokenUsage {
+fn support_live_non_use_item_usage(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+    pruned_struct_fields: &BTreeMap<String, BTreeSet<String>>,
+) -> TokenUsage {
     let mut usage = TokenUsage::default();
     let named_items = support_named_item_names(&syntax.items);
     for item in &syntax.items {
@@ -6431,7 +6474,14 @@ fn support_live_non_use_item_usage(syntax: &syn::File, live_set: &SupportLiveSet
             continue;
         }
         if support_item_should_collect_live_usage(item, &named_items, live_set) {
-            collect_token_usage(&item.to_token_stream(), &mut usage);
+            collect_token_usage(
+                &support_item_dependency_tokens_with_pruned_fields(
+                    item,
+                    live_set,
+                    pruned_struct_fields,
+                ),
+                &mut usage,
+            );
         }
     }
     usage
@@ -15195,6 +15245,7 @@ fn module_should_render(
         }
     }) || render_plan.reachable_items.iter().any(|item| {
         item.package == package
+            && render_plan.item_should_render(item)
             && (path_has_prefix(&item.module_path, module_path)
                 || path_has_prefix(&path_from_item(item), module_path))
     }) || inline_module_fallback_macro_should_render(project, render_plan, package, module_path)
@@ -16594,6 +16645,45 @@ fn retained_macro_invocations_mention_unqualified_ident(
             token_stream_mentions_unqualified_ident(&item_macro.mac.tokens, ident)
         }
         _ => false,
+    })
+}
+
+fn retained_macro_definitions_mention_unqualified_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
+        return false;
+    };
+
+    items.iter().any(|item| {
+        let Item::Macro(item_macro) = item else {
+            return false;
+        };
+        let Some(name) = item_macro_definition_name(item_macro) else {
+            return false;
+        };
+        (reachable_module_mentions_ident(project, reduced, package, module_path, &name)
+            || reachable_package_mentions_ident(project, reduced, package, &name))
+            && token_stream_mentions_unqualified_ident(&item_macro.mac.tokens, ident)
+    })
+}
+
+fn item_macro_definition_name(item_macro: &syn::ItemMacro) -> Option<String> {
+    if let Some(ident) = &item_macro.ident {
+        return Some(ident.to_string());
+    }
+    if !item_macro.mac.path.is_ident("macro_rules") {
+        return None;
+    }
+    item_macro.mac.tokens.clone().into_iter().find_map(|token| {
+        let TokenTree::Ident(ident) = token else {
+            return None;
+        };
+        Some(ident.to_string())
     })
 }
 
@@ -18186,6 +18276,13 @@ fn reachable_module_mentions_unqualified_ident(
             ident,
         )
         || retained_root_macro_impl_items_mention_unqualified_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || retained_macro_definitions_mention_unqualified_ident(
             project,
             reduced,
             package,
@@ -24390,6 +24487,15 @@ fn use_target_should_drop(
     else {
         return false;
     };
+    if use_target_has_removed_module_prefix(
+        project,
+        reduced,
+        render_plan,
+        &target_package,
+        &target_path,
+    ) {
+        return true;
+    }
     if target.last().is_some_and(|leaf| {
         reduced.packages.contains(&target_package)
             && package_is_proc_macro(project, &target_package)
@@ -24554,6 +24660,24 @@ fn local_trait_import_should_remain(
     })
 }
 
+fn use_target_has_removed_module_prefix(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    target_path: &[String],
+) -> bool {
+    for index in 1..=target_path.len() {
+        let prefix = &target_path[..index];
+        if project_has_module(project, package, prefix)
+            && !module_should_render(project, reduced, render_plan, package, prefix)
+        {
+            return true;
+        }
+    }
+    false
+}
+
 fn use_prefix_should_drop(
     project: &Project,
     reduced: &ReducedProject,
@@ -24625,6 +24749,17 @@ fn use_prefix_should_drop(
                     &target_package,
                     &target_path,
                 );
+                if !module_should_render(
+                    project,
+                    reduced,
+                    render_plan,
+                    &target_package,
+                    &target_path,
+                ) {
+                    return !(inline_module_items_for_path(project, &target_package, &target_path)
+                        .is_some()
+                        && exposes_referenced_name);
+                }
                 return !exposes_referenced_name;
             }
             let glob_is_used = module_glob_is_used_in_module(
@@ -24778,6 +24913,13 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
             ident,
         )
         || retained_root_macro_impl_items_mention_unqualified_ident(
+            project,
+            reduced,
+            package,
+            module_path,
+            ident,
+        )
+        || retained_macro_definitions_mention_unqualified_ident(
             project,
             reduced,
             package,

@@ -9,6 +9,7 @@ use proc_macro2::{Delimiter, Literal, TokenStream, TokenTree};
 use quote::ToTokens;
 use syn::{
     parse::Parser,
+    spanned::Spanned,
     visit::{self, Visit},
     Expr, ExprCall, ExprIndex, ExprMacro, ExprMatch, ExprMethodCall, ExprPath, ExprStruct, Field,
     FnArg, GenericArgument, ImplItem, Item, ItemMacro, Local, Macro, Member, Meta, Pat,
@@ -23,6 +24,7 @@ use crate::model::{
 
 const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 1;
 const MAX_UNRESOLVED_CONVERSION_CANDIDATES: usize = 24;
+type SpanKey = (usize, usize, usize, usize);
 
 pub fn reduce_with_extra_roots(
     project: &Project,
@@ -4244,7 +4246,15 @@ fn reachable_macro_impl_surface_dependencies(
                 ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type
             )
     }) {
-        if !item_is_root(roots, item) {
+        if !item_is_root(roots, item)
+            && !roots.iter().any(|root| {
+                matches!(
+                    root,
+                    RootId::Callable(callable)
+                        if callable_return_resolves_item(project, callable, item)
+                )
+            })
+        {
             continue;
         }
         dependencies.extend(item_root_macro_impl_dependencies(project, item));
@@ -4266,6 +4276,52 @@ pub(crate) fn callable_signature_resolves_item(
     callable_signature_dependency_items(project, callable)
         .items
         .contains(item)
+}
+
+fn callable_return_resolves_item(project: &Project, callable: &CallableId, item: &ItemId) -> bool {
+    callable_return_dependency_items(project, callable)
+        .items
+        .contains(item)
+}
+
+fn callable_return_dependency_items(project: &Project, callable: &CallableId) -> DependencySet {
+    match callable {
+        CallableId::Free { .. } => {
+            let Some(record) = project.functions.get(callable) else {
+                return DependencySet::default();
+            };
+            let resolver = Resolver {
+                project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            let mut visitor = DependencyVisitor::new(resolver);
+            visitor.visit_return_type(&record.item.sig.output);
+            visitor.dependencies
+        }
+        CallableId::Method {
+            package, type_path, ..
+        } => {
+            let Some(record) = project.methods.get(callable) else {
+                return DependencySet::default();
+            };
+            let resolver = Resolver {
+                project,
+                package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: Some(TypeRef {
+                    package: package.clone(),
+                    type_path: type_path.clone(),
+                }),
+            };
+            let mut visitor = DependencyVisitor::new(resolver);
+            visitor.visit_return_type(&record.item.sig.output);
+            visitor.dependencies
+        }
+    }
 }
 
 fn callable_signature_dependency_items(project: &Project, callable: &CallableId) -> DependencySet {
@@ -4736,6 +4792,7 @@ struct DependencyVisitor<'a> {
     expected_parse_types: BTreeSet<TypeRef>,
     expected_error_types: BTreeSet<TypeRef>,
     expected_collect_types: BTreeSet<TypeRef>,
+    expected_conversion_adapter_fallback_suppression: BTreeSet<SpanKey>,
 }
 
 impl<'a> DependencyVisitor<'a> {
@@ -4764,6 +4821,7 @@ impl<'a> DependencyVisitor<'a> {
             expected_parse_types: BTreeSet::new(),
             expected_error_types: BTreeSet::new(),
             expected_collect_types: BTreeSet::new(),
+            expected_conversion_adapter_fallback_suppression: BTreeSet::new(),
         }
     }
 
@@ -5008,6 +5066,7 @@ impl<'a> DependencyVisitor<'a> {
             };
             let trait_items = self.trait_items_from_type(&input.ty);
             self.insert_variable_trait_bounds(ident.ident.to_string(), trait_items);
+            self.insert_variable_type_data_from_type(ident.ident.to_string(), &input.ty);
             if let Some(name) = generic_parameter_name_from_type(&input.ty) {
                 if let Some(bindings) = self.generic_associated_type_bindings.get(&name) {
                     self.insert_variable_associated_type_bindings(
@@ -6618,21 +6677,21 @@ impl<'a> DependencyVisitor<'a> {
         trait_name: &str,
         trait_method_name: &str,
         expression_method_name: &str,
-    ) {
+    ) -> bool {
         let receiver = match expression {
             Expr::MethodCall(call) if call.method == expression_method_name => self
                 .receiver_type(&call.receiver)
                 .or_else(|| self.infer_expr_type(&call.receiver)),
             Expr::Call(call) => {
                 let Expr::Path(path) = call.func.as_ref() else {
-                    return;
+                    return false;
                 };
                 let segments = path_segments(&path.path);
                 let Some(method) = segments.last() else {
-                    return;
+                    return false;
                 };
                 if method != expression_method_name || call.args.is_empty() {
-                    return;
+                    return false;
                 }
                 call.args.first().and_then(|argument| {
                     self.receiver_type(argument)
@@ -6647,39 +6706,89 @@ impl<'a> DependencyVisitor<'a> {
                     trait_method_name,
                     expression_method_name,
                 ) {
-                    return;
+                    self.suppress_expected_conversion_adapter_fallbacks(
+                        expression,
+                        trait_name,
+                        expression_method_name,
+                    );
+                    return true;
                 }
                 None
             }
             Expr::MethodCall(call) if call.method == "collect" => {
-                self.add_conversion_impls_to_expected_type(
+                return self.add_conversion_impls_to_expected_type(
                     &call.receiver,
                     target,
                     trait_name,
                     trait_method_name,
                     expression_method_name,
                 );
-                return;
             }
             _ => None,
         };
 
         if let Some(receiver) = receiver {
-            for callable in
-                self.resolver
-                    .resolve_conversion_impls(&receiver, trait_name, trait_method_name)
-            {
+            let matches = self.resolver.resolve_conversion_impls_from_to(
+                &receiver,
+                target,
+                trait_name,
+                trait_method_name,
+            );
+            let found = !matches.is_empty();
+            for callable in matches {
                 self.dependencies.callables.insert(callable);
             }
-            return;
+            if found {
+                self.suppress_expected_conversion_adapter_fallbacks(
+                    expression,
+                    trait_name,
+                    expression_method_name,
+                );
+            }
+            return found;
         }
 
-        for callable in
+        let matches =
             self.resolver
-                .resolve_conversion_impls_to_target(target, trait_name, trait_method_name)
-        {
+                .resolve_conversion_impls_to_target(target, trait_name, trait_method_name);
+        let found = !matches.is_empty();
+        for callable in matches {
             self.dependencies.callables.insert(callable);
         }
+        if found {
+            self.suppress_expected_conversion_adapter_fallbacks(
+                expression,
+                trait_name,
+                expression_method_name,
+            );
+        }
+        found
+    }
+
+    fn suppress_expected_conversion_adapter_fallbacks(
+        &mut self,
+        expression: &Expr,
+        trait_name: &str,
+        method_name: &str,
+    ) {
+        let mut collector = ConversionAdapterFallbackSpanCollector {
+            trait_name,
+            method_name,
+            spans: BTreeSet::new(),
+        };
+        collector.visit_expr(expression);
+        self.expected_conversion_adapter_fallback_suppression
+            .extend(collector.spans);
+    }
+
+    fn conversion_adapter_path_fallback_is_suppressed(&self, path: &Path) -> bool {
+        self.expected_conversion_adapter_fallback_suppression
+            .contains(&span_key(path.span()))
+    }
+
+    fn conversion_adapter_method_fallback_is_suppressed(&self, call: &ExprMethodCall) -> bool {
+        self.expected_conversion_adapter_fallback_suppression
+            .contains(&span_key(call.method.span()))
     }
 
     fn add_result_variant_conversion_impls(&mut self, path: &Path, call: &ExprCall) {
@@ -8239,6 +8348,41 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_expected_conversion_call_arg_dependencies(
+        &mut self,
+        call: &ExprCall,
+        resolved_callables: &[CallableId],
+    ) {
+        for callable in resolved_callables {
+            for (arg_index, argument) in call.args.iter().enumerate() {
+                let Some((input_type, resolver)) =
+                    self.resolver.callable_typed_input(callable, arg_index)
+                else {
+                    continue;
+                };
+                let mut targets = resolver.project_type_argument_refs_in_type(input_type);
+                if let Some(target) = resolver.resolve_receiver_type(input_type) {
+                    targets.push(target);
+                }
+                targets.sort();
+                targets.dedup();
+
+                for target in targets {
+                    if expression_contains_conversion_adapter(argument, "From", "into") {
+                        self.add_conversion_impls_to_expected_type(
+                            argument, &target, "From", "from", "into",
+                        );
+                    }
+                    if expression_contains_conversion_adapter(argument, "TryFrom", "try_into") {
+                        self.add_conversion_impls_to_expected_type(
+                            argument, &target, "TryFrom", "try_from", "try_into",
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     fn receiver_has_generic_conversion_bound(
         &self,
         expression: &Expr,
@@ -9153,6 +9297,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             }
             self.add_call_closure_arg_dependencies(call, &resolved_callables);
             self.add_generic_conversion_call_arg_dependencies(call, &resolved_callables);
+            self.add_expected_conversion_call_arg_dependencies(call, &resolved_callables);
             self.add_external_call_arg_trait_impls(call);
             if resolved_callables.is_empty() && path.path.segments.len() >= 2 {
                 if let (Some(receiver), Some(method)) = (
@@ -9174,9 +9319,13 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                         }
                     }
                 }
-                if is_conversion_adapter_path(&path.path, "Into", "into") {
+                if is_conversion_adapter_path(&path.path, "Into", "into")
+                    && !self.conversion_adapter_path_fallback_is_suppressed(&path.path)
+                {
                     self.add_conversion_impls_by_trait("From", "from");
-                } else if is_conversion_adapter_path(&path.path, "TryInto", "try_into") {
+                } else if is_conversion_adapter_path(&path.path, "TryInto", "try_into")
+                    && !self.conversion_adapter_path_fallback_is_suppressed(&path.path)
+                {
                     self.add_conversion_impls_by_trait("TryFrom", "try_from");
                 }
                 self.add_result_variant_conversion_impls(&path.path, call);
@@ -9545,6 +9694,8 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_conversion_impls_for_receivers(&receiver_candidates, "From", "from");
             if found_exact {
                 // Candidate inference is precise enough; avoid the broad capped conversion scan.
+            } else if self.conversion_adapter_method_fallback_is_suppressed(call) {
+                // Expected-type inference already retained the matching conversion.
             } else if self.receiver_has_generic_conversion_bound(&call.receiver, "From", "from") {
                 visit::visit_expr_method_call(self, call);
                 return;
@@ -9559,6 +9710,8 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             );
             if found_exact {
                 // Candidate inference is precise enough; avoid the broad capped conversion scan.
+            } else if self.conversion_adapter_method_fallback_is_suppressed(call) {
+                // Expected-type inference already retained the matching conversion.
             } else if self.receiver_has_generic_conversion_bound(
                 &call.receiver,
                 "TryFrom",
@@ -9675,9 +9828,13 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         }
         self.add_expr_path_call(path);
         if path.qself.is_none() {
-            if is_conversion_adapter_path(&path.path, "Into", "into") {
+            if is_conversion_adapter_path(&path.path, "Into", "into")
+                && !self.conversion_adapter_path_fallback_is_suppressed(&path.path)
+            {
                 self.add_conversion_impls_by_trait("From", "from");
-            } else if is_conversion_adapter_path(&path.path, "TryInto", "try_into") {
+            } else if is_conversion_adapter_path(&path.path, "TryInto", "try_into")
+                && !self.conversion_adapter_path_fallback_is_suppressed(&path.path)
+            {
                 self.add_conversion_impls_by_trait("TryFrom", "try_from");
             }
         }
@@ -13574,6 +13731,36 @@ fn conversion_adapter_path_matches(path: &Path, trait_name: &str, method_name: &
         _ => trait_name,
     };
     is_conversion_adapter_path(path, adapter_trait, method_name)
+}
+
+fn span_key(span: proc_macro2::Span) -> SpanKey {
+    let start = span.start();
+    let end = span.end();
+    (start.line, start.column, end.line, end.column)
+}
+
+struct ConversionAdapterFallbackSpanCollector<'a> {
+    trait_name: &'a str,
+    method_name: &'a str,
+    spans: BTreeSet<SpanKey>,
+}
+
+impl<'ast> Visit<'ast> for ConversionAdapterFallbackSpanCollector<'_> {
+    fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        if call.method == self.method_name {
+            self.spans.insert(span_key(call.method.span()));
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+
+    fn visit_expr_path(&mut self, path: &'ast ExprPath) {
+        if path.qself.is_none()
+            && conversion_adapter_path_matches(&path.path, self.trait_name, self.method_name)
+        {
+            self.spans.insert(span_key(path.path.span()));
+        }
+        visit::visit_expr_path(self, path);
+    }
 }
 
 fn expression_contains_conversion_adapter(
