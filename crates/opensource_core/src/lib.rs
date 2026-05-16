@@ -17720,6 +17720,84 @@ impl LocalRunner {
     }
 
     #[test]
+    fn lock_guard_map_get_does_not_trip_generic_method_fallback() {
+        let root = temp_output("lock-guard-map-get-no-generic-fallback-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+#[derive(Clone)]
+pub struct Metadata {
+    pub name: String,
+}
+
+pub struct Store {
+    inner: RwLock<HashMap<String, Metadata>>,
+}
+
+#[opensourced]
+pub fn entry(store: &Store, key: &str) -> Option<Metadata> {
+    store.get(key)
+}
+
+impl Store {
+    pub fn get(&self, key: &str) -> Option<Metadata> {
+        let guard = self.inner.read().expect("metadata lock");
+        guard.get(key).cloned()
+    }
+}
+
+pub struct Cache;
+
+impl Cache {
+    pub fn get(&mut self, _key: &str) -> usize {
+        1
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("lock-guard-map-get-no-generic-fallback-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "generic_method_name_fallbacks"),
+            "lock guard map access should keep type argument context: {:?}",
+            report.production.hazards
+        );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("Cache::get")),
+            "lock guard map fallback should not retain unrelated local get methods: {:?}",
+            report.reachable
+        );
+    }
+
+    #[test]
     fn callable_signature_macro_surface_does_not_retain_whole_export_impl() {
         let root = temp_output("callable-signature-macro-surface-source");
         let output = temp_output("callable-signature-macro-surface-output");

@@ -8015,6 +8015,7 @@ impl<'a> DependencyVisitor<'a> {
                         | "iter"
                         | "iter_mut"
                         | "leak"
+                        | "lock"
                         | "last_chunk"
                         | "last_chunk_mut"
                         | "make_contiguous"
@@ -8036,6 +8037,7 @@ impl<'a> DependencyVisitor<'a> {
                         | "peek_mut"
                         | "range"
                         | "range_mut"
+                        | "read"
                         | "reduce"
                         | "rev"
                         | "rchunks"
@@ -8082,6 +8084,7 @@ impl<'a> DependencyVisitor<'a> {
                         | "unwrap_or_default"
                         | "unwrap_or_else"
                         | "windows"
+                        | "write"
                 ) {
                     return self.expression_type_arguments(&call.receiver);
                 }
