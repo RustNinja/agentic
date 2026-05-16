@@ -214,6 +214,10 @@ pub struct SemanticUsageReport {
     pub referenced_items: usize,
     pub mapped_callable_ids: BTreeSet<CallableId>,
     pub mapped_item_ids: BTreeSet<ItemId>,
+    pub queried_callable_reference_ids: BTreeSet<CallableId>,
+    pub queried_item_reference_ids: BTreeSet<ItemId>,
+    pub skipped_callable_reference_ids: BTreeSet<CallableId>,
+    pub skipped_item_reference_ids: BTreeSet<ItemId>,
     pub failed_callable_reference_ids: BTreeSet<CallableId>,
     pub failed_item_reference_ids: BTreeSet<ItemId>,
     pub referenced_callable_ids: BTreeSet<CallableId>,
@@ -239,6 +243,22 @@ impl SemanticUsageReport {
 
     pub fn item_reference_query_failed(&self, item: &ItemId) -> bool {
         self.failed_item_reference_ids.contains(item)
+    }
+
+    pub fn callable_reference_query_was_run(&self, callable: &CallableId) -> bool {
+        self.queried_callable_reference_ids.contains(callable)
+    }
+
+    pub fn item_reference_query_was_run(&self, item: &ItemId) -> bool {
+        self.queried_item_reference_ids.contains(item)
+    }
+
+    pub fn callable_reference_query_skipped(&self, callable: &CallableId) -> bool {
+        self.skipped_callable_reference_ids.contains(callable)
+    }
+
+    pub fn item_reference_query_skipped(&self, item: &ItemId) -> bool {
+        self.skipped_item_reference_ids.contains(item)
     }
 
     pub fn callable_has_retained_reference(
@@ -270,7 +290,9 @@ impl SemanticUsageReport {
     }
 
     pub fn reference_search_complete(&self) -> bool {
-        self.reference_queries_skipped == 0
+        self.skipped_callable_reference_ids.is_empty()
+            && self.skipped_item_reference_ids.is_empty()
+            && self.reference_queries_skipped == 0
     }
 
     pub fn unmapped_total(&self) -> usize {
@@ -446,6 +468,14 @@ mod rust_analyzer {
         Complete,
         TopDownOnly,
     }
+
+    impl ReferenceSearchMode {
+        fn includes_item_reference_owners(self) -> bool {
+            matches!(self, Self::Complete)
+        }
+    }
+
+    const DEFAULT_TOP_DOWN_REFERENCE_QUERY_BUDGET: usize = 512;
 
     #[derive(Debug, Default)]
     struct RaWorkspaceLoadTrace {
@@ -1180,23 +1210,28 @@ mod rust_analyzer {
                     index,
                     &mut report,
                     hints,
+                    None,
+                    reference_mode,
                 );
             }
             ReferenceSearchMode::TopDownOnly => {
-                report.reference_queries_skipped = indexed_reference_query_candidates(project);
+                collect_semantic_reference_report(
+                    database,
+                    vfs,
+                    project,
+                    index,
+                    &mut report,
+                    hints,
+                    Some(semantic_budget_from_env(
+                        "OPENSOURCE_RA_REFERENCE_QUERY_BUDGET",
+                        DEFAULT_TOP_DOWN_REFERENCE_QUERY_BUDGET,
+                    )),
+                    reference_mode,
+                );
+                record_skipped_reference_queries(project, &mut report);
             }
         }
         report
-    }
-
-    fn indexed_reference_query_candidates(project: &Project) -> usize {
-        project.functions.len()
-            + project.methods.len()
-            + project
-                .items
-                .keys()
-                .filter(|item| item.kind != ItemKind::Mod)
-                .count()
     }
 
     fn collect_semantic_reference_report(
@@ -1206,6 +1241,8 @@ mod rust_analyzer {
         index: &ProjectSemanticIndex,
         report: &mut SemanticUsageReport,
         hints: &mut SemanticReductionHints,
+        reference_query_budget: Option<usize>,
+        reference_mode: ReferenceSearchMode,
     ) {
         let analysis = ra_ap_ide::AnalysisHost::with_database(database.clone()).analysis();
         let file_ids = vfs_file_ids(vfs);
@@ -1215,6 +1252,7 @@ mod rust_analyzer {
             exclude_imports: false,
             exclude_tests: true,
         };
+        let mut remaining_reference_queries = reference_query_budget.unwrap_or(usize::MAX);
 
         let mut callables = project
             .functions
@@ -1226,6 +1264,14 @@ mod rust_analyzer {
             if !report.is_callable_mapped(callable) {
                 continue;
             }
+            if remaining_reference_queries == 0 {
+                continue;
+            }
+            remaining_reference_queries -= 1;
+            report
+                .queried_callable_reference_ids
+                .insert(callable.clone());
+            report.skipped_callable_reference_ids.remove(callable);
             report.reference_queries += 1;
             match find_all_refs_from_candidates(
                 &analysis,
@@ -1233,9 +1279,15 @@ mod rust_analyzer {
                 index.callable_focus_offsets(callable),
                 &config,
             ) {
-                Some(results) => {
-                    collect_callable_reference_results(vfs, index, callable, results, report, hints)
-                }
+                Some(results) => collect_callable_reference_results(
+                    vfs,
+                    index,
+                    callable,
+                    results,
+                    report,
+                    hints,
+                    reference_mode,
+                ),
                 None => record_callable_reference_query_failure(report, callable),
             }
         }
@@ -1246,6 +1298,12 @@ mod rust_analyzer {
             if item.kind == ItemKind::Mod || !report.is_item_mapped(item) {
                 continue;
             }
+            if remaining_reference_queries == 0 {
+                continue;
+            }
+            remaining_reference_queries -= 1;
+            report.queried_item_reference_ids.insert(item.clone());
+            report.skipped_item_reference_ids.remove(item);
             report.reference_queries += 1;
             match find_all_refs_from_candidates(
                 &analysis,
@@ -1253,9 +1311,15 @@ mod rust_analyzer {
                 index.item_focus_offsets(item),
                 &config,
             ) {
-                Some(results) => {
-                    collect_item_reference_results(vfs, index, item, results, report, hints)
-                }
+                Some(results) => collect_item_reference_results(
+                    vfs,
+                    index,
+                    item,
+                    results,
+                    report,
+                    hints,
+                    reference_mode,
+                ),
                 None => record_item_reference_query_failure(report, item),
             }
         }
@@ -1274,6 +1338,37 @@ mod rust_analyzer {
             .sum();
         report.referenced_callables = report.referenced_callable_ids.len();
         report.referenced_items = report.referenced_item_ids.len();
+    }
+
+    fn record_skipped_reference_queries(project: &Project, report: &mut SemanticUsageReport) {
+        let skipped_callables = project
+            .functions
+            .keys()
+            .chain(project.methods.keys())
+            .filter(|callable| {
+                !report.failed_callable_reference_ids.contains(*callable)
+                    && !report.skipped_callable_reference_ids.contains(*callable)
+                    && !report.callable_reference_query_was_run(callable)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let skipped_items = project
+            .items
+            .keys()
+            .filter(|item| item.kind != ItemKind::Mod)
+            .filter(|item| {
+                !report.failed_item_reference_ids.contains(*item)
+                    && !report.skipped_item_reference_ids.contains(*item)
+                    && !report.item_reference_query_was_run(item)
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        report
+            .skipped_callable_reference_ids
+            .extend(skipped_callables);
+        report.skipped_item_reference_ids.extend(skipped_items);
+        report.reference_queries_skipped =
+            report.skipped_callable_reference_ids.len() + report.skipped_item_reference_ids.len();
     }
 
     fn find_all_refs_from_candidates(
@@ -1301,6 +1396,7 @@ mod rust_analyzer {
         results: Vec<ra_ap_ide::ReferenceSearchResult>,
         report: &mut SemanticUsageReport,
         hints: &mut SemanticReductionHints,
+        reference_mode: ReferenceSearchMode,
     ) {
         for result in results {
             for (file_id, references) in result.references {
@@ -1311,6 +1407,8 @@ mod rust_analyzer {
                 for (range, _) in references {
                     match index.owner_at_vfs_offset(vfs_path, range.start()) {
                         Some(SemanticOwnerId::Callable(owner)) if owner == *target => {}
+                        Some(SemanticOwnerId::Item(_))
+                            if !reference_mode.includes_item_reference_owners() => {}
                         Some(owner) => {
                             let owner_for_hint = owner.clone();
                             report
@@ -1321,7 +1419,7 @@ mod rust_analyzer {
                             hints.add_callable_edge(owner_for_hint, target.clone());
                             report.referenced_callable_ids.insert(target.clone());
                         }
-                        None => {
+                        None if reference_mode.includes_item_reference_owners() => {
                             if let Some(path) = normalize_vfs_path(vfs_path) {
                                 report
                                     .callable_unowned_reference_files
@@ -1331,6 +1429,7 @@ mod rust_analyzer {
                                 report.referenced_callable_ids.insert(target.clone());
                             }
                         }
+                        None => {}
                     }
                 }
             }
@@ -1344,6 +1443,7 @@ mod rust_analyzer {
         results: Vec<ra_ap_ide::ReferenceSearchResult>,
         report: &mut SemanticUsageReport,
         hints: &mut SemanticReductionHints,
+        reference_mode: ReferenceSearchMode,
     ) {
         for result in results {
             for (file_id, references) in result.references {
@@ -1354,6 +1454,8 @@ mod rust_analyzer {
                 for (range, _) in references {
                     match index.owner_at_vfs_offset(vfs_path, range.start()) {
                         Some(SemanticOwnerId::Item(owner)) if owner == *target => {}
+                        Some(SemanticOwnerId::Item(_))
+                            if !reference_mode.includes_item_reference_owners() => {}
                         Some(owner) => {
                             let owner_for_hint = owner.clone();
                             report
@@ -1364,7 +1466,7 @@ mod rust_analyzer {
                             hints.add_item_edge(owner_for_hint, target.clone());
                             report.referenced_item_ids.insert(target.clone());
                         }
-                        None => {
+                        None if reference_mode.includes_item_reference_owners() => {
                             if let Some(path) = normalize_vfs_path(vfs_path) {
                                 report
                                     .item_unowned_reference_files
@@ -1374,6 +1476,7 @@ mod rust_analyzer {
                                 report.referenced_item_ids.insert(target.clone());
                             }
                         }
+                        None => {}
                     }
                 }
             }
@@ -3355,7 +3458,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "ra-hir")]
-    fn ra_feedback_mode_skips_global_reference_proof() {
+    fn ra_feedback_mode_queries_top_down_reference_proof() {
         let workspace_root = ra_fixture_workspace("ra-feedback-reference-scope");
         let workspace = crate::manifest::load_workspace(&workspace_root).unwrap();
         let project = crate::parse::parse_workspace(workspace).unwrap();
@@ -3371,8 +3474,8 @@ mod tests {
             .expect("ra-feedback should still map semantic usage");
 
         assert_eq!(report.mode, AnalyzerMode::RustAnalyzerFeedback);
-        assert_eq!(usage.reference_queries, 0);
-        assert!(usage.reference_queries_skipped > 0);
+        assert!(usage.reference_queries > 0);
+        assert!(!usage.queried_callable_reference_ids.is_empty());
         assert!(report
             .notes
             .iter()
@@ -3406,7 +3509,7 @@ mod tests {
         assert!(semantic.analyzed_files < semantic.source_files);
         assert!(semantic.top_down_skipped_files > 0);
         assert_eq!(semantic.selected_root_skipped_files, 0);
-        assert_eq!(usage.reference_queries, 0);
+        assert!(usage.reference_queries > 0);
         assert!(usage.reference_queries_skipped > usage.mapped_callables);
         assert!(
             usage

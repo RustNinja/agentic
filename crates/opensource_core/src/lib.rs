@@ -5485,7 +5485,7 @@ fn semantic_usage_proof_report(
                     }
                 }
             }
-            if !usage.reference_search_complete() {
+            if usage.callable_reference_query_skipped(callable) {
                 match discharge {
                     SemanticProofDischarge::CfgInactive => cfg_discharged = true,
                     SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
@@ -5554,7 +5554,7 @@ fn semantic_usage_proof_report(
                     }
                 }
             }
-            if !usage.reference_search_complete() {
+            if usage.item_reference_query_skipped(item) {
                 match discharge {
                     SemanticProofDischarge::CfgInactive => cfg_discharged = true,
                     SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
@@ -5645,6 +5645,9 @@ fn item_semantic_proof_discharge(
     }
     if item_source_file_is_pruned(project, item, retained_source_files) {
         return SemanticProofDischarge::SourceFilePruned;
+    }
+    if item.kind == model::ItemKind::Macro {
+        return SemanticProofDischarge::StructuralPruned;
     }
     if pruned_module_has_no_retained_subtree(project, item, retained_callables, retained_items) {
         return SemanticProofDischarge::StructuralPruned;
@@ -6153,7 +6156,7 @@ fn production_readiness_report_inner(
         &mut hazards,
     );
     add_semantic_usage_mapping_hazard(analyzer, project, reduced, &mut hazards);
-    add_semantic_usage_reference_hazard(analyzer, project, &mut hazards);
+    add_semantic_usage_reference_hazard(analyzer, project, semantic_pruning_proven, &mut hazards);
 
     production_readiness_status(hazards)
 }
@@ -6240,12 +6243,13 @@ fn add_semantic_usage_mapping_hazard(
 fn add_semantic_usage_reference_hazard(
     analyzer: &AnalyzerReport,
     project: &Project,
+    semantic_pruning_proven: bool,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
     let Some(usage) = &analyzer.semantic_usage else {
         return;
     };
-    if usage.reference_queries_skipped > 0 {
+    if usage.reference_queries_skipped > 0 && !semantic_pruning_proven {
         hazards.push(production_hazard(
             "semantic_usage_reference_skipped",
             "warning",
@@ -12773,6 +12777,10 @@ struct SemanticUsageReportJson {
     referenced_items: usize,
     mapped_callable_ids: Vec<String>,
     mapped_item_ids: Vec<String>,
+    queried_callable_reference_ids: Vec<String>,
+    queried_item_reference_ids: Vec<String>,
+    skipped_callable_reference_ids: Vec<String>,
+    skipped_item_reference_ids: Vec<String>,
     failed_callable_reference_ids: Vec<String>,
     failed_item_reference_ids: Vec<String>,
     referenced_callable_ids: Vec<String>,
@@ -12830,6 +12838,26 @@ impl SemanticUsageReportJson {
                 .collect(),
             mapped_item_ids: report
                 .mapped_item_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            queried_callable_reference_ids: report
+                .queried_callable_reference_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            queried_item_reference_ids: report
+                .queried_item_reference_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            skipped_callable_reference_ids: report
+                .skipped_callable_reference_ids
+                .iter()
+                .map(ToString::to_string)
+                .collect(),
+            skipped_item_reference_ids: report
+                .skipped_item_reference_ids
                 .iter()
                 .map(ToString::to_string)
                 .collect(),
@@ -14343,6 +14371,124 @@ pub fn dead_helper() -> u64 {
     }
 
     #[test]
+    fn semantic_usage_proof_tracks_reference_skips_per_target() {
+        let root = temp_output("semantic-usage-per-target-reference-skip-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub mod dead_support;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+
+pub fn clean_dead_code() -> i32 {
+    2
+}
+"#,
+        );
+        write(
+            root.join("app/src/dead_support.rs"),
+            r#"pub fn skipped_dead_helper() -> i32 {
+    3
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let clean_dead = project_callable_named(&project, "clean_dead_code");
+        let skipped_dead = project_callable_named(&project, "skipped_dead_helper");
+        let mapped_callable_ids = BTreeSet::from([entry.clone(), clean_dead.clone()]);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: mapped_callable_ids.len(),
+            unmapped_callables: project
+                .functions
+                .len()
+                .saturating_sub(mapped_callable_ids.len()),
+            mapped_callable_ids: mapped_callable_ids.clone(),
+            queried_callable_reference_ids: mapped_callable_ids,
+            reference_queries: 2,
+            reference_queries_skipped: 1,
+            skipped_callable_reference_ids: BTreeSet::from([skipped_dead]),
+            unmapped_items: project.items.len(),
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerFeedback,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (_render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+            RenderedSymbolProofReport::default(),
+            PublicReexportProofReport::default(),
+        );
+
+        assert_eq!(
+            usage.semantic_proof.status, "complete_for_retained_packages",
+            "{:#?}",
+            usage.semantic_proof
+        );
+        assert_eq!(
+            usage
+                .semantic_proof
+                .summary
+                .skipped_reference_query_callables,
+            0
+        );
+        assert!(usage.prunable.callables.contains(&clean_dead));
+        let production = production_readiness_report(
+            &analyzer,
+            &project,
+            &reduced,
+            Path::new("/tmp"),
+            Some(&usage.semantic_proof),
+            Some(&RenderedSymbolProofReport::default()),
+            Some(&PublicReexportProofReport::default()),
+        );
+        assert!(
+            !production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "semantic_usage_reference_skipped"),
+            "per-target reference proof completion should discharge unrelated skipped queries: {production:#?}"
+        );
+    }
+
+    #[test]
     fn semantic_usage_prunes_only_proven_unused_public_use_aliases() {
         let root = temp_output("semantic-usage-public-use-source");
         let output = temp_output("semantic-usage-public-use-output");
@@ -14917,6 +15063,10 @@ theme = []
             referenced_items: 1,
             mapped_callable_ids: BTreeSet::from([semantic_callable.clone()]),
             mapped_item_ids: BTreeSet::from([semantic_item.clone()]),
+            queried_callable_reference_ids: BTreeSet::from([semantic_callable.clone()]),
+            queried_item_reference_ids: BTreeSet::from([semantic_item.clone()]),
+            skipped_callable_reference_ids: BTreeSet::new(),
+            skipped_item_reference_ids: BTreeSet::new(),
             failed_callable_reference_ids: BTreeSet::from([semantic_callable.clone()]),
             failed_item_reference_ids: BTreeSet::from([semantic_item.clone()]),
             referenced_callable_ids: BTreeSet::from([semantic_callable.clone()]),
