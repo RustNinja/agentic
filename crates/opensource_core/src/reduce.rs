@@ -4277,6 +4277,7 @@ fn public_reexport_idents_referenced_by_reachable_packages(
     dependency_package: &str,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
+    let callable_idents_by_package = reachable_callable_idents_by_package(project, reachable);
     for callable in reachable
         .iter()
         .filter(|callable| callable.package() != dependency_package)
@@ -4305,16 +4306,66 @@ fn public_reexport_idents_referenced_by_reachable_packages(
         .filter(|item| item.package() != dependency_package)
     {
         if let Some(record) = project.items.get(item) {
-            collect_dependency_public_path_idents(
+            collect_dependency_public_path_idents_from_reachable_item(
                 project,
-                &record.package,
+                reachable,
+                item,
+                record,
+                &callable_idents_by_package,
                 dependency_package,
-                &record.item.to_token_stream(),
                 &mut idents,
             );
         }
     }
     idents
+}
+
+fn collect_dependency_public_path_idents_from_reachable_item(
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    item: &ItemId,
+    record: &crate::model::ItemRecord,
+    callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    dependency_package: &str,
+    idents: &mut BTreeSet<String>,
+) {
+    let mut collect = |tokens: TokenStream| {
+        collect_dependency_public_path_idents(
+            project,
+            &record.package,
+            dependency_package,
+            &tokens,
+            idents,
+        );
+    };
+
+    match &record.item {
+        Item::Struct(item_struct) => {
+            collect(item_struct.vis.to_token_stream());
+            collect(item_struct.generics.to_token_stream());
+            for attr in &item_struct.attrs {
+                collect(attr.to_token_stream());
+            }
+            for field in &item_struct.fields {
+                if struct_field_source_mentions_should_remain(
+                    project,
+                    reachable,
+                    item,
+                    field,
+                    callable_idents_by_package,
+                ) {
+                    collect(field.to_token_stream());
+                }
+            }
+        }
+        Item::Mod(item_mod) => {
+            collect(item_mod.vis.to_token_stream());
+            for attr in &item_mod.attrs {
+                collect(attr.to_token_stream());
+            }
+        }
+        _ => collect(record.item.to_token_stream()),
+    }
 }
 
 fn package_public_api_is_referenced_by_reachable_packages(

@@ -17798,6 +17798,72 @@ impl Cache {
     }
 
     #[test]
+    fn pruned_struct_fields_do_not_retain_dependency_public_reexports() {
+        let root = temp_output("pruned-field-reexport-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"dep\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\ndep = {{ path = \"../dep\" }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub struct RootState {
+    used: usize,
+    unused: dep::Exported,
+}
+
+#[opensourced]
+pub fn entry(state: &RootState) -> usize {
+    state.used
+}
+"#,
+        );
+        write(
+            root.join("dep/Cargo.toml"),
+            "[package]\nname = \"dep\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("dep/src/lib.rs"),
+            r#"pub use inner::Exported;
+
+mod inner {
+    pub struct Exported;
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("pruned-field-reexport-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .reachable_items
+                .iter()
+                .map(ToString::to_string)
+                .all(|item| !item.contains("dep::inner::Exported")),
+            "dependency reexports behind pruned fields should not be retained: {:?}",
+            report.reachable_items
+        );
+        assert!(
+            report.packages.iter().all(|package| package != "dep"),
+            "dependency package should not be rendered solely for a pruned field: {:?}",
+            report.packages
+        );
+    }
+
+    #[test]
     fn callable_signature_macro_surface_does_not_retain_whole_export_impl() {
         let root = temp_output("callable-signature-macro-surface-source");
         let output = temp_output("callable-signature-macro-surface-output");
