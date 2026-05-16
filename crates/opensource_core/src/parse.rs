@@ -51,6 +51,7 @@ fn parse_workspace_with_package_filter(
         methods: HashMap::new(),
         items: HashMap::new(),
         module_aliases: HashMap::new(),
+        glob_use_paths_by_module: HashMap::new(),
         ignore_missing_modules,
     };
 
@@ -116,6 +117,7 @@ fn parse_workspace_with_package_filter(
         methods: parser.methods,
         items: parser.items,
         module_aliases: parser.module_aliases,
+        glob_use_paths_by_module: parser.glob_use_paths_by_module,
         source_files_by_module,
         methods_by_receiver,
         receivers_with_methods,
@@ -152,6 +154,7 @@ struct Parser {
     methods: HashMap<CallableId, MethodRecord>,
     items: HashMap<ItemId, ItemRecord>,
     module_aliases: HashMap<(String, Vec<String>), HashMap<String, Vec<String>>>,
+    glob_use_paths_by_module: HashMap<(String, Vec<String>), Vec<Vec<String>>>,
     ignore_missing_modules: bool,
 }
 
@@ -180,6 +183,10 @@ impl Parser {
         let aliases = collect_aliases(&syntax.items, parent_aliases);
         self.module_aliases
             .insert((package.to_string(), module_path.clone()), aliases.clone());
+        self.glob_use_paths_by_module.insert(
+            (package.to_string(), module_path.clone()),
+            collect_glob_use_paths(&syntax.items),
+        );
 
         self.collect_items(package, &module_path, &file_path, &syntax.items, &aliases)?;
 
@@ -317,6 +324,10 @@ impl Parser {
                             (package.to_string(), child_path.clone()),
                             child_aliases.clone(),
                         );
+                        self.glob_use_paths_by_module.insert(
+                            (package.to_string(), child_path.clone()),
+                            collect_glob_use_paths(items),
+                        );
                         self.collect_items(package, &child_path, file_path, items, &child_aliases)?;
                     }
                 }
@@ -390,9 +401,6 @@ impl Parser {
         if item_mod.content.is_some() {
             return Ok(());
         }
-        if module_attrs_exclude_current_target(&item_mod.attrs) {
-            return Ok(());
-        }
 
         let name = item_mod.ident.to_string();
         let source_name = module_source_name(&name);
@@ -406,7 +414,9 @@ impl Parser {
                 module_dir.join(path_attr)
             };
             if !path.exists() {
-                if self.ignore_missing_modules {
+                if self.ignore_missing_modules
+                    || module_attrs_exclude_current_target(&item_mod.attrs)
+                {
                     return Ok(());
                 }
                 return Err(format!(
@@ -422,7 +432,7 @@ impl Parser {
         } else if mod_path.exists() {
             (mod_path, module_dir.join(source_name))
         } else {
-            if self.ignore_missing_modules {
+            if self.ignore_missing_modules || module_attrs_exclude_current_target(&item_mod.attrs) {
                 return Ok(());
             }
             return Err(format!(
@@ -676,6 +686,32 @@ fn collect_aliases(
         }
     }
     aliases
+}
+
+fn collect_glob_use_paths(items: &[Item]) -> Vec<Vec<String>> {
+    let mut paths = Vec::new();
+    for item in items {
+        if let Item::Use(ItemUse { tree, .. }) = item {
+            collect_glob_use_tree(tree, Vec::new(), &mut paths);
+        }
+    }
+    paths
+}
+
+fn collect_glob_use_tree(tree: &UseTree, mut prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_glob_use_tree(&path.tree, prefix, paths);
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_glob_use_tree(nested, prefix.clone(), paths);
+            }
+        }
+        UseTree::Glob(_) => paths.push(prefix),
+        UseTree::Name(_) | UseTree::Rename(_) => {}
+    }
 }
 
 fn items_have_super_glob_import(items: &[Item]) -> bool {

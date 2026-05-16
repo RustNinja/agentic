@@ -1706,33 +1706,6 @@ fn collect_use_dependency_paths(
     }
 }
 
-fn visible_glob_use_paths(items: &[syn::Item]) -> Vec<Vec<String>> {
-    let mut paths = Vec::new();
-    for item in items {
-        let syn::Item::Use(item_use) = item else {
-            continue;
-        };
-        collect_glob_use_paths(&item_use.tree, Vec::new(), &mut paths);
-    }
-    paths
-}
-
-fn collect_glob_use_paths(tree: &UseTree, mut prefix: Vec<String>, paths: &mut Vec<Vec<String>>) {
-    match tree {
-        UseTree::Path(path) => {
-            prefix.push(path.ident.to_string());
-            collect_glob_use_paths(&path.tree, prefix, paths);
-        }
-        UseTree::Group(group) => {
-            for nested in &group.items {
-                collect_glob_use_paths(nested, prefix.clone(), paths);
-            }
-        }
-        UseTree::Glob(_) => paths.push(prefix),
-        UseTree::Name(_) | UseTree::Rename(_) => {}
-    }
-}
-
 fn resolve_use_named_dependency(resolver: &Resolver<'_>, path: &[String]) -> DependencySet {
     let mut dependencies = DependencySet::default();
     if let Some(item) = resolver.resolve_item_segments(path) {
@@ -12915,22 +12888,21 @@ impl Resolver<'_> {
             return None;
         }
 
-        let items = self.items_for_module(package, module_path)?;
-        for glob_path in visible_glob_use_paths(items) {
-            let aliases = self
-                .project
-                .module_aliases
-                .get(&(package.to_string(), module_path.to_vec()))
-                .cloned()
-                .unwrap_or_default();
+        let empty_aliases = HashMap::new();
+        let aliases = self
+            .project
+            .module_aliases
+            .get(&(package.to_string(), module_path.to_vec()))
+            .unwrap_or(&empty_aliases);
+        for glob_path in self.glob_use_paths_for_module(package, module_path) {
             let resolver = Resolver {
                 project: self.project,
                 package,
                 module_path,
-                aliases: &aliases,
+                aliases,
                 self_type: None,
             };
-            let glob_path = resolver.apply_alias(glob_path);
+            let glob_path = resolver.apply_alias(glob_path.clone());
             let Some((target_package, target_module_path)) = resolver.resolve_prefix(&glob_path)
             else {
                 continue;
@@ -12985,22 +12957,21 @@ impl Resolver<'_> {
             return None;
         }
 
-        let items = self.items_for_module(package, module_path)?;
-        for glob_path in visible_glob_use_paths(items) {
-            let aliases = self
-                .project
-                .module_aliases
-                .get(&(package.to_string(), module_path.to_vec()))
-                .cloned()
-                .unwrap_or_default();
+        let empty_aliases = HashMap::new();
+        let aliases = self
+            .project
+            .module_aliases
+            .get(&(package.to_string(), module_path.to_vec()))
+            .unwrap_or(&empty_aliases);
+        for glob_path in self.glob_use_paths_for_module(package, module_path) {
             let resolver = Resolver {
                 project: self.project,
                 package,
                 module_path,
-                aliases: &aliases,
+                aliases,
                 self_type: None,
             };
-            let glob_path = resolver.apply_alias(glob_path);
+            let glob_path = resolver.apply_alias(glob_path.clone());
             let Some((target_package, target_module_path)) = resolver.resolve_prefix(&glob_path)
             else {
                 continue;
@@ -13050,6 +13021,14 @@ impl Resolver<'_> {
         None
     }
 
+    fn glob_use_paths_for_module(&self, package: &str, module_path: &[String]) -> &[Vec<String>] {
+        self.project
+            .glob_use_paths_by_module
+            .get(&(package.to_string(), module_path.to_vec()))
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    }
+
     fn resolve_value_prefix(&self, prefix: &[String]) -> Option<(String, Vec<String>)> {
         if prefix.is_empty() {
             return Some((self.package.to_string(), self.module_path.to_vec()));
@@ -13090,36 +13069,6 @@ impl Resolver<'_> {
                 Some((self.package.to_string(), path))
             }
         }
-    }
-
-    fn source_for_module(
-        &self,
-        package: &str,
-        module_path: &[String],
-    ) -> Option<&crate::model::SourceFile> {
-        let path = self
-            .project
-            .source_files_by_module
-            .get(&(package.to_string(), module_path.to_vec()))?;
-        self.project.files.get(path)
-    }
-
-    fn items_for_module(&self, package: &str, module_path: &[String]) -> Option<&[Item]> {
-        if let Some(source) = self.source_for_module(package, module_path) {
-            return Some(&source.syntax.items);
-        }
-
-        for split in (0..module_path.len()).rev() {
-            let prefix = &module_path[..split];
-            let Some(source) = self.source_for_module(package, prefix) else {
-                continue;
-            };
-            if let Some(items) = inline_module_items(&source.syntax.items, &module_path[split..]) {
-                return Some(items);
-            }
-        }
-
-        None
     }
 
     fn resolve_dependency(&self, first: &str) -> Option<String> {

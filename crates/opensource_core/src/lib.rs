@@ -16275,6 +16275,7 @@ pub use dead::Dead;
                     vec!["snapshot".to_string(), "ServerHealthSnapshot".to_string()],
                 )]),
             )]),
+            glob_use_paths_by_module: HashMap::new(),
             source_files_by_module: HashMap::new(),
             methods_by_receiver: HashMap::new(),
             receivers_with_methods: HashSet::new(),

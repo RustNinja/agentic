@@ -16,6 +16,7 @@ pub struct Project {
     pub methods: HashMap<CallableId, MethodRecord>,
     pub items: HashMap<ItemId, ItemRecord>,
     pub module_aliases: HashMap<(String, Vec<String>), HashMap<String, Vec<String>>>,
+    pub glob_use_paths_by_module: HashMap<(String, Vec<String>), Vec<Vec<String>>>,
     pub source_files_by_module: HashMap<(String, Vec<String>), PathBuf>,
     pub methods_by_receiver: HashMap<(String, Vec<String>, String), Vec<CallableId>>,
     pub receivers_with_methods: HashSet<(String, Vec<String>)>,
