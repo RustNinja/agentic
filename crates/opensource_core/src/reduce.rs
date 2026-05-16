@@ -3024,6 +3024,86 @@ fn external_dependency_field_type_argument_paths(
     paths
 }
 
+fn external_dependency_enum_named_variant_field_type_path(
+    package_root: &FsPath,
+    dependency_prefix: &str,
+    receiver_type_path: &[String],
+    variant_name: &str,
+    member: &Member,
+) -> Option<Vec<String>> {
+    let (type_name, module_path) = receiver_type_path.split_last()?;
+    let manifest = read_toml_value(&package_root.join("Cargo.toml"))?;
+    let lib_path = external_package_lib_path(package_root, &manifest)?;
+    let module = load_external_module(package_root, &lib_path, module_path)
+        .filter(|module| external_module_has_enum(module, type_name))
+        .or_else(|| find_external_module_with_enum(package_root, &lib_path, type_name))?;
+    let item_enum = module.items.iter().find_map(|item| {
+        let Item::Enum(item_enum) = item else {
+            return None;
+        };
+        (item_enum.ident == type_name.as_str()).then_some(item_enum)
+    })?;
+    let variant = item_enum
+        .variants
+        .iter()
+        .find(|variant| variant.ident == variant_name)?;
+    let ty = field_member_type(&variant.fields, member)?;
+    external_field_type_path_from_type(dependency_prefix, &module.module_path, &module.aliases, ty)
+}
+
+fn external_dependency_enum_named_variant_field_type_argument_paths(
+    package_root: &FsPath,
+    dependency_prefix: &str,
+    receiver_type_path: &[String],
+    variant_name: &str,
+    member: &Member,
+) -> Vec<Vec<String>> {
+    let Some((type_name, module_path)) = receiver_type_path.split_last() else {
+        return Vec::new();
+    };
+    let Some(manifest) = read_toml_value(&package_root.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let Some(lib_path) = external_package_lib_path(package_root, &manifest) else {
+        return Vec::new();
+    };
+    let Some(module) = load_external_module(package_root, &lib_path, module_path)
+        .filter(|module| external_module_has_enum(module, type_name))
+        .or_else(|| find_external_module_with_enum(package_root, &lib_path, type_name))
+    else {
+        return Vec::new();
+    };
+    let Some(item_enum) = module.items.iter().find_map(|item| {
+        let Item::Enum(item_enum) = item else {
+            return None;
+        };
+        (item_enum.ident == type_name.as_str()).then_some(item_enum)
+    }) else {
+        return Vec::new();
+    };
+    let Some(variant) = item_enum
+        .variants
+        .iter()
+        .find(|variant| variant.ident == variant_name)
+    else {
+        return Vec::new();
+    };
+    let Some(ty) = field_member_type(&variant.fields, member) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    collect_external_field_type_argument_paths(
+        dependency_prefix,
+        &module.module_path,
+        &module.aliases,
+        ty,
+        &mut paths,
+    );
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 struct ExternalModule {
     module_path: Vec<String>,
     items: Vec<Item>,
@@ -3072,12 +3152,36 @@ fn load_external_module(
 }
 
 fn external_module_has_struct(module: &ExternalModule, type_name: &str) -> bool {
-    module.items.iter().any(|item| {
-        let Item::Struct(item_struct) = item else {
-            return false;
-        };
-        item_struct.ident == type_name
-    })
+    external_module_has_item(module, type_name, external_item_is_struct)
+}
+
+fn external_module_has_enum(module: &ExternalModule, type_name: &str) -> bool {
+    external_module_has_item(module, type_name, external_item_is_enum)
+}
+
+fn external_module_has_item(
+    module: &ExternalModule,
+    type_name: &str,
+    matches_item: fn(&Item, &str) -> bool,
+) -> bool {
+    module
+        .items
+        .iter()
+        .any(|item| matches_item(item, type_name))
+}
+
+fn external_item_is_struct(item: &Item, type_name: &str) -> bool {
+    let Item::Struct(item_struct) = item else {
+        return false;
+    };
+    item_struct.ident == type_name
+}
+
+fn external_item_is_enum(item: &Item, type_name: &str) -> bool {
+    let Item::Enum(item_enum) = item else {
+        return false;
+    };
+    item_enum.ident == type_name
 }
 
 fn find_external_module_with_struct(
@@ -3085,24 +3189,43 @@ fn find_external_module_with_struct(
     lib_path: &FsPath,
     type_name: &str,
 ) -> Option<ExternalModule> {
+    find_external_module_with_item(package_root, lib_path, type_name, external_item_is_struct)
+}
+
+fn find_external_module_with_enum(
+    package_root: &FsPath,
+    lib_path: &FsPath,
+    type_name: &str,
+) -> Option<ExternalModule> {
+    find_external_module_with_item(package_root, lib_path, type_name, external_item_is_enum)
+}
+
+fn find_external_module_with_item(
+    package_root: &FsPath,
+    lib_path: &FsPath,
+    type_name: &str,
+    matches_item: fn(&Item, &str) -> bool,
+) -> Option<ExternalModule> {
     let mut matches = Vec::new();
     let mut visited = BTreeSet::new();
-    collect_external_modules_with_struct(
+    collect_external_modules_with_item(
         package_root,
         lib_path,
         Vec::new(),
         type_name,
+        matches_item,
         &mut visited,
         &mut matches,
     );
     (matches.len() == 1).then(|| matches.remove(0))
 }
 
-fn collect_external_modules_with_struct(
+fn collect_external_modules_with_item(
     package_root: &FsPath,
     file_path: &FsPath,
     module_path: Vec<String>,
     type_name: &str,
+    matches_item: fn(&Item, &str) -> bool,
     visited: &mut BTreeSet<PathBuf>,
     matches: &mut Vec<ExternalModule>,
 ) {
@@ -3119,35 +3242,32 @@ fn collect_external_modules_with_struct(
         .parent()
         .map(PathBuf::from)
         .unwrap_or_else(|| package_root.to_path_buf());
-    collect_external_item_modules_with_struct(
+    collect_external_item_modules_with_item(
         package_root,
         &module_dir,
         module_path,
         file.items,
         None,
         type_name,
+        matches_item,
         visited,
         matches,
     );
 }
 
-fn collect_external_item_modules_with_struct(
+fn collect_external_item_modules_with_item(
     package_root: &FsPath,
     module_dir: &FsPath,
     module_path: Vec<String>,
     items: Vec<Item>,
     parent_aliases: Option<&HashMap<String, Vec<String>>>,
     type_name: &str,
+    matches_item: fn(&Item, &str) -> bool,
     visited: &mut BTreeSet<PathBuf>,
     matches: &mut Vec<ExternalModule>,
 ) {
     let aliases = collect_external_aliases(&items, parent_aliases);
-    if items.iter().any(|item| {
-        let Item::Struct(item_struct) = item else {
-            return false;
-        };
-        item_struct.ident == type_name
-    }) {
+    if items.iter().any(|item| matches_item(item, type_name)) {
         matches.push(ExternalModule {
             module_path: module_path.clone(),
             items: items.clone(),
@@ -3162,13 +3282,14 @@ fn collect_external_item_modules_with_struct(
         let mut child_path = module_path.clone();
         child_path.push(item_mod.ident.to_string());
         if let Some((_, inline_items)) = &item_mod.content {
-            collect_external_item_modules_with_struct(
+            collect_external_item_modules_with_item(
                 package_root,
                 &module_dir.join(module_source_name(&item_mod.ident.to_string())),
                 child_path,
                 inline_items.clone(),
                 Some(&aliases),
                 type_name,
+                matches_item,
                 visited,
                 matches,
             );
@@ -3178,11 +3299,12 @@ fn collect_external_item_modules_with_struct(
         else {
             continue;
         };
-        collect_external_modules_with_struct(
+        collect_external_modules_with_item(
             package_root,
             &child_file,
             child_path,
             type_name,
+            matches_item,
             visited,
             matches,
         );
@@ -6180,6 +6302,16 @@ impl<'a> DependencyVisitor<'a> {
                     return;
                 };
                 for field in &struct_pat.fields {
+                    let mut type_arguments = self.resolver.enum_named_variant_field_type_arguments(
+                        type_ref,
+                        &variant_name,
+                        &field.member,
+                    );
+                    if type_arguments.is_empty() {
+                        type_arguments =
+                            self.resolver.field_type_arguments(type_ref, &field.member);
+                    }
+                    self.bind_pattern_type_arguments(&field.pat, &type_arguments);
                     if let Some(field_type) = self
                         .resolver
                         .enum_named_variant_field_type(type_ref, &variant_name, &field.member)
@@ -6475,6 +6607,16 @@ impl<'a> DependencyVisitor<'a> {
                     return;
                 }
                 None
+            }
+            Expr::MethodCall(call) if call.method == "collect" => {
+                self.add_conversion_impls_to_expected_type(
+                    &call.receiver,
+                    target,
+                    trait_name,
+                    trait_method_name,
+                    expression_method_name,
+                );
+                return;
             }
             _ => None,
         };
@@ -9372,8 +9514,23 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     fn visit_expr_struct(&mut self, expr: &'ast ExprStruct) {
         self.add_item_path(&expr.path);
         if let Some(struct_type) = self.resolver.resolve_type_path(&expr.path) {
+            let variant_name = expr
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string());
             for field in &expr.fields {
-                if let Some(target) = self.resolver.field_type(&struct_type, &field.member) {
+                if let Some(target) = variant_name
+                    .as_deref()
+                    .and_then(|variant_name| {
+                        self.resolver.enum_named_variant_field_type(
+                            &struct_type,
+                            variant_name,
+                            &field.member,
+                        )
+                    })
+                    .or_else(|| self.resolver.field_type(&struct_type, &field.member))
+                {
                     self.add_conversion_impls_to_expected_type(
                         &field.expr,
                         &target,
@@ -9389,10 +9546,22 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                         "try_into",
                     );
                 }
-                for target in self
-                    .resolver
-                    .field_type_arguments(&struct_type, &field.member)
-                {
+                let mut type_argument_targets = variant_name
+                    .as_deref()
+                    .map(|variant_name| {
+                        self.resolver.enum_named_variant_field_type_arguments(
+                            &struct_type,
+                            variant_name,
+                            &field.member,
+                        )
+                    })
+                    .unwrap_or_default();
+                if type_argument_targets.is_empty() {
+                    type_argument_targets = self
+                        .resolver
+                        .field_type_arguments(&struct_type, &field.member);
+                }
+                for target in type_argument_targets {
                     self.add_conversion_impls_to_expected_type(
                         &field.expr,
                         &target,
@@ -11982,7 +12151,105 @@ impl Resolver<'_> {
             }
         }
 
-        None
+        self.external_dependency_enum_named_variant_field_type(receiver, variant_name, member)
+    }
+
+    fn external_dependency_enum_named_variant_field_type(
+        &self,
+        receiver: &TypeRef,
+        variant_name: &str,
+        member: &Member,
+    ) -> Option<TypeRef> {
+        if receiver.package != self.package {
+            return None;
+        }
+        let (dependency_prefix, type_path) = receiver.type_path.split_first()?;
+        if type_path.is_empty() || !self.package_has_dependency_named(dependency_prefix) {
+            return None;
+        }
+        let dependency_root = self.dependency_path_root_named(dependency_prefix)?;
+        let type_path = external_dependency_enum_named_variant_field_type_path(
+            &dependency_root,
+            dependency_prefix,
+            type_path,
+            variant_name,
+            member,
+        )?;
+        Some(TypeRef {
+            package: self.package.to_string(),
+            type_path,
+        })
+    }
+
+    fn enum_named_variant_field_type_arguments(
+        &self,
+        receiver: &TypeRef,
+        variant_name: &str,
+        member: &Member,
+    ) -> Vec<TypeRef> {
+        let mut type_refs = Vec::new();
+        for candidate in self.type_ref_candidates(receiver) {
+            let Some((record, variant)) = self.enum_variant_record(&candidate, variant_name) else {
+                continue;
+            };
+            let Some(ty) = field_member_type(&variant.fields, member) else {
+                continue;
+            };
+            let resolver = Resolver {
+                project: self.project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            type_refs.extend(resolver.type_argument_refs_in_type(ty));
+        }
+
+        if type_refs.is_empty() {
+            type_refs.extend(
+                self.external_dependency_enum_named_variant_field_type_arguments(
+                    receiver,
+                    variant_name,
+                    member,
+                ),
+            );
+        }
+        type_refs.sort();
+        type_refs.dedup();
+        type_refs
+    }
+
+    fn external_dependency_enum_named_variant_field_type_arguments(
+        &self,
+        receiver: &TypeRef,
+        variant_name: &str,
+        member: &Member,
+    ) -> Vec<TypeRef> {
+        if receiver.package != self.package {
+            return Vec::new();
+        }
+        let Some((dependency_prefix, type_path)) = receiver.type_path.split_first() else {
+            return Vec::new();
+        };
+        if type_path.is_empty() || !self.package_has_dependency_named(dependency_prefix) {
+            return Vec::new();
+        }
+        let Some(dependency_root) = self.dependency_path_root_named(dependency_prefix) else {
+            return Vec::new();
+        };
+        external_dependency_enum_named_variant_field_type_argument_paths(
+            &dependency_root,
+            dependency_prefix,
+            type_path,
+            variant_name,
+            member,
+        )
+        .into_iter()
+        .map(|type_path| TypeRef {
+            package: self.package.to_string(),
+            type_path,
+        })
+        .collect()
     }
 
     fn enum_variant_record<'a>(

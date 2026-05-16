@@ -2641,6 +2641,34 @@ fn retains_from_impl_for_cloned_external_field_into_receiver() {
 }
 
 #[test]
+fn retains_external_enum_variant_conversion_dependencies() {
+    let workspace = temp_path("rule-external-enum-variant-workspace");
+    let output = temp_path("rule-external-enum-variant-output");
+    let target_dir = temp_path("rule-external-enum-variant-target");
+    let wire = temp_path("rule-external-enum-variant-wire");
+    write_external_enum_variant_rule_fixture(&workspace, &wire);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("external enum variant rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("external_enum_variant_rule/src/lib.rs"));
+    assert!(
+        lib.contains("impl From<upstream::NetworkAccess> for AppNetworkAccess"),
+        "{lib}"
+    );
+    assert!(
+        lib.contains("impl From<upstream::AbsolutePathBuf> for AbsolutePath"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadTarget0"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_nested_map_into_conversions_for_expected_struct_fields() {
     let workspace = temp_path("rule-map-into-field-workspace");
     let output = temp_path("rule-map-into-field-output");
@@ -7343,6 +7371,160 @@ pub struct Notification {
     pub dead: DeadSnapshot0,
 }
 "#,
+        ),
+    );
+}
+
+fn write_external_enum_variant_rule_fixture(root: &Path, wire: &Path) {
+    let dead_impls = (0..30)
+        .map(|index| {
+            format!(
+                r#"
+pub struct DeadTarget{index};
+
+impl From<upstream::DeadSource{index}> for DeadTarget{index} {{
+    fn from(_: upstream::DeadSource{index}) -> Self {{
+        Self
+    }}
+}}
+"#
+            )
+        })
+        .collect::<String>();
+    let dead_sources = (0..30)
+        .map(|index| format!("pub struct DeadSource{index};\n"))
+        .collect::<String>();
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["external_enum_variant_rule"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("external_enum_variant_rule/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external_enum_variant_rule"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+wire_protocol = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced")),
+            manifest_path(wire)
+        ),
+    );
+    write(
+        root.join("external_enum_variant_rule/src/lib.rs"),
+        &format!(
+            "{}{}{}",
+            r#"use opensourced::opensourced;
+use wire_protocol as upstream;
+
+pub struct AbsolutePath {
+    pub value: String,
+}
+
+impl From<upstream::AbsolutePathBuf> for AbsolutePath {
+    fn from(value: upstream::AbsolutePathBuf) -> Self {
+        Self { value: value.value }
+    }
+}
+
+pub enum AppNetworkAccess {
+    Restricted,
+    Enabled,
+}
+
+impl From<upstream::NetworkAccess> for AppNetworkAccess {
+    fn from(value: upstream::NetworkAccess) -> Self {
+        match value {
+            upstream::NetworkAccess::Restricted => Self::Restricted,
+            upstream::NetworkAccess::Enabled => Self::Enabled,
+        }
+    }
+}
+
+"#,
+            dead_impls,
+            r#"
+pub enum AppSandboxPolicy {
+    DangerFullAccess,
+    ExternalSandbox {
+        network_access: AppNetworkAccess,
+    },
+    WorkspaceWrite {
+        writable_roots: Vec<AbsolutePath>,
+        network_access: bool,
+    },
+}
+
+impl From<upstream::SandboxPolicy> for AppSandboxPolicy {
+    fn from(value: upstream::SandboxPolicy) -> Self {
+        match value {
+            upstream::SandboxPolicy::DangerFullAccess => Self::DangerFullAccess,
+            upstream::SandboxPolicy::ExternalSandbox { network_access } => {
+                Self::ExternalSandbox {
+                    network_access: network_access.into(),
+                }
+            }
+            upstream::SandboxPolicy::WorkspaceWrite {
+                writable_roots,
+                network_access,
+            } => {
+                Self::WorkspaceWrite {
+                    writable_roots: writable_roots.into_iter().map(Into::into).collect(),
+                    network_access,
+                }
+            }
+        }
+    }
+}
+
+#[opensourced]
+pub fn selected(value: upstream::SandboxPolicy) -> AppSandboxPolicy {
+    value.into()
+}
+"#,
+        ),
+    );
+    write(
+        wire.join("Cargo.toml"),
+        r#"[package]
+name = "wire_protocol"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        wire.join("src/lib.rs"),
+        &format!(
+            "{}{}",
+            r#"pub struct AbsolutePathBuf {
+    pub value: String,
+}
+
+pub enum NetworkAccess {
+    Restricted,
+    Enabled,
+}
+
+pub enum SandboxPolicy {
+    DangerFullAccess,
+    ExternalSandbox {
+        network_access: NetworkAccess,
+    },
+    WorkspaceWrite {
+        writable_roots: Vec<AbsolutePathBuf>,
+        network_access: bool,
+    },
+}
+
+"#,
+            dead_sources,
         ),
     );
 }
