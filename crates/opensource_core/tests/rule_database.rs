@@ -2704,6 +2704,29 @@ fn retains_nested_map_into_conversions_for_expected_struct_fields() {
 }
 
 #[test]
+fn retains_result_ok_into_conversion_dependencies() {
+    let workspace = temp_path("rule-result-ok-into-workspace");
+    let output = temp_path("rule-result-ok-into-output");
+    let target_dir = temp_path("rule-result-ok-into-target");
+    write_result_ok_into_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("result Ok into rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("result_ok_into_rule/src/lib.rs"));
+    assert!(
+        lib.contains("impl From<ParsedPairPayload> for AppAlleycatPairPayload"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadPairPayload"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
     let workspace = temp_path("rule-option-arc-callback-workspace");
     let output = temp_path("rule-option-arc-callback-output");
@@ -7639,6 +7662,53 @@ pub fn selected(value: upstream::RawSnapshot) -> Snapshot {
 }
 "#,
         ),
+    );
+}
+
+fn write_result_ok_into_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "result_ok_into_rule",
+        r#"use opensourced::opensourced;
+
+pub struct ParsedPairPayload {
+    pub token: String,
+}
+
+pub struct AppAlleycatPairPayload {
+    pub token: String,
+}
+
+impl From<ParsedPairPayload> for AppAlleycatPairPayload {
+    fn from(value: ParsedPairPayload) -> Self {
+        Self { token: value.token }
+    }
+}
+
+pub struct DeadPairPayload {
+    pub token: String,
+}
+
+impl From<DeadPairPayload> for AppAlleycatPairPayload {
+    fn from(value: DeadPairPayload) -> Self {
+        Self { token: value.token }
+    }
+}
+
+pub enum ClientError {
+    Bad,
+}
+
+fn parse_pair_payload(value: String) -> Result<ParsedPairPayload, ClientError> {
+    Ok(ParsedPairPayload { token: value })
+}
+
+#[opensourced]
+pub fn selected(value: String) -> Result<AppAlleycatPairPayload, ClientError> {
+    let parsed = parse_pair_payload(value)?;
+    Ok(parsed.into())
+}
+"#,
     );
 }
 

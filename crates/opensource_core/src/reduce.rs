@@ -4102,6 +4102,7 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
                 visitor.visit_attribute(attr);
             }
             visitor.visit_signature(&record.item.sig);
+            visitor.add_expected_ok_types_from_return(&record.item.sig.output);
             visitor.add_expected_parse_types_from_return(&record.item.sig.output);
             visitor.add_expected_error_types_from_return(&record.item.sig.output);
             visitor.add_expected_collect_types_from_return(&record.item.sig.output);
@@ -4153,6 +4154,7 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
             }
             visitor.visit_impl_peers(callable, record, trait_path.is_some());
             visitor.visit_signature(&record.item.sig);
+            visitor.add_expected_ok_types_from_return(&record.item.sig.output);
             visitor.add_expected_parse_types_from_return(&record.item.sig.output);
             visitor.add_expected_error_types_from_return(&record.item.sig.output);
             visitor.add_expected_collect_types_from_return(&record.item.sig.output);
@@ -4730,6 +4732,7 @@ struct DependencyVisitor<'a> {
     variable_result_error_types: HashMap<String, TypeRef>,
     local_value_scopes: Vec<BTreeSet<String>>,
     visible_packages: BTreeSet<String>,
+    expected_ok_types: BTreeSet<TypeRef>,
     expected_parse_types: BTreeSet<TypeRef>,
     expected_error_types: BTreeSet<TypeRef>,
     expected_collect_types: BTreeSet<TypeRef>,
@@ -4757,6 +4760,7 @@ impl<'a> DependencyVisitor<'a> {
             variable_result_error_types: HashMap::new(),
             local_value_scopes: vec![BTreeSet::new()],
             visible_packages,
+            expected_ok_types: BTreeSet::new(),
             expected_parse_types: BTreeSet::new(),
             expected_error_types: BTreeSet::new(),
             expected_collect_types: BTreeSet::new(),
@@ -6215,6 +6219,12 @@ impl<'a> DependencyVisitor<'a> {
             .or_else(|| self.infer_expr_type(argument))
     }
 
+    fn add_expected_ok_types_from_return(&mut self, output: &ReturnType) {
+        if let Some(type_ref) = self.resolver.ok_type_from_return_type(output) {
+            self.expected_ok_types.insert(type_ref);
+        }
+    }
+
     fn add_expected_parse_types_from_return(&mut self, output: &ReturnType) {
         self.expected_parse_types
             .extend(self.resolver.type_arguments_from_return_type(output));
@@ -6669,6 +6679,48 @@ impl<'a> DependencyVisitor<'a> {
                 .resolve_conversion_impls_to_target(target, trait_name, trait_method_name)
         {
             self.dependencies.callables.insert(callable);
+        }
+    }
+
+    fn add_result_variant_conversion_impls(&mut self, path: &Path, call: &ExprCall) {
+        let Some(argument) = call.args.first() else {
+            return;
+        };
+        if call.args.len() != 1 {
+            return;
+        }
+
+        let Some(variant) = path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return;
+        };
+        let targets = match variant.as_str() {
+            "Ok" => self.expected_ok_types.iter().cloned().collect::<Vec<_>>(),
+            "Err" => self
+                .expected_error_types
+                .iter()
+                .cloned()
+                .collect::<Vec<_>>(),
+            _ => return,
+        };
+        if targets.is_empty() {
+            return;
+        }
+
+        for target in targets {
+            if expression_contains_conversion_adapter(argument, "From", "into") {
+                self.add_conversion_impls_to_expected_type(
+                    argument, &target, "From", "from", "into",
+                );
+            }
+            if expression_contains_conversion_adapter(argument, "TryFrom", "try_into") {
+                self.add_conversion_impls_to_expected_type(
+                    argument, &target, "TryFrom", "try_from", "try_into",
+                );
+            }
         }
     }
 
@@ -9127,6 +9179,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 } else if is_conversion_adapter_path(&path.path, "TryInto", "try_into") {
                     self.add_conversion_impls_by_trait("TryFrom", "try_from");
                 }
+                self.add_result_variant_conversion_impls(&path.path, call);
                 self.add_conversion_impls_for_associated_call_arg(&path.path, call);
             }
         }
@@ -13521,6 +13574,47 @@ fn conversion_adapter_path_matches(path: &Path, trait_name: &str, method_name: &
         _ => trait_name,
     };
     is_conversion_adapter_path(path, adapter_trait, method_name)
+}
+
+fn expression_contains_conversion_adapter(
+    expression: &Expr,
+    trait_name: &str,
+    method_name: &str,
+) -> bool {
+    match expression {
+        Expr::MethodCall(call) if call.method == method_name => true,
+        Expr::MethodCall(call) if call.method == "map" => {
+            let Some(Expr::Path(path)) = call.args.first() else {
+                return false;
+            };
+            conversion_adapter_path_matches(&path.path, trait_name, method_name)
+        }
+        Expr::MethodCall(call) if call.method == "collect" => {
+            expression_contains_conversion_adapter(&call.receiver, trait_name, method_name)
+        }
+        Expr::Call(call) => {
+            let Expr::Path(path) = call.func.as_ref() else {
+                return false;
+            };
+            path.path
+                .segments
+                .last()
+                .is_some_and(|segment| segment.ident == method_name)
+        }
+        Expr::Try(expr) => {
+            expression_contains_conversion_adapter(&expr.expr, trait_name, method_name)
+        }
+        Expr::Reference(reference) => {
+            expression_contains_conversion_adapter(&reference.expr, trait_name, method_name)
+        }
+        Expr::Paren(paren) => {
+            expression_contains_conversion_adapter(&paren.expr, trait_name, method_name)
+        }
+        Expr::Group(group) => {
+            expression_contains_conversion_adapter(&group.expr, trait_name, method_name)
+        }
+        _ => false,
+    }
 }
 
 fn callable_method(callable: &CallableId) -> &str {
