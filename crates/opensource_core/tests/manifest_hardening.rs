@@ -3316,6 +3316,114 @@ pub fn decorate(value: &str) -> String {
 }
 
 #[test]
+fn copies_support_sqlx_migration_directories_referenced_by_copied_macros() {
+    let workspace = temp_path("support-sqlx-migrate-asset-workspace");
+    let output = temp_path("support-sqlx-migrate-asset-output");
+    let target_dir = temp_path("support-sqlx-migrate-asset-target");
+    let helper = temp_path("support-sqlx-migrate-asset-helper");
+    if helper.exists() {
+        fs::remove_dir_all(&helper).unwrap();
+    }
+    let opensourced_path = repo_root().join("crates/opensourced");
+
+    write(
+        workspace.join("Cargo.toml"),
+        "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+    );
+    write(
+        workspace.join("app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+helper = {{ path = "{}" }}
+"#,
+            manifest_path(&opensourced_path),
+            manifest_path(&helper),
+        ),
+    );
+    write(
+        workspace.join("app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn selected() -> usize {
+    helper::migration_count()
+}
+"#,
+    );
+    write(
+        helper.join("Cargo.toml"),
+        r#"[package]
+name = "helper"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        helper.join("src/lib.rs"),
+        r#"mod sqlx {
+    macro_rules! migrate {
+        () => {
+            ()
+        };
+        ($path:literal) => {{
+            const _: &str = $path;
+            ()
+        }};
+    }
+
+    pub(crate) use migrate;
+}
+
+pub fn migration_count() -> usize {
+    let _state = sqlx::migrate!("./migrations");
+    let _logs = sqlx::migrate!("./logs_migrations");
+    let _default = sqlx::migrate!();
+    3
+}
+"#,
+    );
+    write(helper.join("migrations/0001_init.sql"), "-- state");
+    write(helper.join("logs_migrations/0001_logs.sql"), "-- logs");
+
+    generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    assert!(output
+        .join("support/helper/migrations/0001_init.sql")
+        .exists());
+    assert!(output
+        .join("support/helper/logs_migrations/0001_logs.sql")
+        .exists());
+
+    fs::rename(&helper, helper.with_extension("moved")).unwrap();
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated support sqlx migration asset slice did not compile\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nhelper lib:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        read(output.join("support/helper/src/lib.rs")),
+    );
+}
+
+#[test]
 fn retains_imports_used_only_by_format_string_captures() {
     let workspace = temp_path("format-capture-import-workspace");
     let output = temp_path("format-capture-import-output");

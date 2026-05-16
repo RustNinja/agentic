@@ -8835,22 +8835,41 @@ fn copy_include_assets_for_support_source(
     };
 
     let mut candidates = BTreeSet::new();
-    collect_include_macro_paths_from_syntax(syntax, &mut candidates);
+    collect_static_asset_paths_from_syntax(syntax, &mut candidates);
 
     let mut copied = 0;
     for candidate in candidates {
-        let path = match candidate {
-            StaticIncludePath::SourceRelative(path) => source_dir.join(path),
-            StaticIncludePath::PackageRelative(path) => package_root.join(path),
-            StaticIncludePath::Absolute(_) => continue,
-        };
-        copied += copy_support_include_asset(
-            package_root,
-            allowed_source_root,
-            &path,
-            package_output,
-            output_root,
-        )?;
+        match candidate {
+            StaticAssetPath::File(path) => {
+                let path = match path {
+                    StaticIncludePath::SourceRelative(path) => source_dir.join(path),
+                    StaticIncludePath::PackageRelative(path) => package_root.join(path),
+                    StaticIncludePath::Absolute(_) => continue,
+                };
+                copied += copy_support_include_asset(
+                    package_root,
+                    allowed_source_root,
+                    &path,
+                    package_output,
+                    output_root,
+                )?;
+            }
+            StaticAssetPath::Directory(path) => {
+                let path = match path {
+                    StaticIncludePath::SourceRelative(path)
+                    | StaticIncludePath::PackageRelative(path) => package_root.join(path),
+                    StaticIncludePath::Absolute(_) => continue,
+                };
+                copied += copy_support_asset_directory(
+                    package_root,
+                    allowed_source_root,
+                    &path,
+                    package_output,
+                    output_root,
+                    &mut BTreeSet::new(),
+                )?;
+            }
+        }
     }
     Ok(copied)
 }
@@ -8887,6 +8906,68 @@ fn copy_support_include_asset(
     }
     fs::copy(resolved, output_path)?;
     Ok(1)
+}
+
+fn copy_support_asset_directory(
+    package_root: &Path,
+    allowed_source_root: &Path,
+    source_path: &Path,
+    package_output: &Path,
+    output_root: &Path,
+    visited_dirs: &mut BTreeSet<PathBuf>,
+) -> Result<usize, Box<dyn std::error::Error>> {
+    let metadata = match fs::symlink_metadata(source_path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(0),
+        Err(error) => return Err(error.into()),
+    };
+    if metadata.file_type().is_symlink() {
+        return Ok(0);
+    }
+    let Ok(resolved) = source_path.canonicalize() else {
+        return Ok(0);
+    };
+    if !resolved.starts_with(allowed_source_root) {
+        return Ok(0);
+    }
+    let metadata = fs::metadata(&resolved)?;
+    if metadata.is_file() {
+        if !should_copy_asset(source_path) {
+            return Ok(0);
+        }
+        return copy_support_include_asset(
+            package_root,
+            allowed_source_root,
+            source_path,
+            package_output,
+            output_root,
+        );
+    }
+    if !metadata.is_dir() || !visited_dirs.insert(resolved.clone()) {
+        return Ok(0);
+    }
+    if source_path
+        .file_name()
+        .and_then(|name| name.to_str())
+        .is_some_and(|name| matches!(name, "target" | ".git" | ".hg" | ".svn"))
+    {
+        return Ok(0);
+    }
+
+    let mut entries = fs::read_dir(&resolved)?.collect::<Result<Vec<_>, _>>()?;
+    entries.sort_by_key(|entry| entry.file_name());
+    let mut copied = 0;
+    for entry in entries {
+        copied += copy_support_asset_directory(
+            package_root,
+            allowed_source_root,
+            &source_path.join(entry.file_name()),
+            package_output,
+            output_root,
+            visited_dirs,
+        )?;
+    }
+    Ok(copied)
 }
 
 fn relative_path_between(from_dir: &Path, target: &Path) -> PathBuf {
@@ -11052,46 +11133,64 @@ fn copy_source_include_assets(
     };
 
     let mut candidates = BTreeSet::new();
-    collect_include_macro_paths_from_syntax(syntax, &mut candidates);
+    collect_static_asset_paths_from_syntax(syntax, &mut candidates);
 
     let mut copied = 0;
     for candidate in candidates {
-        let path = match candidate {
-            StaticIncludePath::SourceRelative(path) => source_dir.join(path),
-            StaticIncludePath::PackageRelative(path) => package.root.join(path),
-            StaticIncludePath::Absolute(_) => continue,
-        };
-        let Some(resolved) = resolve_package_copy_source(package, &path)? else {
-            continue;
-        };
-        if !fs::metadata(&resolved)?.is_file() {
-            continue;
+        match candidate {
+            StaticAssetPath::File(path) => {
+                let path = match path {
+                    StaticIncludePath::SourceRelative(path) => source_dir.join(path),
+                    StaticIncludePath::PackageRelative(path) => package.root.join(path),
+                    StaticIncludePath::Absolute(_) => continue,
+                };
+                let Some(resolved) = resolve_package_copy_source(package, &path)? else {
+                    continue;
+                };
+                if !fs::metadata(&resolved)?.is_file() {
+                    continue;
+                }
+                copy_asset(package, &resolved, &path, package_output)?;
+                copied += 1;
+            }
+            StaticAssetPath::Directory(path) => {
+                let path = match path {
+                    StaticIncludePath::SourceRelative(path)
+                    | StaticIncludePath::PackageRelative(path) => package.root.join(path),
+                    StaticIncludePath::Absolute(_) => continue,
+                };
+                copied += copy_non_rust_path_assets(package, &path, package_output)?;
+            }
         }
-        copy_asset(package, &resolved, &path, package_output)?;
-        copied += 1;
     }
 
     Ok(copied)
 }
 
-fn collect_include_macro_paths_from_syntax(
+#[derive(Debug, Clone, Eq, PartialEq, Ord, PartialOrd)]
+enum StaticAssetPath {
+    File(StaticIncludePath),
+    Directory(StaticIncludePath),
+}
+
+fn collect_static_asset_paths_from_syntax(
     syntax: &syn::File,
-    candidates: &mut BTreeSet<StaticIncludePath>,
+    candidates: &mut BTreeSet<StaticAssetPath>,
 ) {
-    let mut collector = IncludeMacroPathCollector { candidates };
+    let mut collector = StaticAssetPathCollector { candidates };
     collector.visit_file(syntax);
 }
 
-struct IncludeMacroPathCollector<'a> {
-    candidates: &'a mut BTreeSet<StaticIncludePath>,
+struct StaticAssetPathCollector<'a> {
+    candidates: &'a mut BTreeSet<StaticAssetPath>,
 }
 
-impl<'ast> Visit<'ast> for IncludeMacroPathCollector<'_> {
+impl<'ast> Visit<'ast> for StaticAssetPathCollector<'_> {
     fn visit_attribute(&mut self, attr: &'ast syn::Attribute) {
         if is_cfg_test_attr(attr) || is_test_attr(attr.path()) {
             return;
         }
-        collect_include_macro_paths_from_tokens(&attr.to_token_stream(), self.candidates);
+        collect_static_asset_paths_from_tokens(&attr.to_token_stream(), self.candidates);
         visit::visit_attribute(self, attr);
     }
 
@@ -11145,45 +11244,112 @@ impl<'ast> Visit<'ast> for IncludeMacroPathCollector<'_> {
             .is_some_and(|segment| is_file_include_macro(&segment.ident.to_string()))
         {
             if let Some(path) = static_include_path(&mac.tokens) {
-                self.candidates.insert(path);
+                self.candidates.insert(StaticAssetPath::File(path));
             }
         }
-        collect_include_macro_paths_from_tokens(&mac.tokens, self.candidates);
+        if is_sqlx_migrate_macro_path(&mac.path) {
+            if let Some(path) = sqlx_migrate_asset_path(&mac.tokens) {
+                self.candidates.insert(StaticAssetPath::Directory(path));
+            }
+        }
+        collect_static_asset_paths_from_tokens(&mac.tokens, self.candidates);
         visit::visit_macro(self, mac);
     }
 }
 
-fn collect_include_macro_paths_from_tokens(
+fn collect_static_asset_paths_from_tokens(
     tokens: &TokenStream,
-    candidates: &mut BTreeSet<StaticIncludePath>,
+    candidates: &mut BTreeSet<StaticAssetPath>,
 ) {
-    let mut tokens = tokens.clone().into_iter().peekable();
-    while let Some(token) = tokens.next() {
-        match token {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    let mut index = 0;
+    while index < tokens.len() {
+        match &tokens[index] {
             TokenTree::Ident(ident) if is_file_include_macro(&ident.to_string()) => {
-                let Some(TokenTree::Punct(punct)) = tokens.next() else {
+                let Some(TokenTree::Punct(punct)) = tokens.get(index + 1) else {
+                    index += 1;
                     continue;
                 };
                 if punct.as_char() != '!' {
+                    index += 1;
                     continue;
                 }
-                let Some(TokenTree::Group(group)) = tokens.next() else {
+                let Some(TokenTree::Group(group)) = tokens.get(index + 2) else {
+                    index += 1;
                     continue;
                 };
                 if let Some(path) = static_include_path(&group.stream()) {
-                    candidates.insert(path);
+                    candidates.insert(StaticAssetPath::File(path));
+                }
+                index += 3;
+                continue;
+            }
+            TokenTree::Ident(ident) if ident == "migrate" => {
+                if let Some(path) = migrate_asset_path_from_token_tail(&tokens[index + 1..]) {
+                    candidates.insert(StaticAssetPath::Directory(path));
+                }
+            }
+            TokenTree::Ident(ident) if ident == "sqlx" => {
+                if let Some(path) = sqlx_migrate_asset_path_from_token_tail(&tokens[index + 1..]) {
+                    candidates.insert(StaticAssetPath::Directory(path));
                 }
             }
             TokenTree::Group(group) => {
-                collect_include_macro_paths_from_tokens(&group.stream(), candidates)
+                collect_static_asset_paths_from_tokens(&group.stream(), candidates)
             }
             TokenTree::Ident(_) | TokenTree::Punct(_) | TokenTree::Literal(_) => {}
         }
+        index += 1;
     }
 }
 
 fn is_file_include_macro(ident: &str) -> bool {
     matches!(ident, "include" | "include_str" | "include_bytes")
+}
+
+fn is_sqlx_migrate_macro_path(path: &syn::Path) -> bool {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    matches!(segments.as_slice(), [name] if name == "migrate")
+        || matches!(segments.as_slice(), [prefix, name] if prefix == "sqlx" && name == "migrate")
+}
+
+fn migrate_asset_path_from_token_tail(tokens: &[TokenTree]) -> Option<StaticIncludePath> {
+    let [TokenTree::Punct(punct), TokenTree::Group(group), ..] = tokens else {
+        return None;
+    };
+    (punct.as_char() == '!')
+        .then(|| sqlx_migrate_asset_path(&group.stream()))
+        .flatten()
+}
+
+fn sqlx_migrate_asset_path_from_token_tail(tokens: &[TokenTree]) -> Option<StaticIncludePath> {
+    let [TokenTree::Punct(first_colon), TokenTree::Punct(second_colon), TokenTree::Ident(name), tail @ ..] =
+        tokens
+    else {
+        return None;
+    };
+    if first_colon.as_char() != ':' || second_colon.as_char() != ':' || name != "migrate" {
+        return None;
+    }
+    migrate_asset_path_from_token_tail(tail)
+}
+
+fn sqlx_migrate_asset_path(tokens: &TokenStream) -> Option<StaticIncludePath> {
+    if tokens.is_empty() {
+        return Some(StaticIncludePath::PackageRelative(PathBuf::from(
+            "migrations",
+        )));
+    }
+    match static_include_path(tokens)? {
+        StaticIncludePath::SourceRelative(path) | StaticIncludePath::PackageRelative(path) => {
+            Some(StaticIncludePath::PackageRelative(path))
+        }
+        StaticIncludePath::Absolute(path) => Some(StaticIncludePath::Absolute(path)),
+    }
 }
 
 fn copy_asset(
@@ -14396,6 +14562,9 @@ fn transform_file(
     );
     if !retain_test_items {
         strip_test_only_statements_from_file(&mut transformed);
+    }
+    if module_path.is_empty() {
+        allow_generated_crate_private_visibility_lints(&mut transformed.attrs);
     }
     transformed
 }
@@ -19890,8 +20059,34 @@ fn allow_restricted_support_crate_warnings(attrs: &mut Vec<syn::Attribute>) {
         attr.path().is_ident("allow")
             && token_stream_mentions_ident(&attr.to_token_stream(), "unused_imports")
     });
-    if needs_dead_code || needs_unused_imports {
-        attrs.push(parse_quote!(#![allow(dead_code, unused_imports)]));
+    let needs_private_interfaces = !attrs.iter().any(|attr| {
+        attr.path().is_ident("allow")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "private_interfaces")
+    });
+    let needs_private_bounds = !attrs.iter().any(|attr| {
+        attr.path().is_ident("allow")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "private_bounds")
+    });
+    if needs_dead_code || needs_unused_imports || needs_private_interfaces || needs_private_bounds {
+        attrs.push(parse_quote!(
+            #![allow(dead_code, unused_imports, private_interfaces, private_bounds)]
+        ));
+    }
+}
+
+fn allow_generated_crate_private_visibility_lints(attrs: &mut Vec<syn::Attribute>) {
+    let needs_private_interfaces = !attrs.iter().any(|attr| {
+        attr.path().is_ident("allow")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "private_interfaces")
+    });
+    let needs_private_bounds = !attrs.iter().any(|attr| {
+        attr.path().is_ident("allow")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "private_bounds")
+    });
+    if needs_private_interfaces || needs_private_bounds {
+        attrs.push(parse_quote!(
+            #![allow(private_interfaces, private_bounds)]
+        ));
     }
 }
 

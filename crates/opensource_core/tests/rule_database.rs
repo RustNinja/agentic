@@ -3079,6 +3079,42 @@ fn allows_pub_items_inside_private_modules_under_dead_code_deny() {
 }
 
 #[test]
+fn allows_private_interface_lints_under_deny_warnings() {
+    let workspace = temp_path("rule-private-interface-deny-warnings-workspace");
+    let output = temp_path("rule-private-interface-deny-warnings-output");
+    let target_dir = temp_path("rule-private-interface-deny-warnings-target");
+    write_private_interface_deny_warnings_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("private interface deny warnings rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("private_interface_rule/src/lib.rs"));
+    assert!(lib.contains("private_interfaces"), "{lib}");
+    assert!(lib.contains("private_bounds"), "{lib}");
+
+    let cargo_check = Command::new("cargo")
+        .arg("check")
+        .arg("--quiet")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", &target_dir)
+        .env("RUSTFLAGS", "-D warnings")
+        .output()
+        .expect("cargo check should start");
+    assert!(
+        cargo_check.status.success(),
+        "generated private interface rule slice did not compile with denied warnings\nstatus: {}\nstdout:\n{}\nstderr:\n{}\nsrc/lib.rs:\n{}",
+        cargo_check.status,
+        String::from_utf8_lossy(&cargo_check.stdout),
+        String::from_utf8_lossy(&cargo_check.stderr),
+        lib,
+    );
+}
+
+#[test]
 fn retains_result_alias_error_and_payload_surfaces() {
     let workspace = temp_path("rule-result-alias-surface-workspace");
     let output = temp_path("rule-result-alias-surface-output");
@@ -5038,6 +5074,36 @@ mod private_state {
 #[opensourced]
 pub fn selected() -> Option<private_state::HiddenState> {
     private_state::selected()
+}
+"#,
+    );
+}
+
+fn write_private_interface_deny_warnings_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "private_interface_rule",
+        r#"use opensourced::opensourced;
+
+mod ssh {
+    mod connect {
+        pub(super) struct ClientHandler;
+    }
+
+    use connect::ClientHandler;
+
+    pub struct SshClient {
+        pub(super) handle: Option<ClientHandler>,
+    }
+
+    pub fn selected() -> SshClient {
+        SshClient { handle: None }
+    }
+}
+
+#[opensourced]
+pub fn selected() -> ssh::SshClient {
+    ssh::selected()
 }
 "#,
     );
