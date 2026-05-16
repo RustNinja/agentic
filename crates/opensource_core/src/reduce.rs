@@ -27,6 +27,33 @@ const MAX_UNRESOLVED_CONVERSION_CANDIDATES: usize = 24;
 const EXACT_STRUCT_FIELD_DEPENDENCY_SCAN_CALLABLE_BUDGET: usize = 64;
 type SpanKey = (usize, usize, usize, usize);
 
+#[derive(Clone, Default)]
+struct RootSurfaceItems {
+    root_items: BTreeSet<ItemId>,
+    root_signature_items: BTreeSet<ItemId>,
+}
+
+impl RootSurfaceItems {
+    fn new(project: &Project, roots: &[RootId]) -> Self {
+        Self {
+            root_items: roots
+                .iter()
+                .filter_map(|root| match root {
+                    RootId::Item(item) => Some(item.clone()),
+                    RootId::Callable(_) => None,
+                })
+                .collect(),
+            root_signature_items: root_callable_signature_items(project, roots),
+        }
+    }
+
+    fn requires_public_field_surface(&self, item: &ItemId, item_struct: &syn::ItemStruct) -> bool {
+        self.root_items.contains(item)
+            || self.root_signature_items.contains(item)
+            || struct_attrs_require_public_field_surface(item_struct)
+    }
+}
+
 pub fn reduce_with_extra_roots(
     project: &Project,
     extra_roots: &[RootId],
@@ -128,7 +155,8 @@ pub fn reduce_with_extra_roots_and_semantics(
     let mut evidence = ReductionEvidence::default();
     let mut callable_queue = VecDeque::from(callable_roots);
     let mut item_queue = VecDeque::from(item_roots);
-    let mut dependency_cache = DependencyCache::new(semantic_hints);
+    let root_surface = RootSurfaceItems::new(project, &roots);
+    let mut dependency_cache = DependencyCache::new(semantic_hints, root_surface.clone());
     let mut struct_field_dependency_state = StructFieldDependencyState::default();
 
     while !callable_queue.is_empty() || !item_queue.is_empty() {
@@ -182,6 +210,7 @@ pub fn reduce_with_extra_roots_and_semantics(
             &mut candidate_packages,
             &reachable,
             &reachable_items,
+            &root_surface,
         );
 
         let dependencies = externally_referenced_public_reexport_dependencies(
@@ -189,6 +218,7 @@ pub fn reduce_with_extra_roots_and_semantics(
             &candidate_packages,
             &reachable,
             &reachable_items,
+            &root_surface,
         );
         evidence.add(&dependencies.evidence);
         for dependency in dependencies.callables {
@@ -227,6 +257,7 @@ pub fn reduce_with_extra_roots_and_semantics(
             &candidate_packages,
             &reachable,
             &reachable_items,
+            &root_surface,
         );
         evidence.add(&dependencies.evidence);
         for dependency in dependencies.callables {
@@ -246,6 +277,7 @@ pub fn reduce_with_extra_roots_and_semantics(
             &candidate_packages,
             &reachable,
             &reachable_items,
+            &root_surface,
             &mut struct_field_dependency_state,
         );
         evidence.add(&dependencies.evidence);
@@ -303,7 +335,13 @@ pub fn reduce_with_extra_roots_and_semantics(
     }
 
     let mut packages = reachable_packages(&roots, &reachable, &reachable_items);
-    add_source_mentioned_dependency_packages(project, &mut packages, &reachable, &reachable_items);
+    add_source_mentioned_dependency_packages(
+        project,
+        &mut packages,
+        &reachable,
+        &reachable_items,
+        &root_surface,
+    );
     retain_referenced_public_reexport_dependencies(
         project,
         &mut packages,
@@ -312,6 +350,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &module_roots,
         &mut evidence,
         &mut dependency_cache,
+        &root_surface,
     );
     let proc_macro_dependency_packages = local_proc_macro_dependency_packages(project, &packages);
     retain_proc_macro_exports(
@@ -323,6 +362,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &module_roots,
         &mut evidence,
         &mut dependency_cache,
+        &root_surface,
     );
     let build_dependency_packages = add_local_build_dependency_packages(project, &mut packages);
     retain_entire_packages(
@@ -347,6 +387,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &module_roots,
         &mut evidence,
         &mut dependency_cache,
+        &root_surface,
     );
     retain_reachable_module_items(project, &packages, &reachable, &mut reachable_items);
 
@@ -607,6 +648,7 @@ fn retained_rendered_use_dependencies(
     candidate_packages: &BTreeSet<String>,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
+    root_surface: &RootSurfaceItems,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
     let mut module_ident_cache = HashMap::new();
@@ -625,6 +667,7 @@ fn retained_rendered_use_dependencies(
                         project,
                         reachable,
                         reachable_items,
+                        root_surface,
                         &source.package,
                     ))
         })
@@ -648,6 +691,7 @@ fn retained_rendered_use_dependencies(
             &source.package,
             &source.module_path,
             &callable_idents_by_package,
+            root_surface,
             &mut module_ident_cache,
         );
         let mut package_idents = package_ident_cache
@@ -659,6 +703,7 @@ fn retained_rendered_use_dependencies(
                     reachable_items,
                     &source.package,
                     &callable_idents_by_package,
+                    root_surface,
                 )
             })
             .clone();
@@ -669,6 +714,7 @@ fn retained_rendered_use_dependencies(
                     project,
                     reachable,
                     reachable_items,
+                    root_surface,
                     &source.package,
                 )
             });
@@ -974,6 +1020,7 @@ fn externally_referenced_public_reexport_dependencies(
     candidate_packages: &BTreeSet<String>,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
+    root_surface: &RootSurfaceItems,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
     let mut public_ident_cache = HashMap::new();
@@ -989,6 +1036,7 @@ fn externally_referenced_public_reexport_dependencies(
                     project,
                     reachable,
                     reachable_items,
+                    root_surface,
                     &source.package,
                 )
             });
@@ -1099,16 +1147,24 @@ fn retain_referenced_public_reexport_dependencies(
     expanded_module_roots: &BTreeSet<ItemId>,
     evidence: &mut ReductionEvidence,
     dependency_cache: &mut DependencyCache<'_>,
+    root_surface: &RootSurfaceItems,
 ) {
     loop {
         let package_count = packages.len();
-        add_source_mentioned_dependency_packages(project, packages, reachable, reachable_items);
+        add_source_mentioned_dependency_packages(
+            project,
+            packages,
+            reachable,
+            reachable_items,
+            root_surface,
+        );
         let packages_changed = packages.len() != package_count;
         let dependencies = externally_referenced_public_reexport_dependencies(
             project,
             packages,
             reachable,
             reachable_items,
+            root_surface,
         );
         let changed = retain_dependency_set(
             project,
@@ -1211,6 +1267,7 @@ fn reachable_source_idents(
     package: &str,
     module_path: &[String],
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    root_surface: &RootSurfaceItems,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
     for callable in reachable
@@ -1239,6 +1296,7 @@ fn reachable_source_idents(
                 item,
                 record,
                 &callable_idents_by_package,
+                root_surface,
                 &mut idents,
             );
         }
@@ -1252,6 +1310,7 @@ fn reachable_package_source_idents(
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    root_surface: &RootSurfaceItems,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
     for callable in reachable
@@ -1276,6 +1335,7 @@ fn reachable_package_source_idents(
                 item,
                 record,
                 &callable_idents_by_package,
+                root_surface,
                 &mut idents,
             );
         }
@@ -1290,6 +1350,7 @@ fn reachable_import_scope_source_idents_cached(
     package: &str,
     module_path: &[String],
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    root_surface: &RootSurfaceItems,
     cache: &mut HashMap<(String, Vec<String>), BTreeSet<String>>,
 ) -> BTreeSet<String> {
     let key = (package.to_string(), module_path.to_vec());
@@ -1304,6 +1365,7 @@ fn reachable_import_scope_source_idents_cached(
         package,
         module_path,
         callable_idents_by_package,
+        root_surface,
     );
     for source in project
         .files
@@ -1321,6 +1383,7 @@ fn reachable_import_scope_source_idents_cached(
             package,
             &source.module_path,
             callable_idents_by_package,
+            root_surface,
             cache,
         ));
     }
@@ -2062,6 +2125,7 @@ fn add_source_mentioned_dependency_packages(
     packages: &mut BTreeSet<String>,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
+    root_surface: &RootSurfaceItems,
 ) {
     let callable_idents_by_package = reachable_callable_idents_by_package(project, reachable);
     let mut idents_cache = HashMap::<String, BTreeSet<String>>::new();
@@ -2083,6 +2147,7 @@ fn add_source_mentioned_dependency_packages(
                     reachable_items,
                     &package_name,
                     &callable_idents_by_package,
+                    root_surface,
                 )
             });
             let path_prefixes = path_prefix_cache
@@ -2094,6 +2159,7 @@ fn add_source_mentioned_dependency_packages(
                         reachable_items,
                         &package_name,
                         &callable_idents_by_package,
+                        root_surface,
                     )
                 });
             if idents.is_empty() && path_prefixes.is_empty() {
@@ -2198,6 +2264,7 @@ fn retain_proc_macro_exports(
     expanded_module_roots: &BTreeSet<ItemId>,
     evidence: &mut ReductionEvidence,
     dependency_cache: &mut DependencyCache<'_>,
+    root_surface: &RootSurfaceItems,
 ) {
     if proc_macro_packages.is_empty() {
         return;
@@ -2218,6 +2285,7 @@ fn retain_proc_macro_exports(
                 candidate_packages,
                 reachable,
                 reachable_items,
+                root_surface,
                 &record.package,
                 name,
             )
@@ -2308,6 +2376,7 @@ fn proc_macro_export_is_referenced(
     candidate_packages: &BTreeSet<String>,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
+    root_surface: &RootSurfaceItems,
     proc_macro_package: &str,
     export_name: &str,
 ) -> bool {
@@ -2315,6 +2384,7 @@ fn proc_macro_export_is_referenced(
         project,
         reachable,
         reachable_items,
+        root_surface,
         proc_macro_package,
     )
     .contains(export_name)
@@ -3727,6 +3797,7 @@ fn reachable_package_dependency_path_prefixes(
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    root_surface: &RootSurfaceItems,
 ) -> BTreeSet<String> {
     let mut prefixes = BTreeSet::new();
     for callable in reachable
@@ -3748,8 +3819,10 @@ fn reachable_package_dependency_path_prefixes(
             collect_reachable_package_item_dependency_path_prefixes(
                 project,
                 reachable,
+                item,
                 record,
                 callable_idents_by_package,
+                root_surface,
                 &mut prefixes,
             );
         }
@@ -3760,21 +3833,16 @@ fn reachable_package_dependency_path_prefixes(
 fn collect_reachable_package_item_dependency_path_prefixes(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
+    item: &ItemId,
     record: &crate::model::ItemRecord,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    root_surface: &RootSurfaceItems,
     prefixes: &mut BTreeSet<String>,
 ) {
     let Item::Struct(item_struct) = &record.item else {
         collect_dependency_path_prefixes(&record.item.to_token_stream(), prefixes);
         return;
     };
-    let item_id = ItemId {
-        package: record.package.clone(),
-        module_path: record.module_path.clone(),
-        name: item_struct.ident.to_string(),
-        kind: ItemKind::Struct,
-    };
-
     collect_dependency_path_prefixes(&item_struct.vis.to_token_stream(), prefixes);
     collect_dependency_path_prefixes(&item_struct.generics.to_token_stream(), prefixes);
     for attr in &item_struct.attrs {
@@ -3785,9 +3853,11 @@ fn collect_reachable_package_item_dependency_path_prefixes(
         if struct_field_source_mentions_should_remain(
             project,
             reachable,
-            &item_id,
+            item,
+            item_struct,
             field,
             callable_idents_by_package,
+            root_surface,
         ) {
             collect_dependency_path_prefixes(&field.to_token_stream(), prefixes);
         }
@@ -3809,12 +3879,14 @@ fn reachable_package_idents(
     package: &str,
 ) -> BTreeSet<String> {
     let callable_idents_by_package = reachable_callable_idents_by_package(project, reachable);
+    let root_surface = RootSurfaceItems::default();
     reachable_package_idents_with_callable_index(
         project,
         reachable,
         reachable_items,
         package,
         &callable_idents_by_package,
+        &root_surface,
     )
 }
 
@@ -3824,6 +3896,7 @@ fn reachable_package_idents_with_callable_index(
     reachable_items: &BTreeSet<ItemId>,
     package: &str,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    root_surface: &RootSurfaceItems,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
     if let Some(callable_idents) = callable_idents_by_package.get(package) {
@@ -3840,6 +3913,7 @@ fn reachable_package_idents_with_callable_index(
                 item,
                 record,
                 callable_idents_by_package,
+                root_surface,
                 &mut idents,
             );
         }
@@ -3896,6 +3970,7 @@ fn collect_reachable_package_item_idents(
     item: &ItemId,
     record: &crate::model::ItemRecord,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    root_surface: &RootSurfaceItems,
     idents: &mut BTreeSet<String>,
 ) {
     if let Item::Mod(item_mod) = &record.item {
@@ -3921,8 +3996,10 @@ fn collect_reachable_package_item_idents(
             project,
             reachable,
             item,
+            item_struct,
             field,
             callable_idents_by_package,
+            root_surface,
         ) {
             collect_token_idents(&field.to_token_stream(), idents);
         }
@@ -3946,10 +4023,21 @@ fn struct_field_source_mentions_should_remain(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
     item: &ItemId,
+    item_struct: &syn::ItemStruct,
     field: &Field,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
+    root_surface: &RootSurfaceItems,
 ) -> bool {
-    struct_field_reachable_dependency_should_remain_with_callable_index(
+    if field_attrs_require_field(field) || field.ident.is_none() {
+        return true;
+    }
+    if matches!(item_struct.vis, syn::Visibility::Public(_))
+        && matches!(field.vis, syn::Visibility::Public(_))
+        && root_surface.requires_public_field_surface(item, item_struct)
+    {
+        return true;
+    }
+    struct_field_concrete_dependency_should_remain_with_callable_index(
         project,
         reachable,
         item,
@@ -3958,22 +4046,22 @@ fn struct_field_source_mentions_should_remain(
     )
 }
 
-fn struct_field_static_surface_dependency_should_remain(field: &Field) -> bool {
-    matches!(field.vis, syn::Visibility::Public(_))
+fn struct_field_static_surface_dependency_should_remain(
+    field: &Field,
+    retain_public_fields: bool,
+) -> bool {
+    (retain_public_fields && matches!(field.vis, syn::Visibility::Public(_)))
         || field_attrs_require_field(field)
         || field.ident.is_none()
 }
 
-fn struct_field_reachable_dependency_should_remain_with_callable_index(
+fn struct_field_concrete_dependency_should_remain_with_callable_index(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
     item: &ItemId,
     field: &Field,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
 ) -> bool {
-    if matches!(field.vis, syn::Visibility::Public(_)) || field_attrs_require_field(field) {
-        return true;
-    }
     let Some(name) = field.ident.as_ref() else {
         return true;
     };
@@ -4270,10 +4358,48 @@ fn field_attrs_require_field(field: &Field) -> bool {
     })
 }
 
+fn struct_attrs_require_public_field_surface(item_struct: &syn::ItemStruct) -> bool {
+    item_struct
+        .attrs
+        .iter()
+        .any(struct_attr_requires_public_field_surface)
+}
+
+fn struct_attr_requires_public_field_surface(attr: &syn::Attribute) -> bool {
+    let path = attr.path();
+    if path.is_ident("derive") {
+        return derive_trait_names(std::slice::from_ref(attr))
+            .iter()
+            .any(|derive| !builtin_field_shape_preserving_derive(derive));
+    }
+
+    path.is_ident("serde")
+        || path.is_ident("clap")
+        || path.is_ident("command")
+        || path.is_ident("arg")
+        || path
+            .segments
+            .first()
+            .is_some_and(|segment| segment.ident == "uniffi")
+        || (path.is_ident("cfg_attr")
+            && (token_stream_mentions_ident(&attr.to_token_stream(), "derive")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "serde")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "clap")
+                || token_stream_mentions_ident(&attr.to_token_stream(), "uniffi")))
+}
+
+fn builtin_field_shape_preserving_derive(name: &str) -> bool {
+    matches!(
+        name,
+        "Clone" | "Copy" | "Debug" | "Default" | "Eq" | "Hash" | "Ord" | "PartialEq" | "PartialOrd"
+    )
+}
+
 fn public_reexport_idents_referenced_by_reachable_packages(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
+    root_surface: &RootSurfaceItems,
     dependency_package: &str,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
@@ -4313,6 +4439,7 @@ fn public_reexport_idents_referenced_by_reachable_packages(
                 record,
                 &callable_idents_by_package,
                 dependency_package,
+                root_surface,
                 &mut idents,
             );
         }
@@ -4327,6 +4454,7 @@ fn collect_dependency_public_path_idents_from_reachable_item(
     record: &crate::model::ItemRecord,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
     dependency_package: &str,
+    root_surface: &RootSurfaceItems,
     idents: &mut BTreeSet<String>,
 ) {
     let mut collect = |tokens: TokenStream| {
@@ -4351,8 +4479,10 @@ fn collect_dependency_public_path_idents_from_reachable_item(
                     project,
                     reachable,
                     item,
+                    item_struct,
                     field,
                     callable_idents_by_package,
+                    root_surface,
                 ) {
                     collect(field.to_token_stream());
                 }
@@ -4372,12 +4502,14 @@ fn package_public_api_is_referenced_by_reachable_packages(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
+    root_surface: &RootSurfaceItems,
     dependency_package: &str,
 ) -> bool {
     !public_reexport_idents_referenced_by_reachable_packages(
         project,
         reachable,
         reachable_items,
+        root_surface,
         dependency_package,
     )
     .is_empty()
@@ -4532,6 +4664,7 @@ fn item_dependencies(
     project: &Project,
     item: &ItemId,
     expanded_module_roots: &BTreeSet<ItemId>,
+    root_surface: &RootSurfaceItems,
 ) -> DependencySet {
     let Some(record) = project.items.get(item) else {
         return DependencySet::default();
@@ -4557,7 +4690,10 @@ fn item_dependencies(
         if item_has_opensourced_attr(&record.item) {
             visitor.visit_item(&record.item);
         } else {
-            visitor.visit_struct_static_surface_dependencies(item_struct);
+            visitor.visit_struct_static_surface_dependencies(
+                item_struct,
+                root_surface.requires_public_field_surface(item, item_struct),
+            );
         }
     } else if let Item::Trait(item_trait) = &record.item {
         if item_has_opensourced_attr(&record.item) {
@@ -4704,6 +4840,7 @@ fn reachable_struct_field_dependencies(
     candidate_packages: &BTreeSet<String>,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
+    root_surface: &RootSurfaceItems,
     state: &mut StructFieldDependencyState,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
@@ -4731,12 +4868,14 @@ fn reachable_struct_field_dependencies(
         let mut visitor = DependencyVisitor::new(resolver);
         let mut scanned_field = false;
         for (field_index, field) in item_struct.fields.iter().enumerate() {
-            if !struct_field_reachable_dependency_should_remain_with_callable_index(
+            if !struct_field_source_mentions_should_remain(
                 project,
                 reachable,
                 item,
+                item_struct,
                 field,
                 &callable_idents_by_package,
+                root_surface,
             ) {
                 continue;
             }
@@ -5001,14 +5140,16 @@ impl DependencySet {
 
 struct DependencyCache<'a> {
     semantic_hints: &'a SemanticReductionHints,
+    root_surface: RootSurfaceItems,
     callables: BTreeMap<CallableId, DependencySet>,
     items: BTreeMap<ItemId, DependencySet>,
 }
 
 impl<'a> DependencyCache<'a> {
-    fn new(semantic_hints: &'a SemanticReductionHints) -> Self {
+    fn new(semantic_hints: &'a SemanticReductionHints, root_surface: RootSurfaceItems) -> Self {
         Self {
             semantic_hints,
+            root_surface,
             callables: BTreeMap::new(),
             items: BTreeMap::new(),
         }
@@ -5039,7 +5180,8 @@ impl<'a> DependencyCache<'a> {
             return dependencies.clone();
         }
 
-        let mut dependencies = item_dependencies(project, item, expanded_module_roots);
+        let mut dependencies =
+            item_dependencies(project, item, expanded_module_roots, &self.root_surface);
         dependencies.extend(semantic_item_dependencies(self.semantic_hints, item));
         self.items.insert(item.clone(), dependencies.clone());
         dependencies
@@ -5189,13 +5331,17 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
-    fn visit_struct_static_surface_dependencies(&mut self, item_struct: &syn::ItemStruct) {
+    fn visit_struct_static_surface_dependencies(
+        &mut self,
+        item_struct: &syn::ItemStruct,
+        retain_public_fields: bool,
+    ) {
         for attr in &item_struct.attrs {
             self.visit_attribute(attr);
         }
         self.visit_generics(&item_struct.generics);
         for field in &item_struct.fields {
-            if struct_field_static_surface_dependency_should_remain(field) {
+            if struct_field_static_surface_dependency_should_remain(field, retain_public_fields) {
                 self.visit_struct_field_surface_dependencies(item_struct, field);
             }
         }

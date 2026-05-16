@@ -17864,6 +17864,62 @@ mod inner {
     }
 
     #[test]
+    fn public_fields_on_non_root_structs_are_pruned_when_unused() {
+        let root = temp_output("non-root-public-field-pruning-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub struct Facade {
+    inner: Core,
+}
+
+pub struct Core {
+    pub used: usize,
+    pub unused: UnusedSurface,
+}
+
+pub struct UnusedSurface {
+    pub value: usize,
+}
+
+#[opensourced]
+pub fn entry(facade: &Facade) -> usize {
+    facade.inner.used
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("non-root-public-field-pruning-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .reachable_items
+                .iter()
+                .map(ToString::to_string)
+                .all(|item| !item.contains("UnusedSurface")),
+            "unused public fields on non-root structs should not retain their types: {:?}",
+            report.reachable_items
+        );
+    }
+
+    #[test]
     fn callable_signature_macro_surface_does_not_retain_whole_export_impl() {
         let root = temp_output("callable-signature-macro-surface-source");
         let output = temp_output("callable-signature-macro-surface-output");
