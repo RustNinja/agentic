@@ -3641,6 +3641,7 @@ fn build_restricted_support_sources(
                     &source_file,
                     &support_item_dependency_tokens_with_pruned_fields(
                         item,
+                        &named_items,
                         &live_set,
                         &pruned_struct_fields,
                     ),
@@ -4045,12 +4046,17 @@ fn prune_empty_restricted_support_modules(
     }
 }
 
-fn support_item_dependency_tokens(item: &Item, live_set: &SupportLiveSet) -> TokenStream {
-    support_item_dependency_tokens_with_pruned_fields(item, live_set, &BTreeMap::new())
+fn support_item_dependency_tokens(
+    item: &Item,
+    named_items: &BTreeMap<String, Item>,
+    live_set: &SupportLiveSet,
+) -> TokenStream {
+    support_item_dependency_tokens_with_pruned_fields(item, named_items, live_set, &BTreeMap::new())
 }
 
 fn support_item_dependency_tokens_with_pruned_fields(
     item: &Item,
+    named_items: &BTreeMap<String, Item>,
     live_set: &SupportLiveSet,
     pruned_struct_fields: &BTreeMap<String, BTreeSet<String>>,
 ) -> TokenStream {
@@ -4070,6 +4076,9 @@ fn support_item_dependency_tokens_with_pruned_fields(
         Item::Struct(item_struct) => {
             Item::Struct(transform_support_struct(item_struct, pruned_struct_fields))
                 .to_token_stream()
+        }
+        Item::Impl(item_impl) => {
+            support_impl_dependency_tokens(item_impl, named_items, live_set).unwrap_or_default()
         }
         _ => item.to_token_stream(),
     }
@@ -5703,6 +5712,8 @@ fn transform_restricted_support_file(
     let live_import_usage =
         support_live_non_use_item_usage(syntax, live_set, &pruned_struct_fields);
     let mut live_import_names = support_live_import_names(&live_import_usage);
+    let live_method_names =
+        support_live_method_call_names(syntax, live_set, &named_items, &pruned_struct_fields);
     let non_enum_usage = support_live_non_enum_usage_across_live_files(ctx, live_by_file);
     let retained_enum_variants = support_retained_enum_variants(syntax, live_set, &non_enum_usage);
     let enum_variant_type_usage =
@@ -5727,6 +5738,9 @@ fn transform_restricted_support_file(
     public_use_names.extend(live_import_names.iter().cloned());
     public_use_names.retain(|name| !pruned_variant_payload_drop_names.contains(name));
     let mut transformed = syntax.clone();
+    if source_file == ctx.root_file {
+        allow_restricted_support_crate_warnings(&mut transformed.attrs);
+    }
     transformed.items = syntax
         .items
         .iter()
@@ -5761,6 +5775,7 @@ fn transform_restricted_support_file(
                     Vec::new(),
                     &live_import_names,
                     &live_derive_idents,
+                    &live_method_names,
                 )?;
                 Some(Item::Use(item_use))
             }
@@ -6429,6 +6444,31 @@ fn support_live_import_names(usage: &TokenUsage) -> BTreeSet<String> {
         .collect()
 }
 
+fn support_live_method_call_names(
+    syntax: &syn::File,
+    live_set: &SupportLiveSet,
+    named_items: &BTreeMap<String, Item>,
+    pruned_struct_fields: &BTreeMap<String, BTreeSet<String>>,
+) -> BTreeSet<String> {
+    let mut names = BTreeSet::new();
+    for item in &syntax.items {
+        if matches!(item, Item::Use(_)) {
+            continue;
+        }
+        if support_item_should_collect_live_usage(item, named_items, live_set) {
+            names.extend(token_method_call_names(
+                &support_item_dependency_tokens_with_pruned_fields(
+                    item,
+                    named_items,
+                    live_set,
+                    pruned_struct_fields,
+                ),
+            ));
+        }
+    }
+    names
+}
+
 fn support_live_enum_variant_names(
     syntax: &syn::File,
     live_set: &SupportLiveSet,
@@ -6477,6 +6517,7 @@ fn support_live_non_use_item_usage(
             collect_token_usage(
                 &support_item_dependency_tokens_with_pruned_fields(
                     item,
+                    &named_items,
                     live_set,
                     pruned_struct_fields,
                 ),
@@ -6506,7 +6547,10 @@ fn support_live_non_pruned_payload_usage(
             continue;
         }
         if support_item_should_collect_live_usage(item, &named_items, live_set) {
-            collect_token_usage(&support_item_dependency_tokens(item, live_set), &mut usage);
+            collect_token_usage(
+                &support_item_dependency_tokens(item, &named_items, live_set),
+                &mut usage,
+            );
         }
     }
     usage
@@ -6520,7 +6564,10 @@ fn support_live_non_enum_item_usage(syntax: &syn::File, live_set: &SupportLiveSe
             continue;
         }
         if support_item_should_collect_live_usage(item, &named_items, live_set) {
-            collect_token_usage(&item.to_token_stream(), &mut usage);
+            collect_token_usage(
+                &support_item_dependency_tokens(item, &named_items, live_set),
+                &mut usage,
+            );
         }
     }
     usage
@@ -8165,6 +8212,7 @@ fn prune_support_private_use_tree(
     mut prefix: Vec<String>,
     live_names: &BTreeSet<String>,
     live_derive_idents: &BTreeSet<String>,
+    live_method_names: &BTreeSet<String>,
 ) -> Option<UseTree> {
     match tree {
         UseTree::Path(path) => {
@@ -8178,6 +8226,7 @@ fn prune_support_private_use_tree(
                 prefix,
                 live_names,
                 live_derive_idents,
+                live_method_names,
             )?);
             Some(UseTree::Path(path))
         }
@@ -8199,6 +8248,7 @@ fn prune_support_private_use_tree(
                 &visible_name,
                 live_names,
                 live_derive_idents,
+                live_method_names,
             )
             .then(|| UseTree::Name(name.clone()))
         }
@@ -8211,6 +8261,7 @@ fn prune_support_private_use_tree(
             &rename.rename.to_string(),
             live_names,
             live_derive_idents,
+            live_method_names,
         )
         .then(|| UseTree::Rename(rename.clone())),
         UseTree::Group(group) => {
@@ -8227,6 +8278,7 @@ fn prune_support_private_use_tree(
                         prefix.clone(),
                         live_names,
                         live_derive_idents,
+                        live_method_names,
                     )
                 })
                 .collect::<Punctuated<_, syn::Token![,]>>();
@@ -8265,27 +8317,30 @@ fn support_private_import_name_should_render(
     visible_name: &str,
     live_names: &BTreeSet<String>,
     live_derive_idents: &BTreeSet<String>,
+    live_method_names: &BTreeSet<String>,
 ) -> bool {
     if support_import_is_derive_only(prefix, imported_name) {
         return live_derive_idents.contains(imported_name)
             || live_derive_idents.contains(visible_name);
     }
     live_names.contains(visible_name)
-        || support_private_import_target_is_live_local(
+        || support_private_trait_import_has_live_method_scope(
             ctx,
             live_by_file,
             source_file,
             prefix,
             imported_name,
+            live_method_names,
         )
 }
 
-fn support_private_import_target_is_live_local(
+fn support_private_trait_import_has_live_method_scope(
     ctx: &SupportResolveContext<'_>,
     live_by_file: &BTreeMap<PathBuf, SupportLiveSet>,
     source_file: &Path,
     prefix: &[String],
     imported_name: &str,
+    live_method_names: &BTreeSet<String>,
 ) -> bool {
     let mut target_file = source_file.to_path_buf();
     let mut remaining_prefix = prefix;
@@ -8316,10 +8371,29 @@ fn support_private_import_target_is_live_local(
         target_file = child_file;
     }
 
-    live_by_file.get(&target_file).is_some_and(|live_set| {
-        live_set.item_names.contains(imported_name)
-            || live_set.surface_item_names.contains(imported_name)
-            || live_set.public_exports.contains(imported_name)
+    let Some(live_set) = live_by_file.get(&target_file) else {
+        return false;
+    };
+    if !live_set.item_names.contains(imported_name)
+        && !live_set.surface_item_names.contains(imported_name)
+        && !live_set.public_exports.contains(imported_name)
+    {
+        return false;
+    }
+    let Some(module) = ctx.modules.get(&target_file) else {
+        return false;
+    };
+    module.syntax.items.iter().any(|item| {
+        let Item::Trait(item_trait) = item else {
+            return false;
+        };
+        item_trait.ident == imported_name
+            && item_trait.items.iter().any(|trait_item| {
+                let TraitItem::Fn(function) = trait_item else {
+                    return false;
+                };
+                live_method_names.contains(&function.sig.ident.to_string())
+            })
     })
 }
 
@@ -19734,6 +19808,20 @@ fn allow_dead_code(attrs: &mut Vec<syn::Attribute>) {
         return;
     }
     attrs.push(parse_quote!(#[allow(dead_code)]));
+}
+
+fn allow_restricted_support_crate_warnings(attrs: &mut Vec<syn::Attribute>) {
+    let needs_dead_code = !attrs.iter().any(|attr| {
+        attr.path().is_ident("allow")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "dead_code")
+    });
+    let needs_unused_imports = !attrs.iter().any(|attr| {
+        attr.path().is_ident("allow")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "unused_imports")
+    });
+    if needs_dead_code || needs_unused_imports {
+        attrs.push(parse_quote!(#![allow(dead_code, unused_imports)]));
+    }
 }
 
 fn struct_has_private_fields(item_struct: &syn::ItemStruct) -> bool {

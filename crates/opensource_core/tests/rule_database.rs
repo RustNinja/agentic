@@ -1774,6 +1774,9 @@ fn copies_support_path_bundle_without_absolute_leaks_or_dead_surfaces() {
     assert!(!helper_atoms.contains("dead_leaf"), "{helper_atoms}");
     assert!(leaf_lib.contains("pub struct LeafLive"), "{leaf_lib}");
     assert!(leaf_lib.contains("pub fn suffix"), "{leaf_lib}");
+    assert!(!leaf_lib.contains("use std::path::Display"), "{leaf_lib}");
+    assert!(!leaf_lib.contains("use std::path::Path"), "{leaf_lib}");
+    assert!(!leaf_lib.contains("path_display"), "{leaf_lib}");
     assert!(!leaf_lib.contains("LeafDead"), "{leaf_lib}");
     assert!(!leaf_lib.contains("dead_suffix"), "{leaf_lib}");
     assert!(!output.join("support/external-helper/src/bin").exists());
@@ -11138,6 +11141,9 @@ edition = "2021"
     write(
         leaf.join("src/lib.rs"),
         r#"
+use std::path::Display;
+use std::path::Path;
+
 pub fn suffix() -> &'static str {
     ":leaf"
 }
@@ -11155,6 +11161,10 @@ impl LeafLive {
 
     pub fn label(&self) -> &str {
         &self.label
+    }
+
+    pub fn path_display(path: &Path) -> Display<'_> {
+        path.display()
     }
 }
 
