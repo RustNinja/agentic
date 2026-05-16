@@ -24,6 +24,7 @@ use crate::model::{
 
 const MAX_UNRESOLVED_METHOD_NAME_CANDIDATES: usize = 1;
 const MAX_UNRESOLVED_CONVERSION_CANDIDATES: usize = 24;
+const EXACT_STRUCT_FIELD_DEPENDENCY_SCAN_CALLABLE_BUDGET: usize = 64;
 type SpanKey = (usize, usize, usize, usize);
 
 pub fn reduce_with_extra_roots(
@@ -263,6 +264,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         let dependencies = reachable_trait_impl_surface_dependencies(
             project,
             &candidate_packages,
+            &roots,
             &reachable,
             &reachable_items,
         );
@@ -723,6 +725,7 @@ fn retained_rendered_use_dependencies(
 fn reachable_trait_impl_surface_dependencies(
     project: &Project,
     candidate_packages: &BTreeSet<String>,
+    roots: &[RootId],
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
@@ -754,10 +757,13 @@ fn reachable_trait_impl_surface_dependencies(
                 let Some(self_type) = resolver.resolve_receiver_type(&item_impl.self_ty) else {
                     continue;
                 };
-                if !resolver
-                    .type_ref_candidates(&self_type)
+                let type_ref_candidates = resolver.type_ref_candidates(&self_type);
+                if !type_ref_candidates
                     .iter()
                     .any(|type_ref| type_ref_item_is_reachable(reachable_items, type_ref))
+                    || !type_ref_candidates.iter().any(|type_ref| {
+                        trait_impl_surface_type_is_root_exposed(project, roots, type_ref)
+                    })
                 {
                     continue;
                 }
@@ -803,6 +809,47 @@ fn reachable_trait_impl_surface_dependencies(
         }
     }
     dependencies
+}
+
+fn trait_impl_surface_type_is_root_exposed(
+    project: &Project,
+    roots: &[RootId],
+    type_ref: &TypeRef,
+) -> bool {
+    roots.iter().any(|root| match root {
+        RootId::Item(item) => type_ref_matches_item(type_ref, item),
+        RootId::Callable(callable) => root_callable_exposes_type_ref(project, callable, type_ref),
+    })
+}
+
+fn root_callable_exposes_type_ref(
+    project: &Project,
+    callable: &CallableId,
+    type_ref: &TypeRef,
+) -> bool {
+    if let CallableId::Method {
+        package, type_path, ..
+    } = callable
+    {
+        if package == &type_ref.package && type_path == &type_ref.type_path {
+            return true;
+        }
+    }
+
+    let Some(type_name) = type_ref.type_path.last() else {
+        return false;
+    };
+    project.functions.get(callable).is_some_and(|record| {
+        token_stream_mentions_ident(&record.item.sig.to_token_stream(), type_name)
+    }) || project.methods.get(callable).is_some_and(|record| {
+        token_stream_mentions_ident(&record.item.sig.to_token_stream(), type_name)
+    })
+}
+
+fn type_ref_matches_item(type_ref: &TypeRef, item: &ItemId) -> bool {
+    item.package == type_ref.package
+        && item.kind != ItemKind::Mod
+        && path_from_item(item) == type_ref.type_path
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -3721,6 +3768,12 @@ fn collect_reachable_package_item_dependency_path_prefixes(
         collect_dependency_path_prefixes(&record.item.to_token_stream(), prefixes);
         return;
     };
+    let item_id = ItemId {
+        package: record.package.clone(),
+        module_path: record.module_path.clone(),
+        name: item_struct.ident.to_string(),
+        kind: ItemKind::Struct,
+    };
 
     collect_dependency_path_prefixes(&item_struct.vis.to_token_stream(), prefixes);
     collect_dependency_path_prefixes(&item_struct.generics.to_token_stream(), prefixes);
@@ -3732,7 +3785,7 @@ fn collect_reachable_package_item_dependency_path_prefixes(
         if struct_field_source_mentions_should_remain(
             project,
             reachable,
-            &record.package,
+            &item_id,
             field,
             callable_idents_by_package,
         ) {
@@ -3867,7 +3920,7 @@ fn collect_reachable_package_item_idents(
         if struct_field_source_mentions_should_remain(
             project,
             reachable,
-            &record.package,
+            item,
             field,
             callable_idents_by_package,
         ) {
@@ -3892,14 +3945,14 @@ fn collect_item_mod_surface_idents(
 fn struct_field_source_mentions_should_remain(
     project: &Project,
     reachable: &BTreeSet<CallableId>,
-    package: &str,
+    item: &ItemId,
     field: &Field,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
 ) -> bool {
     struct_field_reachable_dependency_should_remain_with_callable_index(
         project,
         reachable,
-        package,
+        item,
         field,
         callable_idents_by_package,
     )
@@ -3912,9 +3965,9 @@ fn struct_field_static_surface_dependency_should_remain(field: &Field) -> bool {
 }
 
 fn struct_field_reachable_dependency_should_remain_with_callable_index(
-    _project: &Project,
-    _reachable: &BTreeSet<CallableId>,
-    package: &str,
+    project: &Project,
+    reachable: &BTreeSet<CallableId>,
+    item: &ItemId,
     field: &Field,
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
 ) -> bool {
@@ -3924,9 +3977,284 @@ fn struct_field_reachable_dependency_should_remain_with_callable_index(
     let Some(name) = field.ident.as_ref() else {
         return true;
     };
-    callable_idents_by_package
-        .get(package)
-        .is_some_and(|idents| idents.contains(&name.to_string()))
+    let name = name.to_string();
+    if !callable_idents_by_package
+        .get(item.package())
+        .is_some_and(|idents| idents.contains(&name))
+    {
+        return false;
+    }
+    if reachable.len() > EXACT_STRUCT_FIELD_DEPENDENCY_SCAN_CALLABLE_BUDGET {
+        return true;
+    }
+    reachable
+        .iter()
+        .filter(|callable| callable.package() == item.package())
+        .any(|callable| callable_needs_struct_field_dependency(project, callable, item, &name))
+}
+
+fn callable_needs_struct_field_dependency(
+    project: &Project,
+    callable: &CallableId,
+    item: &ItemId,
+    field_name: &str,
+) -> bool {
+    if let Some(record) = project.functions.get(callable) {
+        return block_needs_struct_field_dependency(
+            project,
+            &record.package,
+            &record.module_path,
+            &record.aliases,
+            &record.item.block,
+            item,
+            field_name,
+            false,
+        );
+    }
+    let Some(record) = project.methods.get(callable) else {
+        return false;
+    };
+    let (package, type_path) = match callable {
+        CallableId::Method {
+            package, type_path, ..
+        } => (package.as_str(), type_path.as_slice()),
+        CallableId::Free { .. } => return false,
+    };
+    let self_targets_item = package == item.package() && type_path == path_from_item(item);
+    block_needs_struct_field_dependency(
+        project,
+        package,
+        &record.module_path,
+        &record.aliases,
+        &record.item.block,
+        item,
+        field_name,
+        self_targets_item,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn block_needs_struct_field_dependency(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    block: &syn::Block,
+    item: &ItemId,
+    field_name: &str,
+    self_targets_item: bool,
+) -> bool {
+    let resolver = Resolver {
+        project,
+        package,
+        module_path,
+        aliases,
+        self_type: None,
+    };
+    let mut visitor = StructFieldDependencyUseVisitor {
+        resolver,
+        target_item: item,
+        field_name,
+        self_targets_item,
+        needs_field: false,
+    };
+    visitor.visit_block(block);
+    visitor.needs_field
+}
+
+struct StructFieldDependencyUseVisitor<'a> {
+    resolver: Resolver<'a>,
+    target_item: &'a ItemId,
+    field_name: &'a str,
+    self_targets_item: bool,
+    needs_field: bool,
+}
+
+impl StructFieldDependencyUseVisitor<'_> {
+    fn path_targets_item(&self, path: &Path) -> bool {
+        if self.self_targets_item && path_is_self_type(path) {
+            return true;
+        }
+        self.resolver
+            .resolve_type_path(path)
+            .and_then(|type_ref| {
+                self.resolver
+                    .find_item(&type_ref.package, &type_ref.type_path, &[ItemKind::Struct])
+            })
+            .as_ref()
+            == Some(self.target_item)
+    }
+
+    fn path_is_unresolved_type(&self, path: &Path) -> bool {
+        !(self.self_targets_item && path_is_self_type(path))
+            && self.resolver.resolve_type_path(path).is_none()
+    }
+}
+
+impl Visit<'_> for StructFieldDependencyUseVisitor<'_> {
+    fn visit_expr_field(&mut self, field: &syn::ExprField) {
+        if member_name(&field.member).as_deref() == Some(self.field_name) {
+            self.needs_field = true;
+        }
+        visit::visit_expr_field(self, field);
+    }
+
+    fn visit_pat_struct(&mut self, pattern: &syn::PatStruct) {
+        let targets_item = self.path_targets_item(&pattern.path);
+        let unresolved_type = !targets_item && self.path_is_unresolved_type(&pattern.path);
+        if (targets_item || unresolved_type)
+            && pattern
+                .fields
+                .iter()
+                .any(|field| member_name(&field.member).as_deref() == Some(self.field_name))
+        {
+            self.needs_field = true;
+        }
+        visit::visit_pat_struct(self, pattern);
+    }
+
+    fn visit_expr_struct(&mut self, expr: &ExprStruct) {
+        let targets_item = self.path_targets_item(&expr.path);
+        let unresolved_type = !targets_item && self.path_is_unresolved_type(&expr.path);
+        for field in &expr.fields {
+            if (targets_item || unresolved_type)
+                && member_name(&field.member).as_deref() == Some(self.field_name)
+                && !struct_literal_initializer_can_be_pruned_for_dependency(
+                    &field.expr,
+                    Some(self.resolver.aliases),
+                )
+            {
+                self.needs_field = true;
+            }
+            self.visit_expr(&field.expr);
+        }
+        if let Some(rest) = &expr.rest {
+            self.visit_expr(rest);
+        }
+    }
+
+    fn visit_macro(&mut self, mac: &Macro) {
+        if token_stream_mentions_ident(&mac.tokens, self.field_name) {
+            self.needs_field = true;
+        }
+        visit::visit_macro(self, mac);
+    }
+}
+
+fn member_name(member: &Member) -> Option<String> {
+    match member {
+        Member::Named(ident) => Some(ident.to_string()),
+        Member::Unnamed(_) => None,
+    }
+}
+
+fn path_is_self_type(path: &Path) -> bool {
+    path.segments.len() == 1 && path.segments[0].ident == "Self"
+}
+
+fn struct_literal_initializer_can_be_pruned_for_dependency(
+    expr: &Expr,
+    aliases: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
+    match expr {
+        Expr::Path(path) => path.qself.is_none() && path.path.is_ident("None"),
+        Expr::Lit(_) => true,
+        Expr::Array(array) => array.elems.is_empty(),
+        Expr::Tuple(tuple) => tuple.elems.is_empty(),
+        Expr::Call(call) => {
+            let Expr::Path(function) = call.func.as_ref() else {
+                return false;
+            };
+            function.qself.is_none()
+                && pure_std_struct_literal_initializer_path_for_dependency(&function.path, aliases)
+                && call.args.iter().all(|arg| {
+                    struct_literal_initializer_can_be_pruned_for_dependency(arg, aliases)
+                })
+        }
+        _ => false,
+    }
+}
+
+fn pure_std_struct_literal_initializer_path_for_dependency(
+    path: &Path,
+    aliases: Option<&HashMap<String, Vec<String>>>,
+) -> bool {
+    let segments = path_segments(path);
+    let segments = aliases
+        .map(|aliases| apply_alias_for_dependency_scan(segments.clone(), aliases))
+        .unwrap_or(segments);
+    let Some(last) = segments.last() else {
+        return false;
+    };
+    (path_segments_match(&segments, &["std", "borrow", "Cow"])
+        || path_segments_match(&segments, &["alloc", "borrow", "Cow"]))
+        && matches!(last.as_str(), "Borrowed" | "Owned")
+        || (path_segments_match(&segments, &["std", "time", "Duration"])
+            || path_segments_match(&segments, &["core", "time", "Duration"]))
+            && matches!(
+                last.as_str(),
+                "from_secs" | "from_millis" | "from_micros" | "from_nanos"
+            )
+        || last == "new" && pure_empty_std_constructor_path(&segments)
+        || last == "default" && pure_default_constructor_path(&segments)
+}
+
+fn pure_empty_std_constructor_path(segments: &[String]) -> bool {
+    [
+        &["String"][..],
+        &["std", "string", "String"],
+        &["alloc", "string", "String"],
+        &["Vec"],
+        &["std", "vec", "Vec"],
+        &["alloc", "vec", "Vec"],
+        &["VecDeque"],
+        &["std", "collections", "VecDeque"],
+        &["HashMap"],
+        &["std", "collections", "HashMap"],
+        &["BTreeMap"],
+        &["std", "collections", "BTreeMap"],
+        &["HashSet"],
+        &["std", "collections", "HashSet"],
+        &["BTreeSet"],
+        &["std", "collections", "BTreeSet"],
+        &["BinaryHeap"],
+        &["std", "collections", "BinaryHeap"],
+        &["PathBuf"],
+        &["std", "path", "PathBuf"],
+        &["OsString"],
+        &["std", "ffi", "OsString"],
+    ]
+    .iter()
+    .any(|prefix| path_segments_match(segments, prefix))
+}
+
+fn pure_default_constructor_path(segments: &[String]) -> bool {
+    path_segments_match(segments, &["Default"])
+        || path_segments_match(segments, &["std", "default", "Default"])
+        || path_segments_match(segments, &["core", "default", "Default"])
+}
+
+fn path_segments_match(segments: &[String], prefix: &[&str]) -> bool {
+    segments.len() == prefix.len() + 1
+        && segments
+            .iter()
+            .zip(prefix.iter())
+            .all(|(left, right)| left == right)
+}
+
+fn apply_alias_for_dependency_scan(
+    mut segments: Vec<String>,
+    aliases: &HashMap<String, Vec<String>>,
+) -> Vec<String> {
+    let Some(first) = segments.first() else {
+        return segments;
+    };
+    let Some(target) = aliases.get(first) else {
+        return segments;
+    };
+    let mut resolved = target.clone();
+    resolved.extend(segments.drain(1..));
+    resolved
 }
 
 fn field_attrs_require_field(field: &Field) -> bool {
@@ -4212,6 +4540,7 @@ fn reachable_macro_impl_surface_dependencies(
     reachable_items: &BTreeSet<ItemId>,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
+    let root_signature_items = root_callable_signature_items(project, roots);
     for item in reachable_items.iter().filter(|item| {
         candidate_packages.contains(item.package())
             && matches!(
@@ -4219,12 +4548,42 @@ fn reachable_macro_impl_surface_dependencies(
                 ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type
             )
     }) {
-        if !item_is_root(roots, item) {
+        if !item_is_root(roots, item) && !root_signature_items.contains(item) {
             continue;
         }
         dependencies.extend(item_root_macro_impl_dependencies(project, item));
     }
     dependencies
+}
+
+fn root_callable_signature_items(project: &Project, roots: &[RootId]) -> BTreeSet<ItemId> {
+    let mut items = BTreeSet::new();
+    for root in roots {
+        let RootId::Callable(callable) = root else {
+            continue;
+        };
+        if !callable_has_opensourced_attr(project, callable) {
+            continue;
+        }
+        items.extend(callable_signature_dependency_items(project, callable).items);
+    }
+    items
+}
+
+fn callable_has_opensourced_attr(project: &Project, callable: &CallableId) -> bool {
+    project.functions.get(callable).is_some_and(|record| {
+        record
+            .item
+            .attrs
+            .iter()
+            .any(|attribute| is_opensourced_attr(attribute.path()))
+    }) || project.methods.get(callable).is_some_and(|record| {
+        record
+            .item
+            .attrs
+            .iter()
+            .any(|attribute| is_opensourced_attr(attribute.path()))
+    })
 }
 
 fn item_is_root(roots: &[RootId], item: &ItemId) -> bool {
@@ -4324,7 +4683,7 @@ fn reachable_struct_field_dependencies(
             if !struct_field_reachable_dependency_should_remain_with_callable_index(
                 project,
                 reachable,
-                &record.package,
+                item,
                 field,
                 &callable_idents_by_package,
             ) {
@@ -4797,7 +5156,6 @@ impl<'a> DependencyVisitor<'a> {
         field: &Field,
     ) {
         self.add_derive_field_trait_dependencies_for_field(&item_struct.attrs, field);
-        self.add_generic_field_type_trait_dependencies_for_field(field);
         self.add_serde_default_field_dependencies_for_field(field);
         self.visit_field(field);
     }
@@ -5267,6 +5625,15 @@ impl<'a> DependencyVisitor<'a> {
             }
         } else {
             self.add_call_path(&path.path);
+        }
+    }
+
+    fn add_associated_const_trait_dependencies(&mut self, path: &ExprPath) {
+        if path.qself.is_some() {
+            return;
+        }
+        for trait_item in self.resolver.resolve_associated_const_traits(&path.path) {
+            self.dependencies.items.insert(trait_item);
         }
     }
 
@@ -5945,7 +6312,33 @@ impl<'a> DependencyVisitor<'a> {
         if call.method == "get_mut" && call.args.is_empty() {
             return self.single_expression_type_argument(&call.receiver);
         }
-        if matches!(call.method.to_string().as_str(), "as_ref" | "clone") {
+        if matches!(
+            call.method.to_string().as_str(),
+            "as_ref"
+                | "as_mut"
+                | "get_ref"
+                | "get_or_init"
+                | "to_mut"
+                | "into_owned"
+                | "assume_init"
+        ) {
+            if call.method == "get_or_init" {
+                if let Some(Expr::Closure(closure)) = call.args.first() {
+                    if let Some(type_ref) = self.infer_expr_type(&closure.body) {
+                        return Some(type_ref);
+                    }
+                }
+            }
+            return self
+                .single_expression_type_argument(&call.receiver)
+                .or_else(|| self.receiver_type(&call.receiver));
+        }
+        if call.method == "into_inner" && call.args.is_empty() {
+            return self
+                .single_expression_type_argument(&call.receiver)
+                .or_else(|| self.receiver_type(&call.receiver));
+        }
+        if call.method == "clone" {
             return self.receiver_type(&call.receiver);
         }
         if call.method == "lock" && call.args.is_empty() {
@@ -5969,6 +6362,15 @@ impl<'a> DependencyVisitor<'a> {
                 | "unwrap_or_default"
                 | "unwrap_or_else"
         ) {
+            if let Expr::MethodCall(receiver_call) = call.receiver.as_ref() {
+                if receiver_call.method == "into_inner" && receiver_call.args.is_empty() {
+                    if let Some(type_ref) =
+                        self.single_expression_type_argument(&receiver_call.receiver)
+                    {
+                        return Some(type_ref);
+                    }
+                }
+            }
             return self.expression_result_ok_type(&call.receiver).or_else(|| {
                 self.expression_type_arguments(&call.receiver)
                     .first()
@@ -6136,7 +6538,7 @@ impl<'a> DependencyVisitor<'a> {
                         .nth(1)
                         .and_then(|argument| self.infer_expr_type(argument))
                 }),
-            "try_unwrap" | "into_inner" | "unwrap_or_clone" | "from_raw" | "into_raw"
+            "try_unwrap" | "into_inner" | "unwrap_or_clone" | "from_raw" | "into_raw" | "leak"
             | "make_mut" | "pin" | "from" => call
                 .args
                 .first()
@@ -6975,6 +7377,28 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_unique_visible_method_name_dependency(&mut self, method_name: &str) {
+        let mut matches = self
+            .resolver
+            .project
+            .methods
+            .keys()
+            .filter(|callable| {
+                self.visible_packages.contains(callable.package())
+                    && matches!(
+                        callable,
+                        CallableId::Method { method, .. } if method == method_name
+                    )
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.dedup();
+        if matches.len() == 1 {
+            self.add_method_dependency(&matches[0]);
+        }
+    }
+
     fn add_peer_trait_impls_for_resolved_methods(&mut self, resolved_methods: &[CallableId]) {
         let resolved_traits = resolved_methods
             .iter()
@@ -7221,18 +7645,6 @@ impl<'a> DependencyVisitor<'a> {
                     self.add_trait_impls_for_type_named(&type_ref, "Display");
                 }
             }
-        }
-    }
-
-    fn add_generic_field_type_trait_dependencies(&mut self, fields: &syn::Fields) {
-        for field in fields.iter() {
-            self.add_generic_field_type_trait_dependencies_for_field(field);
-        }
-    }
-
-    fn add_generic_field_type_trait_dependencies_for_field(&mut self, field: &Field) {
-        for type_ref in self.resolver.type_argument_refs_in_type(&field.ty) {
-            self.add_non_conversion_trait_impls_for_type(&type_ref);
         }
     }
 
@@ -7773,6 +8185,25 @@ impl<'a> DependencyVisitor<'a> {
                     .or_else(|| self.known_associated_return_type(call))
             }
             Expr::MethodCall(call) => {
+                if matches!(
+                    call.method.to_string().as_str(),
+                    "and_then" | "filter_map" | "find_map"
+                ) {
+                    if let Some(type_ref) = self.single_payload_closure_method_result_ok_type(call)
+                    {
+                        return Some(type_ref);
+                    }
+                    if let Some(Expr::Closure(closure)) = call.args.first() {
+                        return self
+                            .expression_result_ok_type(&closure.body)
+                            .or_else(|| self.infer_expr_type(&closure.body));
+                    }
+                }
+                if call.method == "map" {
+                    if let Some(Expr::Closure(closure)) = call.args.first() {
+                        return self.infer_expr_type(&closure.body);
+                    }
+                }
                 if call.method == "collect" {
                     if let Some(ok_type) = self.collect_turbofish_result_ok_type(call) {
                         return Some(ok_type);
@@ -7922,6 +8353,7 @@ impl<'a> DependencyVisitor<'a> {
 
     fn single_expression_type_argument(&self, expression: &Expr) -> Option<TypeRef> {
         let mut type_arguments = self.expression_type_arguments(expression);
+        dedup_type_refs_preserve_order(&mut type_arguments);
         (type_arguments.len() == 1).then(|| type_arguments.remove(0))
     }
 
@@ -9041,6 +9473,66 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn single_payload_closure_method_result_ok_type(
+        &self,
+        call: &ExprMethodCall,
+    ) -> Option<TypeRef> {
+        let Some(Expr::Closure(closure)) = call.args.first() else {
+            return None;
+        };
+        let first_input = closure.inputs.first()?;
+        let input_name = match first_input {
+            Pat::Ident(ident) => ident.ident.to_string(),
+            Pat::Type(pat_type) => match pat_type.pat.as_ref() {
+                Pat::Ident(ident) => ident.ident.to_string(),
+                _ => return None,
+            },
+            Pat::Reference(reference) => match reference.pat.as_ref() {
+                Pat::Ident(ident) => ident.ident.to_string(),
+                _ => return None,
+            },
+            _ => return None,
+        };
+        let Expr::MethodCall(body_call) = closure.body.as_ref() else {
+            return None;
+        };
+        let Expr::Path(receiver_path) = body_call.receiver.as_ref() else {
+            return None;
+        };
+        if receiver_path.path.segments.len() != 1
+            || receiver_path.path.segments.first()?.ident.to_string() != input_name
+        {
+            return None;
+        }
+        if let Some(payload_type) = self.single_payload_closure_method_type(call) {
+            if let Some(type_ref) = self
+                .resolver
+                .resolve_methods(&payload_type, &body_call.method.to_string())
+                .iter()
+                .find_map(|callable| self.resolver.return_ok_type_from_callable(callable))
+            {
+                return Some(type_ref);
+            }
+        }
+        let mut matches = self
+            .resolver
+            .project
+            .methods
+            .keys()
+            .filter(|callable| {
+                self.visible_packages.contains(callable.package())
+                    && matches!(
+                        callable,
+                        CallableId::Method { method, .. } if method == &body_call.method.to_string()
+                    )
+            })
+            .filter_map(|callable| self.resolver.return_ok_type_from_callable(callable))
+            .collect::<Vec<_>>();
+        matches.sort();
+        matches.dedup();
+        (matches.len() == 1).then(|| matches.remove(0))
+    }
+
     fn single_payload_closure_error_type(&self, call: &ExprMethodCall) -> Option<TypeRef> {
         let Some(Expr::Closure(closure)) = call.args.first() else {
             return None;
@@ -9510,7 +10002,6 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
 
     fn visit_item_struct(&mut self, item: &'ast syn::ItemStruct) {
         self.add_derive_field_trait_dependencies(&item.attrs, &item.fields);
-        self.add_generic_field_type_trait_dependencies(&item.fields);
         self.add_serde_default_field_dependencies(&item.fields);
         visit::visit_item_struct(self, item);
     }
@@ -9519,7 +10010,6 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
         let derive_traits = derive_trait_names(&item.attrs);
         for variant in &item.variants {
             self.add_derive_field_trait_dependencies(&variant.attrs, &variant.fields);
-            self.add_generic_field_type_trait_dependencies(&variant.fields);
             self.add_serde_default_field_dependencies(&variant.fields);
             for field in variant.fields.iter() {
                 for type_ref in self.resolver.type_refs_in_type(&field.ty) {
@@ -9570,6 +10060,23 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
     }
 
     fn visit_expr_method_call(&mut self, call: &'ast ExprMethodCall) {
+        if call.method == "set" && call.args.len() == 1 {
+            if let Expr::Path(receiver_path) = call.receiver.as_ref() {
+                if receiver_path.path.segments.len() == 1 {
+                    if let (Some(name), Some(type_ref)) = (
+                        receiver_path.path.segments.first(),
+                        call.args.first().and_then(|arg| self.infer_expr_type(arg)),
+                    ) {
+                        let entry = self
+                            .variable_type_arguments
+                            .entry(name.ident.to_string())
+                            .or_default();
+                        entry.push(type_ref);
+                        dedup_type_refs_preserve_order(entry);
+                    }
+                }
+            }
+        }
         if call.method == "or_default" {
             if let Some(value_type) = self.expression_entry_value_type(&call.receiver) {
                 self.add_trait_impls_for_type_named(&value_type, "Default");
@@ -9653,6 +10160,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                     &receiver_candidates,
                     Some(call.method.span().start().line),
                 );
+                if method == "as_str" {
+                    self.add_unique_visible_method_name_dependency(&method);
+                }
                 self.add_trait_impls_for_type_named(&receiver, "Deref");
                 self.add_trait_impls_for_type_named(&receiver, "DerefMut");
                 self.add_extension_trait_dependencies_for_method(&receiver, &method);
@@ -9687,6 +10197,29 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_parse_method_trait_dependencies();
             } else if call.method == "collect" {
                 self.add_collect_method_trait_dependencies();
+            }
+        } else if !receiver_candidates.is_empty()
+            && !matches!(call.method.to_string().as_str(), "into" | "try_into")
+        {
+            let method = call.method.to_string();
+            let mut resolved_methods = receiver_candidates
+                .iter()
+                .flat_map(|candidate| self.resolver.resolve_methods(candidate, &method))
+                .collect::<Vec<_>>();
+            resolved_methods.sort();
+            resolved_methods.dedup();
+            for callable in &resolved_methods {
+                self.add_method_dependency(callable);
+            }
+            if !resolved_methods.is_empty() {
+                self.add_peer_trait_impls_for_resolved_methods(&resolved_methods);
+                self.add_closure_arg_dependencies(call, &resolved_methods);
+            } else {
+                self.add_unresolved_method_candidates(
+                    &method,
+                    &receiver_candidates,
+                    Some(call.method.span().start().line),
+                );
             }
         } else if call.method == "into" {
             let found_exact =
@@ -9727,6 +10260,9 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             self.add_collect_method_trait_dependencies();
         } else {
             let method = call.method.to_string();
+            if method == "as_str" {
+                self.add_unique_visible_method_name_dependency(&method);
+            }
             if !self.add_trait_bound_method_dependencies(&call.receiver, &method) {
                 self.add_unresolved_method_candidates(
                     &method,
@@ -9826,6 +10362,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             return;
         }
         self.add_expr_path_call(path);
+        self.add_associated_const_trait_dependencies(path);
         if path.qself.is_none() {
             if is_conversion_adapter_path(&path.path, "Into", "into")
                 && !self.conversion_adapter_path_fallback_is_suppressed(&path.path)
@@ -10466,6 +11003,74 @@ impl Resolver<'_> {
         };
 
         self.resolve_methods(&receiver, &method).into_iter().next()
+    }
+
+    fn resolve_associated_const_traits(&self, path: &Path) -> Vec<ItemId> {
+        let segments = self.apply_alias(path_segments(path));
+        if segments.len() < 2 {
+            return Vec::new();
+        }
+        let Some(associated_const) = segments.last() else {
+            return Vec::new();
+        };
+        let receiver_segments = &segments[..segments.len() - 1];
+        let receiver = if receiver_segments.len() == 1 && receiver_segments[0] == "Self" {
+            match &self.self_type {
+                Some(self_type) => self_type.clone(),
+                None => return Vec::new(),
+            }
+        } else {
+            match self.resolve_type_segments(receiver_segments) {
+                Some(receiver) => receiver,
+                None => return Vec::new(),
+            }
+        };
+
+        let mut traits = BTreeSet::new();
+        for module_path in project_module_paths(self.project, &receiver.package) {
+            let Some(items) = module_items_for_path(self.project, &receiver.package, &module_path)
+            else {
+                continue;
+            };
+            let aliases = self
+                .project
+                .module_aliases
+                .get(&(receiver.package.clone(), module_path.clone()))
+                .cloned()
+                .unwrap_or_default();
+            let resolver = Resolver {
+                project: self.project,
+                package: &receiver.package,
+                module_path: &module_path,
+                aliases: &aliases,
+                self_type: None,
+            };
+            for item in items {
+                let Item::Impl(item_impl) = item else {
+                    continue;
+                };
+                if item_impl.trait_.is_none() {
+                    continue;
+                }
+                let Some(self_type) = resolver.resolve_receiver_type(&item_impl.self_ty) else {
+                    continue;
+                };
+                if self_type.package != receiver.package
+                    || self_type.type_path != receiver.type_path
+                {
+                    continue;
+                }
+                if !item_impl.items.iter().any(|impl_item| {
+                    matches!(impl_item, ImplItem::Const(item) if item.ident == associated_const)
+                }) {
+                    continue;
+                }
+                if let Some(trait_item) = trait_item_for_impl(&resolver, item_impl) {
+                    traits.insert(trait_item);
+                }
+            }
+        }
+        traits.into_iter().collect()
     }
 
     fn resolve_qself_call(&self, path: &ExprPath) -> Vec<CallableId> {
@@ -13111,6 +13716,7 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
             | "unwrap_or_clone"
             | "from_raw"
             | "into_raw"
+            | "leak"
             | "make_mut"
             | "pin"
             | "from"
@@ -13207,6 +13813,14 @@ fn known_associated_return_function(path: &Path) -> Option<String> {
         }
         ([wrapper], "pin") if wrapper == "Box" => Some(function.clone()),
         ([root, module, wrapper], "pin")
+            if matches!(root.as_str(), "std" | "alloc")
+                && module == "boxed"
+                && wrapper == "Box" =>
+        {
+            Some(function.clone())
+        }
+        ([wrapper], "leak") if wrapper == "Box" => Some(function.clone()),
+        ([root, module, wrapper], "leak")
             if matches!(root.as_str(), "std" | "alloc")
                 && module == "boxed"
                 && wrapper == "Box" =>

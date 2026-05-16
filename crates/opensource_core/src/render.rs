@@ -30,6 +30,8 @@ use crate::{
 
 const OUTPUT_MARKER: &str = ".slicers-output";
 const SUPPORT_PACKAGE_DIR: &str = "support";
+const EXACT_CONCRETE_FIELD_SCAN_CALLABLE_BUDGET: usize = 64;
+const EXACT_CONCRETE_FIELD_SCAN_ITEM_BUDGET: usize = 256;
 
 type RootMacroImplAssocFunctionCalls = BTreeSet<(String, String, String)>;
 
@@ -60,6 +62,8 @@ struct RenderPlan {
         RefCell<BTreeMap<(String, Vec<String>), BTreeSet<String>>>,
     import_scope_mentions: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
     import_scope_uses: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
+    callable_import_idents: RefCell<BTreeMap<CallableId, BTreeSet<String>>>,
+    rendered_non_callable_import_idents: RefCell<BTreeMap<(String, Vec<String>), BTreeSet<String>>>,
 }
 
 struct RenderPrepass {
@@ -236,6 +240,8 @@ impl RenderPlan {
             retained_impl_header_unqualified_idents: RefCell::new(BTreeMap::new()),
             import_scope_mentions: RefCell::new(BTreeMap::new()),
             import_scope_uses: RefCell::new(BTreeMap::new()),
+            callable_import_idents: RefCell::new(BTreeMap::new()),
+            rendered_non_callable_import_idents: RefCell::new(BTreeMap::new()),
         };
         plan.mentions = ReachableMentionIndex::build(
             project,
@@ -9213,17 +9219,15 @@ fn collect_struct_surface_idents_for_mention_index(
     match &item_struct.fields {
         syn::Fields::Named(fields) => {
             for field in &fields.named {
-                if render_plan.is_none_or(|render_plan| {
-                    struct_field_should_remain(
-                        project,
-                        reduced,
-                        Some(render_plan),
-                        &item_id.package,
-                        &item_id.module_path,
-                        item_struct,
-                        field,
-                    )
-                }) {
+                if struct_field_should_remain(
+                    project,
+                    reduced,
+                    render_plan,
+                    &item_id.package,
+                    &item_id.module_path,
+                    item_struct,
+                    field,
+                ) {
                     collect_token_idents(&field.to_token_stream(), idents);
                 }
             }
@@ -17067,6 +17071,7 @@ fn retained_macro_invocations_mention_unqualified_ident(
 fn retained_macro_definitions_mention_unqualified_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     module_path: &[String],
     ident: &str,
@@ -17082,8 +17087,17 @@ fn retained_macro_definitions_mention_unqualified_ident(
         let Some(name) = item_macro_definition_name(item_macro) else {
             return false;
         };
-        (reachable_module_mentions_ident(project, reduced, package, module_path, &name)
-            || reachable_package_mentions_ident(project, reduced, package, &name))
+        let definition_is_reachable = render_plan.map_or_else(
+            || {
+                reachable_module_mentions_ident(project, reduced, package, module_path, &name)
+                    || reachable_package_mentions_ident(project, reduced, package, &name)
+            },
+            |render_plan| {
+                render_plan.module_mentions_ident(package, module_path, &name)
+                    || render_plan.package_mentions_ident(package, &name)
+            },
+        );
+        definition_is_reachable
             && token_stream_mentions_unqualified_ident(&item_macro.mac.tokens, ident)
     })
 }
@@ -18705,6 +18719,7 @@ fn reachable_module_mentions_unqualified_ident(
         || retained_macro_definitions_mention_unqualified_ident(
             project,
             reduced,
+            None,
             package,
             module_path,
             ident,
@@ -21253,6 +21268,36 @@ fn reachable_callables_need_concrete_struct_field(
             return cached;
         }
     }
+    if concrete_struct_field_scan_exceeds_budget(reduced) {
+        let result = reduced
+            .reachable
+            .iter()
+            .filter(|callable| {
+                render_plan.is_none_or(|render_plan| render_plan.callable_should_render(callable))
+            })
+            .any(|callable| {
+                callable_token_idents_mention_field(
+                    project,
+                    render_plan,
+                    prepass,
+                    callable,
+                    field_name,
+                )
+            });
+        if let Some(render_plan) = render_plan {
+            render_plan
+                .concrete_struct_field_needs
+                .borrow_mut()
+                .insert(cache_key.clone(), result);
+        }
+        if let Some(prepass) = prepass {
+            prepass
+                .concrete_struct_field_needs
+                .borrow_mut()
+                .insert(cache_key, result);
+        }
+        return result;
+    }
     let result = reduced
         .reachable
         .iter()
@@ -21279,6 +21324,11 @@ fn reachable_callables_need_concrete_struct_field(
             .insert(cache_key, result);
     }
     result
+}
+
+fn concrete_struct_field_scan_exceeds_budget(reduced: &ReducedProject) -> bool {
+    reduced.reachable.len() > EXACT_CONCRETE_FIELD_SCAN_CALLABLE_BUDGET
+        || reduced.reachable_items.len() > EXACT_CONCRETE_FIELD_SCAN_ITEM_BUDGET
 }
 
 fn callable_token_idents_mention_field(
@@ -25471,6 +25521,7 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
         || retained_macro_definitions_mention_unqualified_ident(
             project,
             reduced,
+            Some(render_plan),
             package,
             module_path,
             ident,
@@ -25625,34 +25676,16 @@ fn reachable_module_uses_imported_ident(
         .iter()
         .filter(|callable| callable.package() == package)
         .any(|callable| {
-            project.functions.get(callable).is_some_and(|record| {
-                record.module_path == module_path
-                    && function_uses_imported_ident(
-                        project,
-                        reduced,
-                        render_plan,
-                        package,
-                        module_path,
-                        &record.item,
-                        ident,
-                    )
-            }) || project.methods.get(callable).is_some_and(|record| {
-                let current_type_path = match callable {
-                    CallableId::Method { type_path, .. } => Some(type_path.as_slice()),
-                    CallableId::Free { .. } => None,
-                };
-                record.module_path == module_path
-                    && method_uses_imported_ident(
-                        project,
-                        reduced,
-                        render_plan,
-                        package,
-                        module_path,
-                        current_type_path,
-                        &record.item,
-                        ident,
-                    )
-            })
+            let in_module = project
+                .functions
+                .get(callable)
+                .is_some_and(|record| record.module_path == module_path)
+                || project
+                    .methods
+                    .get(callable)
+                    .is_some_and(|record| record.module_path == module_path);
+            in_module
+                && callable_uses_imported_ident(project, reduced, render_plan, callable, ident)
         })
     {
         return true;
@@ -25710,12 +25743,44 @@ fn rendered_non_callable_items_use_imported_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
+    let key = (package.to_string(), module_path.to_vec());
+    if let Some(cached) = render_plan
+        .rendered_non_callable_import_idents
+        .borrow()
+        .get(&key)
+    {
+        return cached.contains(ident);
+    }
+
+    let idents = collect_rendered_non_callable_import_idents(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+    );
+    let result = idents.contains(ident);
+    render_plan
+        .rendered_non_callable_import_idents
+        .borrow_mut()
+        .insert(key, idents);
+    result
+}
+
+fn collect_rendered_non_callable_import_idents(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+) -> BTreeSet<String> {
     let Some(items) = module_items_for_path(project, package, module_path) else {
-        return false;
+        return BTreeSet::new();
     };
     let preserve_uniffi_surface = package_preserves_uniffi_surface(project, reduced, package);
 
-    items.iter().any(|item| {
+    let mut idents = BTreeSet::new();
+    for item in items {
         let Some(rendered_item) = rendered_non_callable_import_scan_item(
             project,
             reduced,
@@ -25725,12 +25790,13 @@ fn rendered_non_callable_items_use_imported_ident(
             item,
             preserve_uniffi_surface,
         ) else {
-            return false;
+            continue;
         };
-        let mut visitor = ImportUsageVisitor::new(ident);
+        let mut visitor = ImportUsageCollector::new();
         visitor.visit_item(&rendered_item);
-        visitor.found
-    })
+        idents.extend(visitor.used_idents);
+    }
+    idents
 }
 
 fn rendered_non_callable_import_scan_item(
@@ -25815,57 +25881,72 @@ fn rendered_non_callable_import_scan_item(
     }
 }
 
-fn function_uses_imported_ident(
+fn callable_uses_imported_ident(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: &RenderPlan,
-    package: &str,
-    module_path: &[String],
-    function: &syn::ItemFn,
+    callable: &CallableId,
     ident: &str,
 ) -> bool {
-    let mut block = function.block.clone();
-    prune_rendered_struct_literal_fields(
-        project,
-        reduced,
-        render_plan,
-        package,
-        module_path,
-        None,
-        &mut block,
-    );
-    let mut visitor = ImportUsageVisitor::new(ident);
-    visitor.push_scope();
-    visitor.visit_signature(&function.sig);
-    visitor.visit_block(&block);
-    visitor.found
+    if let Some(cached) = render_plan.callable_import_idents.borrow().get(callable) {
+        return cached.contains(ident);
+    }
+
+    let idents = collect_callable_import_idents(project, reduced, render_plan, callable);
+    let result = idents.contains(ident);
+    render_plan
+        .callable_import_idents
+        .borrow_mut()
+        .insert(callable.clone(), idents);
+    result
 }
 
-fn method_uses_imported_ident(
+fn collect_callable_import_idents(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: &RenderPlan,
-    package: &str,
-    module_path: &[String],
-    current_type_path: Option<&[String]>,
-    function: &syn::ImplItemFn,
-    ident: &str,
-) -> bool {
-    let mut block = function.block.clone();
+    callable: &CallableId,
+) -> BTreeSet<String> {
+    if let Some(record) = project.functions.get(callable) {
+        let mut block = record.item.block.clone();
+        prune_rendered_struct_literal_fields(
+            project,
+            reduced,
+            render_plan,
+            &record.package,
+            &record.module_path,
+            None,
+            &mut block,
+        );
+        let mut visitor = ImportUsageCollector::new();
+        visitor.push_scope();
+        visitor.visit_signature(&record.item.sig);
+        visitor.visit_block(&block);
+        return visitor.used_idents;
+    }
+
+    let Some(record) = project.methods.get(callable) else {
+        return BTreeSet::new();
+    };
+    let current_type_path = match callable {
+        CallableId::Method { type_path, .. } => Some(type_path.as_slice()),
+        CallableId::Free { .. } => None,
+    };
+    let mut block = record.item.block.clone();
     prune_rendered_struct_literal_fields(
         project,
         reduced,
         render_plan,
-        package,
-        module_path,
+        callable.package(),
+        &record.module_path,
         current_type_path,
         &mut block,
     );
-    let mut visitor = ImportUsageVisitor::new(ident);
+    let mut visitor = ImportUsageCollector::new();
     visitor.push_scope();
-    visitor.visit_signature(&function.sig);
+    visitor.visit_signature(&record.item.sig);
     visitor.visit_block(&block);
-    visitor.found
+    visitor.used_idents
 }
 
 struct ImportUsageVisitor<'a> {
@@ -25904,26 +25985,6 @@ impl<'a> ImportUsageVisitor<'a> {
 
     fn is_value_bound(&self, ident: &str) -> bool {
         self.scopes.iter().rev().any(|scope| scope.contains(ident))
-    }
-
-    fn visit_signature(&mut self, signature: &syn::Signature) {
-        for generic in &signature.generics.params {
-            visit::visit_generic_param(self, generic);
-        }
-        if let Some(where_clause) = &signature.generics.where_clause {
-            visit::visit_where_clause(self, where_clause);
-        }
-        for input in &signature.inputs {
-            match input {
-                syn::FnArg::Receiver(receiver) => visit::visit_receiver(self, receiver),
-                syn::FnArg::Typed(input) => {
-                    self.visit_pat(&input.pat);
-                    self.visit_type(&input.ty);
-                    self.add_bindings_from_pat(&input.pat);
-                }
-            }
-        }
-        visit::visit_return_type(self, &signature.output);
     }
 
     fn path_uses_import(&mut self, path: &syn::Path) {
@@ -26015,6 +26076,148 @@ impl Visit<'_> for ImportUsageVisitor<'_> {
         {
             self.found = true;
         }
+        visit::visit_macro(self, item_macro);
+    }
+}
+
+struct ImportUsageCollector {
+    used_idents: BTreeSet<String>,
+    scopes: Vec<BTreeSet<String>>,
+}
+
+impl ImportUsageCollector {
+    fn new() -> Self {
+        Self {
+            used_idents: BTreeSet::new(),
+            scopes: vec![BTreeSet::new()],
+        }
+    }
+
+    fn push_scope(&mut self) {
+        self.scopes.push(BTreeSet::new());
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+        if self.scopes.is_empty() {
+            self.scopes.push(BTreeSet::new());
+        }
+    }
+
+    fn add_bindings_from_pat(&mut self, pat: &syn::Pat) {
+        let mut bindings = BTreeSet::new();
+        collect_pat_bindings(pat, &mut bindings);
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.extend(bindings);
+        }
+    }
+
+    fn is_value_bound(&self, ident: &str) -> bool {
+        self.scopes.iter().rev().any(|scope| scope.contains(ident))
+    }
+
+    fn visit_signature(&mut self, signature: &syn::Signature) {
+        for generic in &signature.generics.params {
+            visit::visit_generic_param(self, generic);
+        }
+        if let Some(where_clause) = &signature.generics.where_clause {
+            visit::visit_where_clause(self, where_clause);
+        }
+        for input in &signature.inputs {
+            match input {
+                syn::FnArg::Receiver(receiver) => visit::visit_receiver(self, receiver),
+                syn::FnArg::Typed(input) => {
+                    self.visit_pat(&input.pat);
+                    self.visit_type(&input.ty);
+                    self.add_bindings_from_pat(&input.pat);
+                }
+            }
+        }
+        visit::visit_return_type(self, &signature.output);
+    }
+
+    fn collect_path_import(&mut self, path: &syn::Path) {
+        if path.leading_colon.is_some() {
+            return;
+        }
+        let Some(first) = path.segments.first() else {
+            return;
+        };
+        let first = first.ident.to_string();
+        if path.segments.len() > 1 || !self.is_value_bound(&first) {
+            self.used_idents.insert(first);
+        }
+    }
+}
+
+impl Visit<'_> for ImportUsageCollector {
+    fn visit_block(&mut self, block: &syn::Block) {
+        self.push_scope();
+        for statement in &block.stmts {
+            self.visit_stmt(statement);
+        }
+        self.pop_scope();
+    }
+
+    fn visit_stmt(&mut self, statement: &syn::Stmt) {
+        match statement {
+            syn::Stmt::Local(local) => {
+                self.visit_pat(&local.pat);
+                if let Some(init) = &local.init {
+                    self.visit_expr(&init.expr);
+                    if let Some((_else_token, diverge)) = &init.diverge {
+                        self.visit_expr(diverge);
+                    }
+                }
+                self.add_bindings_from_pat(&local.pat);
+            }
+            syn::Stmt::Item(item) => self.visit_item(item),
+            syn::Stmt::Expr(expr, _) => self.visit_expr(expr),
+            syn::Stmt::Macro(item) => self.visit_macro(&item.mac),
+        }
+    }
+
+    fn visit_arm(&mut self, arm: &syn::Arm) {
+        self.visit_pat(&arm.pat);
+        self.push_scope();
+        self.add_bindings_from_pat(&arm.pat);
+        if let Some((_if_token, guard)) = &arm.guard {
+            self.visit_expr(guard);
+        }
+        self.visit_expr(&arm.body);
+        self.pop_scope();
+    }
+
+    fn visit_expr_closure(&mut self, closure: &syn::ExprClosure) {
+        self.push_scope();
+        for input in &closure.inputs {
+            self.visit_pat(input);
+            self.add_bindings_from_pat(input);
+        }
+        visit::visit_return_type(self, &closure.output);
+        self.visit_expr(&closure.body);
+        self.pop_scope();
+    }
+
+    fn visit_expr_for_loop(&mut self, loop_expr: &syn::ExprForLoop) {
+        self.visit_expr(&loop_expr.expr);
+        self.visit_pat(&loop_expr.pat);
+        self.push_scope();
+        self.add_bindings_from_pat(&loop_expr.pat);
+        self.visit_block(&loop_expr.body);
+        self.pop_scope();
+    }
+
+    fn visit_path(&mut self, path: &syn::Path) {
+        self.collect_path_import(path);
+        visit::visit_path(self, path);
+    }
+
+    fn visit_macro(&mut self, item_macro: &syn::Macro) {
+        if let Some(segment) = item_macro.path.segments.first() {
+            self.used_idents.insert(segment.ident.to_string());
+        }
+        collect_token_idents(&item_macro.tokens, &mut self.used_idents);
         visit::visit_macro(self, item_macro);
     }
 }
@@ -26296,34 +26499,16 @@ fn reachable_module_import_scope_uses_public_glob_ident(
         .iter()
         .filter(|callable| callable.package() == package)
         .any(|callable| {
-            project.functions.get(callable).is_some_and(|record| {
-                record.module_path == module_path
-                    && function_uses_imported_ident(
-                        project,
-                        reduced,
-                        render_plan,
-                        package,
-                        module_path,
-                        &record.item,
-                        ident,
-                    )
-            }) || project.methods.get(callable).is_some_and(|record| {
-                let current_type_path = match callable {
-                    CallableId::Method { type_path, .. } => Some(type_path.as_slice()),
-                    CallableId::Free { .. } => None,
-                };
-                record.module_path == module_path
-                    && method_uses_imported_ident(
-                        project,
-                        reduced,
-                        render_plan,
-                        package,
-                        module_path,
-                        current_type_path,
-                        &record.item,
-                        ident,
-                    )
-            })
+            let in_module = project
+                .functions
+                .get(callable)
+                .is_some_and(|record| record.module_path == module_path)
+                || project
+                    .methods
+                    .get(callable)
+                    .is_some_and(|record| record.module_path == module_path);
+            in_module
+                && callable_uses_imported_ident(project, reduced, render_plan, callable, ident)
         })
     {
         return true;
