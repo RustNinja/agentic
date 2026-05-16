@@ -2029,7 +2029,7 @@ mod rust_analyzer {
             return false;
         }
         method_receiver_snippet(snippet, method_name)
-            .is_some_and(|receiver| receiver_is_plain_value_or_field_chain(&receiver))
+            .is_some_and(|receiver| receiver_is_common_external_value_chain(&receiver))
     }
 
     fn method_receiver_snippet(snippet: &str, method_name: &str) -> Option<String> {
@@ -2056,6 +2056,40 @@ mod rust_analyzer {
             && receiver.chars().all(|character| {
                 character.is_ascii_alphanumeric() || matches!(character, '_' | '.')
             })
+    }
+
+    fn receiver_is_common_external_value_chain(receiver: &str) -> bool {
+        let normalized = receiver.replace(" .", ".").replace(". ", "");
+        let mut receiver = normalized.trim();
+        loop {
+            if receiver_is_plain_value_or_field_chain(receiver) {
+                return true;
+            }
+            let Some((stripped, _adapter)) = strip_common_no_arg_receiver_adapter(receiver) else {
+                return false;
+            };
+            receiver = stripped;
+        }
+    }
+
+    fn strip_common_no_arg_receiver_adapter(receiver: &str) -> Option<(&str, &str)> {
+        for adapter in [
+            "as_deref",
+            "as_mut",
+            "as_ref",
+            "as_str",
+            "borrow",
+            "borrow_mut",
+            "trim",
+            "trim_end",
+            "trim_start",
+        ] {
+            let suffix = format!(".{adapter}()");
+            if let Some(stripped) = receiver.strip_suffix(&suffix) {
+                return Some((stripped.trim(), adapter));
+            }
+        }
+        None
     }
 
     fn is_common_external_method_name(name: &str) -> bool {
@@ -3325,6 +3359,14 @@ use crate::local::fmt as local_fmt;
             assert!(unresolved_method_looks_like_common_external_receiver(
                 "len",
                 "prefs.pinned_threads.len()"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "is_empty",
+                "wire.node_id.trim().is_empty()"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "is_empty",
+                "entry.name.as_deref().is_empty()"
             ));
             assert!(unresolved_method_looks_like_common_external_receiver(
                 "parent",

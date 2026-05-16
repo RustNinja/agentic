@@ -7549,6 +7549,104 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_enum_tuple_variant_arg_conversion_impls(&mut self, path: &Path, call: &ExprCall) {
+        let Some(enum_type) = self.resolver.resolve_associated_call_type(path) else {
+            return;
+        };
+        let Some(variant_name) = path
+            .segments
+            .last()
+            .map(|segment| segment.ident.to_string())
+        else {
+            return;
+        };
+
+        for candidate in self.resolver.type_ref_candidates(&enum_type) {
+            let Some((package, module_path, aliases, field_types)) = self
+                .resolver
+                .enum_variant_record(&candidate, &variant_name)
+                .and_then(|(record, variant)| {
+                    let syn::Fields::Unnamed(fields) = &variant.fields else {
+                        return None;
+                    };
+                    Some((
+                        record.package.clone(),
+                        record.module_path.clone(),
+                        record.aliases.clone(),
+                        fields
+                            .unnamed
+                            .iter()
+                            .map(|field| field.ty.clone())
+                            .collect::<Vec<_>>(),
+                    ))
+                })
+            else {
+                continue;
+            };
+            let project = self.resolver.project;
+            let field_resolver = Resolver {
+                project,
+                package: &package,
+                module_path: &module_path,
+                aliases: &aliases,
+                self_type: None,
+            };
+            for (argument, field_type) in call.args.iter().zip(&field_types) {
+                self.add_conversion_impls_to_expected_variant_field(
+                    argument,
+                    field_type,
+                    &field_resolver,
+                    "From",
+                    "from",
+                    "into",
+                );
+                self.add_conversion_impls_to_expected_variant_field(
+                    argument,
+                    field_type,
+                    &field_resolver,
+                    "TryFrom",
+                    "try_from",
+                    "try_into",
+                );
+            }
+            return;
+        }
+    }
+
+    fn add_conversion_impls_to_expected_variant_field(
+        &mut self,
+        argument: &Expr,
+        field_type: &Type,
+        field_resolver: &Resolver<'_>,
+        trait_name: &str,
+        trait_method_name: &str,
+        expression_method_name: &str,
+    ) {
+        if !expression_contains_conversion_adapter(argument, trait_name, expression_method_name) {
+            return;
+        }
+        if let Some(target) = field_resolver.resolve_receiver_type(field_type) {
+            if self.add_conversion_impls_to_expected_type(
+                argument,
+                &target,
+                trait_name,
+                trait_method_name,
+                expression_method_name,
+            ) {
+                return;
+            }
+        }
+        if type_is_known_external_conversion_target(field_type, field_resolver)
+            && expression_conversion_adapter_has_literal_receiver(argument, expression_method_name)
+        {
+            self.suppress_expected_conversion_adapter_fallbacks(
+                argument,
+                trait_name,
+                expression_method_name,
+            );
+        }
+    }
+
     fn add_method_dependency(&mut self, callable: &CallableId) {
         if let CallableId::Method {
             package,
@@ -10090,6 +10188,7 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 }
                 self.add_result_variant_conversion_impls(&path.path, call);
                 self.add_conversion_impls_for_associated_call_arg(&path.path, call);
+                self.add_enum_tuple_variant_arg_conversion_impls(&path.path, call);
             }
         }
         visit::visit_expr_call(self, call);
@@ -10538,7 +10637,11 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             if method == "as_str" {
                 self.add_unique_visible_method_name_dependency(&method);
             }
-            if !self.add_trait_bound_method_dependencies(&call.receiver, &method) {
+            if common_external_receiver_method_call(call) {
+                // The receiver is a plain value/field chain, possibly through a std-like
+                // no-arg adapter such as `trim()`. Avoid retaining unrelated local same-name
+                // methods when type inference has no project-local receiver to anchor on.
+            } else if !self.add_trait_bound_method_dependencies(&call.receiver, &method) {
                 self.add_unresolved_method_candidates(
                     &method,
                     &receiver_candidates,
@@ -14631,6 +14734,142 @@ fn generic_name_only_method_fallback(method_name: &str) -> bool {
             | "unwrap_or_else"
             | "write"
     )
+}
+
+fn common_external_receiver_method_call(call: &ExprMethodCall) -> bool {
+    let method = call.method.to_string();
+    is_common_external_receiver_method_name(&method)
+        && receiver_tokens_are_common_external_value_chain(
+            &call.receiver.to_token_stream().to_string(),
+        )
+}
+
+fn type_is_known_external_conversion_target(ty: &Type, resolver: &Resolver<'_>) -> bool {
+    match ty {
+        Type::Reference(reference) => {
+            type_is_known_external_conversion_target(&reference.elem, resolver)
+        }
+        Type::Group(group) => type_is_known_external_conversion_target(&group.elem, resolver),
+        Type::Paren(paren) => type_is_known_external_conversion_target(&paren.elem, resolver),
+        Type::Path(type_path) => {
+            if resolver.resolve_receiver_type(ty).is_some() {
+                return false;
+            }
+            let segments = path_segments(&type_path.path);
+            let Some(first) = segments.first().map(String::as_str) else {
+                return false;
+            };
+            if matches!(first, "std" | "core" | "alloc")
+                || resolver.package_has_dependency_named(first)
+            {
+                return true;
+            }
+            segments.len() == 1 && is_known_prelude_conversion_target(first)
+        }
+        _ => false,
+    }
+}
+
+fn is_known_prelude_conversion_target(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "Box" | "Cow" | "OsString" | "PathBuf" | "String" | "Vec"
+    )
+}
+
+fn expression_conversion_adapter_has_literal_receiver(
+    expression: &Expr,
+    expression_method_name: &str,
+) -> bool {
+    match expression {
+        Expr::MethodCall(call) if call.method == expression_method_name => {
+            matches!(call.receiver.as_ref(), Expr::Lit(_))
+        }
+        Expr::Reference(reference) => expression_conversion_adapter_has_literal_receiver(
+            &reference.expr,
+            expression_method_name,
+        ),
+        Expr::Paren(paren) => {
+            expression_conversion_adapter_has_literal_receiver(&paren.expr, expression_method_name)
+        }
+        Expr::Group(group) => {
+            expression_conversion_adapter_has_literal_receiver(&group.expr, expression_method_name)
+        }
+        _ => false,
+    }
+}
+
+fn is_common_external_receiver_method_name(method_name: &str) -> bool {
+    matches!(
+        method_name,
+        "as_ref"
+            | "as_mut"
+            | "borrow"
+            | "borrow_mut"
+            | "clone"
+            | "contains"
+            | "get"
+            | "get_mut"
+            | "insert"
+            | "is_empty"
+            | "iter"
+            | "iter_mut"
+            | "join"
+            | "len"
+            | "parent"
+            | "push"
+            | "read"
+            | "remove"
+            | "to_path_buf"
+            | "to_string"
+            | "write"
+    )
+}
+
+fn receiver_tokens_are_common_external_value_chain(receiver: &str) -> bool {
+    let normalized = receiver
+        .replace(' ', "")
+        .trim_start_matches(['&', '*', '('])
+        .trim_end_matches(')')
+        .to_string();
+    let mut receiver = normalized.as_str();
+    loop {
+        if receiver_is_plain_value_or_field_tokens(receiver) {
+            return true;
+        }
+        let Some(stripped) = strip_common_no_arg_receiver_adapter_tokens(receiver) else {
+            return false;
+        };
+        receiver = stripped;
+    }
+}
+
+fn receiver_is_plain_value_or_field_tokens(receiver: &str) -> bool {
+    !receiver.is_empty()
+        && !receiver.contains("::")
+        && receiver
+            .chars()
+            .all(|character| character.is_ascii_alphanumeric() || matches!(character, '_' | '.'))
+}
+
+fn strip_common_no_arg_receiver_adapter_tokens(receiver: &str) -> Option<&str> {
+    for adapter in [
+        "as_deref",
+        "as_mut",
+        "as_ref",
+        "as_str",
+        "borrow",
+        "borrow_mut",
+        "trim",
+        "trim_end",
+        "trim_start",
+    ] {
+        let suffix = format!(".{adapter}()");
+        if let Some(stripped) = receiver.strip_suffix(&suffix) {
+            return Some(stripped);
+        }
+    }
+    None
 }
 
 fn is_conversion_adapter_path(path: &Path, trait_name: &str, method_name: &str) -> bool {

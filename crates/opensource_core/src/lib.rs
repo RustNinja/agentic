@@ -17865,6 +17865,138 @@ impl LocalFactory {
     }
 
     #[test]
+    fn common_adapter_receiver_chains_do_not_trip_method_fallback_cap() {
+        let root = temp_output("common-adapter-chain-no-method-cap-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry(wire: Wire) -> bool {
+    wire.node_id.trim().is_empty()
+}
+
+pub struct Wire {
+    pub node_id: String,
+}
+
+pub struct LocalA;
+pub struct LocalB;
+
+impl LocalA {
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+
+impl LocalB {
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("common-adapter-chain-no-method-cap-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "syntactic_method_fallback_cap"),
+            "std-like adapter receiver chains should not report capped same-name local method risk: {:?}",
+            report.production.hazards
+        );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("LocalA::is_empty")
+                    && !callable.contains("LocalB::is_empty")),
+            "std-like adapter receiver chains should not retain unrelated same-name local methods: {:?}",
+            report.reachable
+        );
+    }
+
+    #[test]
+    fn literal_into_inside_external_enum_field_does_not_trip_conversion_cap() {
+        let root = temp_output("literal-into-enum-field-no-cap-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        let mut source = r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> Result<(), AppError> {
+    Err(AppError::Message("empty".into()))
+}
+
+pub enum AppError {
+    Message(String),
+}
+"#
+        .to_string();
+        for index in 0..=24 {
+            source.push_str(&format!(
+                r#"
+pub struct Source{index};
+pub struct Target{index};
+
+impl From<Source{index}> for Target{index} {{
+    fn from(_value: Source{index}) -> Self {{
+        Self
+    }}
+}}
+"#
+            ));
+        }
+        write(root.join("app/src/lib.rs"), &source);
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("literal-into-enum-field-no-cap-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "syntactic_method_fallback_cap"),
+            "literal conversions into known external enum fields should not scan capped local From impls: {:?}",
+            report.production.hazards
+        );
+    }
+
+    #[test]
     fn generic_receiverless_method_fallbacks_do_not_retain_local_name_matches() {
         let root = temp_output("generic-method-fallback-no-local-name-source");
         let opensourced_path = workspace_root().join("crates/opensourced");
