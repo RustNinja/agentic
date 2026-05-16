@@ -2641,6 +2641,41 @@ fn retains_from_impl_for_cloned_external_field_into_receiver() {
 }
 
 #[test]
+fn retains_nested_map_into_conversions_for_expected_struct_fields() {
+    let workspace = temp_path("rule-map-into-field-workspace");
+    let output = temp_path("rule-map-into-field-output");
+    let target_dir = temp_path("rule-map-into-field-target");
+    write_map_into_field_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("map into field rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("map_into_field_rule/src/lib.rs"));
+    assert!(
+        lib.contains("impl From<upstream::RawSnapshot> for Snapshot"),
+        "{lib}"
+    );
+    assert!(
+        lib.contains("impl From<upstream::RawWindow> for RateLimitWindow"),
+        "{lib}"
+    );
+    assert!(
+        lib.contains("impl From<upstream::RawCredits> for CreditsSnapshot"),
+        "{lib}"
+    );
+    assert!(
+        lib.contains("impl From<upstream::RawPlan> for PlanType"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadTarget0"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
     let workspace = temp_path("rule-option-arc-callback-workspace");
     let output = temp_path("rule-option-arc-callback-output");
@@ -7306,6 +7341,119 @@ pub struct RateLimitSnapshot {
 pub struct Notification {
     pub rate_limits: RateLimitSnapshot,
     pub dead: DeadSnapshot0,
+}
+"#,
+        ),
+    );
+}
+
+fn write_map_into_field_rule_fixture(root: &Path) {
+    let dead_impls = (0..30)
+        .map(|index| {
+            format!(
+                r#"
+pub struct DeadTarget{index};
+
+impl From<upstream::DeadSource{index}> for DeadTarget{index} {{
+    fn from(_: upstream::DeadSource{index}) -> Self {{
+        Self
+    }}
+}}
+"#
+            )
+        })
+        .collect::<String>();
+    let dead_sources = (0..30)
+        .map(|index| format!("    pub struct DeadSource{index};\n"))
+        .collect::<String>();
+    write_workspace(
+        root,
+        "map_into_field_rule",
+        &format!(
+            "{}{}{}{}{}",
+            r#"use opensourced::opensourced;
+
+mod upstream {
+    pub struct RawWindow {
+        pub used_percent: i32,
+    }
+
+    pub struct RawCredits {
+        pub has_credits: bool,
+    }
+
+    pub enum RawPlan {
+        Pro,
+    }
+
+    pub struct RawSnapshot {
+        pub primary: Option<RawWindow>,
+        pub credits: Option<RawCredits>,
+        pub plan_type: Option<RawPlan>,
+    }
+
+"#,
+            dead_sources,
+            r#"}
+
+pub struct RateLimitWindow {
+    pub used_percent: i32,
+}
+
+impl From<upstream::RawWindow> for RateLimitWindow {
+    fn from(value: upstream::RawWindow) -> Self {
+        Self {
+            used_percent: value.used_percent,
+        }
+    }
+}
+
+pub struct CreditsSnapshot {
+    pub has_credits: bool,
+}
+
+impl From<upstream::RawCredits> for CreditsSnapshot {
+    fn from(value: upstream::RawCredits) -> Self {
+        Self {
+            has_credits: value.has_credits,
+        }
+    }
+}
+
+pub enum PlanType {
+    Pro,
+}
+
+impl From<upstream::RawPlan> for PlanType {
+    fn from(value: upstream::RawPlan) -> Self {
+        match value {
+            upstream::RawPlan::Pro => Self::Pro,
+        }
+    }
+}
+
+"#,
+            dead_impls,
+            r#"
+pub struct Snapshot {
+    pub primary: Option<RateLimitWindow>,
+    pub credits: Option<CreditsSnapshot>,
+    pub plan_type: Option<PlanType>,
+}
+
+impl From<upstream::RawSnapshot> for Snapshot {
+    fn from(value: upstream::RawSnapshot) -> Self {
+        Self {
+            primary: value.primary.map(Into::into),
+            credits: value.credits.map(Into::into),
+            plan_type: value.plan_type.map(Into::into),
+        }
+    }
+}
+
+#[opensourced]
+pub fn selected(value: upstream::RawSnapshot) -> Snapshot {
+    value.into()
 }
 "#,
         ),

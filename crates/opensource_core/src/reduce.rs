@@ -2979,6 +2979,51 @@ fn external_dependency_field_type_path(
     external_field_type_path_from_type(dependency_prefix, &module.module_path, &module.aliases, ty)
 }
 
+fn external_dependency_field_type_argument_paths(
+    package_root: &FsPath,
+    dependency_prefix: &str,
+    receiver_type_path: &[String],
+    member: &Member,
+) -> Vec<Vec<String>> {
+    let Some((type_name, module_path)) = receiver_type_path.split_last() else {
+        return Vec::new();
+    };
+    let Some(manifest) = read_toml_value(&package_root.join("Cargo.toml")) else {
+        return Vec::new();
+    };
+    let Some(lib_path) = external_package_lib_path(package_root, &manifest) else {
+        return Vec::new();
+    };
+    let Some(module) = load_external_module(package_root, &lib_path, module_path)
+        .filter(|module| external_module_has_struct(module, type_name))
+        .or_else(|| find_external_module_with_struct(package_root, &lib_path, type_name))
+    else {
+        return Vec::new();
+    };
+    let Some(item_struct) = module.items.iter().find_map(|item| {
+        let Item::Struct(item_struct) = item else {
+            return None;
+        };
+        (item_struct.ident == type_name.as_str()).then_some(item_struct)
+    }) else {
+        return Vec::new();
+    };
+    let Some(ty) = field_member_type(&item_struct.fields, member) else {
+        return Vec::new();
+    };
+    let mut paths = Vec::new();
+    collect_external_field_type_argument_paths(
+        dependency_prefix,
+        &module.module_path,
+        &module.aliases,
+        ty,
+        &mut paths,
+    );
+    paths.sort();
+    paths.dedup();
+    paths
+}
+
 struct ExternalModule {
     module_path: Vec<String>,
     items: Vec<Item>,
@@ -3282,6 +3327,16 @@ fn external_field_type_path_from_type(
 ) -> Option<Vec<String>> {
     match ty {
         Type::Path(type_path) => {
+            if let Some(inner) = single_type_arg_for_collection_wrapper(&type_path.path) {
+                if let Some(path) = external_field_type_path_from_type(
+                    dependency_prefix,
+                    module_path,
+                    aliases,
+                    inner,
+                ) {
+                    return Some(path);
+                }
+            }
             let segments = path_segments(&type_path.path);
             external_normalize_type_segments(dependency_prefix, module_path, aliases, segments)
         }
@@ -3301,6 +3356,98 @@ fn external_field_type_path_from_type(
     }
 }
 
+fn collect_external_field_type_argument_paths(
+    dependency_prefix: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    ty: &Type,
+    paths: &mut Vec<Vec<String>>,
+) {
+    match ty {
+        Type::Path(type_path) => {
+            for segment in &type_path.path.segments {
+                let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+                    continue;
+                };
+                for argument in &arguments.args {
+                    let GenericArgument::Type(ty) = argument else {
+                        continue;
+                    };
+                    if let Some(path) = external_field_type_path_from_type(
+                        dependency_prefix,
+                        module_path,
+                        aliases,
+                        ty,
+                    ) {
+                        paths.push(path);
+                    }
+                    collect_external_field_type_argument_paths(
+                        dependency_prefix,
+                        module_path,
+                        aliases,
+                        ty,
+                        paths,
+                    );
+                }
+            }
+        }
+        Type::Reference(reference) => collect_external_field_type_argument_paths(
+            dependency_prefix,
+            module_path,
+            aliases,
+            &reference.elem,
+            paths,
+        ),
+        Type::Ptr(pointer) => collect_external_field_type_argument_paths(
+            dependency_prefix,
+            module_path,
+            aliases,
+            &pointer.elem,
+            paths,
+        ),
+        Type::Slice(slice) => collect_external_field_type_argument_paths(
+            dependency_prefix,
+            module_path,
+            aliases,
+            &slice.elem,
+            paths,
+        ),
+        Type::Array(array) => collect_external_field_type_argument_paths(
+            dependency_prefix,
+            module_path,
+            aliases,
+            &array.elem,
+            paths,
+        ),
+        Type::Group(group) => collect_external_field_type_argument_paths(
+            dependency_prefix,
+            module_path,
+            aliases,
+            &group.elem,
+            paths,
+        ),
+        Type::Paren(paren) => collect_external_field_type_argument_paths(
+            dependency_prefix,
+            module_path,
+            aliases,
+            &paren.elem,
+            paths,
+        ),
+        Type::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_external_field_type_argument_paths(
+                    dependency_prefix,
+                    module_path,
+                    aliases,
+                    elem,
+                    paths,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
 fn external_normalize_type_segments(
     dependency_prefix: &str,
     module_path: &[String],
@@ -3310,13 +3457,18 @@ fn external_normalize_type_segments(
     if segments.is_empty() {
         return None;
     }
+    let mut alias_applied = false;
     if let Some(target) = segments.first().and_then(|first| aliases.get(first)) {
         let mut resolved = target.clone();
         resolved.extend(segments.drain(1..));
         segments = resolved;
+        alias_applied = true;
     }
     let first = segments.first()?.as_str();
     if matches!(first, "std" | "core" | "alloc") || first == dependency_prefix {
+        return Some(segments);
+    }
+    if alias_applied && !matches!(first, "crate" | "self" | "super") {
         return Some(segments);
     }
     if first == "crate" {
@@ -6312,6 +6464,18 @@ impl<'a> DependencyVisitor<'a> {
                         .or_else(|| self.infer_expr_type(argument))
                 })
             }
+            Expr::MethodCall(call) if call.method == "map" => {
+                if self.add_map_conversion_adapter_to_expected_type(
+                    call,
+                    target,
+                    trait_name,
+                    trait_method_name,
+                    expression_method_name,
+                ) {
+                    return;
+                }
+                None
+            }
             _ => None,
         };
 
@@ -6331,6 +6495,49 @@ impl<'a> DependencyVisitor<'a> {
         {
             self.dependencies.callables.insert(callable);
         }
+    }
+
+    fn add_map_conversion_adapter_to_expected_type(
+        &mut self,
+        call: &ExprMethodCall,
+        target: &TypeRef,
+        trait_name: &str,
+        trait_method_name: &str,
+        expression_method_name: &str,
+    ) -> bool {
+        let Some(adapter) = call.args.first() else {
+            return false;
+        };
+        let Expr::Path(path) = adapter else {
+            return false;
+        };
+        if !conversion_adapter_path_matches(&path.path, trait_name, expression_method_name) {
+            return false;
+        }
+
+        let mut sources = self.expression_type_arguments(&call.receiver);
+        if let Some(source) = self
+            .receiver_type(&call.receiver)
+            .or_else(|| self.infer_expr_type(&call.receiver))
+        {
+            sources.push(source);
+        }
+        sources.sort();
+        sources.dedup();
+
+        let mut found = false;
+        for source in sources {
+            for callable in self.resolver.resolve_conversion_impls_from_to(
+                &source,
+                target,
+                trait_name,
+                trait_method_name,
+            ) {
+                found = true;
+                self.dependencies.callables.insert(callable);
+            }
+        }
+        found
     }
 
     fn add_conversion_impls_for_associated_call_arg(&mut self, path: &Path, call: &ExprCall) {
@@ -9182,6 +9389,25 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                         "try_into",
                     );
                 }
+                for target in self
+                    .resolver
+                    .field_type_arguments(&struct_type, &field.member)
+                {
+                    self.add_conversion_impls_to_expected_type(
+                        &field.expr,
+                        &target,
+                        "From",
+                        "from",
+                        "into",
+                    );
+                    self.add_conversion_impls_to_expected_type(
+                        &field.expr,
+                        &target,
+                        "TryFrom",
+                        "try_from",
+                        "try_into",
+                    );
+                }
             }
         }
         visit::visit_expr_struct(self, expr);
@@ -11621,9 +11847,43 @@ impl Resolver<'_> {
             type_refs.extend(resolver.type_argument_refs_in_type(ty));
         }
 
+        if type_refs.is_empty() {
+            type_refs.extend(self.external_dependency_field_type_arguments(receiver, member));
+        }
         type_refs.sort();
         type_refs.dedup();
         type_refs
+    }
+
+    fn external_dependency_field_type_arguments(
+        &self,
+        receiver: &TypeRef,
+        member: &Member,
+    ) -> Vec<TypeRef> {
+        if receiver.package != self.package {
+            return Vec::new();
+        }
+        let Some((dependency_prefix, type_path)) = receiver.type_path.split_first() else {
+            return Vec::new();
+        };
+        if type_path.is_empty() || !self.package_has_dependency_named(dependency_prefix) {
+            return Vec::new();
+        }
+        let Some(dependency_root) = self.dependency_path_root_named(dependency_prefix) else {
+            return Vec::new();
+        };
+        external_dependency_field_type_argument_paths(
+            &dependency_root,
+            dependency_prefix,
+            type_path,
+            member,
+        )
+        .into_iter()
+        .map(|type_path| TypeRef {
+            package: self.package.to_string(),
+            type_path,
+        })
+        .collect()
     }
 
     fn enum_tuple_variant_field_types(
@@ -12952,6 +13212,15 @@ fn is_conversion_adapter_path(path: &Path, trait_name: &str, method_name: &str) 
         [trait_segment, method_segment]
             if trait_segment == trait_name && method_segment == method_name
     )
+}
+
+fn conversion_adapter_path_matches(path: &Path, trait_name: &str, method_name: &str) -> bool {
+    let adapter_trait = match trait_name {
+        "From" => "Into",
+        "TryFrom" => "TryInto",
+        _ => trait_name,
+    };
+    is_conversion_adapter_path(path, adapter_trait, method_name)
 }
 
 fn callable_method(callable: &CallableId) -> &str {
