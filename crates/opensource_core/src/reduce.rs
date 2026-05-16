@@ -1,4 +1,5 @@
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
     fs,
     path::{Path as FsPath, PathBuf},
@@ -3104,10 +3105,30 @@ fn external_dependency_enum_named_variant_field_type_argument_paths(
     paths
 }
 
+#[derive(Clone)]
 struct ExternalModule {
     module_path: Vec<String>,
     items: Vec<Item>,
     aliases: HashMap<String, Vec<String>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd)]
+enum ExternalItemKind {
+    Struct,
+    Enum,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Ord, PartialOrd)]
+struct ExternalModuleCacheKey {
+    package_root: PathBuf,
+    lib_path: PathBuf,
+    type_name: String,
+    kind: ExternalItemKind,
+}
+
+thread_local! {
+    static EXTERNAL_MODULE_FIND_CACHE: RefCell<BTreeMap<ExternalModuleCacheKey, Option<ExternalModule>>> =
+        const { RefCell::new(BTreeMap::new()) };
 }
 
 fn load_external_module(
@@ -3152,36 +3173,30 @@ fn load_external_module(
 }
 
 fn external_module_has_struct(module: &ExternalModule, type_name: &str) -> bool {
-    external_module_has_item(module, type_name, external_item_is_struct)
+    external_module_has_item(module, type_name, ExternalItemKind::Struct)
 }
 
 fn external_module_has_enum(module: &ExternalModule, type_name: &str) -> bool {
-    external_module_has_item(module, type_name, external_item_is_enum)
+    external_module_has_item(module, type_name, ExternalItemKind::Enum)
 }
 
 fn external_module_has_item(
     module: &ExternalModule,
     type_name: &str,
-    matches_item: fn(&Item, &str) -> bool,
+    kind: ExternalItemKind,
 ) -> bool {
     module
         .items
         .iter()
-        .any(|item| matches_item(item, type_name))
+        .any(|item| external_item_matches(item, type_name, kind))
 }
 
-fn external_item_is_struct(item: &Item, type_name: &str) -> bool {
-    let Item::Struct(item_struct) = item else {
-        return false;
-    };
-    item_struct.ident == type_name
-}
-
-fn external_item_is_enum(item: &Item, type_name: &str) -> bool {
-    let Item::Enum(item_enum) = item else {
-        return false;
-    };
-    item_enum.ident == type_name
+fn external_item_matches(item: &Item, type_name: &str, kind: ExternalItemKind) -> bool {
+    match (kind, item) {
+        (ExternalItemKind::Struct, Item::Struct(item_struct)) => item_struct.ident == type_name,
+        (ExternalItemKind::Enum, Item::Enum(item_enum)) => item_enum.ident == type_name,
+        _ => false,
+    }
 }
 
 fn find_external_module_with_struct(
@@ -3189,7 +3204,7 @@ fn find_external_module_with_struct(
     lib_path: &FsPath,
     type_name: &str,
 ) -> Option<ExternalModule> {
-    find_external_module_with_item(package_root, lib_path, type_name, external_item_is_struct)
+    find_external_module_with_item(package_root, lib_path, type_name, ExternalItemKind::Struct)
 }
 
 fn find_external_module_with_enum(
@@ -3197,15 +3212,26 @@ fn find_external_module_with_enum(
     lib_path: &FsPath,
     type_name: &str,
 ) -> Option<ExternalModule> {
-    find_external_module_with_item(package_root, lib_path, type_name, external_item_is_enum)
+    find_external_module_with_item(package_root, lib_path, type_name, ExternalItemKind::Enum)
 }
 
 fn find_external_module_with_item(
     package_root: &FsPath,
     lib_path: &FsPath,
     type_name: &str,
-    matches_item: fn(&Item, &str) -> bool,
+    kind: ExternalItemKind,
 ) -> Option<ExternalModule> {
+    let key = ExternalModuleCacheKey {
+        package_root: package_root.to_path_buf(),
+        lib_path: lib_path.to_path_buf(),
+        type_name: type_name.to_string(),
+        kind,
+    };
+    if let Some(module) = EXTERNAL_MODULE_FIND_CACHE.with(|cache| cache.borrow().get(&key).cloned())
+    {
+        return module;
+    }
+
     let mut matches = Vec::new();
     let mut visited = BTreeSet::new();
     collect_external_modules_with_item(
@@ -3213,11 +3239,15 @@ fn find_external_module_with_item(
         lib_path,
         Vec::new(),
         type_name,
-        matches_item,
+        kind,
         &mut visited,
         &mut matches,
     );
-    (matches.len() == 1).then(|| matches.remove(0))
+    let module = (matches.len() == 1).then(|| matches.remove(0));
+    EXTERNAL_MODULE_FIND_CACHE.with(|cache| {
+        cache.borrow_mut().insert(key, module.clone());
+    });
+    module
 }
 
 fn collect_external_modules_with_item(
@@ -3225,7 +3255,7 @@ fn collect_external_modules_with_item(
     file_path: &FsPath,
     module_path: Vec<String>,
     type_name: &str,
-    matches_item: fn(&Item, &str) -> bool,
+    kind: ExternalItemKind,
     visited: &mut BTreeSet<PathBuf>,
     matches: &mut Vec<ExternalModule>,
 ) {
@@ -3249,7 +3279,7 @@ fn collect_external_modules_with_item(
         file.items,
         None,
         type_name,
-        matches_item,
+        kind,
         visited,
         matches,
     );
@@ -3262,12 +3292,15 @@ fn collect_external_item_modules_with_item(
     items: Vec<Item>,
     parent_aliases: Option<&HashMap<String, Vec<String>>>,
     type_name: &str,
-    matches_item: fn(&Item, &str) -> bool,
+    kind: ExternalItemKind,
     visited: &mut BTreeSet<PathBuf>,
     matches: &mut Vec<ExternalModule>,
 ) {
     let aliases = collect_external_aliases(&items, parent_aliases);
-    if items.iter().any(|item| matches_item(item, type_name)) {
+    if items
+        .iter()
+        .any(|item| external_item_matches(item, type_name, kind))
+    {
         matches.push(ExternalModule {
             module_path: module_path.clone(),
             items: items.clone(),
@@ -3289,7 +3322,7 @@ fn collect_external_item_modules_with_item(
                 inline_items.clone(),
                 Some(&aliases),
                 type_name,
-                matches_item,
+                kind,
                 visited,
                 matches,
             );
@@ -3304,7 +3337,7 @@ fn collect_external_item_modules_with_item(
             &child_file,
             child_path,
             type_name,
-            matches_item,
+            kind,
             visited,
             matches,
         );
