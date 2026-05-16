@@ -2692,6 +2692,11 @@ fn feedback_root_candidates_in_scope(
         "E0599" => {
             roots.extend(method_name_candidates(project, package_hint, name));
         }
+        "E0560" | "E0609" => {
+            roots.extend(item_name_candidates(project, package_hint, name, |item| {
+                item.kind == model::ItemKind::Struct
+            }));
+        }
         _ => {}
     }
     roots.sort();
@@ -2874,6 +2879,11 @@ impl PackageMatch for ItemId {
 }
 
 fn diagnostic_symbols(diagnostic: &feedback::CheckDiagnostic) -> Vec<String> {
+    if matches!(diagnostic.code.as_deref(), Some("E0560" | "E0609")) {
+        if let Some(symbol) = diagnostic_field_surface_owner_symbol(diagnostic) {
+            return vec![symbol];
+        }
+    }
     let mut symbols = backticked_symbols(&diagnostic.message);
     if let Some(rendered) = &diagnostic.rendered {
         symbols.extend(backticked_symbols(rendered));
@@ -2881,6 +2891,24 @@ fn diagnostic_symbols(diagnostic: &feedback::CheckDiagnostic) -> Vec<String> {
     symbols.sort();
     symbols.dedup();
     symbols
+}
+
+fn diagnostic_field_surface_owner_symbol(diagnostic: &feedback::CheckDiagnostic) -> Option<String> {
+    field_surface_owner_symbol_from_text(&diagnostic.message).or_else(|| {
+        diagnostic
+            .rendered
+            .as_deref()
+            .and_then(field_surface_owner_symbol_from_text)
+    })
+}
+
+fn field_surface_owner_symbol_from_text(text: &str) -> Option<String> {
+    text.split_once(" on type ")
+        .and_then(|(_, tail)| backticked_symbols(tail).into_iter().next())
+        .or_else(|| {
+            text.split_once("struct ")
+                .and_then(|(_, tail)| backticked_symbols(tail).into_iter().next())
+        })
 }
 
 fn backticked_symbols(text: &str) -> Vec<String> {
@@ -3105,12 +3133,14 @@ impl DeletionBlockerScope {
             for detail in &hazard.details {
                 if !detail.blocked_idents.is_empty() {
                     if hazard_uses_scoped_detail_blockers(&hazard.code) {
+                        let module_path = detail
+                            .module_path
+                            .as_deref()
+                            .map(module_path_from_report_string)
+                            .or_else(|| detail.package.as_ref().map(|_| Vec::new()));
                         scope.scoped.push(ScopedDeletionBlocker {
                             package: detail.package.clone(),
-                            module_path: detail
-                                .module_path
-                                .as_deref()
-                                .map(module_path_from_report_string),
+                            module_path,
                             idents: detail.blocked_idents.iter().cloned().collect(),
                         });
                     } else {
@@ -19161,6 +19191,108 @@ pub struct Helper {
             .items
             .iter()
             .any(|item| item.to_string() == "app::Helper(Struct)"));
+    }
+
+    #[test]
+    fn feedback_diagnostics_widen_owner_struct_roots_for_field_surface_errors() {
+        let root = temp_output("feedback-widen-field-surface-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\", \"support\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nsupport = {{ path = \"../support\" }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    1
+}
+"#,
+        );
+        write(
+            root.join("support/Cargo.toml"),
+            "[package]\nname = \"support\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("support/src/lib.rs"),
+            r#"pub struct ThreadReadResponse {
+    pub thread: usize,
+    pub approval_policy: Option<usize>,
+}
+
+pub struct ThreadRealtimeStartParams {
+    pub thread_id: String,
+    pub dynamic_tools: Option<Vec<String>>,
+}
+"#,
+        );
+        let read_response_diagnostic = CheckDiagnostic {
+            level: "error".to_string(),
+            message: "no field `approval_policy` on type `ThreadReadResponse`".to_string(),
+            code: Some("E0609".to_string()),
+            package_id: Some("app 0.1.0 (path+file:///tmp/app)".to_string()),
+            target: None,
+            rendered: None,
+            spans: Vec::new(),
+            suggestions: Vec::new(),
+        };
+        let realtime_params_diagnostic = CheckDiagnostic {
+            level: "error".to_string(),
+            message: "struct `ThreadRealtimeStartParams` has no field named `dynamic_tools`"
+                .to_string(),
+            code: Some("E0560".to_string()),
+            package_id: Some("app 0.1.0 (path+file:///tmp/app)".to_string()),
+            target: None,
+            rendered: None,
+            spans: Vec::new(),
+            suggestions: Vec::new(),
+        };
+        let diagnostics = vec![read_response_diagnostic, realtime_params_diagnostic];
+        let resolution = resolve_feedback_widening_roots(&root, &diagnostics, &[])
+            .expect("feedback root resolution should load");
+
+        assert!(resolution
+            .matched_roots
+            .iter()
+            .any(|root| root == "support::ThreadReadResponse(Struct)"));
+        assert!(resolution
+            .matched_roots
+            .iter()
+            .any(|root| root == "support::ThreadRealtimeStartParams(Struct)"));
+        assert_eq!(resolution.skipped_no_match, 0);
+
+        let output = temp_output("feedback-widen-field-surface-output");
+        let report = generate_with_analyzer_feedback(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output.clone(),
+            },
+            AnalyzerMode::Syn,
+            &diagnostics,
+        )
+        .expect("feedback widening should generate");
+
+        assert!(report
+            .feedback_widened_roots
+            .iter()
+            .any(|root| root.to_string() == "support::ThreadReadResponse(Struct)"));
+        assert!(report
+            .feedback_widened_roots
+            .iter()
+            .any(|root| root.to_string() == "support::ThreadRealtimeStartParams(Struct)"));
+        let rendered_support =
+            fs::read_to_string(output.join("support/src/lib.rs")).expect("support should render");
+        assert!(rendered_support.contains("pub approval_policy: Option<usize>"));
+        assert!(rendered_support.contains("pub dynamic_tools: Option<Vec<String>>"));
     }
 
     #[test]

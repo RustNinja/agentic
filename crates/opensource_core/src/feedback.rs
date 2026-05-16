@@ -318,6 +318,11 @@ fn classify_widening_candidate(diagnostic: &CheckDiagnostic) -> Option<FeedbackW
             "medium",
             "widen receiver type impls, extension trait imports, inherent impls, or trait bounds needed by this call",
         ),
+        "E0560" | "E0609" => (
+            "struct-field-surface-mismatch",
+            "medium",
+            "widen the owning struct item to restore its field surface; if the source struct lacks the field, treat this as source/API drift",
+        ),
         "E0277" if diagnostic.message.contains(": From<")
             || diagnostic.message.contains(": Into<")
             || diagnostic.message.contains(": TryFrom<")
@@ -368,6 +373,7 @@ fn classify_feedback_hazard(diagnostic: &CheckDiagnostic) -> Option<FeedbackHaza
         "cargo-stderr" => ("cargo-shape-failure", "blocker"),
         "E0463" => ("missing-crate", "blocker"),
         "E0583" => ("missing-module-file", "blocker"),
+        "E0560" | "E0609" => ("needs-field-surface", "high"),
         "E0277" | "E0432" | "E0433" | "E0405" | "E0412" | "E0422" | "E0425" | "E0599" => {
             ("needs-widening", "high")
         }
@@ -407,12 +413,35 @@ fn hazard_severity_rank(severity: &str) -> usize {
 }
 
 fn diagnostic_symbol(diagnostic: &CheckDiagnostic) -> Option<String> {
+    if matches!(diagnostic.code.as_deref(), Some("E0560" | "E0609")) {
+        if let Some(symbol) = diagnostic_field_surface_owner_symbol(diagnostic) {
+            return Some(symbol);
+        }
+    }
     extract_backticked_symbol(&diagnostic.message).or_else(|| {
         diagnostic
             .rendered
             .as_deref()
             .and_then(extract_backticked_symbol)
     })
+}
+
+fn diagnostic_field_surface_owner_symbol(diagnostic: &CheckDiagnostic) -> Option<String> {
+    field_surface_owner_symbol_from_text(&diagnostic.message).or_else(|| {
+        diagnostic
+            .rendered
+            .as_deref()
+            .and_then(field_surface_owner_symbol_from_text)
+    })
+}
+
+fn field_surface_owner_symbol_from_text(text: &str) -> Option<String> {
+    text.split_once(" on type ")
+        .and_then(|(_, tail)| extract_backticked_symbol(tail))
+        .or_else(|| {
+            text.split_once("struct ")
+                .and_then(|(_, tail)| extract_backticked_symbol(tail))
+        })
 }
 
 fn extract_backticked_symbol(text: &str) -> Option<String> {
@@ -806,6 +835,44 @@ mod tests {
         assert!(widening.hazards.iter().any(
             |hazard| hazard.kind == "needs-widening" && hazard.code.as_deref() == Some("E0277")
         ));
+    }
+
+    #[test]
+    fn classifies_struct_field_surface_errors_as_widening_candidates() {
+        let diagnostics = vec![
+            diagnostic(
+                "E0609",
+                "no field `approval_policy` on type `ThreadReadResponse`",
+                "src/thread_projection.rs",
+                119,
+            ),
+            diagnostic(
+                "E0560",
+                "struct `ThreadRealtimeStartParams` has no field named `dynamic_tools`",
+                "src/server_requests.rs",
+                694,
+            ),
+        ];
+
+        let widening = classify_feedback(&diagnostics);
+
+        assert_eq!(widening.candidates.len(), 2);
+        assert!(widening.candidates.iter().any(|candidate| {
+            candidate.kind == "struct-field-surface-mismatch"
+                && candidate.symbol.as_deref() == Some("ThreadReadResponse")
+                && candidate.file_name.as_deref() == Some("src/thread_projection.rs")
+                && candidate.line_start == Some(119)
+        }));
+        assert!(widening.candidates.iter().any(|candidate| {
+            candidate.kind == "struct-field-surface-mismatch"
+                && candidate.symbol.as_deref() == Some("ThreadRealtimeStartParams")
+                && candidate.file_name.as_deref() == Some("src/server_requests.rs")
+                && candidate.line_start == Some(694)
+        }));
+        assert!(widening
+            .hazards
+            .iter()
+            .all(|hazard| { hazard.kind == "needs-field-surface" && hazard.severity == "high" }));
     }
 
     #[test]

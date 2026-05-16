@@ -17642,8 +17642,12 @@ fn inherent_impl_assoc_item_should_render(
         .attrs
         .iter()
         .any(attr_requires_impl_surface_retention)
-        || impl_item_attrs_require_surface_retention(impl_item)
     {
+        return render_plan
+            .root_item_impl_surface_should_render(reduced, package, type_path, item_impl)
+            && root_macro_impl_item_should_render(item_impl, impl_item);
+    }
+    if impl_item_attrs_require_surface_retention(impl_item) {
         return true;
     }
     if source_include_blocked_impl_method_should_render(
@@ -20195,14 +20199,20 @@ fn allow_dead_code(attrs: &mut Vec<syn::Attribute>) {
 }
 
 fn allow_restricted_support_crate_warnings(attrs: &mut Vec<syn::Attribute>) {
-    let needs_dead_code = !attrs.iter().any(|attr| {
+    let has_unused_group = attrs.iter().any(|attr| {
         attr.path().is_ident("allow")
-            && token_stream_mentions_ident(&attr.to_token_stream(), "dead_code")
+            && token_stream_mentions_ident(&attr.to_token_stream(), "unused")
     });
-    let needs_unused_imports = !attrs.iter().any(|attr| {
-        attr.path().is_ident("allow")
-            && token_stream_mentions_ident(&attr.to_token_stream(), "unused_imports")
-    });
+    let needs_dead_code = !has_unused_group
+        && !attrs.iter().any(|attr| {
+            attr.path().is_ident("allow")
+                && token_stream_mentions_ident(&attr.to_token_stream(), "dead_code")
+        });
+    let needs_unused_imports = !has_unused_group
+        && !attrs.iter().any(|attr| {
+            attr.path().is_ident("allow")
+                && token_stream_mentions_ident(&attr.to_token_stream(), "unused_imports")
+        });
     let needs_private_interfaces = !attrs.iter().any(|attr| {
         attr.path().is_ident("allow")
             && token_stream_mentions_ident(&attr.to_token_stream(), "private_interfaces")
@@ -20213,7 +20223,7 @@ fn allow_restricted_support_crate_warnings(attrs: &mut Vec<syn::Attribute>) {
     });
     if needs_dead_code || needs_unused_imports || needs_private_interfaces || needs_private_bounds {
         attrs.push(parse_quote!(
-            #![allow(dead_code, unused_imports, private_interfaces, private_bounds)]
+            #![allow(unused, unused_imports, private_interfaces, private_bounds)]
         ));
     }
 }

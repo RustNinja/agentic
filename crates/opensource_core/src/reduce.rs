@@ -4219,15 +4219,7 @@ fn reachable_macro_impl_surface_dependencies(
                 ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type
             )
     }) {
-        if !item_is_root(roots, item)
-            && !roots.iter().any(|root| {
-                matches!(
-                    root,
-                    RootId::Callable(callable)
-                        if callable_return_resolves_item(project, callable, item)
-                )
-            })
-        {
+        if !item_is_root(roots, item) {
             continue;
         }
         dependencies.extend(item_root_macro_impl_dependencies(project, item));
@@ -4249,52 +4241,6 @@ pub(crate) fn callable_signature_resolves_item(
     callable_signature_dependency_items(project, callable)
         .items
         .contains(item)
-}
-
-fn callable_return_resolves_item(project: &Project, callable: &CallableId, item: &ItemId) -> bool {
-    callable_return_dependency_items(project, callable)
-        .items
-        .contains(item)
-}
-
-fn callable_return_dependency_items(project: &Project, callable: &CallableId) -> DependencySet {
-    match callable {
-        CallableId::Free { .. } => {
-            let Some(record) = project.functions.get(callable) else {
-                return DependencySet::default();
-            };
-            let resolver = Resolver {
-                project,
-                package: &record.package,
-                module_path: &record.module_path,
-                aliases: &record.aliases,
-                self_type: None,
-            };
-            let mut visitor = DependencyVisitor::new(resolver);
-            visitor.visit_return_type(&record.item.sig.output);
-            visitor.dependencies
-        }
-        CallableId::Method {
-            package, type_path, ..
-        } => {
-            let Some(record) = project.methods.get(callable) else {
-                return DependencySet::default();
-            };
-            let resolver = Resolver {
-                project,
-                package,
-                module_path: &record.module_path,
-                aliases: &record.aliases,
-                self_type: Some(TypeRef {
-                    package: package.clone(),
-                    type_path: type_path.clone(),
-                }),
-            };
-            let mut visitor = DependencyVisitor::new(resolver);
-            visitor.visit_return_type(&record.item.sig.output);
-            visitor.dependencies
-        }
-    }
 }
 
 fn callable_signature_dependency_items(project: &Project, callable: &CallableId) -> DependencySet {
