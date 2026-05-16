@@ -90,6 +90,7 @@ pub struct SemanticReport {
     pub analyzed_files: usize,
     pub failed_files: usize,
     pub skipped_files: usize,
+    pub top_down_skipped_files: usize,
     pub file_budget: usize,
     pub method_call_budget: usize,
     pub path_budget: usize,
@@ -132,6 +133,7 @@ pub struct SemanticFileReport {
     pub analyzed: bool,
     pub failed: bool,
     pub skipped_by_file_budget: bool,
+    pub skipped_by_top_down_scope: bool,
     pub method_calls: usize,
     pub queried_method_calls: usize,
     pub resolved_method_calls: usize,
@@ -204,6 +206,7 @@ pub struct SemanticUsageReport {
     pub unmapped_callables: usize,
     pub unmapped_items: usize,
     pub reference_queries: usize,
+    pub reference_queries_skipped: usize,
     pub reference_query_failures: usize,
     pub callable_reference_edges: usize,
     pub item_reference_edges: usize,
@@ -264,6 +267,10 @@ impl SemanticUsageReport {
                 .iter()
                 .any(|owner| semantic_owner_is_retained(owner, retained_callables, retained_items))
         })
+    }
+
+    pub fn reference_search_complete(&self) -> bool {
+        self.reference_queries_skipped == 0
     }
 
     pub fn unmapped_total(&self) -> usize {
@@ -432,6 +439,12 @@ mod rust_analyzer {
     pub enum RaFeedbackMode {
         Disabled,
         Enabled,
+    }
+
+    #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+    enum ReferenceSearchMode {
+        Complete,
+        TopDownOnly,
     }
 
     #[derive(Debug, Default)]
@@ -671,6 +684,12 @@ mod rust_analyzer {
                 .map(|samples| samples.clone())
                 .unwrap_or_default();
 
+            let reference_mode = match requested_mode {
+                AnalyzerMode::RustAnalyzerFeedback => ReferenceSearchMode::TopDownOnly,
+                AnalyzerMode::Syn
+                | AnalyzerMode::RustAnalyzerHir
+                | AnalyzerMode::RustAnalyzerHirProcMacros => ReferenceSearchMode::Complete,
+            };
             let semantic = collect_semantic_report(
                 &database,
                 &vfs,
@@ -678,6 +697,7 @@ mod rust_analyzer {
                 project,
                 selected_roots,
                 feedback_mode,
+                reference_mode,
             );
             let mut notes = vec![
                 "rust-analyzer RootDatabase loaded".to_string(),
@@ -724,10 +744,11 @@ mod rust_analyzer {
                 );
             }
             notes.push(format!(
-                "HIR semantic inventory: {}/{} files analyzed, {} skipped by budget, {}/{} queried method calls resolved to functions, {}/{} callable, {}/{} fallback, {} method calls unqueried, {}/{} queried paths resolved, {} paths unqueried",
+                "HIR semantic inventory: {}/{} files analyzed, {} skipped by budget, {} skipped by top-down scope, {}/{} queried method calls resolved to functions, {}/{} callable, {}/{} fallback, {} method calls unqueried, {}/{} queried paths resolved, {} paths unqueried",
                 semantic.report.analyzed_files,
                 semantic.report.source_files,
-                semantic.report.skipped_files,
+                semantic.report.skipped_files.saturating_sub(semantic.report.top_down_skipped_files),
+                semantic.report.top_down_skipped_files,
                 semantic.report.resolved_method_calls,
                 semantic.report.queried_method_calls,
                 semantic.report.callable_method_calls,
@@ -761,18 +782,25 @@ mod rust_analyzer {
             ));
             if let Some(usage) = &semantic.usage {
                 notes.push(format!(
-                    "HIR usage mapping: {}/{} callable(s) and {}/{} item(s) mapped to rust-analyzer definitions; {} unmapped; {} reference query/queries, {} failure(s), {} promoted reference edge(s), {} referenced callable(s), {} referenced item(s)",
+                    "HIR usage mapping: {}/{} callable(s) and {}/{} item(s) mapped to rust-analyzer definitions; {} unmapped; {} reference query/queries, {} skipped, {} failure(s), {} promoted reference edge(s), {} referenced callable(s), {} referenced item(s)",
                     usage.mapped_callables,
                     usage.indexed_callables,
                     usage.mapped_items,
                     usage.indexed_items,
                     usage.unmapped_total(),
                     usage.reference_queries,
+                    usage.reference_queries_skipped,
                     usage.reference_query_failures,
                     usage.callable_reference_edges + usage.item_reference_edges,
                     usage.referenced_callables,
                     usage.referenced_items
                 ));
+                if reference_mode == ReferenceSearchMode::TopDownOnly {
+                    notes.push(
+                        "HIR usage mapping scoped to top-down retained/root files; skipped whole-project reference proof is recorded as proof debt"
+                            .to_string(),
+                    );
+                }
             }
             if let Some(feedback) = semantic.ra_feedback {
                 notes.push(format!(
@@ -843,6 +871,7 @@ mod rust_analyzer {
         project: Option<&Project>,
         selected_roots: &[RootId],
         feedback_mode: RaFeedbackMode,
+        reference_mode: ReferenceSearchMode,
     ) -> SemanticCollection {
         ra_ap_hir::attach_db(database, || {
             collect_semantic_report_attached(
@@ -852,6 +881,7 @@ mod rust_analyzer {
                 project,
                 selected_roots,
                 feedback_mode,
+                reference_mode,
             )
         })
     }
@@ -878,6 +908,7 @@ mod rust_analyzer {
         semantics: &'a ra_ap_ide::Semantics<'a, ra_ap_ide::RootDatabase>,
         semantic_index: Option<&'a ProjectSemanticIndex>,
         hints: &'a mut SemanticReductionHints,
+        external_imported_symbols: BTreeSet<String>,
     }
 
     impl FileSemanticContext<'_> {
@@ -894,6 +925,7 @@ mod rust_analyzer {
         project: Option<&Project>,
         selected_roots: &[RootId],
         feedback_mode: RaFeedbackMode,
+        reference_mode: ReferenceSearchMode,
     ) -> SemanticCollection {
         let canonical_workspace_root = workspace_root
             .canonicalize()
@@ -961,6 +993,16 @@ mod rust_analyzer {
             if selected_root_file {
                 report.selected_root_source_files += 1;
             }
+            if semantic_index
+                .as_ref()
+                .is_some_and(|index| !index.should_collect_semantic_file(vfs_path, reference_mode))
+            {
+                report.skipped_files += 1;
+                report.top_down_skipped_files += 1;
+                file_summary.skipped_by_top_down_scope = true;
+                report.file_reports.push(file_summary);
+                continue;
+            }
             if report.analyzed_files + report.failed_files >= report.file_budget {
                 report.skipped_files += 1;
                 file_summary.skipped_by_file_budget = true;
@@ -979,6 +1021,7 @@ mod rust_analyzer {
                     semantics: &semantics,
                     semantic_index: semantic_index.as_ref(),
                     hints: &mut hints,
+                    external_imported_symbols: BTreeSet::new(),
                 };
                 collect_file_semantics(file_id, &mut budget, &mut context)
             })) {
@@ -1058,7 +1101,15 @@ mod rust_analyzer {
         let usage = project
             .zip(semantic_index.as_ref())
             .map(|(project, index)| {
-                collect_semantic_usage_report(database, &semantics, vfs, project, index, &mut hints)
+                collect_semantic_usage_report(
+                    database,
+                    &semantics,
+                    vfs,
+                    project,
+                    index,
+                    &mut hints,
+                    reference_mode,
+                )
             });
         SemanticCollection {
             report,
@@ -1075,6 +1126,7 @@ mod rust_analyzer {
         project: &Project,
         index: &ProjectSemanticIndex,
         hints: &mut SemanticReductionHints,
+        reference_mode: ReferenceSearchMode,
     ) -> SemanticUsageReport {
         let mut report = SemanticUsageReport {
             indexed_callables: project.functions.len() + project.methods.len(),
@@ -1083,7 +1135,7 @@ mod rust_analyzer {
         };
 
         for (file_id, vfs_path) in vfs.iter() {
-            if !index.contains_vfs_path(vfs_path) {
+            if !index.should_map_usage_file(vfs_path, reference_mode) {
                 continue;
             }
             let source = semantics.parse_guess_edition(file_id);
@@ -1119,8 +1171,32 @@ mod rust_analyzer {
             .indexed_callables
             .saturating_sub(report.mapped_callables);
         report.unmapped_items = report.indexed_items.saturating_sub(report.mapped_items);
-        collect_semantic_reference_report(database, vfs, project, index, &mut report, hints);
+        match reference_mode {
+            ReferenceSearchMode::Complete => {
+                collect_semantic_reference_report(
+                    database,
+                    vfs,
+                    project,
+                    index,
+                    &mut report,
+                    hints,
+                );
+            }
+            ReferenceSearchMode::TopDownOnly => {
+                report.reference_queries_skipped = indexed_reference_query_candidates(project);
+            }
+        }
         report
+    }
+
+    fn indexed_reference_query_candidates(project: &Project) -> usize {
+        project.functions.len()
+            + project.methods.len()
+            + project
+                .items
+                .keys()
+                .filter(|item| item.kind != ItemKind::Mod)
+                .count()
     }
 
     fn collect_semantic_reference_report(
@@ -1497,6 +1573,7 @@ mod rust_analyzer {
         let source = context.semantics.parse_guess_edition(file_id);
         let mut report = SemanticReport::default();
         let source_text = source.syntax().text().to_string();
+        context.external_imported_symbols = external_imported_symbols(&source_text);
         let file_path = normalize_vfs_path(context.vfs_path).unwrap_or_default();
 
         for node in source.syntax().descendants() {
@@ -1600,8 +1677,12 @@ mod rust_analyzer {
         let symbol = method_call
             .name_ref()
             .map(|name| name.syntax().text().to_string());
-        let (category, reason) =
-            classify_unresolved_method(context.semantic_index, &symbol, syntax, source_text);
+        let (category, reason) = classify_unresolved_method(
+            context.semantic_index,
+            &context.external_imported_symbols,
+            &symbol,
+            syntax,
+        );
         unresolved_diagnostic(
             SemanticUnresolvedKind::MethodCall,
             category,
@@ -1626,8 +1707,12 @@ mod rust_analyzer {
             .and_then(|segment| segment.name_ref())
             .map(|name| name.syntax().text().to_string());
         let segments = path_segments(path);
-        let (category, reason) =
-            classify_unresolved_path(context.semantic_index, syntax, source_text, &segments);
+        let (category, reason) = classify_unresolved_path(
+            context.semantic_index,
+            &context.external_imported_symbols,
+            syntax,
+            &segments,
+        );
         unresolved_diagnostic(
             SemanticUnresolvedKind::Path,
             category,
@@ -1676,9 +1761,9 @@ mod rust_analyzer {
 
     fn classify_unresolved_method(
         index: Option<&ProjectSemanticIndex>,
+        external_imported_symbols: &BTreeSet<String>,
         symbol: &Option<String>,
         syntax: &ra_ap_syntax::SyntaxNode,
-        source_text: &str,
     ) -> (SemanticUnresolvedCategory, &'static str) {
         if syntax_has_macro_or_attr_ancestor(syntax) {
             return (
@@ -1693,7 +1778,11 @@ mod rust_analyzer {
                 "unresolved_method_has_primitive_turbofish",
             );
         }
-        if unresolved_method_receiver_has_external_anchor(source_text, symbol, &snippet) {
+        if unresolved_method_receiver_has_external_anchor(
+            external_imported_symbols,
+            symbol,
+            &snippet,
+        ) {
             return (
                 SemanticUnresolvedCategory::Benign,
                 "unresolved_method_receiver_has_external_anchor",
@@ -1724,8 +1813,8 @@ mod rust_analyzer {
 
     fn classify_unresolved_path(
         index: Option<&ProjectSemanticIndex>,
+        external_imported_symbols: &BTreeSet<String>,
         syntax: &ra_ap_syntax::SyntaxNode,
-        source_text: &str,
         segments: &[String],
     ) -> (SemanticUnresolvedCategory, &'static str) {
         if syntax_has_macro_or_attr_ancestor(syntax) {
@@ -1746,7 +1835,7 @@ mod rust_analyzer {
                 "unresolved_path_has_external_dependency_root",
             );
         }
-        if source_has_external_imported_path(source_text, segments) {
+        if external_imported_symbols_have_path(external_imported_symbols, segments) {
             return (
                 SemanticUnresolvedCategory::Benign,
                 "unresolved_path_has_retained_external_import",
@@ -1812,7 +1901,7 @@ mod rust_analyzer {
     }
 
     fn unresolved_method_receiver_has_external_anchor(
-        source_text: &str,
+        external_imported_symbols: &BTreeSet<String>,
         symbol: &Option<String>,
         snippet: &str,
     ) -> bool {
@@ -1826,7 +1915,7 @@ mod rust_analyzer {
             return false;
         };
         matches!(anchor, "std" | "core" | "alloc")
-            || source_has_external_imported_symbols(source_text, &[anchor])
+            || external_imported_symbols_have_symbols(external_imported_symbols, &[anchor])
     }
 
     fn unresolved_method_looks_like_common_external_receiver(
@@ -1903,6 +1992,7 @@ mod rust_analyzer {
         package_or_alias.replace('-', "_")
     }
 
+    #[cfg(test)]
     fn source_has_external_imported_path(source_text: &str, segments: &[String]) -> bool {
         let mut symbols = Vec::new();
         if let Some(symbol) = segments.last() {
@@ -1921,19 +2011,53 @@ mod rust_analyzer {
         source_has_external_imported_symbols(source_text, &[symbol])
     }
 
+    #[cfg(test)]
     fn source_has_external_imported_symbols(source_text: &str, symbols: &[&str]) -> bool {
         if symbols.is_empty() {
             return false;
         }
+        let imported_symbols = external_imported_symbols(source_text);
+        external_imported_symbols_have_symbols(&imported_symbols, symbols)
+    }
+
+    fn external_imported_symbols(source_text: &str) -> BTreeSet<String> {
         let Ok(file) = syn::parse_file(source_text) else {
-            return false;
+            return BTreeSet::new();
         };
-        file.items.iter().any(|item| {
+        let mut symbols = BTreeSet::new();
+        for item in &file.items {
             let syn::Item::Use(item_use) = item else {
-                return false;
+                continue;
             };
-            use_tree_imports_external_symbol(&item_use.tree, symbols, UseRootKind::Unknown)
-        })
+            collect_external_imported_symbols(&item_use.tree, UseRootKind::Unknown, &mut symbols);
+        }
+        symbols
+    }
+
+    fn external_imported_symbols_have_path(
+        imported_symbols: &BTreeSet<String>,
+        segments: &[String],
+    ) -> bool {
+        let mut symbols = Vec::new();
+        if let Some(symbol) = segments.last() {
+            symbols.push(symbol.as_str());
+        }
+        if segments.len() > 1 {
+            if let Some(symbol) = segments.first() {
+                symbols.push(symbol.as_str());
+            }
+        }
+        external_imported_symbols_have_symbols(imported_symbols, &symbols)
+    }
+
+    fn external_imported_symbols_have_symbols(
+        imported_symbols: &BTreeSet<String>,
+        symbols: &[&str],
+    ) -> bool {
+        !symbols.is_empty()
+            && symbols
+                .iter()
+                .any(|symbol| imported_symbols.contains(*symbol))
     }
 
     #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -1943,11 +2067,11 @@ mod rust_analyzer {
         Local,
     }
 
-    fn use_tree_imports_external_symbol(
+    fn collect_external_imported_symbols(
         tree: &syn::UseTree,
-        symbols: &[&str],
         root: UseRootKind,
-    ) -> bool {
+        symbols: &mut BTreeSet<String>,
+    ) {
         match tree {
             syn::UseTree::Path(path) => {
                 let ident = path.ident.to_string();
@@ -1956,20 +2080,24 @@ mod rust_analyzer {
                     UseRootKind::Unknown => UseRootKind::External,
                     existing => existing,
                 };
-                use_tree_imports_external_symbol(&path.tree, symbols, root)
+                collect_external_imported_symbols(&path.tree, root, symbols);
             }
             syn::UseTree::Name(name) => {
-                root == UseRootKind::External && symbols.iter().any(|symbol| name.ident == *symbol)
+                if root == UseRootKind::External {
+                    symbols.insert(name.ident.to_string());
+                }
             }
             syn::UseTree::Rename(rename) => {
-                root == UseRootKind::External
-                    && symbols.iter().any(|symbol| rename.rename == *symbol)
+                if root == UseRootKind::External {
+                    symbols.insert(rename.rename.to_string());
+                }
             }
-            syn::UseTree::Glob(_) => false,
-            syn::UseTree::Group(group) => group
-                .items
-                .iter()
-                .any(|tree| use_tree_imports_external_symbol(tree, symbols, root)),
+            syn::UseTree::Glob(_) => {}
+            syn::UseTree::Group(group) => {
+                for tree in &group.items {
+                    collect_external_imported_symbols(tree, root, symbols);
+                }
+            }
         }
     }
 
@@ -2268,10 +2396,8 @@ mod rust_analyzer {
             }
             for source in project.files.values() {
                 let path = normalize_fs_path(&source.path);
-                files.entry(path).or_insert_with(|| IndexedSourceFile {
-                    text: fs::read_to_string(&source.path).unwrap_or_default(),
-                    callables: Vec::new(),
-                    items: Vec::new(),
+                files.entry(path).or_insert_with(|| {
+                    IndexedSourceFile::new(fs::read_to_string(&source.path).unwrap_or_default())
                 });
             }
 
@@ -2373,6 +2499,37 @@ mod rust_analyzer {
 
         fn is_root_file(&self, vfs_path: &ra_ap_vfs::VfsPath) -> bool {
             normalize_vfs_path(vfs_path).is_some_and(|path| self.root_files.contains(&path))
+        }
+
+        fn should_collect_semantic_file(
+            &self,
+            vfs_path: &ra_ap_vfs::VfsPath,
+            reference_mode: ReferenceSearchMode,
+        ) -> bool {
+            match reference_mode {
+                ReferenceSearchMode::Complete => true,
+                ReferenceSearchMode::TopDownOnly => {
+                    (self.root_files.is_empty() && self.retained_files.is_empty())
+                        || self.file_priority(vfs_path) <= 1
+                }
+            }
+        }
+
+        fn should_map_usage_file(
+            &self,
+            vfs_path: &ra_ap_vfs::VfsPath,
+            reference_mode: ReferenceSearchMode,
+        ) -> bool {
+            if !self.contains_vfs_path(vfs_path) {
+                return false;
+            }
+            match reference_mode {
+                ReferenceSearchMode::Complete => true,
+                ReferenceSearchMode::TopDownOnly => {
+                    (self.root_files.is_empty() && self.retained_files.is_empty())
+                        || self.file_priority(vfs_path) <= 1
+                }
+            }
         }
 
         fn should_collect_semantic_node(
@@ -2626,44 +2783,48 @@ mod rust_analyzer {
 
     struct IndexedSourceFile {
         text: String,
+        line_starts: Vec<usize>,
         callables: Vec<IndexedCallable>,
         items: Vec<IndexedItem>,
     }
 
     impl IndexedSourceFile {
-        fn line_column(&self, offset: TextSize) -> (usize, usize) {
-            let offset = text_size_to_usize(offset).min(self.text.len());
-            let mut line = 1;
-            let mut line_start = 0;
-            for (index, ch) in self.text.char_indices() {
-                if index >= offset {
-                    break;
-                }
-                if ch == '\n' {
-                    line += 1;
-                    line_start = index + 1;
+        fn new(text: String) -> Self {
+            let mut line_starts = vec![0];
+            for (index, byte) in text.bytes().enumerate() {
+                if byte == b'\n' {
+                    line_starts.push(index + 1);
                 }
             }
-            (line, offset.saturating_sub(line_start))
+            Self {
+                text,
+                line_starts,
+                callables: Vec::new(),
+                items: Vec::new(),
+            }
+        }
+
+        fn line_column(&self, offset: TextSize) -> (usize, usize) {
+            let offset = text_size_to_usize(offset).min(self.text.len());
+            let line_index = match self.line_starts.binary_search(&offset) {
+                Ok(index) => index,
+                Err(0) => 0,
+                Err(index) => index - 1,
+            };
+            (
+                line_index + 1,
+                offset.saturating_sub(self.line_starts[line_index]),
+            )
         }
 
         fn byte_offset(&self, line: usize, column: usize) -> usize {
-            let mut current_line = 1;
-            let mut line_start = 0;
-            for (index, ch) in self.text.char_indices() {
-                if current_line == line {
-                    return (line_start + column).min(self.text.len());
-                }
-                if ch == '\n' {
-                    current_line += 1;
-                    line_start = index + 1;
-                }
-            }
-            if current_line == line {
-                (line_start + column).min(self.text.len())
-            } else {
-                self.text.len()
-            }
+            let Some(line_start) = line
+                .checked_sub(1)
+                .and_then(|index| self.line_starts.get(index))
+            else {
+                return self.text.len();
+            };
+            (line_start + column).min(self.text.len())
         }
     }
 
@@ -2913,10 +3074,10 @@ mod rust_analyzer {
     #[cfg(test)]
     mod tests {
         use super::{
-            classify_unresolved_path, item_derives_default, method_receiver_snippet, path_segments,
-            receiver_is_plain_value_or_field_chain, rust_crate_root_ident,
-            snippet_has_only_primitive_turbofish, source_has_external_imported_path,
-            source_has_external_imported_symbol,
+            classify_unresolved_path, external_imported_symbols, item_derives_default,
+            method_receiver_snippet, path_segments, receiver_is_plain_value_or_field_chain,
+            rust_crate_root_ident, snippet_has_only_primitive_turbofish,
+            source_has_external_imported_path, source_has_external_imported_symbol,
             unresolved_method_looks_like_common_external_receiver,
             unresolved_method_receiver_has_external_anchor, ProjectSemanticIndex,
         };
@@ -2997,8 +3158,9 @@ use crate::local::fmt as local_fmt;
             index.local_idents.insert("BorderType".to_string());
             let segments = path_segments(&path);
 
+            let imported_symbols = external_imported_symbols(source);
             let (category, reason) =
-                classify_unresolved_path(Some(&index), path.syntax(), source, &segments);
+                classify_unresolved_path(Some(&index), &imported_symbols, path.syntax(), &segments);
 
             assert_eq!(category, SemanticUnresolvedCategory::Benign);
             assert_eq!(reason, "unresolved_path_has_external_dependency_root");
@@ -3026,18 +3188,19 @@ use crate::local::fmt as local_fmt;
         #[test]
         fn external_receiver_methods_are_benign_unresolved_candidates() {
             let source = "use std::{fs, path::PathBuf};";
+            let imported_symbols = external_imported_symbols(source);
             assert!(unresolved_method_receiver_has_external_anchor(
-                source,
+                &imported_symbols,
                 &Some("join".to_string()),
                 "PathBuf::from(directory).join(PREFERENCES_FILE)"
             ));
             assert!(unresolved_method_receiver_has_external_anchor(
-                source,
+                &imported_symbols,
                 &Some("write".to_string()),
                 "fs::OpenOptions::new().write(true)"
             ));
             assert!(!unresolved_method_receiver_has_external_anchor(
-                source,
+                &imported_symbols,
                 &Some("create".to_string()),
                 "manager.create()"
             ));
@@ -3192,6 +3355,76 @@ mod tests {
 
     #[test]
     #[cfg(feature = "ra-hir")]
+    fn ra_feedback_mode_skips_global_reference_proof() {
+        let workspace_root = ra_fixture_workspace("ra-feedback-reference-scope");
+        let workspace = crate::manifest::load_workspace(&workspace_root).unwrap();
+        let project = crate::parse::parse_workspace(workspace).unwrap();
+        let report = load_report_for_project(
+            &workspace_root,
+            AnalyzerMode::RustAnalyzerFeedback,
+            &project,
+        )
+        .unwrap();
+        let usage = report
+            .semantic_usage
+            .as_ref()
+            .expect("ra-feedback should still map semantic usage");
+
+        assert_eq!(report.mode, AnalyzerMode::RustAnalyzerFeedback);
+        assert_eq!(usage.reference_queries, 0);
+        assert!(usage.reference_queries_skipped > 0);
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("RA feedback closure:")));
+        assert!(report.notes.iter().any(|note| note.contains("skipped")));
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
+    fn ra_feedback_usage_mapping_is_scoped_to_retained_files() {
+        let workspace_root = ra_fixture_workspace_with_dead_module("ra-feedback-retained-scope");
+        let workspace = crate::manifest::load_workspace(&workspace_root).unwrap();
+        let project = crate::parse::parse_workspace(workspace).unwrap();
+        let report = load_report_for_project(
+            &workspace_root,
+            AnalyzerMode::RustAnalyzerFeedback,
+            &project,
+        )
+        .unwrap();
+        let usage = report
+            .semantic_usage
+            .as_ref()
+            .expect("ra-feedback should still map semantic usage");
+
+        assert!(usage.mapped_callables < usage.indexed_callables);
+        assert!(usage.unmapped_callables > 0);
+        let semantic = report
+            .semantic
+            .as_ref()
+            .expect("ra-feedback should collect semantic inventory");
+        assert!(semantic.analyzed_files < semantic.source_files);
+        assert!(semantic.top_down_skipped_files > 0);
+        assert_eq!(semantic.selected_root_skipped_files, 0);
+        assert_eq!(usage.reference_queries, 0);
+        assert!(usage.reference_queries_skipped > usage.mapped_callables);
+        assert!(
+            usage
+                .mapped_callable_ids
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("dead::unused")),
+            "dead module callables should not be definition-mapped in top-down mode: {:?}",
+            usage.mapped_callable_ids
+        );
+        assert!(report
+            .notes
+            .iter()
+            .any(|note| note.contains("scoped to top-down retained/root files")));
+    }
+
+    #[test]
+    #[cfg(feature = "ra-hir")]
     fn ra_hir_proc_macro_mode_skips_dependency_artifacts_by_default() {
         if proc_macro_dependency_loading_enabled_for_test() {
             return;
@@ -3278,6 +3511,62 @@ pub fn helper(worker: Worker) -> u32 {
 #[opensourced]
 pub fn entry(worker: Worker) -> u32 {
     helper(worker)
+}
+"#,
+        );
+        root
+    }
+
+    #[cfg(feature = "ra-hir")]
+    fn ra_fixture_workspace_with_dead_module(label: &str) -> PathBuf {
+        let root = temp_path(label);
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"
+pub mod dead;
+pub mod live;
+"#,
+        );
+        write(
+            root.join("app/src/live.rs"),
+            r#"
+use opensourced::opensourced;
+
+pub fn helper() -> u32 {
+    7
+}
+
+#[opensourced]
+pub fn entry() -> u32 {
+    helper()
+}
+"#,
+        );
+        write(
+            root.join("app/src/dead.rs"),
+            r#"
+pub fn unused() -> u32 {
+    11
+}
+
+pub struct Dead;
+
+impl Dead {
+    pub fn unused_method(&self) -> u32 {
+        unused()
+    }
 }
 "#,
         );

@@ -170,6 +170,8 @@ pub enum SemanticOwnerId {
 pub struct ReductionEvidence {
     pub unresolved_method_fallbacks: usize,
     pub unresolved_method_candidate_matches: usize,
+    pub generic_unresolved_method_fallbacks: usize,
+    pub generic_unresolved_method_candidate_matches: usize,
     pub capped_unresolved_method_fallbacks: usize,
     pub capped_unresolved_method_details: Vec<CappedMethodFallbackEvidence>,
     pub semantic_edges_applied: usize,
@@ -179,6 +181,9 @@ impl ReductionEvidence {
     pub fn add(&mut self, other: &Self) {
         self.unresolved_method_fallbacks += other.unresolved_method_fallbacks;
         self.unresolved_method_candidate_matches += other.unresolved_method_candidate_matches;
+        self.generic_unresolved_method_fallbacks += other.generic_unresolved_method_fallbacks;
+        self.generic_unresolved_method_candidate_matches +=
+            other.generic_unresolved_method_candidate_matches;
         self.capped_unresolved_method_fallbacks += other.capped_unresolved_method_fallbacks;
         self.capped_unresolved_method_details
             .extend(other.capped_unresolved_method_details.iter().cloned());

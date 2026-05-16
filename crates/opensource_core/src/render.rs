@@ -31,6 +31,8 @@ use crate::{
 const OUTPUT_MARKER: &str = ".slicers-output";
 const SUPPORT_PACKAGE_DIR: &str = "support";
 
+type RootMacroImplAssocFunctionCalls = BTreeSet<(String, String, String)>;
+
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RenderedMemberDecisionIndex {
     pub(crate) retained: BTreeSet<String>,
@@ -46,38 +48,65 @@ struct RenderPlan {
     reachable_items: BTreeSet<ItemId>,
     pruned_enum_payload_item_names: BTreeMap<String, BTreeSet<String>>,
     callable_idents_by_package: BTreeMap<String, BTreeSet<String>>,
-    root_callable_signature_surfaces: BTreeSet<(String, Vec<String>)>,
-    root_macro_impl_assoc_function_calls: BTreeSet<(String, String, String)>,
+    root_macro_impl_assoc_function_calls: RootMacroImplAssocFunctionCalls,
     mentions: ReachableMentionIndex,
     non_callable_mentions: ReachableMentionIndex,
+    concrete_struct_field_needs: RefCell<BTreeMap<(ItemId, String), bool>>,
+    callable_concrete_struct_fields: RefCell<BTreeMap<(CallableId, ItemId), BTreeSet<String>>>,
+    package_struct_field_needs: RefCell<BTreeMap<(Option<String>, String), bool>>,
+    retained_impl_field_mentions: RefCell<BTreeMap<(String, Vec<String>, String, String), bool>>,
+    callable_token_idents: RefCell<BTreeMap<CallableId, BTreeSet<String>>>,
+    retained_impl_header_unqualified_idents:
+        RefCell<BTreeMap<(String, Vec<String>), BTreeSet<String>>>,
     import_scope_mentions: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
     import_scope_uses: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
+}
+
+struct RenderPrepass {
+    root_macro_impl_assoc_function_calls: RootMacroImplAssocFunctionCalls,
+    concrete_struct_field_needs: RefCell<BTreeMap<(ItemId, String), bool>>,
+    callable_concrete_struct_fields: RefCell<BTreeMap<(CallableId, ItemId), BTreeSet<String>>>,
+    package_struct_field_needs: RefCell<BTreeMap<(Option<String>, String), bool>>,
+    retained_impl_field_mentions: RefCell<BTreeMap<(String, Vec<String>, String, String), bool>>,
+    callable_token_idents: RefCell<BTreeMap<CallableId, BTreeSet<String>>>,
+}
+
+impl RenderPrepass {
+    fn new(root_macro_impl_assoc_function_calls: RootMacroImplAssocFunctionCalls) -> Self {
+        Self {
+            root_macro_impl_assoc_function_calls,
+            concrete_struct_field_needs: RefCell::new(BTreeMap::new()),
+            callable_concrete_struct_fields: RefCell::new(BTreeMap::new()),
+            package_struct_field_needs: RefCell::new(BTreeMap::new()),
+            retained_impl_field_mentions: RefCell::new(BTreeMap::new()),
+            callable_token_idents: RefCell::new(BTreeMap::new()),
+        }
+    }
 }
 
 impl RenderPlan {
     fn build(project: &Project, reduced: &ReducedProject, usage: &UsageDecisionIndex) -> Self {
         let mut reachable_items = BTreeSet::new();
         let mut rendered_item_idents = BTreeSet::new();
-        let pruned_enum_payload_item_names =
-            droppable_pruned_enum_payload_item_names_by_package(project, reduced, usage);
+        let prepass = RenderPrepass::new(root_macro_impl_assoc_function_calls(project, reduced));
+        let pruned_enum_payload_item_names = droppable_pruned_enum_payload_item_names_by_package(
+            project,
+            reduced,
+            usage,
+            Some(&prepass),
+        );
         let callable_idents = reachable_reduced_callable_ident_index(project, reduced);
         let reachable_token_idents = ReachableTokenIdentIndex::build(
             project,
             reduced,
             usage,
             &pruned_enum_payload_item_names,
+            Some(&prepass),
         );
         let retained_surface_idents =
             retained_surface_idents_by_package(project, reduced, &reachable_token_idents);
         let referenced_reexport_target_items =
             referenced_public_reexport_target_items(project, reduced, &reachable_token_idents);
-        let root_callable_signature_surfaces = root_callable_signature_surfaces(project, reduced);
-        let root_macro_impl_assoc_function_calls = root_macro_impl_assoc_function_calls(
-            project,
-            reduced,
-            &root_callable_signature_surfaces,
-        );
-
         for item in &reduced.reachable_items {
             if item_name_is_droppable_pruned_enum_payload(
                 &pruned_enum_payload_item_names,
@@ -100,6 +129,7 @@ impl RenderPlan {
                 insert_render_plan_item(
                     project,
                     reduced,
+                    &prepass,
                     &mut reachable_items,
                     &mut rendered_item_idents,
                     item,
@@ -118,6 +148,7 @@ impl RenderPlan {
             insert_render_plan_item(
                 project,
                 reduced,
+                &prepass,
                 &mut reachable_items,
                 &mut rendered_item_idents,
                 item,
@@ -135,6 +166,7 @@ impl RenderPlan {
             insert_render_plan_item(
                 project,
                 reduced,
+                &prepass,
                 &mut reachable_items,
                 &mut rendered_item_idents,
                 &item,
@@ -159,6 +191,7 @@ impl RenderPlan {
                     insert_render_plan_item(
                         project,
                         reduced,
+                        &prepass,
                         &mut reachable_items,
                         &mut rendered_item_idents,
                         item,
@@ -194,8 +227,13 @@ impl RenderPlan {
             reachable_items,
             pruned_enum_payload_item_names,
             callable_idents_by_package: callable_idents.by_package,
-            root_callable_signature_surfaces,
-            root_macro_impl_assoc_function_calls,
+            root_macro_impl_assoc_function_calls: prepass.root_macro_impl_assoc_function_calls,
+            concrete_struct_field_needs: RefCell::new(BTreeMap::new()),
+            callable_concrete_struct_fields: RefCell::new(BTreeMap::new()),
+            package_struct_field_needs: RefCell::new(BTreeMap::new()),
+            retained_impl_field_mentions: RefCell::new(BTreeMap::new()),
+            callable_token_idents: RefCell::new(BTreeMap::new()),
+            retained_impl_header_unqualified_idents: RefCell::new(BTreeMap::new()),
             import_scope_mentions: RefCell::new(BTreeMap::new()),
             import_scope_uses: RefCell::new(BTreeMap::new()),
         };
@@ -254,16 +292,6 @@ impl RenderPlan {
         self.mentions.module_idents(package, module_path)
     }
 
-    fn module_non_callable_mentions_ident(
-        &self,
-        package: &str,
-        module_path: &[String],
-        ident: &str,
-    ) -> bool {
-        self.non_callable_mentions
-            .module_mentions_ident(package, module_path, ident)
-    }
-
     fn package_callable_mentions_ident(&self, package: &str, ident: &str) -> bool {
         self.callable_idents_by_package
             .get(package)
@@ -277,13 +305,7 @@ impl RenderPlan {
         type_path: &[String],
         item_impl: &syn::ItemImpl,
     ) -> bool {
-        root_item_impl_surface_should_render_with_signature_surfaces(
-            reduced,
-            &self.root_callable_signature_surfaces,
-            package,
-            type_path,
-            item_impl,
-        )
+        root_item_impl_surface_should_render(reduced, package, type_path, item_impl)
     }
 
     fn retained_impl_surfaces_call_inherent_associated_function(
@@ -292,14 +314,12 @@ impl RenderPlan {
         type_path: &[String],
         function: &str,
     ) -> bool {
-        let Some(type_name) = type_path.last() else {
-            return false;
-        };
-        self.root_macro_impl_assoc_function_calls.contains(&(
-            package.to_string(),
-            type_name.clone(),
-            function.to_string(),
-        ))
+        root_macro_impl_assoc_function_calls_contains(
+            &self.root_macro_impl_assoc_function_calls,
+            package,
+            type_path,
+            function,
+        )
     }
 
     fn is_droppable_pruned_enum_payload(&self, item: &ItemId) -> bool {
@@ -906,6 +926,7 @@ impl ReachableTokenIdentIndex {
         reduced: &ReducedProject,
         usage: &UsageDecisionIndex,
         pruned_enum_payload_item_names: &BTreeMap<String, BTreeSet<String>>,
+        prepass: Option<&RenderPrepass>,
     ) -> Self {
         let mut index = Self::default();
         for callable in &reduced.reachable {
@@ -935,7 +956,8 @@ impl ReachableTokenIdentIndex {
             ) {
                 continue;
             }
-            let idents = rendered_item_surface_idents(project, reduced, item);
+            let idents =
+                rendered_item_surface_idents_with_assoc_calls(project, reduced, item, prepass);
             index.add(&item.package, &item.module_path, idents);
         }
 
@@ -997,6 +1019,7 @@ fn callable_module_path(callable: &CallableId) -> &[String] {
 fn insert_render_plan_item(
     project: &Project,
     reduced: &ReducedProject,
+    prepass: &RenderPrepass,
     reachable_items: &mut BTreeSet<ItemId>,
     rendered_item_idents: &mut BTreeSet<String>,
     item: &ItemId,
@@ -1004,7 +1027,12 @@ fn insert_render_plan_item(
     if !reachable_items.insert(item.clone()) {
         return;
     }
-    rendered_item_idents.extend(rendered_item_surface_idents(project, reduced, item));
+    rendered_item_idents.extend(rendered_item_surface_idents_with_assoc_calls(
+        project,
+        reduced,
+        item,
+        Some(prepass),
+    ));
 }
 
 pub fn write_reduced_workspace(
@@ -8870,13 +8898,32 @@ fn rendered_item_surface_idents(
     reduced: &ReducedProject,
     item: &ItemId,
 ) -> BTreeSet<String> {
+    rendered_item_surface_idents_with_assoc_calls(project, reduced, item, None)
+}
+
+fn rendered_item_surface_idents_with_assoc_calls(
+    project: &Project,
+    reduced: &ReducedProject,
+    item: &ItemId,
+    prepass: Option<&RenderPrepass>,
+) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
     let Some(record) = project.items.get(item) else {
         return idents;
     };
     match &record.item {
+        Item::Mod(item_mod) => {
+            collect_item_mod_surface_idents(item, item_mod, &mut idents);
+        }
         Item::Struct(item_struct) => {
-            collect_struct_surface_idents(project, reduced, item, item_struct, &mut idents);
+            collect_struct_surface_idents(
+                project,
+                reduced,
+                item,
+                item_struct,
+                prepass,
+                &mut idents,
+            );
         }
         Item::Enum(item_enum) => {
             collect_enum_surface_idents(project, reduced, item, item_enum, &mut idents);
@@ -8901,6 +8948,9 @@ fn rendered_item_surface_idents_for_mention_index(
         return idents;
     };
     match &record.item {
+        Item::Mod(item_mod) => {
+            collect_item_mod_surface_idents(item, item_mod, &mut idents);
+        }
         Item::Struct(item_struct) => {
             collect_struct_surface_idents_for_mention_index(
                 project,
@@ -8915,6 +8965,19 @@ fn rendered_item_surface_idents_for_mention_index(
     }
     expand_alias_surface_idents(&record.aliases, &mut idents);
     idents
+}
+
+fn collect_item_mod_surface_idents(
+    item_id: &ItemId,
+    item_mod: &ItemMod,
+    idents: &mut BTreeSet<String>,
+) {
+    idents.insert(item_id.name.clone());
+    idents.extend(item_id.module_path.iter().cloned());
+    for attr in &item_mod.attrs {
+        collect_token_idents(&attr.to_token_stream(), idents);
+    }
+    collect_token_idents(&item_mod.vis.to_token_stream(), idents);
 }
 
 fn collect_struct_surface_idents_for_mention_index(
@@ -8961,6 +9024,7 @@ fn droppable_pruned_enum_payload_item_names_by_package(
     project: &Project,
     reduced: &ReducedProject,
     usage: &UsageDecisionIndex,
+    prepass: Option<&RenderPrepass>,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let item_names_by_package = project.items.keys().fold(
         BTreeMap::<String, BTreeSet<String>>::new(),
@@ -9049,7 +9113,9 @@ fn droppable_pruned_enum_payload_item_names_by_package(
         required_idents
             .entry(item_id.package.clone())
             .or_default()
-            .extend(rendered_item_surface_idents(project, reduced, item_id));
+            .extend(rendered_item_surface_idents_with_assoc_calls(
+                project, reduced, item_id, prepass,
+            ));
     }
 
     candidates
@@ -9083,6 +9149,7 @@ fn collect_struct_surface_idents(
     reduced: &ReducedProject,
     item_id: &ItemId,
     item_struct: &syn::ItemStruct,
+    prepass: Option<&RenderPrepass>,
     idents: &mut BTreeSet<String>,
 ) {
     idents.insert(item_id.name.clone());
@@ -9100,7 +9167,7 @@ fn collect_struct_surface_idents(
         return;
     };
     for field in &fields.named {
-        if struct_field_should_remain(
+        if struct_field_should_remain_with_assoc_calls(
             project,
             reduced,
             None,
@@ -9108,6 +9175,7 @@ fn collect_struct_surface_idents(
             &item_id.module_path,
             item_struct,
             field,
+            prepass,
         ) {
             collect_token_idents(&field.to_token_stream(), idents);
         }
@@ -13797,6 +13865,19 @@ fn token_stream_mentions_unqualified_ident(tokens: &TokenStream, ident: &str) ->
     false
 }
 
+fn collect_token_unqualified_idents(tokens: &TokenStream, idents: &mut BTreeSet<String>) {
+    let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+    for (index, token) in tokens.iter().enumerate() {
+        match token {
+            TokenTree::Ident(candidate) if !previous_tokens_are_path_separator(&tokens, index) => {
+                idents.insert(candidate.to_string());
+            }
+            TokenTree::Group(group) => collect_token_unqualified_idents(&group.stream(), idents),
+            TokenTree::Ident(_) | TokenTree::Literal(_) | TokenTree::Punct(_) => {}
+        }
+    }
+}
+
 fn previous_tokens_are_path_separator(tokens: &[TokenTree], index: usize) -> bool {
     if index < 2 {
         return false;
@@ -16182,12 +16263,38 @@ fn retained_impl_attrs_mention_unqualified_ident(
 fn retained_impl_headers_mention_unqualified_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     ident: &str,
 ) -> bool {
+    let key = (package.to_string(), module_path.to_vec());
+    if let Some(idents) = render_plan
+        .retained_impl_header_unqualified_idents
+        .borrow()
+        .get(&key)
+    {
+        return idents.contains(ident);
+    }
+
+    let idents = retained_impl_header_unqualified_idents(project, reduced, package, module_path);
+    let contains_ident = idents.contains(ident);
+    render_plan
+        .retained_impl_header_unqualified_idents
+        .borrow_mut()
+        .insert(key, idents);
+    contains_ident
+}
+
+fn retained_impl_header_unqualified_idents(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+    module_path: &[String],
+) -> BTreeSet<String> {
+    let mut idents = BTreeSet::new();
     let Some(items) = module_items_for_path(project, package, module_path) else {
-        return false;
+        return idents;
     };
     let aliases = project
         .module_aliases
@@ -16195,9 +16302,9 @@ fn retained_impl_headers_mention_unqualified_ident(
         .cloned()
         .unwrap_or_default();
 
-    items.iter().any(|item| {
+    for item in items {
         let Item::Impl(item_impl) = item else {
-            return false;
+            continue;
         };
         let header_should_render =
             impl_has_reachable_method(project, reduced, package, module_path, item_impl, &aliases)
@@ -16210,7 +16317,7 @@ fn retained_impl_headers_mention_unqualified_ident(
                         item_impl,
                         &aliases,
                     ));
-        (header_should_render
+        if header_should_render
             || root_macro_impl_surface_should_render_for_module(
                 project,
                 reduced,
@@ -16218,9 +16325,12 @@ fn retained_impl_headers_mention_unqualified_ident(
                 module_path,
                 item_impl,
                 &aliases,
-            ))
-            && impl_header_mentions_unqualified_ident(item_impl, ident)
-    })
+            )
+        {
+            collect_impl_header_unqualified_idents(item_impl, &mut idents);
+        }
+    }
+    idents
 }
 
 fn retained_impl_non_fn_items_mention_ident(
@@ -16697,12 +16807,15 @@ fn collect_impl_header_idents(item_impl: &syn::ItemImpl, idents: &mut BTreeSet<S
     }
 }
 
-fn impl_header_mentions_unqualified_ident(item_impl: &syn::ItemImpl, ident: &str) -> bool {
-    token_stream_mentions_unqualified_ident(&item_impl.generics.to_token_stream(), ident)
-        || token_stream_mentions_unqualified_ident(&item_impl.self_ty.to_token_stream(), ident)
-        || item_impl.trait_.as_ref().is_some_and(|(_, trait_path, _)| {
-            token_stream_mentions_unqualified_ident(&trait_path.to_token_stream(), ident)
-        })
+fn collect_impl_header_unqualified_idents(
+    item_impl: &syn::ItemImpl,
+    idents: &mut BTreeSet<String>,
+) {
+    collect_token_unqualified_idents(&item_impl.generics.to_token_stream(), idents);
+    collect_token_unqualified_idents(&item_impl.self_ty.to_token_stream(), idents);
+    if let Some((_, trait_path, _)) = &item_impl.trait_ {
+        collect_token_unqualified_idents(&trait_path.to_token_stream(), idents);
+    }
 }
 
 fn impl_has_reachable_method(
@@ -16718,7 +16831,7 @@ fn impl_has_reachable_method(
     else {
         return false;
     };
-    if root_item_impl_surface_should_render(project, reduced, package, &type_path, item_impl) {
+    if root_item_impl_surface_should_render(reduced, package, &type_path, item_impl) {
         return true;
     }
     let trait_path = item_impl
@@ -17713,32 +17826,13 @@ fn impl_item_attrs_require_surface_retention(impl_item: &ImplItem) -> bool {
 }
 
 fn root_item_impl_surface_should_render(
-    project: &Project,
     reduced: &ReducedProject,
-    package: &str,
-    type_path: &[String],
-    item_impl: &syn::ItemImpl,
-) -> bool {
-    let root_callable_signature_surfaces =
-        root_callable_signature_surfaces_for_path(project, reduced, package, type_path);
-    root_item_impl_surface_should_render_with_signature_surfaces(
-        reduced,
-        &root_callable_signature_surfaces,
-        package,
-        type_path,
-        item_impl,
-    )
-}
-
-fn root_item_impl_surface_should_render_with_signature_surfaces(
-    reduced: &ReducedProject,
-    root_callable_signature_surfaces: &BTreeSet<(String, Vec<String>)>,
     package: &str,
     type_path: &[String],
     item_impl: &syn::ItemImpl,
 ) -> bool {
     item_impl.trait_.is_none()
-        && (path_item_is_root(
+        && path_item_is_root(
             reduced,
             package,
             type_path,
@@ -17748,8 +17842,7 @@ fn root_item_impl_surface_should_render_with_signature_surfaces(
                 ItemKind::Union,
                 ItemKind::Type,
             ],
-        ) || root_callable_signature_surfaces
-            .contains(&(package.to_string(), type_path.to_vec())))
+        )
         && impl_surface_has_macro_contract_attrs(item_impl)
 }
 
@@ -17763,7 +17856,7 @@ fn root_macro_impl_surface_should_render_for_module(
 ) -> bool {
     resolved_local_type_path(project, package, module_path, &item_impl.self_ty, aliases)
         .is_some_and(|type_path| {
-            root_item_impl_surface_should_render(project, reduced, package, &type_path, item_impl)
+            root_item_impl_surface_should_render(reduced, package, &type_path, item_impl)
         })
 }
 
@@ -17985,82 +18078,6 @@ fn path_item_is_root(
                         && item.module_path == module_path
                         && item.name == *name
                         && item.kind == *kind
-            )
-        })
-    })
-}
-
-fn root_callable_signature_surfaces(
-    project: &Project,
-    reduced: &ReducedProject,
-) -> BTreeSet<(String, Vec<String>)> {
-    let mut surfaces = BTreeSet::new();
-    let root_callables = reduced
-        .roots
-        .iter()
-        .filter_map(|root| match root {
-            RootId::Callable(callable) => Some(callable),
-            RootId::Item(_) => None,
-        })
-        .collect::<Vec<_>>();
-    if root_callables.is_empty() {
-        return surfaces;
-    }
-
-    for item in project.items.keys() {
-        if !reduced.packages.contains(&item.package)
-            || !type_surface_item_kinds().contains(&item.kind)
-        {
-            continue;
-        }
-        if root_callables
-            .iter()
-            .any(|callable| callable_signature_resolves_item(project, callable, item))
-        {
-            let mut type_path = item.module_path.clone();
-            type_path.push(item.name.clone());
-            surfaces.insert((item.package.clone(), type_path));
-        }
-    }
-    surfaces
-}
-
-fn root_callable_signature_surfaces_for_path(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &str,
-    type_path: &[String],
-) -> BTreeSet<(String, Vec<String>)> {
-    let mut surfaces = BTreeSet::new();
-    if type_path_is_root_callable_signature_surface(project, reduced, package, type_path) {
-        surfaces.insert((package.to_string(), type_path.to_vec()));
-    }
-    surfaces
-}
-
-fn type_path_is_root_callable_signature_surface(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &str,
-    type_path: &[String],
-) -> bool {
-    let Some((name, module_path)) = type_path.split_last() else {
-        return false;
-    };
-    reduced.roots.iter().any(|root| {
-        let RootId::Callable(callable) = root else {
-            return false;
-        };
-        type_surface_item_kinds().iter().any(|kind| {
-            callable_signature_resolves_item(
-                project,
-                callable,
-                &ItemId {
-                    package: package.to_string(),
-                    module_path: module_path.to_vec(),
-                    name: name.clone(),
-                    kind: *kind,
-                },
             )
         })
     })
@@ -18313,8 +18330,7 @@ fn reachable_import_scope_has_associated_function_call(
 fn root_macro_impl_assoc_function_calls(
     project: &Project,
     reduced: &ReducedProject,
-    root_callable_signature_surfaces: &BTreeSet<(String, Vec<String>)>,
-) -> BTreeSet<(String, String, String)> {
+) -> RootMacroImplAssocFunctionCalls {
     let mut calls = BTreeSet::new();
     for package in &reduced.packages {
         for module_path in project_module_paths(project, package) {
@@ -18339,13 +18355,7 @@ fn root_macro_impl_assoc_function_calls(
                 ) else {
                     continue;
                 };
-                if !root_item_impl_surface_should_render_with_signature_surfaces(
-                    reduced,
-                    root_callable_signature_surfaces,
-                    package,
-                    &type_path,
-                    item_impl,
-                ) {
+                if !root_item_impl_surface_should_render(reduced, package, &type_path, item_impl) {
                     continue;
                 }
                 for impl_item in &item_impl.items {
@@ -18367,6 +18377,18 @@ fn root_macro_impl_assoc_function_calls(
         }
     }
     calls
+}
+
+fn root_macro_impl_assoc_function_calls_contains(
+    calls: &RootMacroImplAssocFunctionCalls,
+    package: &str,
+    type_path: &[String],
+    function: &str,
+) -> bool {
+    let Some(type_name) = type_path.last() else {
+        return false;
+    };
+    calls.contains(&(package.to_string(), type_name.clone(), function.to_string()))
 }
 
 fn retained_impl_surfaces_call_inherent_associated_function(
@@ -18485,6 +18507,9 @@ fn impl_item_fn_has_method_call(item: &syn::ImplItemFn, method: &str) -> bool {
 }
 
 fn item_has_method_call(item: &Item, method: &str) -> bool {
+    if matches!(item, Item::Mod(_)) {
+        return false;
+    }
     let mut visitor = MethodCallVisitor::new(method);
     visitor.visit_item(item);
     visitor.found
@@ -18519,6 +18544,9 @@ fn associated_function_calls_on_types(item: &syn::ImplItemFn) -> BTreeSet<(Strin
 }
 
 fn item_has_associated_function_call(item: &Item, function: &str) -> bool {
+    if matches!(item, Item::Mod(_)) {
+        return false;
+    }
     let mut visitor = AssociatedFunctionCallVisitor::new(function);
     visitor.visit_item(item);
     visitor.found
@@ -20061,6 +20089,29 @@ fn struct_field_should_remain(
     item_struct: &syn::ItemStruct,
     field: &Field,
 ) -> bool {
+    struct_field_should_remain_with_assoc_calls(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        item_struct,
+        field,
+        None,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn struct_field_should_remain_with_assoc_calls(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
+    package: &str,
+    module_path: &[String],
+    item_struct: &syn::ItemStruct,
+    field: &Field,
+    prepass: Option<&RenderPrepass>,
+) -> bool {
     if struct_item_is_blocked_by_unknown(render_plan, package, module_path, item_struct) {
         return true;
     }
@@ -20072,11 +20123,12 @@ fn struct_field_should_remain(
         module_path,
         item_struct,
         field,
+        prepass,
     ) {
         return true;
     }
     if field_mentions_struct_type_params(item_struct, field)
-        && field_provides_required_struct_type_param_usage(
+        && field_provides_required_struct_type_param_usage_with_assoc_calls(
             project,
             reduced,
             render_plan,
@@ -20084,6 +20136,7 @@ fn struct_field_should_remain(
             module_path,
             item_struct,
             field,
+            prepass,
         )
     {
         return true;
@@ -20121,9 +20174,10 @@ fn struct_field_should_remain(
         project,
         reduced,
         render_plan,
+        prepass,
         &item_id,
         &name,
-    ) || retained_impl_items_mention_struct_field(
+    ) || retained_impl_items_mention_struct_field_with_assoc_calls(
         project,
         reduced,
         render_plan,
@@ -20131,6 +20185,7 @@ fn struct_field_should_remain(
         module_path,
         item_struct,
         &name,
+        prepass,
     ) {
         return true;
     }
@@ -20140,10 +20195,11 @@ fn struct_field_should_remain(
     {
         return false;
     }
-    reachable_callables_need_struct_field(project, reduced, render_plan, package, &name)
+    reachable_callables_need_struct_field(project, reduced, render_plan, prepass, package, &name)
 }
 
-fn field_provides_required_struct_type_param_usage(
+#[allow(clippy::too_many_arguments)]
+fn field_provides_required_struct_type_param_usage_with_assoc_calls(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: Option<&RenderPlan>,
@@ -20151,10 +20207,11 @@ fn field_provides_required_struct_type_param_usage(
     module_path: &[String],
     item_struct: &syn::ItemStruct,
     field: &Field,
+    prepass: Option<&RenderPrepass>,
 ) -> bool {
     item_struct.generics.type_params().any(|param| {
         token_stream_mentions_ident(&field.to_token_stream(), &param.ident.to_string())
-            && !struct_type_param_is_used_by_other_retained_field(
+            && !struct_type_param_is_used_by_other_retained_field_with_assoc_calls(
                 project,
                 reduced,
                 render_plan,
@@ -20163,12 +20220,13 @@ fn field_provides_required_struct_type_param_usage(
                 item_struct,
                 field,
                 &param.ident.to_string(),
+                prepass,
             )
     })
 }
 
 #[allow(clippy::too_many_arguments)]
-fn struct_type_param_is_used_by_other_retained_field(
+fn struct_type_param_is_used_by_other_retained_field_with_assoc_calls(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: Option<&RenderPlan>,
@@ -20177,13 +20235,14 @@ fn struct_type_param_is_used_by_other_retained_field(
     item_struct: &syn::ItemStruct,
     field: &Field,
     type_param: &str,
+    prepass: Option<&RenderPrepass>,
 ) -> bool {
     let syn::Fields::Named(fields) = &item_struct.fields else {
         return false;
     };
     fields.named.iter().any(|candidate| {
         candidate.ident != field.ident
-            && struct_field_should_remain_without_type_param_guard(
+            && struct_field_should_remain_without_type_param_guard_with_assoc_calls(
                 project,
                 reduced,
                 render_plan,
@@ -20191,12 +20250,14 @@ fn struct_type_param_is_used_by_other_retained_field(
                 module_path,
                 item_struct,
                 candidate,
+                prepass,
             )
             && token_stream_mentions_ident(&candidate.to_token_stream(), type_param)
     })
 }
 
-fn struct_field_should_remain_without_type_param_guard(
+#[allow(clippy::too_many_arguments)]
+fn struct_field_should_remain_without_type_param_guard_with_assoc_calls(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: Option<&RenderPlan>,
@@ -20204,6 +20265,7 @@ fn struct_field_should_remain_without_type_param_guard(
     module_path: &[String],
     item_struct: &syn::ItemStruct,
     field: &Field,
+    prepass: Option<&RenderPrepass>,
 ) -> bool {
     if struct_item_is_blocked_by_unknown(render_plan, package, module_path, item_struct) {
         return true;
@@ -20216,6 +20278,7 @@ fn struct_field_should_remain_without_type_param_guard(
         module_path,
         item_struct,
         field,
+        prepass,
     ) {
         return true;
     }
@@ -20242,8 +20305,8 @@ fn struct_field_should_remain_without_type_param_guard(
         return true;
     };
     let name = name.to_string();
-    reachable_callables_need_struct_field(project, reduced, render_plan, package, &name)
-        || retained_impl_items_mention_struct_field(
+    reachable_callables_need_struct_field(project, reduced, render_plan, prepass, package, &name)
+        || retained_impl_items_mention_struct_field_with_assoc_calls(
             project,
             reduced,
             render_plan,
@@ -20251,6 +20314,7 @@ fn struct_field_should_remain_without_type_param_guard(
             module_path,
             item_struct,
             &name,
+            prepass,
         )
 }
 
@@ -20278,6 +20342,7 @@ fn public_struct_field_surface_should_remain(
     module_path: &[String],
     item_struct: &syn::ItemStruct,
     field: &Field,
+    prepass: Option<&RenderPrepass>,
 ) -> bool {
     if !matches!(item_struct.vis, syn::Visibility::Public(_))
         || !matches!(field.vis, syn::Visibility::Public(_))
@@ -20298,6 +20363,7 @@ fn public_struct_field_surface_should_remain(
                 project,
                 reduced,
                 render_plan,
+                prepass,
                 &item_id,
                 &field_name.to_string(),
             )
@@ -20339,7 +20405,8 @@ fn builtin_field_shape_preserving_derive(name: &str) -> bool {
     )
 }
 
-fn retained_impl_items_mention_struct_field(
+#[allow(clippy::too_many_arguments)]
+fn retained_impl_items_mention_struct_field_with_assoc_calls(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: Option<&RenderPlan>,
@@ -20347,7 +20414,34 @@ fn retained_impl_items_mention_struct_field(
     module_path: &[String],
     item_struct: &syn::ItemStruct,
     field_name: &str,
+    prepass: Option<&RenderPrepass>,
 ) -> bool {
+    let cache_key = (
+        package.to_string(),
+        module_path.to_vec(),
+        item_struct.ident.to_string(),
+        field_name.to_string(),
+    );
+    if let Some(render_plan) = render_plan {
+        if let Some(cached) = render_plan
+            .retained_impl_field_mentions
+            .borrow()
+            .get(&cache_key)
+            .copied()
+        {
+            return cached;
+        }
+    }
+    if let Some(prepass) = prepass {
+        if let Some(cached) = prepass
+            .retained_impl_field_mentions
+            .borrow()
+            .get(&cache_key)
+            .copied()
+        {
+            return cached;
+        }
+    }
     let Some(items) = module_items_for_path(project, package, module_path) else {
         return false;
     };
@@ -20358,7 +20452,7 @@ fn retained_impl_items_mention_struct_field(
         .unwrap_or_default();
     let struct_name = item_struct.ident.to_string();
 
-    items.iter().any(|item| {
+    let result = items.iter().any(|item| {
         let Item::Impl(item_impl) = item else {
             return false;
         };
@@ -20381,6 +20475,7 @@ fn retained_impl_items_mention_struct_field(
                 impl_item,
                 &type_path,
                 &aliases,
+                prepass.map(|prepass| &prepass.root_macro_impl_assoc_function_calls),
             ) && impl_item_needs_struct_field(
                 impl_item,
                 field_name,
@@ -20388,13 +20483,27 @@ fn retained_impl_items_mention_struct_field(
                 &aliases,
             )
         })
-    })
+    });
+    if let Some(render_plan) = render_plan {
+        render_plan
+            .retained_impl_field_mentions
+            .borrow_mut()
+            .insert(cache_key.clone(), result);
+    }
+    if let Some(prepass) = prepass {
+        prepass
+            .retained_impl_field_mentions
+            .borrow_mut()
+            .insert(cache_key, result);
+    }
+    result
 }
 
 fn reachable_callables_need_struct_field(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: Option<&RenderPlan>,
+    prepass: Option<&RenderPrepass>,
     package: &str,
     field_name: &str,
 ) -> bool {
@@ -20402,6 +20511,7 @@ fn reachable_callables_need_struct_field(
         project,
         reduced,
         render_plan,
+        prepass,
         Some(package),
         Some(field_name),
     )
@@ -20411,13 +20521,35 @@ fn reachable_callables_need_struct_field_in_any_package(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: Option<&RenderPlan>,
+    prepass: Option<&RenderPrepass>,
     package: Option<&str>,
     field_name: Option<&str>,
 ) -> bool {
     let Some(field_name) = field_name else {
         return false;
     };
-    reduced
+    let cache_key = (package.map(str::to_string), field_name.to_string());
+    if let Some(render_plan) = render_plan {
+        if let Some(cached) = render_plan
+            .package_struct_field_needs
+            .borrow()
+            .get(&cache_key)
+            .copied()
+        {
+            return cached;
+        }
+    }
+    if let Some(prepass) = prepass {
+        if let Some(cached) = prepass
+            .package_struct_field_needs
+            .borrow()
+            .get(&cache_key)
+            .copied()
+        {
+            return cached;
+        }
+    }
+    let result = reduced
         .reachable
         .iter()
         .filter(|callable| package.is_none_or(|package| callable.package() == package))
@@ -20430,57 +20562,196 @@ fn reachable_callables_need_struct_field_in_any_package(
             }) || project.methods.get(callable).is_some_and(|record| {
                 method_needs_struct_field(&record.item, &record.aliases, field_name)
             })
-        })
+        });
+    if let Some(render_plan) = render_plan {
+        render_plan
+            .package_struct_field_needs
+            .borrow_mut()
+            .insert(cache_key.clone(), result);
+    }
+    if let Some(prepass) = prepass {
+        prepass
+            .package_struct_field_needs
+            .borrow_mut()
+            .insert(cache_key, result);
+    }
+    result
 }
 
 fn reachable_callables_need_concrete_struct_field(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: Option<&RenderPlan>,
+    prepass: Option<&RenderPrepass>,
     item_id: &ItemId,
     field_name: &str,
 ) -> bool {
-    reduced
+    let cache_key = (item_id.clone(), field_name.to_string());
+    if let Some(render_plan) = render_plan {
+        if let Some(cached) = render_plan
+            .concrete_struct_field_needs
+            .borrow()
+            .get(&cache_key)
+            .copied()
+        {
+            return cached;
+        }
+    }
+    if let Some(prepass) = prepass {
+        if let Some(cached) = prepass
+            .concrete_struct_field_needs
+            .borrow()
+            .get(&cache_key)
+            .copied()
+        {
+            return cached;
+        }
+    }
+    let result = reduced
         .reachable
         .iter()
         .filter(|callable| {
             render_plan.is_none_or(|render_plan| render_plan.callable_should_render(callable))
         })
-        .any(|callable| {
-            project.functions.get(callable).is_some_and(|record| {
-                function_needs_concrete_struct_field(project, record, item_id, field_name)
-            }) || project.methods.get(callable).is_some_and(|record| {
-                method_needs_concrete_struct_field(project, callable, record, item_id, field_name)
-            })
+        .filter(|callable| {
+            callable_token_idents_mention_field(project, render_plan, prepass, callable, field_name)
         })
+        .any(|callable| {
+            callable_concrete_struct_fields(project, render_plan, prepass, callable, item_id)
+                .contains(field_name)
+        });
+    if let Some(render_plan) = render_plan {
+        render_plan
+            .concrete_struct_field_needs
+            .borrow_mut()
+            .insert(cache_key.clone(), result);
+    }
+    if let Some(prepass) = prepass {
+        prepass
+            .concrete_struct_field_needs
+            .borrow_mut()
+            .insert(cache_key, result);
+    }
+    result
 }
 
-fn function_needs_concrete_struct_field(
+fn callable_token_idents_mention_field(
     project: &Project,
-    record: &crate::model::FunctionRecord,
-    item_id: &ItemId,
+    render_plan: Option<&RenderPlan>,
+    prepass: Option<&RenderPrepass>,
+    callable: &CallableId,
     field_name: &str,
 ) -> bool {
-    let mut visitor = ConcreteStructFieldUseVisitor::new(
-        project,
-        &record.package,
-        &record.module_path,
-        &record.aliases,
-        item_id,
-        field_name,
-        None,
-    );
-    visitor.visit_item_fn(&record.item);
-    visitor.needs_field
+    if let Some(render_plan) = render_plan {
+        if let Some(idents) = render_plan.callable_token_idents.borrow().get(callable) {
+            return idents.contains(field_name);
+        }
+    }
+    if let Some(prepass) = prepass {
+        if let Some(idents) = prepass.callable_token_idents.borrow().get(callable) {
+            return idents.contains(field_name);
+        }
+    }
+
+    let idents = callable_token_idents_for_field_scan(project, callable);
+    let result = idents.contains(field_name);
+    if let Some(render_plan) = render_plan {
+        render_plan
+            .callable_token_idents
+            .borrow_mut()
+            .insert(callable.clone(), idents.clone());
+    }
+    if let Some(prepass) = prepass {
+        prepass
+            .callable_token_idents
+            .borrow_mut()
+            .insert(callable.clone(), idents);
+    }
+    result
 }
 
-fn method_needs_concrete_struct_field(
+fn callable_token_idents_for_field_scan(
     project: &Project,
     callable: &CallableId,
-    record: &crate::model::MethodRecord,
+) -> BTreeSet<String> {
+    let mut idents = BTreeSet::new();
+    if let Some(record) = project.functions.get(callable) {
+        collect_token_idents(&record.item.to_token_stream(), &mut idents);
+        expand_alias_surface_idents(&record.aliases, &mut idents);
+    } else if let Some(record) = project.methods.get(callable) {
+        collect_token_idents(&record.item.to_token_stream(), &mut idents);
+        expand_alias_surface_idents(&record.aliases, &mut idents);
+    }
+    idents
+}
+
+fn callable_concrete_struct_fields(
+    project: &Project,
+    render_plan: Option<&RenderPlan>,
+    prepass: Option<&RenderPrepass>,
+    callable: &CallableId,
     item_id: &ItemId,
-    field_name: &str,
-) -> bool {
+) -> BTreeSet<String> {
+    let cache_key = (callable.clone(), item_id.clone());
+    if let Some(render_plan) = render_plan {
+        if let Some(cached) = render_plan
+            .callable_concrete_struct_fields
+            .borrow()
+            .get(&cache_key)
+            .cloned()
+        {
+            return cached;
+        }
+    }
+    if let Some(prepass) = prepass {
+        if let Some(cached) = prepass
+            .callable_concrete_struct_fields
+            .borrow()
+            .get(&cache_key)
+            .cloned()
+        {
+            return cached;
+        }
+    }
+
+    let fields = collect_callable_concrete_struct_fields(project, callable, item_id);
+    if let Some(render_plan) = render_plan {
+        render_plan
+            .callable_concrete_struct_fields
+            .borrow_mut()
+            .insert(cache_key.clone(), fields.clone());
+    }
+    if let Some(prepass) = prepass {
+        prepass
+            .callable_concrete_struct_fields
+            .borrow_mut()
+            .insert(cache_key, fields.clone());
+    }
+    fields
+}
+
+fn collect_callable_concrete_struct_fields(
+    project: &Project,
+    callable: &CallableId,
+    item_id: &ItemId,
+) -> BTreeSet<String> {
+    if let Some(record) = project.functions.get(callable) {
+        let mut visitor = ConcreteStructFieldUseVisitor::new(
+            project,
+            &record.package,
+            &record.module_path,
+            &record.aliases,
+            item_id,
+            None,
+            None,
+        );
+        visitor.visit_item_fn(&record.item);
+        return visitor.needed_fields;
+    }
+
+    let Some(record) = project.methods.get(callable) else {
+        return BTreeSet::new();
+    };
     let self_item = match callable {
         CallableId::Method {
             package, type_path, ..
@@ -20498,11 +20769,11 @@ fn method_needs_concrete_struct_field(
         &record.module_path,
         &record.aliases,
         item_id,
-        field_name,
+        None,
         self_item,
     );
     visitor.visit_impl_item_fn(&record.item);
-    visitor.needs_field
+    visitor.needed_fields
 }
 
 struct ConcreteStructFieldUseVisitor<'a> {
@@ -20511,11 +20782,12 @@ struct ConcreteStructFieldUseVisitor<'a> {
     module_path: &'a [String],
     aliases: &'a HashMap<String, Vec<String>>,
     target_item: &'a ItemId,
-    field_name: &'a str,
+    field_name: Option<&'a str>,
     self_item: Option<ItemId>,
     bindings: Vec<(String, ItemId)>,
     iterable_bindings: Vec<(String, IteratorItemShape)>,
     needs_field: bool,
+    needed_fields: BTreeSet<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -20553,7 +20825,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         module_path: &'a [String],
         aliases: &'a HashMap<String, Vec<String>>,
         target_item: &'a ItemId,
-        field_name: &'a str,
+        field_name: Option<&'a str>,
         self_item: Option<ItemId>,
     ) -> Self {
         Self {
@@ -20567,6 +20839,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             bindings: Vec::new(),
             iterable_bindings: Vec::new(),
             needs_field: false,
+            needed_fields: BTreeSet::new(),
         }
     }
 
@@ -20631,7 +20904,19 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
         if matches!(
             method.as_str(),
-            "as_ref" | "as_mut" | "clone" | "cloned" | "copied"
+            "as_ref"
+                | "as_mut"
+                | "borrow"
+                | "borrow_mut"
+                | "clone"
+                | "cloned"
+                | "copied"
+                | "expect"
+                | "into_inner"
+                | "lock"
+                | "read"
+                | "unwrap"
+                | "write"
         ) {
             if let Some(item) = self.expr_type_item(&call.receiver) {
                 return Some(item);
@@ -20860,6 +21145,21 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
             bindings: self.bindings.clone(),
             iterable_bindings: self.iterable_bindings.clone(),
             needs_field: false,
+            needed_fields: BTreeSet::new(),
+        }
+    }
+
+    fn note_needed_field(&mut self, field_name: &str) -> bool {
+        match self.field_name {
+            Some(target) if target == field_name => {
+                self.needs_field = true;
+                true
+            }
+            Some(_) => false,
+            None => {
+                self.needed_fields.insert(field_name.to_string());
+                true
+            }
         }
     }
 
@@ -21851,7 +22151,9 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 let index = match segment.ident.to_string().as_str() {
                     "HashMap" | "BTreeMap" | "IndexMap" => 1,
                     "Result" => 0,
-                    "Option" | "Vec" | "Box" | "Arc" | "Rc" | "Pin" | "Cow" => 0,
+                    "Option" | "Vec" | "Box" | "Arc" | "Rc" | "Pin" | "Cow" | "Cell" | "Ref"
+                    | "RefMut" | "RefCell" | "Mutex" | "MutexGuard" | "OnceCell" | "OnceLock"
+                    | "RwLock" | "RwLockReadGuard" | "RwLockWriteGuard" => 0,
                     _ => return None,
                 };
                 type_args.get(index).and_then(|ty| {
@@ -21899,12 +22201,13 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
         }
     }
 
-    fn macro_tokens_need_target_field(&self, tokens: &TokenStream) -> bool {
+    fn macro_tokens_need_target_field(&mut self, tokens: &TokenStream) -> bool {
         let tokens = tokens.clone().into_iter().collect::<Vec<_>>();
+        let mut found = false;
         for (index, token) in tokens.iter().enumerate() {
             if let TokenTree::Group(group) = token {
                 if self.macro_tokens_need_target_field(&group.stream()) {
-                    return true;
+                    found = true;
                 }
             }
             let Some(base_name) = token_ident_name(token) else {
@@ -21921,8 +22224,8 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 let Some(field_name) = token_ident_name(&tokens[cursor + 1]) else {
                     break;
                 };
-                if item == *self.target_item && field_name == self.field_name {
-                    return true;
+                if item == *self.target_item && self.note_needed_field(&field_name) {
+                    found = true;
                 }
                 let Some(next_item) = self.item_field_type_by_name(&item, &field_name) else {
                     break;
@@ -21931,7 +22234,7 @@ impl<'a> ConcreteStructFieldUseVisitor<'a> {
                 cursor += 2;
             }
         }
-        false
+        found
     }
 
     fn macro_chain_base_item(&self, name: &str) -> Option<ItemId> {
@@ -22759,22 +23062,21 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
     }
 
     fn visit_expr_field(&mut self, field: &syn::ExprField) {
-        if member_name(&field.member).as_deref() == Some(self.field_name)
-            && self.field_base_targets_item(&field.base)
-        {
-            self.needs_field = true;
+        if self.field_base_targets_item(&field.base) {
+            if let Some(field_name) = member_name(&field.member) {
+                self.note_needed_field(&field_name);
+            }
         }
         visit::visit_expr_field(self, field);
     }
 
     fn visit_pat_struct(&mut self, pattern: &syn::PatStruct) {
-        if self.resolve_type_path(&pattern.path).as_ref() == Some(self.target_item)
-            && pattern
-                .fields
-                .iter()
-                .any(|field| member_name(&field.member).as_deref() == Some(self.field_name))
-        {
-            self.needs_field = true;
+        if self.resolve_type_path(&pattern.path).as_ref() == Some(self.target_item) {
+            for field in &pattern.fields {
+                if let Some(field_name) = member_name(&field.member) {
+                    self.note_needed_field(&field_name);
+                }
+            }
         }
         visit::visit_pat_struct(self, pattern);
     }
@@ -22782,14 +23084,15 @@ impl Visit<'_> for ConcreteStructFieldUseVisitor<'_> {
     fn visit_expr_struct(&mut self, expr: &ExprStruct) {
         let targets_item = self.resolve_type_path(&expr.path).as_ref() == Some(self.target_item);
         for field in &expr.fields {
-            if targets_item
-                && member_name(&field.member).as_deref() == Some(self.field_name)
-                && !struct_literal_initializer_can_be_pruned_with_aliases(
-                    &field.expr,
-                    Some(self.aliases),
-                )
-            {
-                self.needs_field = true;
+            if targets_item {
+                if let Some(field_name) = member_name(&field.member) {
+                    if !struct_literal_initializer_can_be_pruned_with_aliases(
+                        &field.expr,
+                        Some(self.aliases),
+                    ) {
+                        self.note_needed_field(&field_name);
+                    }
+                }
             }
             self.visit_expr(&field.expr);
         }
@@ -23108,6 +23411,7 @@ fn impl_item_should_render_for_field_scan(
     impl_item: &ImplItem,
     type_path: &[String],
     aliases: &std::collections::HashMap<String, Vec<String>>,
+    root_macro_impl_assoc_function_calls: Option<&RootMacroImplAssocFunctionCalls>,
 ) -> bool {
     if impl_item_is_test(impl_item) {
         return false;
@@ -23155,6 +23459,15 @@ fn impl_item_should_render_for_field_scan(
         if let Some(render_plan) = render_plan {
             return reduced.reachable.contains(&id)
                 || render_plan.retained_impl_surfaces_call_inherent_associated_function(
+                    package,
+                    type_path,
+                    &method.sig.ident.to_string(),
+                );
+        }
+        if let Some(root_macro_impl_assoc_function_calls) = root_macro_impl_assoc_function_calls {
+            return reduced.reachable.contains(&id)
+                || root_macro_impl_assoc_function_calls_contains(
+                    root_macro_impl_assoc_function_calls,
                     package,
                     type_path,
                     &method.sig.ident.to_string(),
@@ -23827,9 +24140,7 @@ fn renamed_use_alias_is_reachable(
         return true;
     }
 
-    is_public_use
-        && (render_plan.package_mentions_ident(package, alias)
-            || reachable_package_mentions_ident(project, reduced, package, alias))
+    is_public_use && render_plan.package_mentions_ident(package, alias)
 }
 
 fn use_target_resolves_to_removed_symbol(
@@ -24187,7 +24498,7 @@ fn use_target_should_drop(
 
     target.last().is_some_and(|leaf| {
         if is_public_use {
-            !reachable_package_mentions_ident(project, reduced, package, leaf)
+            !render_plan.package_mentions_ident(package, leaf)
         } else if target
             .first()
             .is_some_and(|first| use_name_is_dependency(project, package, first))
@@ -24240,7 +24551,6 @@ fn local_trait_import_should_remain(
             module_path,
             &method,
         ) || render_plan.module_mentions_ident(package, module_path, &method)
-            || reachable_module_mentions_ident(project, reduced, package, module_path, &method)
     })
 }
 
@@ -24454,6 +24764,7 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
         || retained_impl_headers_mention_unqualified_ident(
             project,
             reduced,
+            render_plan,
             package,
             module_path,
             ident,
@@ -24674,8 +24985,14 @@ fn reachable_module_non_callable_mentions_imported_ident(
     module_path: &[String],
     ident: &str,
 ) -> bool {
-    render_plan.module_non_callable_mentions_ident(package, module_path, ident)
-        || retained_impl_attrs_mention_ident(project, reduced, package, module_path, ident)
+    rendered_non_callable_items_use_imported_ident(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        ident,
+    ) || retained_impl_attrs_mention_ident(project, reduced, package, module_path, ident)
         || retained_impl_non_fn_items_mention_ident(
             project,
             reduced,
@@ -24692,6 +25009,119 @@ fn reachable_module_non_callable_mentions_imported_ident(
             ident,
         )
         || retained_macro_invocations_mention_ident(project, reduced, package, module_path, ident)
+}
+
+fn rendered_non_callable_items_use_imported_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
+        return false;
+    };
+    let preserve_uniffi_surface = package_preserves_uniffi_surface(project, reduced, package);
+
+    items.iter().any(|item| {
+        let Some(rendered_item) = rendered_non_callable_import_scan_item(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            item,
+            preserve_uniffi_surface,
+        ) else {
+            return false;
+        };
+        let mut visitor = ImportUsageVisitor::new(ident);
+        visitor.visit_item(&rendered_item);
+        visitor.found
+    })
+}
+
+fn rendered_non_callable_import_scan_item(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    item: &Item,
+    preserve_uniffi_surface: bool,
+) -> Option<Item> {
+    match item {
+        Item::Struct(item_struct) => item_id(package, module_path, item).and_then(|id| {
+            render_plan.item_should_render(&id).then(|| {
+                let mut item_struct = item_struct.clone();
+                if !preserve_uniffi_surface {
+                    strip_uniffi_attrs_from_fields(&mut item_struct.fields);
+                    strip_uniffi_attrs(&mut item_struct.attrs);
+                }
+                let preserve_private_fields = root_item_should_render(reduced, &id);
+                prune_private_struct_fields(
+                    project,
+                    reduced,
+                    render_plan,
+                    package,
+                    module_path,
+                    &mut item_struct,
+                    preserve_private_fields,
+                );
+                Item::Struct(item_struct)
+            })
+        }),
+        Item::Enum(item_enum) => item_id(package, module_path, item).and_then(|id| {
+            render_plan.item_should_render(&id).then(|| {
+                let mut item_enum = item_enum.clone();
+                if !preserve_uniffi_surface {
+                    strip_uniffi_attrs(&mut item_enum.attrs);
+                    for variant in &mut item_enum.variants {
+                        strip_uniffi_attrs_from_variant(variant);
+                    }
+                }
+                if !enum_preserves_full_variant_surface(project, reduced, &id, &item_enum) {
+                    prune_private_enum_variants(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        &mut item_enum,
+                    );
+                }
+                Item::Enum(item_enum)
+            })
+        }),
+        Item::Trait(item_trait) => item_id(package, module_path, item).and_then(|id| {
+            render_plan.item_should_render(&id).then(|| {
+                let mut item_trait = item_trait.clone();
+                if !preserve_uniffi_surface {
+                    strip_uniffi_attrs(&mut item_trait.attrs);
+                    for trait_item in &mut item_trait.items {
+                        strip_uniffi_attrs_from_trait_item(trait_item);
+                    }
+                }
+                if !root_item_should_render(reduced, &id) {
+                    prune_trait_items_if_only_type_surface(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        &mut item_trait,
+                    );
+                }
+                Item::Trait(item_trait)
+            })
+        }),
+        Item::Union(_) | Item::Type(_) | Item::Const(_) | Item::Static(_) => {
+            item_id(package, module_path, item)
+                .filter(|id| render_plan.item_should_render(id))
+                .map(|_| item.clone())
+        }
+        Item::Fn(_) | Item::Impl(_) | Item::Use(_) | Item::Mod(_) | Item::Macro(_) => None,
+        _ => None,
+    }
 }
 
 fn function_uses_imported_ident(
@@ -24990,6 +25420,19 @@ fn public_glob_exposed_name_is_used(
     target_module_path: &[String],
     name: &str,
 ) -> bool {
+    if rendered_imports_resolve_public_reexport_target(
+        project,
+        reduced,
+        render_plan,
+        package,
+        source_module_path,
+        target_package,
+        target_module_path,
+        name,
+    ) {
+        return true;
+    }
+
     if !source_module_path.is_empty()
         && reachable_package_mentions_module_path_ident(
             project,
@@ -25062,6 +25505,91 @@ fn public_glob_exposed_name_is_used(
                 target_package,
                 name,
             ))
+}
+
+fn rendered_imports_resolve_public_reexport_target(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    source_module_path: &[String],
+    target_package: &str,
+    target_module_path: &[String],
+    name: &str,
+) -> bool {
+    project
+        .files
+        .values()
+        .filter(|source| source.package == package)
+        .filter(|source| {
+            module_should_render(project, reduced, render_plan, package, &source.module_path)
+        })
+        .any(|source| {
+            source.syntax.items.iter().any(|item| {
+                let Item::Use(item_use) = item else {
+                    return false;
+                };
+                let mut visible_targets = Vec::new();
+                collect_use_tree_visible_targets(&item_use.tree, Vec::new(), &mut visible_targets);
+                visible_targets.into_iter().any(|(_, target)| {
+                    import_target_resolves_to_public_reexport_target(
+                        project,
+                        package,
+                        &source.module_path,
+                        &target,
+                        source_module_path,
+                        target_package,
+                        target_module_path,
+                        name,
+                    )
+                })
+            })
+        })
+}
+
+#[allow(clippy::too_many_arguments)]
+fn import_target_resolves_to_public_reexport_target(
+    project: &Project,
+    package: &str,
+    import_module_path: &[String],
+    import_target: &[String],
+    source_module_path: &[String],
+    target_package: &str,
+    target_module_path: &[String],
+    name: &str,
+) -> bool {
+    let Some((resolved_package, resolved_path)) =
+        resolve_use_target_path(project, package, import_module_path, import_target)
+    else {
+        return false;
+    };
+
+    let mut exposed_path = source_module_path.to_vec();
+    exposed_path.push(name.to_string());
+    if resolved_package == package && resolved_path == exposed_path {
+        return true;
+    }
+
+    if find_use_item(project, &resolved_package, &resolved_path).is_some_and(|item| {
+        item.package == target_package
+            && item.module_path == target_module_path
+            && item.name == name
+    }) {
+        return true;
+    }
+
+    find_use_function(project, &resolved_package, &resolved_path).is_some_and(|callable| {
+        matches!(
+            callable,
+            CallableId::Free {
+                package,
+                module_path,
+                name: callable_name,
+            } if package == target_package
+                && module_path == target_module_path
+                && callable_name == name
+        )
+    })
 }
 
 fn reachable_module_import_scope_uses_public_glob_ident(
@@ -25832,9 +26360,7 @@ fn external_trait_import_should_remain(
         if is_public_use {
             return true;
         }
-        if render_plan.module_mentions_ident(package, module_path, leaf)
-            || reachable_module_mentions_ident(project, reduced, package, module_path, leaf)
-        {
+        if render_plan.module_mentions_ident(package, module_path, leaf) {
             return true;
         }
         let known_associated_functions = known_trait_associated_function_idents(target, leaf);
@@ -25903,10 +26429,9 @@ fn external_trait_import_should_remain(
             return false;
         };
         if is_public_use {
-            return functions.iter().any(|function| {
-                render_plan.package_mentions_ident(package, function)
-                    || reachable_package_mentions_ident(project, reduced, package, function)
-            });
+            return functions
+                .iter()
+                .any(|function| render_plan.package_mentions_ident(package, function));
         }
         return functions.iter().any(|function| {
             reachable_module_has_associated_function_call(
@@ -25924,23 +26449,13 @@ fn external_trait_import_should_remain(
                 .first()
                 .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
                 && is_known_std_trait_import(leaf);
-        if is_known_trait
-            && (render_plan.module_mentions_ident(package, module_path, leaf)
-                || reachable_module_mentions_ident(project, reduced, package, module_path, leaf))
-        {
+        if is_known_trait && render_plan.module_mentions_ident(package, module_path, leaf) {
             return true;
         }
         let receiver_is_reachable =
             known_trait_receiver_idents(target, leaf).is_none_or(|receivers| {
                 receivers.iter().any(|receiver| {
                     render_plan.module_mentions_ident(package, module_path, receiver)
-                        || reachable_module_mentions_ident(
-                            project,
-                            reduced,
-                            package,
-                            module_path,
-                            receiver,
-                        )
                 })
             });
         if !receiver_is_reachable {
@@ -26044,7 +26559,6 @@ fn external_source_trait_import_should_remain(
                 module_path,
                 &method,
             ) || render_plan.module_mentions_ident(package, module_path, &method)
-                || reachable_module_mentions_ident(project, reduced, package, module_path, &method)
         })
 }
 
@@ -26409,8 +26923,8 @@ fn pruned_proc_macro_helper_dependency_target_should_remain(
             package,
             module_path,
             leaf,
-        ) || reachable_package_mentions_ident(project, reduced, package, first)
-            || reachable_package_mentions_ident(project, reduced, package, leaf)
+        ) || render_plan.package_mentions_ident(package, first)
+            || render_plan.package_mentions_ident(package, leaf)
     })
 }
 

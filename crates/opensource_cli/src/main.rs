@@ -400,11 +400,14 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     }
     if let Some(semantic) = &report.analyzer.semantic {
         println!(
-            "  analyzer semantic files: {}/{} analyzed ({} failed, {} skipped by budget)",
+            "  analyzer semantic files: {}/{} analyzed ({} failed, {} skipped by budget, {} skipped by top-down scope)",
             semantic.analyzed_files,
             semantic.source_files,
             semantic.failed_files,
-            semantic.skipped_files
+            semantic
+                .skipped_files
+                .saturating_sub(semantic.top_down_skipped_files),
+            semantic.top_down_skipped_files
         );
         println!(
             "  analyzer budgets: files={}, method_calls={}, paths={}",
@@ -4741,8 +4744,11 @@ fn semantic_proof_reason(semantic: Option<&SemanticReport>) -> String {
     match semantic_proof_status(semantic).as_str() {
         "complete" => "rust-analyzer semantic proof covered the selected slice".to_string(),
         "selected_root_complete_workspace_limited" => format!(
-            "selected root semantic proof is complete; wider workspace budget remains limited ({} skipped file(s), {} unqueried method call(s), {} unqueried path(s))",
-            semantic.skipped_files, semantic.unqueried_method_calls, semantic.unqueried_paths
+            "selected root semantic proof is complete; wider workspace analysis remains limited ({} budget-skipped file(s), {} top-down-scoped file(s), {} unqueried method call(s), {} unqueried path(s))",
+            semantic.skipped_files.saturating_sub(semantic.top_down_skipped_files),
+            semantic.top_down_skipped_files,
+            semantic.unqueried_method_calls,
+            semantic.unqueried_paths
         ),
         "selected_root_failed" => format!(
             "selected root semantic proof failed in {} root file(s)",
@@ -4759,8 +4765,11 @@ fn semantic_proof_reason(semantic: Option<&SemanticReport>) -> String {
             semantic.failed_files
         ),
         "workspace_limited" => format!(
-            "workspace semantic proof is budget-limited ({} skipped file(s), {} unqueried method call(s), {} unqueried path(s))",
-            semantic.skipped_files, semantic.unqueried_method_calls, semantic.unqueried_paths
+            "workspace semantic proof is limited ({} budget-skipped file(s), {} top-down-scoped file(s), {} unqueried method call(s), {} unqueried path(s))",
+            semantic.skipped_files.saturating_sub(semantic.top_down_skipped_files),
+            semantic.top_down_skipped_files,
+            semantic.unqueried_method_calls,
+            semantic.unqueried_paths
         ),
         "empty" => "rust-analyzer semantic proof did not find Rust source files".to_string(),
         _ => "rust-analyzer semantic proof state is unknown".to_string(),
@@ -10115,7 +10124,7 @@ fn usage() -> String {
         "[--random-roots <n>] [--random-root-package <package>] [--random-seed <n>] [--batch-roots] [--batch-report <path>] ",
         "[--workspace-root <workspace-root-or-Cargo.toml>] [--output <output-root>] <workspace-root-or-Cargo.toml> <output-root>\n",
         "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn; ",
-        "ra-feedback exposes the bounded RA outgoing-call closure explicitly; ",
+        "ra-feedback exposes the bounded RA outgoing-call closure explicitly and skips whole-project reference proof for fast top-down slicing; ",
         "--production defaults to ra-hir-proc-macros with RA feedback closure when available; ",
         "--root selects functions/items in memory without editing source, while #[opensourced] roots still work"
     )

@@ -51,6 +51,102 @@ fn prunes_public_glob_reexport_when_source_module_is_removed() {
 }
 
 #[test]
+fn retains_public_glob_reexport_used_by_crate_root_import() {
+    let workspace = temp_path("rule-root-glob-import-workspace");
+    let output = temp_path("rule-root-glob-import-output");
+    let target_dir = temp_path("rule-root-glob-import-target");
+    write_root_glob_import_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("root glob import rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("root_glob_import_rule/src/lib.rs"));
+    assert!(
+        lib.contains("pub use mobile_client::*"),
+        "crate-root reexport must remain for retained `use crate::MobileClient`\n{lib}"
+    );
+    assert!(lib.contains("pub struct MobileClient"), "{lib}");
+    assert!(!lib.contains("pub struct DeadClient"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn prunes_import_when_retained_item_uses_fully_qualified_path() {
+    let workspace = temp_path("rule-qualified-import-workspace");
+    let output = temp_path("rule-qualified-import-output");
+    let target_dir = temp_path("rule-qualified-import-target");
+    write_qualified_import_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("qualified import rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("qualified_import_rule/src/lib.rs"));
+    assert!(
+        !lib.contains("use std::sync::Mutex"),
+        "fully qualified std::sync::Mutex should not keep an unused import\n{lib}"
+    );
+    assert!(lib.contains("use std::sync::Arc"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn prunes_parent_import_used_only_by_inline_child_module() {
+    let workspace = temp_path("rule-inline-child-import-workspace");
+    let output = temp_path("rule-inline-child-import-output");
+    let target_dir = temp_path("rule-inline-child-import-target");
+    write_inline_child_import_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("inline child import rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("inline_child_import_rule/src/lib.rs"));
+    assert_eq!(
+        lib.matches("use std::sync::Arc;").count(),
+        1,
+        "parent import must not be retained for child-module-only uses\n{lib}"
+    );
+    assert!(lib.contains("pub mod child"), "{lib}");
+    assert!(lib.contains("pub struct Child(pub Arc<u32>)"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn prunes_probable_trait_import_used_only_by_inline_child_module() {
+    let workspace = temp_path("rule-inline-child-trait-import-workspace");
+    let output = temp_path("rule-inline-child-trait-import-output");
+    let target_dir = temp_path("rule-inline-child-trait-import-target");
+    write_inline_child_probable_trait_import_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("inline child probable trait import rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("inline_child_trait_import_rule/src/lib.rs"));
+    assert_eq!(
+        lib.matches("use tracing::Level;").count(),
+        1,
+        "child `.level()` calls must not retain parent-scope external type imports\n{lib}"
+    );
+    assert!(lib.contains("pub mod child"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn prunes_removed_public_reexport_alias_even_when_alias_name_is_used_locally() {
     let workspace = temp_path("rule-public-alias-workspace");
     let output = temp_path("rule-public-alias-output");
@@ -2521,6 +2617,30 @@ fn retains_struct_literal_field_into_conversion_without_dead_siblings() {
 }
 
 #[test]
+fn retains_from_impl_for_cloned_external_field_into_receiver() {
+    let workspace = temp_path("rule-external-field-into-workspace");
+    let output = temp_path("rule-external-field-into-output");
+    let target_dir = temp_path("rule-external-field-into-target");
+    let wire = temp_path("rule-external-field-into-wire");
+    write_external_field_into_rule_fixture(&workspace, &wire);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("external field into rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("external_field_into_rule/src/lib.rs"));
+    assert!(
+        lib.contains("impl From<upstream::RateLimitSnapshot> for RateLimitSnapshot"),
+        "{lib}"
+    );
+    assert!(!lib.contains("DeadRateLimitSnapshot0"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn reports_option_arc_callback_trait_objects_as_dynamic_hazards() {
     let workspace = temp_path("rule-option-arc-callback-workspace");
     let output = temp_path("rule-option-arc-callback-output");
@@ -4243,6 +4363,121 @@ pub struct Selected {
 
 pub fn noise() -> u32 {
     2
+}
+"#,
+    );
+}
+
+fn write_root_glob_import_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "root_glob_import_rule",
+        r#"use opensourced::opensourced;
+
+mod mobile_client {
+    pub struct MobileClient;
+
+    pub struct DeadClient;
+}
+
+pub use mobile_client::*;
+
+pub mod ffi {
+    use crate::MobileClient;
+
+    #[opensourced]
+    pub fn selected() -> &'static str {
+        std::any::type_name::<MobileClient>()
+    }
+}
+"#,
+    );
+}
+
+fn write_qualified_import_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "qualified_import_rule",
+        r#"use opensourced::opensourced;
+
+use std::sync::Arc;
+use std::sync::Mutex;
+
+pub struct Selected {
+    pub direct: Arc<u32>,
+    pub qualified: std::sync::Mutex<u32>,
+}
+
+#[opensourced]
+pub fn selected() -> Selected {
+    Selected {
+        direct: Arc::new(7),
+        qualified: std::sync::Mutex::new(9),
+    }
+}
+"#,
+    );
+}
+
+fn write_inline_child_import_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "inline_child_import_rule",
+        r#"use opensourced::opensourced;
+
+use std::sync::Arc;
+
+pub mod child {
+    use std::sync::Arc;
+
+    pub struct Child(pub Arc<u32>);
+
+    pub fn live_child() -> Child {
+        Child(Arc::new(7))
+    }
+}
+
+#[opensourced]
+pub fn selected() -> child::Child {
+    child::live_child()
+}
+"#,
+    );
+}
+
+fn write_inline_child_probable_trait_import_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "inline_child_trait_import_rule",
+        r#"tracing = "0.1"
+"#,
+        r#"use opensourced::opensourced;
+
+use tracing::Level;
+
+pub mod child {
+    use tracing::Level;
+
+    pub struct Child(pub Option<Level>);
+
+    struct Probe;
+
+    impl Probe {
+        fn level(&self) -> u8 {
+            7
+        }
+    }
+
+    pub fn live_child() -> Child {
+        let probe = Probe;
+        let _ = probe.level();
+        Child(None)
+    }
+}
+
+#[opensourced]
+pub fn selected() -> child::Child {
+    child::live_child()
 }
 "#,
     );
@@ -6944,6 +7179,136 @@ pub fn selected() -> Vec<PublicAgent> {
         .collect()
 }
 "#,
+    );
+}
+
+fn write_external_field_into_rule_fixture(root: &Path, wire: &Path) {
+    let dead_impls = (0..30)
+        .map(|index| {
+            format!(
+                r#"
+pub struct DeadRateLimitSnapshot{index} {{
+    pub used: u32,
+}}
+
+impl From<upstream::DeadSnapshot{index}> for DeadRateLimitSnapshot{index} {{
+    fn from(value: upstream::DeadSnapshot{index}) -> Self {{
+        Self {{ used: value.used }}
+    }}
+}}
+"#
+            )
+        })
+        .collect::<String>();
+    let dead_wire_types = (0..30)
+        .map(|index| {
+            format!(
+                r#"
+#[derive(Clone)]
+pub struct DeadSnapshot{index} {{
+    pub used: u32,
+}}
+"#
+            )
+        })
+        .collect::<String>();
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["external_field_into_rule"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("external_field_into_rule/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "external_field_into_rule"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+wire_protocol = {{ path = "{}" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced")),
+            manifest_path(wire)
+        ),
+    );
+    write(
+        root.join("external_field_into_rule/src/lib.rs"),
+        &format!(
+            "{}{}{}",
+            r#"use opensourced::opensourced;
+use wire_protocol as upstream;
+
+pub struct RateLimitSnapshot {
+    pub used: u32,
+}
+
+impl From<upstream::RateLimitSnapshot> for RateLimitSnapshot {
+    fn from(value: upstream::RateLimitSnapshot) -> Self {
+        Self { used: value.used }
+    }
+}
+
+"#,
+            dead_impls,
+            r#"
+pub struct Store {
+    latest: Option<RateLimitSnapshot>,
+}
+
+impl Store {
+    pub fn new() -> Self {
+        Self { latest: None }
+    }
+
+    pub fn update(&mut self, value: Option<RateLimitSnapshot>) {
+        self.latest = value;
+    }
+
+    pub fn apply(&mut self, notification: upstream::Notification) {
+        let rate_limits = notification.rate_limits.clone().into();
+        self.update(Some(rate_limits));
+    }
+}
+
+#[opensourced]
+pub fn selected(notification: upstream::Notification) -> Store {
+    let mut store = Store::new();
+    store.apply(notification);
+    store
+}
+"#,
+        ),
+    );
+    write(
+        wire.join("Cargo.toml"),
+        r#"[package]
+name = "wire_protocol"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        wire.join("src/lib.rs"),
+        &format!(
+            "{}{}{}",
+            r#"#[derive(Clone)]
+pub struct RateLimitSnapshot {
+    pub used: u32,
+}
+
+"#,
+            dead_wire_types,
+            r#"
+pub struct Notification {
+    pub rate_limits: RateLimitSnapshot,
+    pub dead: DeadSnapshot0,
+}
+"#,
+        ),
     );
 }
 

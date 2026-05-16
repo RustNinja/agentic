@@ -373,6 +373,8 @@ pub struct SemanticUsageProofSummary {
     pub unmapped_items: usize,
     pub failed_reference_query_callables: usize,
     pub failed_reference_query_items: usize,
+    pub skipped_reference_query_callables: usize,
+    pub skipped_reference_query_items: usize,
     pub retained_reference_callables: usize,
     pub retained_reference_items: usize,
 }
@@ -755,7 +757,14 @@ fn generated_source_unknown_method_extra_roots(
     reduced: &ReducedProject,
     production: &ProductionReadinessReport,
 ) -> Vec<RootId> {
-    let packages = generated_source_unknown_packages(production);
+    let mut packages = generated_source_unknown_packages(production);
+    packages.extend(
+        reduced
+            .packages
+            .iter()
+            .filter(|package| package_has_generated_source_unknown_surface(project, package))
+            .cloned(),
+    );
     if packages.is_empty() {
         return Vec::new();
     }
@@ -1051,6 +1060,15 @@ fn generated_package_has_build_script(package: &crate::manifest::Package) -> boo
             .is_some_and(|package| package.contains_key("build"))
 }
 
+fn package_has_generated_source_unknown_surface(project: &Project, package: &str) -> bool {
+    !generated_source_include_module_names(project, package).is_empty()
+        || project
+            .workspace
+            .packages
+            .get(package)
+            .is_some_and(generated_package_has_build_script)
+}
+
 fn generated_item_contains_source_include(item: &Item) -> bool {
     match item {
         Item::Macro(item_macro) => {
@@ -1085,6 +1103,16 @@ fn collect_generated_method_call_names_from_tokens(
             if let proc_macro2::TokenTree::Ident(ident) = &pair[1] {
                 names.insert(ident.to_string());
             }
+        }
+    }
+    for window in tokens.windows(4) {
+        let [proc_macro2::TokenTree::Ident(_), proc_macro2::TokenTree::Punct(left), proc_macro2::TokenTree::Punct(right), proc_macro2::TokenTree::Ident(method)] =
+            window
+        else {
+            continue;
+        };
+        if left.as_char() == ':' && right.as_char() == ':' {
+            names.insert(method.to_string());
         }
     }
 }
@@ -3777,6 +3805,7 @@ fn collect_generated_rendered_items(
     aliases: &BTreeMap<String, Vec<String>>,
     symbols: &mut GeneratedRenderedSymbols,
 ) {
+    let glob_roots = generated_rendered_glob_use_roots(module_path, items);
     for item in items {
         match item {
             syn::Item::Fn(function) => {
@@ -3949,9 +3978,12 @@ fn collect_generated_rendered_items(
                 }
             }
             syn::Item::Impl(item) => {
-                if let Some(type_path) =
-                    generated_rendered_impl_type_path(module_path, &item.self_ty, aliases)
-                {
+                if let Some(type_path) = generated_rendered_impl_type_path(
+                    module_path,
+                    &item.self_ty,
+                    aliases,
+                    &glob_roots,
+                ) {
                     let trait_path = item.trait_.as_ref().map(|(_, path, _)| {
                         generated_rendered_normalized_path(module_path, path, aliases)
                     });
@@ -4203,6 +4235,56 @@ fn generated_rendered_aliases_from_items(
     aliases
 }
 
+fn generated_rendered_glob_use_roots(
+    module_path: &[String],
+    items: &[syn::Item],
+) -> Vec<Vec<String>> {
+    let mut roots = Vec::new();
+    for item in items {
+        if let syn::Item::Use(item_use) = item {
+            collect_generated_rendered_glob_use_roots(
+                module_path,
+                &item_use.tree,
+                Vec::new(),
+                &mut roots,
+            );
+        }
+    }
+    roots.sort();
+    roots.dedup();
+    roots
+}
+
+fn collect_generated_rendered_glob_use_roots(
+    module_path: &[String],
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    roots: &mut Vec<Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_generated_rendered_glob_use_roots(module_path, &path.tree, prefix, roots);
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_generated_rendered_glob_use_roots(
+                    module_path,
+                    nested,
+                    prefix.clone(),
+                    roots,
+                );
+            }
+        }
+        UseTree::Glob(_) => {
+            if let Some(root) = generated_rendered_normalize_segments(module_path, prefix) {
+                roots.push(root);
+            }
+        }
+        UseTree::Name(_) | UseTree::Rename(_) => {}
+    }
+}
+
 fn collect_generated_rendered_use_tree(
     tree: &UseTree,
     mut prefix: Vec<String>,
@@ -4237,6 +4319,7 @@ fn generated_rendered_impl_type_path(
     module_path: &[String],
     ty: &syn::Type,
     aliases: &BTreeMap<String, Vec<String>>,
+    glob_roots: &[Vec<String>],
 ) -> Option<Vec<String>> {
     let syn::Type::Path(path) = ty else {
         return None;
@@ -4244,7 +4327,31 @@ fn generated_rendered_impl_type_path(
     if path.qself.is_some() {
         return None;
     }
-    generated_rendered_normalized_type_path(module_path, ty, aliases)
+    generated_rendered_normalized_impl_type_path(module_path, ty, aliases, glob_roots)
+}
+
+fn generated_rendered_normalized_impl_type_path(
+    module_path: &[String],
+    ty: &syn::Type,
+    aliases: &BTreeMap<String, Vec<String>>,
+    glob_roots: &[Vec<String>],
+) -> Option<Vec<String>> {
+    let syn::Type::Path(type_path) = ty else {
+        return None;
+    };
+    let segments = type_path
+        .path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let aliased = generated_rendered_apply_alias(segments.clone(), aliases);
+    if aliased == segments && segments.len() == 1 && glob_roots.len() == 1 {
+        let mut path = glob_roots[0].clone();
+        path.extend(segments);
+        return Some(path);
+    }
+    generated_rendered_normalize_segments(module_path, aliased)
 }
 
 fn generated_rendered_normalized_path(
@@ -5348,6 +5455,16 @@ fn semantic_usage_proof_report(
                     }
                 }
             }
+            if !usage.reference_search_complete() {
+                match discharge {
+                    SemanticProofDischarge::CfgInactive => cfg_discharged = true,
+                    SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::None | SemanticProofDischarge::StructuralPruned => {
+                        summary.skipped_reference_query_callables += 1;
+                        unproven = true;
+                    }
+                }
+            }
             if usage.callable_has_retained_reference(callable, &retained_callables, &retained_items)
             {
                 summary.retained_reference_callables += 1;
@@ -5403,6 +5520,17 @@ fn semantic_usage_proof_report(
                     SemanticProofDischarge::StructuralPruned => structural_discharged = true,
                     SemanticProofDischarge::None => {
                         summary.failed_reference_query_items += 1;
+                        unproven = true;
+                    }
+                }
+            }
+            if !usage.reference_search_complete() {
+                match discharge {
+                    SemanticProofDischarge::CfgInactive => cfg_discharged = true,
+                    SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::StructuralPruned => structural_discharged = true,
+                    SemanticProofDischarge::None => {
+                        summary.skipped_reference_query_items += 1;
                         unproven = true;
                     }
                 }
@@ -6087,6 +6215,16 @@ fn add_semantic_usage_reference_hazard(
     let Some(usage) = &analyzer.semantic_usage else {
         return;
     };
+    if usage.reference_queries_skipped > 0 {
+        hazards.push(production_hazard(
+            "semantic_usage_reference_skipped",
+            "warning",
+            format!(
+                "rust-analyzer reference search skipped {} indexed callable/item proof query/queries in top-down mode; retained-package pruning remains review-required until a full semantic proof or compiler feedback discharges it",
+                usage.reference_queries_skipped
+            ),
+        ));
+    }
     if usage.reference_query_failures == 0 {
         return;
     }
@@ -8086,6 +8224,17 @@ fn add_reduction_evidence_production_hazards(
             format!(
                 "{} unresolved method call(s) used syntactic fallback analysis; {} candidate method(s) were retained by name and require compiler feedback validation",
                 evidence.unresolved_method_fallbacks, evidence.unresolved_method_candidate_matches
+            ),
+        ));
+    }
+    if evidence.generic_unresolved_method_candidate_matches > 0 && !semantic_pruning_proven {
+        hazards.push(production_hazard(
+            "generic_method_name_fallbacks",
+            "warning",
+            format!(
+                "{} receiverless generic method fallback(s) skipped {} local same-name candidate method(s); compiler feedback is required to detect any omitted dependencies behind external or macro-generated receivers",
+                evidence.generic_unresolved_method_fallbacks,
+                evidence.generic_unresolved_method_candidate_matches
             ),
         ));
     }
@@ -12239,6 +12388,8 @@ struct SemanticUsageProofSummaryJson {
     unmapped_items: usize,
     failed_reference_query_callables: usize,
     failed_reference_query_items: usize,
+    skipped_reference_query_callables: usize,
+    skipped_reference_query_items: usize,
     retained_reference_callables: usize,
     retained_reference_items: usize,
 }
@@ -12267,6 +12418,8 @@ impl SemanticUsageProofSummaryJson {
             unmapped_items: summary.unmapped_items,
             failed_reference_query_callables: summary.failed_reference_query_callables,
             failed_reference_query_items: summary.failed_reference_query_items,
+            skipped_reference_query_callables: summary.skipped_reference_query_callables,
+            skipped_reference_query_items: summary.skipped_reference_query_items,
             retained_reference_callables: summary.retained_reference_callables,
             retained_reference_items: summary.retained_reference_items,
         }
@@ -12582,6 +12735,7 @@ struct SemanticUsageReportJson {
     unmapped_callables: usize,
     unmapped_items: usize,
     reference_queries: usize,
+    reference_queries_skipped: usize,
     reference_query_failures: usize,
     callable_reference_edges: usize,
     item_reference_edges: usize,
@@ -12633,6 +12787,7 @@ impl SemanticUsageReportJson {
             unmapped_callables: report.unmapped_callables,
             unmapped_items: report.unmapped_items,
             reference_queries: report.reference_queries,
+            reference_queries_skipped: report.reference_queries_skipped,
             reference_query_failures: report.reference_query_failures,
             callable_reference_edges: report.callable_reference_edges,
             item_reference_edges: report.item_reference_edges,
@@ -12720,6 +12875,7 @@ struct SemanticReportJson {
     analyzed_files: usize,
     failed_files: usize,
     skipped_files: usize,
+    top_down_skipped_files: usize,
     file_budget: usize,
     method_call_budget: usize,
     path_budget: usize,
@@ -12762,6 +12918,7 @@ struct SemanticFileReportJson {
     analyzed: bool,
     failed: bool,
     skipped_by_file_budget: bool,
+    skipped_by_top_down_scope: bool,
     method_calls: usize,
     queried_method_calls: usize,
     resolved_method_calls: usize,
@@ -12800,6 +12957,7 @@ impl SemanticReportJson {
             analyzed_files: report.analyzed_files,
             failed_files: report.failed_files,
             skipped_files: report.skipped_files,
+            top_down_skipped_files: report.top_down_skipped_files,
             file_budget: report.file_budget,
             method_call_budget: report.method_call_budget,
             path_budget: report.path_budget,
@@ -12853,6 +13011,7 @@ impl SemanticFileReportJson {
             analyzed: report.analyzed,
             failed: report.failed,
             skipped_by_file_budget: report.skipped_by_file_budget,
+            skipped_by_top_down_scope: report.skipped_by_top_down_scope,
             method_calls: report.method_calls,
             queried_method_calls: report.queried_method_calls,
             resolved_method_calls: report.resolved_method_calls,
@@ -12910,17 +13069,19 @@ mod tests {
         time::{SystemTime, UNIX_EPOCH},
     };
 
+    #[cfg(feature = "ra-hir")]
+    use super::generate_with_analyzer;
     use super::model::{ItemKind, ReductionEvidence};
     use super::non_benign_unresolved_count;
     use super::{
         add_public_reexport_proof_hazards, add_rendered_symbol_proof_hazards,
         add_semantic_inventory_hazard, covered_project_path_unresolved_diagnostic,
         default_feature_closure, direct_free_function_root_selectors, generate,
-        generate_with_analyzer_feedback, generated_package_source_roots,
-        production_hazard_with_details, production_readiness_report, production_readiness_status,
-        public_reexport_proof_report, rendered_symbol_proof_report,
-        rendered_symbol_proof_report_with_members, resolve_feedback_widening_roots,
-        semantic_hazard_metrics, semantic_unresolved_details,
+        generate_with_analyzer_feedback, generate_with_analyzer_roots,
+        generated_package_source_roots, production_hazard_with_details,
+        production_readiness_report, production_readiness_status, public_reexport_proof_report,
+        rendered_symbol_proof_report, rendered_symbol_proof_report_with_members,
+        resolve_feedback_widening_roots, semantic_hazard_metrics, semantic_unresolved_details,
         semantic_unresolved_owner_is_retained, semantic_usage_proof_report,
         unknown_surface_category, usage_classification_report, usage_evidence_reason,
         usage_guarded_render_reduction, write_generate_report, AnalyzerMode, AnalyzerReport,
@@ -12932,8 +13093,6 @@ mod tests {
         SemanticUnresolvedDiagnostic, SemanticUnresolvedKind, SemanticUsageReport, SourceSpan,
         UsageDecision, UsageDecisionIndex,
     };
-    #[cfg(feature = "ra-hir")]
-    use super::{generate_with_analyzer, generate_with_analyzer_roots};
     use super::{manifest, parse, reduce, render};
 
     #[test]
@@ -14720,6 +14879,7 @@ theme = []
             unmapped_callables: 2,
             unmapped_items: 1,
             reference_queries: 4,
+            reference_queries_skipped: 0,
             reference_query_failures: 2,
             callable_reference_edges: 1,
             item_reference_edges: 1,
@@ -15143,6 +15303,67 @@ path = "src/main.rs"
         assert!(proof.entries.iter().any(|entry| {
             entry.kind == "callable"
                 && entry.id == "app::main"
+                && entry.classification == "retained"
+        }));
+    }
+
+    #[test]
+    fn rendered_symbol_proof_resolves_impl_self_type_from_super_glob() {
+        let output = temp_output("rendered-symbol-super-glob-impl");
+        write(
+            output.join("app/Cargo.toml"),
+            r#"[package]
+name = "app"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("app/src/lib.rs"),
+            r#"pub mod client;
+"#,
+        );
+        write(
+            output.join("app/src/client/mod.rs"),
+            r#"pub struct MobileClient;
+pub mod event_loop;
+"#,
+        );
+        write(
+            output.join("app/src/client/event_loop.rs"),
+            r#"use super::*;
+
+impl MobileClient {
+    pub(crate) fn spawn_detached() {}
+}
+"#,
+        );
+        let callable = CallableId::Method {
+            package: "app".to_string(),
+            type_path: vec!["client".to_string(), "MobileClient".to_string()],
+            trait_path: None,
+            trait_input_type_paths: Vec::new(),
+            method: "spawn_detached".to_string(),
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["app".to_string()]),
+            used_callables: BTreeSet::from([callable]),
+            used_items: BTreeSet::from([ItemId {
+                package: "app".to_string(),
+                module_path: vec!["client".to_string()],
+                name: "MobileClient".to_string(),
+                kind: ItemKind::Struct,
+            }]),
+            ..UsageDecisionIndex::default()
+        };
+
+        let proof = rendered_symbol_proof_report(&output, &decisions);
+
+        assert_eq!(proof.status, "proven", "{proof:#?}");
+        assert_eq!(proof.summary.unclassified_callables, 0, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.kind == "callable"
+                && entry.id == "app::client::MobileClient::spawn_detached"
                 && entry.classification == "retained"
         }));
     }
@@ -17335,6 +17556,253 @@ impl Other {
             "external associated call fallback should stay typed and top-down: {:?}",
             report.reachable
         );
+    }
+
+    #[test]
+    fn external_builder_chains_do_not_retain_unrelated_local_methods() {
+        let root = temp_output("external-builder-chain-no-local-method-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use std::fs;
+use std::path::PathBuf;
+
+#[opensourced]
+pub fn entry(path: PathBuf) {
+    let _ = fs::OpenOptions::new()
+        .write(true)
+        .create(true)
+        .truncate(true)
+        .open(path);
+}
+
+pub struct LocalFactory;
+
+impl LocalFactory {
+    pub fn create() -> Self {
+        Self
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("external-builder-chain-no-local-method-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "syntactic_method_fallbacks"),
+            "external builder chain should not retain unrelated local methods: {:?}",
+            report.production.hazards
+        );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("LocalFactory::create")),
+            "external builder chain fallback should stay typed and top-down: {:?}",
+            report.reachable
+        );
+    }
+
+    #[test]
+    fn generic_receiverless_method_fallbacks_do_not_retain_local_name_matches() {
+        let root = temp_output("generic-method-fallback-no-local-name-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nregex = \"1\"\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use regex::Regex;
+
+#[opensourced]
+pub fn entry(input: &str) -> usize {
+    let re = Regex::new("x").expect("valid regex");
+    let captures = re.captures(input).expect("captures");
+    let whole = captures.get(0).expect("whole match");
+    whole.start()
+}
+
+pub struct LocalRunner;
+
+impl LocalRunner {
+    pub fn start(&self) -> usize {
+        1
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("generic-method-fallback-no-local-name-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "generic_method_name_fallbacks"),
+            "generic receiverless fallback debt should be reported: {:?}",
+            report.production.hazards
+        );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("LocalRunner::start")),
+            "generic receiverless fallback should not retain unrelated local methods: {:?}",
+            report.reachable
+        );
+    }
+
+    #[test]
+    fn callable_signature_macro_surface_does_not_retain_whole_export_impl() {
+        let root = temp_output("callable-signature-macro-surface-source");
+        let output = temp_output("callable-signature-macro-surface-output");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"pub struct Api {
+    value: usize,
+}
+
+#[uniffi::export]
+impl Api {
+    pub fn create() -> Self {
+        Self { value: helper() }
+    }
+
+    pub fn unused(&self) -> usize {
+        unused_helper()
+    }
+}
+
+fn helper() -> usize {
+    1
+}
+
+fn unused_helper() -> usize {
+    2
+}
+"#,
+        );
+
+        let report = generate_with_analyzer_roots(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output.clone(),
+            },
+            AnalyzerMode::Syn,
+            &["app::Api::create".to_string()],
+        )
+        .expect("reduction should succeed");
+
+        let rendered = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(rendered.contains("pub fn create"), "{rendered}");
+        assert!(rendered.contains("fn helper"), "{rendered}");
+        assert!(!rendered.contains("pub fn unused"), "{rendered}");
+        assert!(!rendered.contains("fn unused_helper"), "{rendered}");
+        assert!(report
+            .reachable
+            .iter()
+            .any(|callable| callable.to_string() == "app::Api::create"));
+        assert!(
+            report
+                .reachable
+                .iter()
+                .all(|callable| callable.to_string() != "app::Api::unused"),
+            "{:?}",
+            report.reachable
+        );
+    }
+
+    #[test]
+    fn guard_wrapped_field_access_retains_nested_struct_fields() {
+        let root = temp_output("guard-wrapped-field-access-source");
+        let output = temp_output("guard-wrapped-field-access-output");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use std::sync::Mutex;
+
+pub struct Holder {
+    inner: Mutex<Inner>,
+}
+
+pub struct Inner {
+    value: usize,
+    unused: usize,
+}
+
+impl Holder {
+    pub fn value(&self) -> usize {
+        let inner = self.inner.lock().unwrap();
+        inner.value
+    }
+}
+"#,
+        );
+
+        generate_with_analyzer_roots(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output.clone(),
+            },
+            AnalyzerMode::Syn,
+            &["app::Holder::value".to_string()],
+        )
+        .expect("reduction should succeed");
+
+        let rendered = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(rendered.contains("value: usize"), "{rendered}");
+        assert!(!rendered.contains("unused: usize"), "{rendered}");
     }
 
     #[test]

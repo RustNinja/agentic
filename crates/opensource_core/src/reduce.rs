@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
+    fs,
     path::{Path as FsPath, PathBuf},
 };
 
@@ -123,6 +124,8 @@ pub fn reduce_with_extra_roots_and_semantics(
     let mut evidence = ReductionEvidence::default();
     let mut callable_queue = VecDeque::from(callable_roots);
     let mut item_queue = VecDeque::from(item_roots);
+    let mut dependency_cache = DependencyCache::new(semantic_hints);
+    let mut struct_field_dependency_state = StructFieldDependencyState::default();
 
     while !callable_queue.is_empty() || !item_queue.is_empty() {
         while let Some(callable) = callable_queue.pop_front() {
@@ -132,8 +135,7 @@ pub fn reduce_with_extra_roots_and_semantics(
                 continue;
             }
 
-            let mut dependencies = callable_dependencies(project, &callable);
-            dependencies.extend(semantic_callable_dependencies(semantic_hints, &callable));
+            let dependencies = dependency_cache.callable_dependencies(project, &callable);
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -155,8 +157,7 @@ pub fn reduce_with_extra_roots_and_semantics(
                 continue;
             }
 
-            let mut dependencies = item_dependencies(project, &item, &module_roots);
-            dependencies.extend(semantic_item_dependencies(semantic_hints, &item));
+            let dependencies = dependency_cache.item_dependencies(project, &item, &module_roots);
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -241,6 +242,7 @@ pub fn reduce_with_extra_roots_and_semantics(
             &candidate_packages,
             &reachable,
             &reachable_items,
+            &mut struct_field_dependency_state,
         );
         evidence.add(&dependencies.evidence);
         for dependency in dependencies.callables {
@@ -304,6 +306,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &mut reachable_items,
         &module_roots,
         &mut evidence,
+        &mut dependency_cache,
     );
     let proc_macro_dependency_packages = local_proc_macro_dependency_packages(project, &packages);
     retain_proc_macro_exports(
@@ -314,6 +317,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &mut reachable_items,
         &module_roots,
         &mut evidence,
+        &mut dependency_cache,
     );
     let build_dependency_packages = add_local_build_dependency_packages(project, &mut packages);
     retain_entire_packages(
@@ -337,6 +341,7 @@ pub fn reduce_with_extra_roots_and_semantics(
         &mut reachable_items,
         &module_roots,
         &mut evidence,
+        &mut dependency_cache,
     );
     retain_reachable_module_items(project, &packages, &reachable, &mut reachable_items);
 
@@ -1043,6 +1048,7 @@ fn retain_referenced_public_reexport_dependencies(
     reachable_items: &mut BTreeSet<ItemId>,
     expanded_module_roots: &BTreeSet<ItemId>,
     evidence: &mut ReductionEvidence,
+    dependency_cache: &mut DependencyCache<'_>,
 ) {
     loop {
         let package_count = packages.len();
@@ -1062,6 +1068,7 @@ fn retain_referenced_public_reexport_dependencies(
             dependencies,
             expanded_module_roots,
             evidence,
+            dependency_cache,
         );
         if !changed && !packages_changed {
             break;
@@ -1077,6 +1084,7 @@ fn retain_dependency_set(
     dependencies: DependencySet,
     expanded_module_roots: &BTreeSet<ItemId>,
     evidence: &mut ReductionEvidence,
+    dependency_cache: &mut DependencyCache<'_>,
 ) -> bool {
     let mut changed = false;
     evidence.add(&dependencies.evidence);
@@ -1103,7 +1111,7 @@ fn retain_dependency_set(
                 continue;
             }
             changed = true;
-            let dependencies = callable_dependencies(project, &callable);
+            let dependencies = dependency_cache.callable_dependencies(project, &callable);
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -1125,7 +1133,8 @@ fn retain_dependency_set(
                 continue;
             }
             changed = true;
-            let dependencies = item_dependencies(project, &item, expanded_module_roots);
+            let dependencies =
+                dependency_cache.item_dependencies(project, &item, expanded_module_roots);
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -1445,6 +1454,19 @@ impl<'a> ImportVisibleNameUseVisitor<'a> {
 }
 
 impl<'ast> Visit<'ast> for ImportVisibleNameUseVisitor<'_> {
+    fn visit_item_mod(&mut self, item_mod: &'ast syn::ItemMod) {
+        for attr in &item_mod.attrs {
+            self.visit_attribute(attr);
+        }
+        if let Some((_, items)) = &item_mod.content {
+            for item in items {
+                if matches!(item, Item::Use(_)) {
+                    self.visit_item(item);
+                }
+            }
+        }
+    }
+
     fn visit_block(&mut self, block: &'ast syn::Block) {
         self.push_scope();
         visit::visit_block(self, block);
@@ -2152,6 +2174,7 @@ fn retain_proc_macro_exports(
     reachable_items: &mut BTreeSet<ItemId>,
     expanded_module_roots: &BTreeSet<ItemId>,
     evidence: &mut ReductionEvidence,
+    dependency_cache: &mut DependencyCache<'_>,
 ) {
     if proc_macro_packages.is_empty() {
         return;
@@ -2190,7 +2213,7 @@ fn retain_proc_macro_exports(
             {
                 continue;
             }
-            let dependencies = callable_dependencies(project, &callable);
+            let dependencies = dependency_cache.callable_dependencies(project, &callable);
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -2211,7 +2234,8 @@ fn retain_proc_macro_exports(
             {
                 continue;
             }
-            let dependencies = item_dependencies(project, &item, expanded_module_roots);
+            let dependencies =
+                dependency_cache.item_dependencies(project, &item, expanded_module_roots);
             evidence.add(&dependencies.evidence);
             for dependency in dependencies.callables {
                 if candidate_packages.contains(dependency.package())
@@ -2868,6 +2892,463 @@ fn existing_package_path(root: &FsPath, path: &str) -> Option<PathBuf> {
     path.exists().then_some(path)
 }
 
+fn manifest_dependency_tables(manifest: &Value) -> Vec<&toml::value::Table> {
+    let mut tables = Vec::new();
+    for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+        if let Some(table) = manifest.get(table_name).and_then(Value::as_table) {
+            tables.push(table);
+        }
+    }
+    if let Some(targets) = manifest.get("target").and_then(Value::as_table) {
+        for target in targets.values() {
+            let Some(target) = target.as_table() else {
+                continue;
+            };
+            for table_name in ["dependencies", "build-dependencies", "dev-dependencies"] {
+                if let Some(table) = target.get(table_name).and_then(Value::as_table) {
+                    tables.push(table);
+                }
+            }
+        }
+    }
+    tables
+}
+
+fn workspace_resolved_dependency_value_with_dir<'a>(
+    project: &'a Project,
+    alias: &str,
+    value: &'a Value,
+    package_root: &'a FsPath,
+) -> (&'a Value, &'a FsPath) {
+    if !dependency_uses_workspace(value) {
+        return (value, package_root);
+    }
+    project
+        .workspace
+        .manifest
+        .get("workspace")
+        .and_then(|workspace| workspace.get("dependencies"))
+        .and_then(Value::as_table)
+        .and_then(|dependencies| dependencies.get(alias))
+        .map(|value| (value, project.workspace.root.as_path()))
+        .unwrap_or((value, package_root))
+}
+
+fn dependency_uses_workspace(value: &Value) -> bool {
+    value
+        .as_table()
+        .and_then(|table| table.get("workspace"))
+        .and_then(Value::as_bool)
+        .unwrap_or(false)
+}
+
+fn dependency_path_root(value: &Value, manifest_dir: &FsPath) -> Option<PathBuf> {
+    let path = value
+        .as_table()
+        .and_then(|table| table.get("path"))
+        .and_then(Value::as_str)?;
+    let path = PathBuf::from(path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        manifest_dir.join(path)
+    };
+    let root = path.canonicalize().ok()?;
+    root.join("Cargo.toml").is_file().then_some(root)
+}
+
+fn external_dependency_field_type_path(
+    package_root: &FsPath,
+    dependency_prefix: &str,
+    receiver_type_path: &[String],
+    member: &Member,
+) -> Option<Vec<String>> {
+    let (type_name, module_path) = receiver_type_path.split_last()?;
+    let manifest = read_toml_value(&package_root.join("Cargo.toml"))?;
+    let lib_path = external_package_lib_path(package_root, &manifest)?;
+    let module = load_external_module(package_root, &lib_path, module_path)
+        .filter(|module| external_module_has_struct(module, type_name))
+        .or_else(|| find_external_module_with_struct(package_root, &lib_path, type_name))?;
+    let item_struct = module.items.iter().find_map(|item| {
+        let Item::Struct(item_struct) = item else {
+            return None;
+        };
+        (item_struct.ident == type_name.as_str()).then_some(item_struct)
+    })?;
+    let ty = field_member_type(&item_struct.fields, member)?;
+    external_field_type_path_from_type(dependency_prefix, &module.module_path, &module.aliases, ty)
+}
+
+struct ExternalModule {
+    module_path: Vec<String>,
+    items: Vec<Item>,
+    aliases: HashMap<String, Vec<String>>,
+}
+
+fn load_external_module(
+    package_root: &FsPath,
+    lib_path: &FsPath,
+    module_path: &[String],
+) -> Option<ExternalModule> {
+    let mut current_module_path = Vec::new();
+    let mut file_path = lib_path.to_path_buf();
+    let mut module_dir = file_path.parent()?.to_path_buf();
+    let mut items = parse_external_source_file(&file_path)?.items;
+    let mut aliases = collect_external_aliases(&items, None);
+
+    for segment in module_path {
+        current_module_path.push(segment.clone());
+        let item_mod = items.iter().find_map(|item| {
+            let Item::Mod(item_mod) = item else {
+                return None;
+            };
+            (item_mod.ident == segment.as_str()).then_some(item_mod)
+        })?;
+
+        if let Some((_, inline_items)) = &item_mod.content {
+            items = inline_items.clone();
+            aliases = collect_external_aliases(&items, Some(&aliases));
+            module_dir = module_dir.join(module_source_name(segment));
+            continue;
+        }
+
+        let (next_file, next_dir) = external_module_source(package_root, &module_dir, item_mod)?;
+        file_path = next_file;
+        module_dir = next_dir;
+        items = parse_external_source_file(&file_path)?.items;
+        aliases = collect_external_aliases(&items, None);
+    }
+
+    Some(ExternalModule {
+        module_path: current_module_path,
+        items,
+        aliases,
+    })
+}
+
+fn external_module_has_struct(module: &ExternalModule, type_name: &str) -> bool {
+    module.items.iter().any(|item| {
+        let Item::Struct(item_struct) = item else {
+            return false;
+        };
+        item_struct.ident == type_name
+    })
+}
+
+fn find_external_module_with_struct(
+    package_root: &FsPath,
+    lib_path: &FsPath,
+    type_name: &str,
+) -> Option<ExternalModule> {
+    let mut matches = Vec::new();
+    let mut visited = BTreeSet::new();
+    collect_external_modules_with_struct(
+        package_root,
+        lib_path,
+        Vec::new(),
+        type_name,
+        &mut visited,
+        &mut matches,
+    );
+    (matches.len() == 1).then(|| matches.remove(0))
+}
+
+fn collect_external_modules_with_struct(
+    package_root: &FsPath,
+    file_path: &FsPath,
+    module_path: Vec<String>,
+    type_name: &str,
+    visited: &mut BTreeSet<PathBuf>,
+    matches: &mut Vec<ExternalModule>,
+) {
+    let Ok(file_path) = file_path.canonicalize() else {
+        return;
+    };
+    if !visited.insert(file_path.clone()) {
+        return;
+    }
+    let Some(file) = parse_external_source_file(&file_path) else {
+        return;
+    };
+    let module_dir = file_path
+        .parent()
+        .map(PathBuf::from)
+        .unwrap_or_else(|| package_root.to_path_buf());
+    collect_external_item_modules_with_struct(
+        package_root,
+        &module_dir,
+        module_path,
+        file.items,
+        None,
+        type_name,
+        visited,
+        matches,
+    );
+}
+
+fn collect_external_item_modules_with_struct(
+    package_root: &FsPath,
+    module_dir: &FsPath,
+    module_path: Vec<String>,
+    items: Vec<Item>,
+    parent_aliases: Option<&HashMap<String, Vec<String>>>,
+    type_name: &str,
+    visited: &mut BTreeSet<PathBuf>,
+    matches: &mut Vec<ExternalModule>,
+) {
+    let aliases = collect_external_aliases(&items, parent_aliases);
+    if items.iter().any(|item| {
+        let Item::Struct(item_struct) = item else {
+            return false;
+        };
+        item_struct.ident == type_name
+    }) {
+        matches.push(ExternalModule {
+            module_path: module_path.clone(),
+            items: items.clone(),
+            aliases: aliases.clone(),
+        });
+    }
+
+    for item in &items {
+        let Item::Mod(item_mod) = item else {
+            continue;
+        };
+        let mut child_path = module_path.clone();
+        child_path.push(item_mod.ident.to_string());
+        if let Some((_, inline_items)) = &item_mod.content {
+            collect_external_item_modules_with_struct(
+                package_root,
+                &module_dir.join(module_source_name(&item_mod.ident.to_string())),
+                child_path,
+                inline_items.clone(),
+                Some(&aliases),
+                type_name,
+                visited,
+                matches,
+            );
+            continue;
+        }
+        let Some((child_file, _)) = external_module_source(package_root, module_dir, item_mod)
+        else {
+            continue;
+        };
+        collect_external_modules_with_struct(
+            package_root,
+            &child_file,
+            child_path,
+            type_name,
+            visited,
+            matches,
+        );
+    }
+}
+
+fn parse_external_source_file(path: &FsPath) -> Option<syn::File> {
+    let source = fs::read_to_string(path).ok()?;
+    syn::parse_file(&source).ok()
+}
+
+fn read_toml_value(path: &FsPath) -> Option<Value> {
+    let source = fs::read_to_string(path).ok()?;
+    source.parse::<Value>().ok()
+}
+
+fn external_package_lib_path(package_root: &FsPath, manifest: &Value) -> Option<PathBuf> {
+    if let Some(path) = manifest
+        .get("lib")
+        .and_then(|lib| lib.get("path"))
+        .and_then(Value::as_str)
+    {
+        let path = package_root.join(path);
+        return path.exists().then_some(path);
+    }
+    let path = package_root.join("src/lib.rs");
+    path.exists().then_some(path)
+}
+
+fn external_module_source(
+    package_root: &FsPath,
+    module_dir: &FsPath,
+    item_mod: &syn::ItemMod,
+) -> Option<(PathBuf, PathBuf)> {
+    if let Some(path) = external_path_attr(item_mod) {
+        let path = if path.is_absolute() {
+            path
+        } else {
+            module_dir.join(path)
+        };
+        return path.exists().then(|| {
+            (
+                path,
+                module_dir.join(module_source_name(&item_mod.ident.to_string())),
+            )
+        });
+    }
+
+    let ident = item_mod.ident.to_string();
+    let source_name = module_source_name(&ident);
+    let file_module = module_dir.join(format!("{source_name}.rs"));
+    if file_module.exists() {
+        return Some((file_module, module_dir.join(source_name)));
+    }
+    let mod_module = module_dir.join(source_name).join("mod.rs");
+    mod_module
+        .exists()
+        .then(|| (mod_module, module_dir.join(source_name)))
+        .filter(|(path, _)| path.starts_with(package_root))
+}
+
+fn external_path_attr(item_mod: &syn::ItemMod) -> Option<PathBuf> {
+    for attr in &item_mod.attrs {
+        if !attr.path().is_ident("path") {
+            continue;
+        }
+        let Meta::NameValue(meta) = &attr.meta else {
+            continue;
+        };
+        let Expr::Lit(expr_lit) = &meta.value else {
+            continue;
+        };
+        let syn::Lit::Str(value) = &expr_lit.lit else {
+            continue;
+        };
+        return Some(PathBuf::from(value.value()));
+    }
+    None
+}
+
+fn collect_external_aliases(
+    items: &[Item],
+    parent_aliases: Option<&HashMap<String, Vec<String>>>,
+) -> HashMap<String, Vec<String>> {
+    let mut aliases = if external_items_have_super_glob_import(items) {
+        parent_aliases.cloned().unwrap_or_default()
+    } else {
+        HashMap::new()
+    };
+    for item in items {
+        if let Item::Use(item_use) = item {
+            collect_external_use_tree_aliases(&item_use.tree, Vec::new(), &mut aliases);
+        }
+    }
+    aliases
+}
+
+fn external_items_have_super_glob_import(items: &[Item]) -> bool {
+    items.iter().any(|item| {
+        let Item::Use(item_use) = item else {
+            return false;
+        };
+        use_tree_has_super_glob_import(&item_use.tree)
+    })
+}
+
+fn collect_external_use_tree_aliases(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    aliases: &mut HashMap<String, Vec<String>>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_external_use_tree_aliases(&path.tree, prefix, aliases);
+        }
+        UseTree::Name(name) => {
+            let ident = name.ident.to_string();
+            let mut target = prefix;
+            target.push(ident.clone());
+            aliases.insert(ident, target);
+        }
+        UseTree::Rename(rename) => {
+            let mut target = prefix;
+            target.push(rename.ident.to_string());
+            aliases.insert(rename.rename.to_string(), target);
+        }
+        UseTree::Group(group) => {
+            for nested in &group.items {
+                collect_external_use_tree_aliases(nested, prefix.clone(), aliases);
+            }
+        }
+        UseTree::Glob(_) => {}
+    }
+}
+
+fn external_field_type_path_from_type(
+    dependency_prefix: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    ty: &Type,
+) -> Option<Vec<String>> {
+    match ty {
+        Type::Path(type_path) => {
+            let segments = path_segments(&type_path.path);
+            external_normalize_type_segments(dependency_prefix, module_path, aliases, segments)
+        }
+        Type::Reference(reference) => external_field_type_path_from_type(
+            dependency_prefix,
+            module_path,
+            aliases,
+            &reference.elem,
+        ),
+        Type::Group(group) => {
+            external_field_type_path_from_type(dependency_prefix, module_path, aliases, &group.elem)
+        }
+        Type::Paren(paren) => {
+            external_field_type_path_from_type(dependency_prefix, module_path, aliases, &paren.elem)
+        }
+        _ => None,
+    }
+}
+
+fn external_normalize_type_segments(
+    dependency_prefix: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    mut segments: Vec<String>,
+) -> Option<Vec<String>> {
+    if segments.is_empty() {
+        return None;
+    }
+    if let Some(target) = segments.first().and_then(|first| aliases.get(first)) {
+        let mut resolved = target.clone();
+        resolved.extend(segments.drain(1..));
+        segments = resolved;
+    }
+    let first = segments.first()?.as_str();
+    if matches!(first, "std" | "core" | "alloc") || first == dependency_prefix {
+        return Some(segments);
+    }
+    if first == "crate" {
+        let mut path = vec![dependency_prefix.to_string()];
+        path.extend_from_slice(&segments[1..]);
+        return Some(path);
+    }
+    if first == "self" {
+        let mut path = vec![dependency_prefix.to_string()];
+        path.extend_from_slice(module_path);
+        path.extend_from_slice(&segments[1..]);
+        return Some(path);
+    }
+    if first == "super" {
+        let mut path = vec![dependency_prefix.to_string()];
+        let mut parent = module_path.to_vec();
+        parent.pop();
+        path.extend(parent);
+        path.extend_from_slice(&segments[1..]);
+        return Some(path);
+    }
+
+    let mut path = vec![dependency_prefix.to_string()];
+    path.extend_from_slice(module_path);
+    path.extend(segments);
+    Some(path)
+}
+
+fn module_source_name(name: &str) -> &str {
+    name.strip_prefix("r#").unwrap_or(name)
+}
+
 fn dependency_package_name(alias: &str, value: &Value) -> String {
     match value {
         Value::Table(table) => table
@@ -3082,6 +3563,11 @@ fn collect_reachable_package_item_idents(
     callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
     idents: &mut BTreeSet<String>,
 ) {
+    if let Item::Mod(item_mod) = &record.item {
+        collect_item_mod_surface_idents(item, item_mod, idents);
+        return;
+    }
+
     let Item::Struct(item_struct) = &record.item else {
         collect_token_idents(&record.item.to_token_stream(), idents);
         return;
@@ -3105,6 +3591,19 @@ fn collect_reachable_package_item_idents(
         ) {
             collect_token_idents(&field.to_token_stream(), idents);
         }
+    }
+}
+
+fn collect_item_mod_surface_idents(
+    item: &ItemId,
+    item_mod: &syn::ItemMod,
+    idents: &mut BTreeSet<String>,
+) {
+    idents.insert(item.name.clone());
+    idents.extend(item.module_path.iter().cloned());
+    collect_token_idents(&item_mod.vis.to_token_stream(), idents);
+    for attr in &item_mod.attrs {
+        collect_token_idents(&attr.to_token_stream(), idents);
     }
 }
 
@@ -3436,9 +3935,7 @@ fn reachable_macro_impl_surface_dependencies(
                 ItemKind::Struct | ItemKind::Enum | ItemKind::Union | ItemKind::Type
             )
     }) {
-        if !item_is_root(roots, item)
-            && !item_is_root_callable_signature_surface(project, roots, item)
-        {
+        if !item_is_root(roots, item) {
             continue;
         }
         dependencies.extend(item_root_macro_impl_dependencies(project, item));
@@ -3450,19 +3947,6 @@ fn item_is_root(roots: &[RootId], item: &ItemId) -> bool {
     roots
         .iter()
         .any(|root| matches!(root, RootId::Item(root_item) if root_item == item))
-}
-
-fn item_is_root_callable_signature_surface(
-    project: &Project,
-    roots: &[RootId],
-    item: &ItemId,
-) -> bool {
-    roots.iter().any(|root| {
-        let RootId::Callable(callable) = root else {
-            return false;
-        };
-        callable_signature_resolves_item(project, callable, item)
-    })
 }
 
 pub(crate) fn callable_signature_resolves_item(
@@ -3526,6 +4010,7 @@ fn reachable_struct_field_dependencies(
     candidate_packages: &BTreeSet<String>,
     reachable: &BTreeSet<CallableId>,
     reachable_items: &BTreeSet<ItemId>,
+    state: &mut StructFieldDependencyState,
 ) -> DependencySet {
     let mut dependencies = DependencySet::default();
     let callable_idents_by_package = reachable_callable_idents_by_package(project, reachable);
@@ -3550,16 +4035,45 @@ fn reachable_struct_field_dependencies(
             self_type: None,
         };
         let mut visitor = DependencyVisitor::new(resolver);
-        visitor.visit_struct_reachable_field_dependencies(
-            project,
-            reachable,
-            &record.package,
-            item_struct,
-            &callable_idents_by_package,
-        );
-        dependencies.extend(visitor.dependencies);
+        let mut scanned_field = false;
+        for (field_index, field) in item_struct.fields.iter().enumerate() {
+            if !struct_field_reachable_dependency_should_remain_with_callable_index(
+                project,
+                reachable,
+                &record.package,
+                field,
+                &callable_idents_by_package,
+            ) {
+                continue;
+            }
+            let field_key = (
+                item.clone(),
+                struct_field_dependency_key(field_index, field),
+            );
+            if !state.processed_fields.insert(field_key) {
+                continue;
+            }
+            visitor.visit_struct_field_surface_dependencies(item_struct, field);
+            scanned_field = true;
+        }
+        if scanned_field {
+            dependencies.extend(visitor.dependencies);
+        }
     }
     dependencies
+}
+
+#[derive(Default)]
+struct StructFieldDependencyState {
+    processed_fields: BTreeSet<(ItemId, String)>,
+}
+
+fn struct_field_dependency_key(index: usize, field: &Field) -> String {
+    field
+        .ident
+        .as_ref()
+        .map(ToString::to_string)
+        .unwrap_or_else(|| format!("#{index}"))
 }
 
 fn item_root_macro_impl_dependencies(project: &Project, item: &ItemId) -> DependencySet {
@@ -3772,7 +4286,7 @@ fn item_has_test_attr(item: &Item) -> bool {
     .any(|attribute| is_cfg_test_attr(attribute) || is_test_attr(attribute.path()))
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct DependencySet {
     callables: BTreeSet<CallableId>,
     items: BTreeSet<ItemId>,
@@ -3788,6 +4302,53 @@ impl DependencySet {
         self.callables.extend(other.callables);
         self.items.extend(other.items);
         self.evidence.add(&other.evidence);
+    }
+}
+
+struct DependencyCache<'a> {
+    semantic_hints: &'a SemanticReductionHints,
+    callables: BTreeMap<CallableId, DependencySet>,
+    items: BTreeMap<ItemId, DependencySet>,
+}
+
+impl<'a> DependencyCache<'a> {
+    fn new(semantic_hints: &'a SemanticReductionHints) -> Self {
+        Self {
+            semantic_hints,
+            callables: BTreeMap::new(),
+            items: BTreeMap::new(),
+        }
+    }
+
+    fn callable_dependencies(&mut self, project: &Project, callable: &CallableId) -> DependencySet {
+        if let Some(dependencies) = self.callables.get(callable) {
+            return dependencies.clone();
+        }
+
+        let mut dependencies = callable_dependencies(project, callable);
+        dependencies.extend(semantic_callable_dependencies(
+            self.semantic_hints,
+            callable,
+        ));
+        self.callables
+            .insert(callable.clone(), dependencies.clone());
+        dependencies
+    }
+
+    fn item_dependencies(
+        &mut self,
+        project: &Project,
+        item: &ItemId,
+        expanded_module_roots: &BTreeSet<ItemId>,
+    ) -> DependencySet {
+        if let Some(dependencies) = self.items.get(item) {
+            return dependencies.clone();
+        }
+
+        let mut dependencies = item_dependencies(project, item, expanded_module_roots);
+        dependencies.extend(semantic_item_dependencies(self.semantic_hints, item));
+        self.items.insert(item.clone(), dependencies.clone());
+        dependencies
     }
 }
 
@@ -3937,27 +4498,6 @@ impl<'a> DependencyVisitor<'a> {
         self.visit_generics(&item_struct.generics);
         for field in &item_struct.fields {
             if struct_field_static_surface_dependency_should_remain(field) {
-                self.visit_struct_field_surface_dependencies(item_struct, field);
-            }
-        }
-    }
-
-    fn visit_struct_reachable_field_dependencies(
-        &mut self,
-        project: &Project,
-        reachable: &BTreeSet<CallableId>,
-        package: &str,
-        item_struct: &syn::ItemStruct,
-        callable_idents_by_package: &BTreeMap<String, BTreeSet<String>>,
-    ) {
-        for field in &item_struct.fields {
-            if struct_field_reachable_dependency_should_remain_with_callable_index(
-                project,
-                reachable,
-                package,
-                field,
-                callable_idents_by_package,
-            ) {
                 self.visit_struct_field_surface_dependencies(item_struct, field);
             }
         }
@@ -4539,7 +5079,9 @@ impl<'a> DependencyVisitor<'a> {
                     );
                 }
 
-                for receiver in self.receiver_type_candidates(&call.receiver) {
+                let receiver_candidates = self.receiver_type_candidates(&call.receiver);
+                let resolved_candidate_count = candidates.len();
+                for receiver in &receiver_candidates {
                     for callable in self
                         .resolver
                         .resolve_methods(&receiver, &call.method.to_string())
@@ -4550,6 +5092,13 @@ impl<'a> DependencyVisitor<'a> {
                             candidates.extend(self.resolver.type_ref_candidates(&return_type));
                         }
                     }
+                }
+                if candidates.len() == resolved_candidate_count {
+                    candidates.extend(
+                        receiver_candidates
+                            .into_iter()
+                            .filter(|receiver| self.resolver.type_ref_is_external(receiver)),
+                    );
                 }
             }
             Expr::Try(expr) => {
@@ -5714,6 +6263,27 @@ impl<'a> DependencyVisitor<'a> {
         }
     }
 
+    fn add_conversion_impls_for_receivers(
+        &mut self,
+        receivers: &[TypeRef],
+        trait_name: &str,
+        method_name: &str,
+    ) -> bool {
+        let mut callables = Vec::new();
+        for receiver in receivers {
+            callables.extend(self.resolver.resolve_conversion_impls(
+                receiver,
+                trait_name,
+                method_name,
+            ));
+        }
+        callables.sort();
+        callables.dedup();
+        let found = !callables.is_empty();
+        self.dependencies.callables.extend(callables);
+        found
+    }
+
     fn add_conversion_impls_to_expected_type(
         &mut self,
         expression: &Expr,
@@ -5869,6 +6439,20 @@ impl<'a> DependencyVisitor<'a> {
             }
 
             matches.push(callable.clone());
+        }
+
+        if receiver_candidates.is_empty()
+            && !matches.is_empty()
+            && generic_name_only_method_fallback(method_name)
+        {
+            self.dependencies.evidence.unresolved_method_fallbacks += 1;
+            self.dependencies
+                .evidence
+                .generic_unresolved_method_fallbacks += 1;
+            self.dependencies
+                .evidence
+                .generic_unresolved_method_candidate_matches += matches.len();
+            return;
         }
 
         if receiver_candidates.is_empty() && matches.len() > MAX_UNRESOLVED_METHOD_NAME_CANDIDATES {
@@ -6830,10 +7414,28 @@ impl<'a> DependencyVisitor<'a> {
             Expr::MethodCall(call)
                 if matches!(
                     call.method.to_string().as_str(),
-                    "as_ref" | "as_mut" | "clone" | "split_off"
+                    "as_ref"
+                        | "as_mut"
+                        | "borrow"
+                        | "borrow_mut"
+                        | "clone"
+                        | "expect"
+                        | "into_inner"
+                        | "lock"
+                        | "read"
+                        | "split_off"
+                        | "try_lock"
+                        | "try_read"
+                        | "try_write"
+                        | "unwrap"
+                        | "write"
                 ) =>
             {
                 self.expression_map_key_type(&call.receiver)
+            }
+            Expr::Field(field) => {
+                let receiver = self.receiver_type(&field.base)?;
+                self.resolver.field_map_key_type(&receiver, &field.member)
             }
             Expr::Block(expr) => final_block_expression(&expr.block)
                 .and_then(|expr| self.expression_map_key_type(expr)),
@@ -6870,10 +7472,28 @@ impl<'a> DependencyVisitor<'a> {
             Expr::MethodCall(call)
                 if matches!(
                     call.method.to_string().as_str(),
-                    "as_ref" | "as_mut" | "clone" | "split_off"
+                    "as_ref"
+                        | "as_mut"
+                        | "borrow"
+                        | "borrow_mut"
+                        | "clone"
+                        | "expect"
+                        | "into_inner"
+                        | "lock"
+                        | "read"
+                        | "split_off"
+                        | "try_lock"
+                        | "try_read"
+                        | "try_write"
+                        | "unwrap"
+                        | "write"
                 ) =>
             {
                 self.expression_map_value_type(&call.receiver)
+            }
+            Expr::Field(field) => {
+                let receiver = self.receiver_type(&field.base)?;
+                self.resolver.field_map_value_type(&receiver, &field.member)
             }
             Expr::Block(expr) => final_block_expression(&expr.block)
                 .and_then(|expr| self.expression_map_value_type(expr)),
@@ -8463,19 +9083,21 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_external_method_arg_trait_impls(call);
             }
             if call.method == "into" {
-                for callable in self
-                    .resolver
-                    .resolve_conversion_impls(&receiver, "From", "from")
-                {
-                    self.dependencies.callables.insert(callable);
-                }
+                let mut conversion_receivers = receiver_candidates.clone();
+                conversion_receivers.push(receiver.clone());
+                conversion_receivers.sort();
+                conversion_receivers.dedup();
+                self.add_conversion_impls_for_receivers(&conversion_receivers, "From", "from");
             } else if call.method == "try_into" {
-                for callable in self
-                    .resolver
-                    .resolve_conversion_impls(&receiver, "TryFrom", "try_from")
-                {
-                    self.dependencies.callables.insert(callable);
-                }
+                let mut conversion_receivers = receiver_candidates.clone();
+                conversion_receivers.push(receiver.clone());
+                conversion_receivers.sort();
+                conversion_receivers.dedup();
+                self.add_conversion_impls_for_receivers(
+                    &conversion_receivers,
+                    "TryFrom",
+                    "try_from",
+                );
             } else if call.method == "to_string" {
                 self.add_trait_impls_for_type_named(&receiver, "Display");
             } else if call.method == "parse" {
@@ -8484,17 +9106,34 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_collect_method_trait_dependencies();
             }
         } else if call.method == "into" {
-            if self.receiver_has_generic_conversion_bound(&call.receiver, "From", "from") {
+            let found_exact =
+                self.add_conversion_impls_for_receivers(&receiver_candidates, "From", "from");
+            if found_exact {
+                // Candidate inference is precise enough; avoid the broad capped conversion scan.
+            } else if self.receiver_has_generic_conversion_bound(&call.receiver, "From", "from") {
                 visit::visit_expr_method_call(self, call);
                 return;
+            } else {
+                self.add_conversion_impls_by_trait("From", "from");
             }
-            self.add_conversion_impls_by_trait("From", "from");
         } else if call.method == "try_into" {
-            if self.receiver_has_generic_conversion_bound(&call.receiver, "TryFrom", "try_from") {
+            let found_exact = self.add_conversion_impls_for_receivers(
+                &receiver_candidates,
+                "TryFrom",
+                "try_from",
+            );
+            if found_exact {
+                // Candidate inference is precise enough; avoid the broad capped conversion scan.
+            } else if self.receiver_has_generic_conversion_bound(
+                &call.receiver,
+                "TryFrom",
+                "try_from",
+            ) {
                 visit::visit_expr_method_call(self, call);
                 return;
+            } else {
+                self.add_conversion_impls_by_trait("TryFrom", "try_from");
             }
-            self.add_conversion_impls_by_trait("TryFrom", "try_from");
         } else if call.method == "parse" {
             self.add_parse_method_trait_dependencies();
         } else if call.method == "collect" {
@@ -10120,6 +10759,9 @@ impl Resolver<'_> {
                 if let Some(value_type) = self.map_value_type_from_path(&type_path.path) {
                     return Some(value_type);
                 }
+                if let Some(inner) = single_type_arg_for_collection_wrapper(&type_path.path) {
+                    return self.map_value_type(inner);
+                }
                 let alias = self.resolve_type_path(&type_path.path)?;
                 let item = self.resolver_item_for_type(&alias)?;
                 let record = self.project.items.get(&item)?;
@@ -10147,6 +10789,9 @@ impl Resolver<'_> {
             Type::Path(type_path) => {
                 if let Some(key_type) = self.map_key_type_from_path(&type_path.path) {
                     return Some(key_type);
+                }
+                if let Some(inner) = single_type_arg_for_collection_wrapper(&type_path.path) {
+                    return self.map_key_type(inner);
                 }
                 let alias = self.resolve_type_path(&type_path.path)?;
                 let item = self.resolver_item_for_type(&alias)?;
@@ -10822,6 +11467,89 @@ impl Resolver<'_> {
             }
         }
 
+        self.external_dependency_field_type(receiver, member)
+    }
+
+    fn external_dependency_field_type(
+        &self,
+        receiver: &TypeRef,
+        member: &Member,
+    ) -> Option<TypeRef> {
+        if receiver.package != self.package {
+            return None;
+        }
+        let (dependency_prefix, type_path) = receiver.type_path.split_first()?;
+        if type_path.is_empty() || !self.package_has_dependency_named(dependency_prefix) {
+            return None;
+        }
+        let dependency_root = self.dependency_path_root_named(dependency_prefix)?;
+        let type_path = external_dependency_field_type_path(
+            &dependency_root,
+            dependency_prefix,
+            type_path,
+            member,
+        )?;
+        Some(TypeRef {
+            package: self.package.to_string(),
+            type_path,
+        })
+    }
+
+    fn field_map_value_type(&self, receiver: &TypeRef, member: &Member) -> Option<TypeRef> {
+        for candidate in self.type_ref_candidates(receiver) {
+            let item = self.find_item(
+                &candidate.package,
+                &candidate.type_path,
+                &[ItemKind::Struct],
+            )?;
+            let record = self.project.items.get(&item)?;
+            let syn::Item::Struct(item_struct) = &record.item else {
+                continue;
+            };
+            let Some(ty) = field_member_type(&item_struct.fields, member) else {
+                continue;
+            };
+            let resolver = Resolver {
+                project: self.project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            if let Some(type_ref) = resolver.map_value_type(ty) {
+                return Some(type_ref);
+            }
+        }
+
+        None
+    }
+
+    fn field_map_key_type(&self, receiver: &TypeRef, member: &Member) -> Option<TypeRef> {
+        for candidate in self.type_ref_candidates(receiver) {
+            let item = self.find_item(
+                &candidate.package,
+                &candidate.type_path,
+                &[ItemKind::Struct],
+            )?;
+            let record = self.project.items.get(&item)?;
+            let syn::Item::Struct(item_struct) = &record.item else {
+                continue;
+            };
+            let Some(ty) = field_member_type(&item_struct.fields, member) else {
+                continue;
+            };
+            let resolver = Resolver {
+                project: self.project,
+                package: &record.package,
+                module_path: &record.module_path,
+                aliases: &record.aliases,
+                self_type: None,
+            };
+            if let Some(type_ref) = resolver.map_key_type(ty) {
+                return Some(type_ref);
+            }
+        }
+
         None
     }
 
@@ -10854,6 +11582,11 @@ impl Resolver<'_> {
             type_refs.extend(resolver.receiver_type_candidates_from_type(ty));
         }
 
+        if type_refs.is_empty() {
+            if let Some(type_ref) = self.external_dependency_field_type(receiver, member) {
+                type_refs.push(type_ref);
+            }
+        }
         type_refs.sort();
         type_refs.dedup();
         type_refs
@@ -11044,6 +11777,44 @@ impl Resolver<'_> {
             .dependencies
             .iter()
             .any(|dependency| dependency_name_matches(dependency, name))
+    }
+
+    fn dependency_path_root_named(&self, name: &str) -> Option<PathBuf> {
+        let package = self.project.workspace.packages.get(self.package)?;
+        for table in manifest_dependency_tables(&package.manifest) {
+            for (alias, value) in table {
+                let (source, manifest_dir) = workspace_resolved_dependency_value_with_dir(
+                    self.project,
+                    alias,
+                    value,
+                    &package.root,
+                );
+                let dependency = crate::manifest::Dependency {
+                    alias: alias.to_string(),
+                    package: dependency_package_name(alias, source),
+                };
+                if !dependency_name_matches(&dependency, name) {
+                    continue;
+                }
+                if let Some(root) = dependency_path_root(source, manifest_dir) {
+                    return Some(root);
+                }
+            }
+        }
+        None
+    }
+
+    fn type_ref_is_external(&self, type_ref: &TypeRef) -> bool {
+        let Some(first) = type_ref.type_path.first() else {
+            return false;
+        };
+        matches!(first.as_str(), "std" | "core" | "alloc")
+            || self.package_has_dependency_named(first)
+            || !self
+                .project
+                .workspace
+                .packages
+                .contains_key(&type_ref.package)
     }
 
     fn resolve_local_type_item(&self, type_path: &[String]) -> Option<ItemId> {
@@ -11876,6 +12647,41 @@ fn field_member_type<'a>(fields: &'a syn::Fields, member: &Member) -> Option<&'a
     }
 }
 
+fn single_type_arg_for_collection_wrapper(path: &Path) -> Option<&Type> {
+    let segment = path.segments.last()?;
+    if !matches!(
+        segment.ident.to_string().as_str(),
+        "Arc"
+            | "Box"
+            | "Cell"
+            | "Mutex"
+            | "MutexGuard"
+            | "OnceCell"
+            | "OnceLock"
+            | "Option"
+            | "Pin"
+            | "Rc"
+            | "Ref"
+            | "RefCell"
+            | "RefMut"
+            | "Result"
+            | "RwLock"
+            | "RwLockReadGuard"
+            | "RwLockWriteGuard"
+    ) {
+        return None;
+    }
+    let PathArguments::AngleBracketed(arguments) = &segment.arguments else {
+        return None;
+    };
+    arguments.args.iter().find_map(|argument| {
+        let GenericArgument::Type(ty) = argument else {
+            return None;
+        };
+        Some(ty)
+    })
+}
+
 fn derive_trait_names(attrs: &[syn::Attribute]) -> BTreeSet<String> {
     let mut traits = BTreeSet::new();
     for attr in attrs {
@@ -12097,6 +12903,46 @@ fn conversion_input_matches_receiver(input_path: &[String], receiver: &TypeRef) 
                 .last()
                 .is_some_and(|receiver| input == receiver)
         })
+}
+
+fn generic_name_only_method_fallback(method_name: &str) -> bool {
+    matches!(
+        method_name,
+        "as_ref"
+            | "as_str"
+            | "borrow"
+            | "borrow_mut"
+            | "captures"
+            | "captures_iter"
+            | "contains"
+            | "create"
+            | "end"
+            | "expect"
+            | "filter"
+            | "find"
+            | "get"
+            | "get_mut"
+            | "insert"
+            | "is_empty"
+            | "iter"
+            | "iter_mut"
+            | "len"
+            | "map"
+            | "next"
+            | "ok"
+            | "open"
+            | "push"
+            | "start"
+            | "take"
+            | "to_string"
+            | "trim"
+            | "truncate"
+            | "unwrap"
+            | "unwrap_or"
+            | "unwrap_or_default"
+            | "unwrap_or_else"
+            | "write"
+    )
 }
 
 fn is_conversion_adapter_path(path: &Path, trait_name: &str, method_name: &str) -> bool {
