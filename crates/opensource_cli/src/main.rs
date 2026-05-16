@@ -3,7 +3,7 @@ use std::{
     ffi::{OsStr, OsString},
     fs,
     fs::OpenOptions,
-    io::{self, Write},
+    io::Write,
     path::{Path, PathBuf},
     process::Command,
     sync::{mpsc, OnceLock},
@@ -832,7 +832,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 serde_json::json!(feedback_target_dir(&options)),
             )]),
         )?;
-        if let Err(error) = run_plain_check_gate(&options, &mut validation) {
+        if let Err(error) = run_plain_check_gate(&options, baseline.as_ref(), &mut validation) {
             let reason = error.to_string();
             write_decision_log(
                 &options,
@@ -4940,143 +4940,115 @@ fn parse_feedback_timeout(
     Ok((seconds > 0).then(|| Duration::from_secs(seconds)))
 }
 
-#[derive(Debug, Clone)]
-struct PlainCheckOutput {
-    status: String,
-    stdout_excerpt: String,
-    stderr_excerpt: String,
-}
-
-#[derive(Debug)]
-struct PlainCheckFailure {
-    output: PlainCheckOutput,
-}
-
-impl std::fmt::Display for PlainCheckFailure {
-    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            formatter,
-            "generated workspace failed cargo check with {}",
-            self.output.status
-        )
-    }
-}
-
-impl std::error::Error for PlainCheckFailure {}
-
-fn run_plain_check(options: &CliOptions) -> Result<PlainCheckOutput, Box<dyn std::error::Error>> {
-    let manifest_path = absolute_path(&options.output_root.join("Cargo.toml"))?;
-    let working_dir = manifest_working_dir(&manifest_path);
-    let output = Command::new("cargo")
-        .arg("check")
-        .arg("--manifest-path")
-        .arg(&manifest_path)
-        .args(&options.cargo_check_args)
-        .current_dir(&working_dir)
-        .output()?;
-    io::stdout().write_all(&output.stdout)?;
-    io::stderr().write_all(&output.stderr)?;
-
-    let check_output = PlainCheckOutput {
-        status: output.status.to_string(),
-        stdout_excerpt: command_output_excerpt(&output.stdout),
-        stderr_excerpt: command_output_excerpt(&output.stderr),
-    };
-    if !output.status.success() {
-        return Err(Box::new(PlainCheckFailure {
-            output: check_output,
-        }));
-    }
-    Ok(check_output)
-}
-
-fn command_output_excerpt(output: &[u8]) -> String {
-    const MAX_CHARS: usize = 12_000;
-    let text = String::from_utf8_lossy(output);
-    if text.chars().count() <= MAX_CHARS {
-        return text.into_owned();
-    }
-    let tail = text
-        .chars()
-        .rev()
-        .take(MAX_CHARS)
-        .collect::<Vec<_>>()
-        .into_iter()
-        .rev()
-        .collect::<String>();
-    format!("[truncated to last {MAX_CHARS} chars]\n{tail}")
-}
-
 fn run_plain_check_gate(
     options: &CliOptions,
+    baseline: Option<&CheckReport>,
     validation: &mut ValidationReport,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    match run_plain_check(options) {
-        Ok(output) => {
-            write_event_log(
-                options,
-                "check",
-                "passed",
-                "run plain generated workspace cargo check",
-                "generated workspace cargo check passed",
-                event_fields(&[
-                    ("status", serde_json::json!(output.status)),
-                    ("stderr_excerpt", serde_json::json!(output.stderr_excerpt)),
-                ]),
-            )?;
-            validation.gates.push(ValidationGateReport {
-                name: "check".to_string(),
-                status: "passed".to_string(),
-                reason: "generated workspace cargo check passed".to_string(),
-                report_path: None,
-                error_count: None,
-                warning_count: None,
-                semantic_warning_hazards: None,
-                review_warning_hazards: None,
-            });
-            Ok(())
-        }
-        Err(error) => {
-            let reason = error.to_string();
-            let failure = error.downcast_ref::<PlainCheckFailure>();
-            write_event_log(
-                options,
-                "check",
-                "failed",
-                "run plain generated workspace cargo check",
-                &reason,
-                event_fields(&[
-                    (
-                        "status",
-                        serde_json::json!(failure.map(|failure| failure.output.status.clone())),
-                    ),
-                    (
-                        "stdout_excerpt",
-                        serde_json::json!(
-                            failure.map(|failure| failure.output.stdout_excerpt.clone())
-                        ),
-                    ),
-                    (
-                        "stderr_excerpt",
-                        serde_json::json!(
-                            failure.map(|failure| failure.output.stderr_excerpt.clone())
-                        ),
-                    ),
-                ]),
-            )?;
-            validation.gates.push(ValidationGateReport {
-                name: "check".to_string(),
-                status: "failed".to_string(),
-                reason: reason.clone(),
-                report_path: None,
-                error_count: None,
-                warning_count: None,
-                semantic_warning_hazards: None,
-                review_warning_hazards: None,
-            });
-            finish_validation(options, validation, "rejected", Some(&reason))?;
-            Err(reason.into())
-        }
+    let report_path = check_report_path(options);
+    let report = check_workspace(CheckOptions {
+        manifest_path: options.output_root.join("Cargo.toml"),
+        target_dir: Some(feedback_target_dir(options)),
+        timeout: options.feedback_timeout,
+        cargo_args: options.cargo_check_args.clone(),
+    })?;
+    write_report(&report, &report_path)?;
+    print_feedback(&report, options.feedback_limit, &report_path);
+
+    let semantic_warnings = semantic_hazard_warning_count(&report.diagnostics, baseline);
+    let baseline_comparison = feedback_baseline_error_comparison(&report, baseline);
+    validation.feedback_baseline_compared = Some(baseline_comparison.compared);
+    validation.feedback_baseline_known_errors = Some(baseline_comparison.known_errors);
+    validation.feedback_baseline_new_errors = Some(baseline_comparison.new_errors);
+
+    let baseline_limited = options.allow_baseline_failures
+        && baseline_limited_feedback_is_accepted(&report, baseline, options.deny_warnings);
+    let accepted = feedback_is_accepted(&report, baseline, options.deny_warnings);
+    let (status, reason) = if accepted {
+        (
+            "passed",
+            "generated workspace cargo check passed all check gates".to_string(),
+        )
+    } else if baseline_limited {
+        (
+            "baseline_limited",
+            "generated errors match the source baseline and remaining check gates passed"
+                .to_string(),
+        )
+    } else if report.timed_out {
+        (
+            "failed",
+            "generated workspace cargo check timed out".to_string(),
+        )
+    } else if report.success && semantic_warnings > 0 {
+        (
+            "failed",
+            format!(
+                "generated workspace cargo check produced {semantic_warnings} semantic warning hazard(s)"
+            ),
+        )
+    } else if report.success && options.deny_warnings && report.warning_count() > 0 {
+        (
+            "failed",
+            format!(
+                "generated workspace cargo check produced {} warning(s) with --deny-warnings",
+                report.warning_count()
+            ),
+        )
+    } else {
+        (
+            "failed",
+            format!(
+                "generated workspace failed cargo check with exit status: {}",
+                report.exit_code
+            ),
+        )
+    };
+
+    write_event_log(
+        options,
+        "check",
+        status,
+        "run plain generated workspace cargo check",
+        &reason,
+        event_fields(&[
+            ("success", serde_json::json!(report.success)),
+            ("timed_out", serde_json::json!(report.timed_out)),
+            ("exit_code", serde_json::json!(report.exit_code)),
+            ("duration_ms", serde_json::json!(report.duration_ms)),
+            ("errors", serde_json::json!(report.error_count())),
+            ("warnings", serde_json::json!(report.warning_count())),
+            ("semantic_warnings", serde_json::json!(semantic_warnings)),
+            (
+                "feedback_baseline_compared",
+                serde_json::json!(baseline_comparison.compared),
+            ),
+            (
+                "feedback_baseline_known_errors",
+                serde_json::json!(baseline_comparison.known_errors),
+            ),
+            (
+                "feedback_baseline_new_errors",
+                serde_json::json!(baseline_comparison.new_errors),
+            ),
+            ("report_path", serde_json::json!(report_path)),
+        ]),
+    )?;
+    record_feedback_gate(
+        validation,
+        "check",
+        status,
+        &reason,
+        &report,
+        report_path,
+        semantic_warnings,
+    );
+
+    if accepted || baseline_limited {
+        Ok(())
+    } else {
+        finish_validation(options, validation, "rejected", Some(&reason))?;
+        Err(reason.into())
     }
 }
 
@@ -5205,6 +5177,13 @@ fn feedback_report_path(options: &CliOptions) -> Option<PathBuf> {
             .clone()
             .unwrap_or_else(|| options.output_root.join("slice-feedback.json"))
     })
+}
+
+fn check_report_path(options: &CliOptions) -> PathBuf {
+    options
+        .feedback_report
+        .clone()
+        .unwrap_or_else(|| options.output_root.join("slice-feedback.json"))
 }
 
 fn decision_log_feedback_report_path(options: &CliOptions) -> Option<PathBuf> {
@@ -10802,7 +10781,7 @@ resolver = "2"
         let mut options = parse_args_from([
             std::ffi::OsString::from("--production"),
             workspace.clone().into_os_string(),
-            output.into_os_string(),
+            output.clone().into_os_string(),
         ])
         .expect("production arguments should parse");
 
@@ -12741,7 +12720,14 @@ pub fn helper() -> usize {
         let output = temp_path("cli-plain-check-output");
         let validation_path = temp_path("cli-plain-check-report").join("validation.json");
         let event_log_path = temp_path("cli-plain-check-events").join("events.jsonl");
-        write(output.join("Cargo.toml"), "not valid toml");
+        write(
+            output.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            output.join("src/lib.rs"),
+            "pub fn selected() -> usize { missing() }\n",
+        );
         let options = parse_args_from(vec![
             std::ffi::OsString::from("--check"),
             std::ffi::OsString::from("--validation-report"),
@@ -12749,24 +12735,29 @@ pub fn helper() -> usize {
             std::ffi::OsString::from("--event-log"),
             event_log_path.clone().into_os_string(),
             source.into_os_string(),
-            output.into_os_string(),
+            output.clone().into_os_string(),
         ])
         .expect("arguments should parse");
         let mut validation = ValidationReport::new(&options);
 
-        let error = run_plain_check_gate(&options, &mut validation)
-            .expect_err("plain check should fail for invalid Cargo.toml");
+        let error = run_plain_check_gate(&options, None, &mut validation)
+            .expect_err("plain check should fail for generated compile error");
 
         assert!(error.to_string().contains("generated workspace failed"));
+        assert!(output.join("slice-feedback.json").exists());
         let value: serde_json::Value =
             serde_json::from_str(&fs::read_to_string(validation_path).unwrap()).unwrap();
         assert_eq!(value["status"], "rejected");
         assert_eq!(value["gates"][0]["name"], "check");
         assert_eq!(value["gates"][0]["status"], "failed");
+        assert_eq!(
+            value["gates"][0]["report_path"],
+            serde_json::json!(output.join("slice-feedback.json"))
+        );
         let events = fs::read_to_string(event_log_path).unwrap();
         assert!(events.contains(r#""event":"check""#), "{events}");
         assert!(events.contains(r#""status":"failed""#), "{events}");
-        assert!(events.contains("stderr_excerpt"), "{events}");
+        assert!(events.contains("feedback_baseline_compared"), "{events}");
     }
 
     fn report(success: bool, diagnostics: Vec<CheckDiagnostic>) -> CheckReport {
