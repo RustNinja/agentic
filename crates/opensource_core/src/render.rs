@@ -14553,7 +14553,13 @@ fn transform_items(
                         None,
                         &mut function.block,
                     );
-                    allow_dead_code_if_not_public(&function.vis, &mut function.attrs);
+                    allow_dead_code_if_not_publicly_exported(
+                        project,
+                        package,
+                        module_path,
+                        &function.vis,
+                        &mut function.attrs,
+                    );
                     Item::Fn(function)
                 })
             }
@@ -14602,7 +14608,13 @@ fn transform_items(
                         preserve_private_fields,
                     );
                     allow_dead_code_for_private_struct_fields(&mut item_struct);
-                    allow_dead_code_if_not_public(&item_struct.vis, &mut item_struct.attrs);
+                    allow_dead_code_if_not_publicly_exported(
+                        project,
+                        package,
+                        module_path,
+                        &item_struct.vis,
+                        &mut item_struct.attrs,
+                    );
                     Item::Struct(item_struct)
                 })
             }),
@@ -14628,7 +14640,13 @@ fn transform_items(
                             &mut item_trait,
                         );
                     }
-                    allow_dead_code_if_not_public(&item_trait.vis, &mut item_trait.attrs);
+                    allow_dead_code_if_not_publicly_exported(
+                        project,
+                        package,
+                        module_path,
+                        &item_trait.vis,
+                        &mut item_trait.attrs,
+                    );
                     Item::Trait(item_trait)
                 })
             }),
@@ -14651,7 +14669,13 @@ fn transform_items(
                             &mut item_enum,
                         );
                     }
-                    allow_dead_code_if_not_public(&item_enum.vis, &mut item_enum.attrs);
+                    allow_dead_code_if_not_publicly_exported(
+                        project,
+                        package,
+                        module_path,
+                        &item_enum.vis,
+                        &mut item_enum.attrs,
+                    );
                     Item::Enum(item_enum)
                 })
             }),
@@ -14663,7 +14687,12 @@ fn transform_items(
                         if !preserve_uniffi_surface {
                             strip_uniffi_attrs_from_item(&mut item);
                         }
-                        allow_dead_code_for_non_public_item(&mut item);
+                        allow_dead_code_for_non_publicly_exported_item(
+                            project,
+                            package,
+                            module_path,
+                            &mut item,
+                        );
                         item
                     })
                 })
@@ -19794,6 +19823,48 @@ fn allow_dead_code_if_not_public(vis: &syn::Visibility, attrs: &mut Vec<syn::Att
     allow_dead_code(attrs);
 }
 
+fn allow_dead_code_if_not_publicly_exported(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    vis: &syn::Visibility,
+    attrs: &mut Vec<syn::Attribute>,
+) {
+    if matches!(vis, syn::Visibility::Public(_))
+        && module_path_is_publicly_exported(project, package, module_path)
+    {
+        return;
+    }
+    allow_dead_code(attrs);
+}
+
+fn module_path_is_publicly_exported(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+) -> bool {
+    let mut parent = Vec::new();
+    for segment in module_path {
+        let id = ItemId {
+            package: package.to_string(),
+            module_path: parent.clone(),
+            name: segment.clone(),
+            kind: ItemKind::Mod,
+        };
+        let Some(record) = project.items.get(&id) else {
+            return false;
+        };
+        let Item::Mod(item_mod) = &record.item else {
+            return false;
+        };
+        if !matches!(item_mod.vis, syn::Visibility::Public(_)) {
+            return false;
+        }
+        parent.push(segment.clone());
+    }
+    true
+}
+
 fn allow_dead_code_for_private_struct_fields(item_struct: &mut syn::ItemStruct) {
     if struct_has_private_fields(item_struct) {
         allow_dead_code(&mut item_struct.attrs);
@@ -19838,14 +19909,55 @@ fn struct_has_private_fields(item_struct: &syn::ItemStruct) -> bool {
     }
 }
 
-fn allow_dead_code_for_non_public_item(item: &mut Item) {
+fn allow_dead_code_for_non_publicly_exported_item(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    item: &mut Item,
+) {
     match item {
-        Item::Const(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
-        Item::Enum(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
-        Item::Static(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
-        Item::Trait(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
-        Item::Type(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
-        Item::Union(item) => allow_dead_code_if_not_public(&item.vis, &mut item.attrs),
+        Item::Const(item) => allow_dead_code_if_not_publicly_exported(
+            project,
+            package,
+            module_path,
+            &item.vis,
+            &mut item.attrs,
+        ),
+        Item::Enum(item) => allow_dead_code_if_not_publicly_exported(
+            project,
+            package,
+            module_path,
+            &item.vis,
+            &mut item.attrs,
+        ),
+        Item::Static(item) => allow_dead_code_if_not_publicly_exported(
+            project,
+            package,
+            module_path,
+            &item.vis,
+            &mut item.attrs,
+        ),
+        Item::Trait(item) => allow_dead_code_if_not_publicly_exported(
+            project,
+            package,
+            module_path,
+            &item.vis,
+            &mut item.attrs,
+        ),
+        Item::Type(item) => allow_dead_code_if_not_publicly_exported(
+            project,
+            package,
+            module_path,
+            &item.vis,
+            &mut item.attrs,
+        ),
+        Item::Union(item) => allow_dead_code_if_not_publicly_exported(
+            project,
+            package,
+            module_path,
+            &item.vis,
+            &mut item.attrs,
+        ),
         _ => {}
     }
 }

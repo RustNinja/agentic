@@ -3059,6 +3059,26 @@ fn prunes_facade_function_alias_dead_siblings() {
 }
 
 #[test]
+fn allows_pub_items_inside_private_modules_under_dead_code_deny() {
+    let workspace = temp_path("rule-private-module-pub-item-dead-code-workspace");
+    let output = temp_path("rule-private-module-pub-item-dead-code-output");
+    let target_dir = temp_path("rule-private-module-pub-item-dead-code-target");
+    write_private_module_pub_item_dead_code_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("private module pub item dead code rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("private_module_pub_item_rule/src/lib.rs"));
+    assert!(lib.contains("#[allow(dead_code)]"), "{lib}");
+    assert!(lib.contains("pub struct HiddenState"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
 fn retains_result_alias_error_and_payload_surfaces() {
     let workspace = temp_path("rule-result-alias-surface-workspace");
     let output = temp_path("rule-result-alias-surface-output");
@@ -4994,6 +5014,30 @@ pub fn dead_report(seed: u32) -> String {
     }
     .dead_note
     .unwrap_or_default()
+}
+"#,
+    );
+}
+
+fn write_private_module_pub_item_dead_code_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "private_module_pub_item_rule",
+        r#"#![deny(dead_code)]
+
+use opensourced::opensourced;
+
+mod private_state {
+    pub struct HiddenState {}
+
+    pub fn selected() -> Option<HiddenState> {
+        None
+    }
+}
+
+#[opensourced]
+pub fn selected() -> Option<private_state::HiddenState> {
+    private_state::selected()
 }
 "#,
     );
