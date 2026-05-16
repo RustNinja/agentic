@@ -6876,6 +6876,34 @@ impl<'a> DependencyVisitor<'a> {
         found
     }
 
+    fn add_map_conversion_adapter_source_dependencies(
+        &mut self,
+        call: &ExprMethodCall,
+        trait_name: &str,
+        trait_method_name: &str,
+        expression_method_name: &str,
+    ) -> bool {
+        if call.method != "map" {
+            return false;
+        }
+        let Some(Expr::Path(path)) = call.args.first() else {
+            return false;
+        };
+        if !conversion_adapter_path_matches(&path.path, trait_name, expression_method_name) {
+            return false;
+        }
+        let mut sources = self.expression_type_arguments(&call.receiver);
+        if let Some(source) = self
+            .receiver_type(&call.receiver)
+            .or_else(|| self.infer_expr_type(&call.receiver))
+        {
+            sources.push(source);
+        }
+        sources.sort();
+        sources.dedup();
+        self.add_conversion_impls_for_receivers(&sources, trait_name, trait_method_name)
+    }
+
     fn add_conversion_impls_for_associated_call_arg(&mut self, path: &Path, call: &ExprCall) {
         let segments = path_segments(path);
         let Some(method) = segments.last().map(String::as_str) else {
@@ -7125,8 +7153,54 @@ impl<'a> DependencyVisitor<'a> {
         let Ok(arguments) = parser.parse2(mac.tokens.clone()) else {
             return;
         };
+        self.add_macro_closure_receiver_arg_dependencies(&arguments);
         for argument in arguments {
             self.visit_expr(&argument);
+        }
+    }
+
+    fn add_macro_closure_receiver_arg_dependencies(
+        &mut self,
+        arguments: &syn::punctuated::Punctuated<Expr, syn::Token![,]>,
+    ) {
+        let mut receiver_types = Vec::new();
+        for argument in arguments {
+            if let Expr::Closure(closure) = argument {
+                let Some(binding) = closure_single_ident_param(closure) else {
+                    continue;
+                };
+                let methods = closure_local_receiver_method_names(closure, &binding);
+                if methods.is_empty() {
+                    continue;
+                }
+                for method in methods {
+                    let mut resolved_methods = Vec::new();
+                    for receiver in &receiver_types {
+                        resolved_methods.extend(self.resolver.resolve_methods(receiver, &method));
+                    }
+                    resolved_methods.sort();
+                    resolved_methods.dedup();
+                    if resolved_methods.is_empty() {
+                        self.add_unresolved_method_candidates(&method, &receiver_types, None);
+                    }
+                    for callable in &resolved_methods {
+                        self.add_method_dependency(callable);
+                    }
+                    for receiver in &receiver_types {
+                        self.add_trait_impls_for_type_named(receiver, "Deref");
+                        self.add_trait_impls_for_type_named(receiver, "DerefMut");
+                        self.add_extension_trait_dependencies_for_method(receiver, &method);
+                        self.add_deref_target_method_dependencies(receiver, &method);
+                    }
+                }
+                continue;
+            }
+            receiver_types.extend(self.receiver_type_candidates(argument));
+            if let Some(receiver) = self.receiver_type(argument) {
+                receiver_types.push(receiver);
+            }
+            receiver_types.sort();
+            receiver_types.dedup();
         }
     }
 
@@ -9596,6 +9670,12 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_trait_impls_for_type_named(&value_type, "Default");
             }
         }
+        if call.method == "map" {
+            self.add_map_conversion_adapter_source_dependencies(call, "From", "from", "into");
+            self.add_map_conversion_adapter_source_dependencies(
+                call, "TryFrom", "try_from", "try_into",
+            );
+        }
         if self.visit_fold_method_call(call) {
             return;
         }
@@ -10027,6 +10107,60 @@ fn macro_self_method_names(tokens: &TokenStream) -> BTreeSet<String> {
     let mut names = BTreeSet::new();
     collect_macro_self_method_names(tokens, &mut names);
     names
+}
+
+fn closure_single_ident_param(closure: &syn::ExprClosure) -> Option<String> {
+    if closure.inputs.len() != 1 {
+        return None;
+    }
+    let Pat::Ident(ident) = closure.inputs.first()? else {
+        return None;
+    };
+    Some(ident.ident.to_string())
+}
+
+fn closure_local_receiver_method_names(
+    closure: &syn::ExprClosure,
+    receiver_name: &str,
+) -> BTreeSet<String> {
+    let mut visitor = LocalReceiverMethodVisitor {
+        receiver_name,
+        methods: BTreeSet::new(),
+    };
+    visitor.visit_expr(&closure.body);
+    visitor.methods
+}
+
+struct LocalReceiverMethodVisitor<'a> {
+    receiver_name: &'a str,
+    methods: BTreeSet<String>,
+}
+
+impl Visit<'_> for LocalReceiverMethodVisitor<'_> {
+    fn visit_expr_method_call(&mut self, call: &ExprMethodCall) {
+        if expr_is_single_ident(&call.receiver, self.receiver_name) {
+            self.methods.insert(call.method.to_string());
+        }
+        visit::visit_expr_method_call(self, call);
+    }
+}
+
+fn expr_is_single_ident(expr: &Expr, name: &str) -> bool {
+    match expr {
+        Expr::Path(path) => {
+            path.qself.is_none()
+                && path.path.segments.len() == 1
+                && path
+                    .path
+                    .segments
+                    .first()
+                    .is_some_and(|segment| segment.ident == name)
+        }
+        Expr::Reference(reference) => expr_is_single_ident(&reference.expr, name),
+        Expr::Paren(paren) => expr_is_single_ident(&paren.expr, name),
+        Expr::Group(group) => expr_is_single_ident(&group.expr, name),
+        _ => false,
+    }
 }
 
 fn collect_macro_self_method_names(tokens: &TokenStream, names: &mut BTreeSet<String>) {

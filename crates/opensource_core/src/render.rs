@@ -6051,6 +6051,13 @@ fn support_struct_field_should_remain(
     field: &Field,
     field_name: &str,
 ) -> bool {
+    if live_set
+        .assoc_item_names
+        .get(struct_name)
+        .is_some_and(|fields| fields.contains(field_name))
+    {
+        return true;
+    }
     if field_attrs_require_field(field) || field_mentions_struct_type_params(item_struct, field) {
         return true;
     }
@@ -12369,16 +12376,24 @@ struct PackageSourceUsage {
 }
 
 impl PackageSourceUsage {
-    fn record_file(&mut self, file: &syn::File, target_names: &BTreeSet<String>) {
-        self.all.record_file(file);
+    fn record_source(
+        &mut self,
+        project: &Project,
+        source: &SourceFile,
+        file: &syn::File,
+        target_names: &BTreeSet<String>,
+    ) {
+        let context = dependency_usage_context_for_source(project, source, file);
+        self.all.record_file_with_dependency_context(file, &context);
         if target_names.is_empty() {
-            self.general.record_file(file);
+            self.general
+                .record_file_with_dependency_context(file, &context);
         } else {
             for target_name in target_names {
                 self.targets
                     .entry(target_name.clone())
                     .or_default()
-                    .record_file(file);
+                    .record_file_with_dependency_context(file, &context);
             }
         }
     }
@@ -12416,6 +12431,12 @@ impl PackageSourceUsage {
 }
 
 #[derive(Clone, Default)]
+struct DependencyUsageContext {
+    type_imports: BTreeMap<String, (String, Vec<String>)>,
+    root_aliases: BTreeMap<String, BTreeSet<Vec<String>>>,
+}
+
+#[derive(Clone, Default)]
 struct TokenUsage {
     idents: BTreeSet<String>,
     bare_idents: BTreeSet<String>,
@@ -12430,15 +12451,40 @@ struct TokenUsage {
 }
 
 impl TokenUsage {
-    fn record_file(&mut self, file: &syn::File) {
-        let dependency_enum_payloads = DependencyEnumPayloadMap::new();
-        self.record_file_with_dependency_enum_payloads(file, &dependency_enum_payloads);
-    }
-
     fn record_file_with_dependency_enum_payloads(
         &mut self,
         file: &syn::File,
         dependency_enum_payloads: &DependencyEnumPayloadMap,
+    ) {
+        let context = DependencyUsageContext {
+            type_imports: dependency_type_imports(file),
+            root_aliases: BTreeMap::new(),
+        };
+        self.record_file_with_dependency_context_and_payloads(
+            file,
+            dependency_enum_payloads,
+            &context,
+        );
+    }
+
+    fn record_file_with_dependency_context(
+        &mut self,
+        file: &syn::File,
+        context: &DependencyUsageContext,
+    ) {
+        let dependency_enum_payloads = DependencyEnumPayloadMap::new();
+        self.record_file_with_dependency_context_and_payloads(
+            file,
+            &dependency_enum_payloads,
+            context,
+        );
+    }
+
+    fn record_file_with_dependency_context_and_payloads(
+        &mut self,
+        file: &syn::File,
+        dependency_enum_payloads: &DependencyEnumPayloadMap,
+        context: &DependencyUsageContext,
     ) {
         collect_token_usage(&file.to_token_stream(), self);
         let mut glob_visible_names = DependencyGlobVisibleNameVisitor::default();
@@ -12446,13 +12492,18 @@ impl TokenUsage {
         self.dependency_glob_visible_names
             .extend(glob_visible_names.names);
         self.record_dependency_method_calls(file);
-        self.record_dependency_methods_through_typed_values(file, dependency_enum_payloads);
-        self.record_dependency_assoc_calls_through_imports(file);
+        self.record_dependency_methods_through_typed_values(
+            file,
+            dependency_enum_payloads,
+            &context.type_imports,
+        );
+        self.record_dependency_assoc_calls_through_imports(file, &context.type_imports);
         for item in &file.items {
             if let Item::Use(item_use) = item {
                 self.record_use(item_use);
             }
         }
+        self.record_dependency_root_aliases(&context.root_aliases);
     }
 
     fn record_use(&mut self, item_use: &syn::ItemUse) {
@@ -12487,9 +12538,10 @@ impl TokenUsage {
         &mut self,
         file: &syn::File,
         dependency_enum_payloads: &DependencyEnumPayloadMap,
+        type_imports: &BTreeMap<String, (String, Vec<String>)>,
     ) {
         let mut visitor = DependencyTypedValueMethodVisitor {
-            type_imports: dependency_type_imports(file),
+            type_imports: type_imports.clone(),
             enum_variant_payload_types: dependency_enum_payloads.clone(),
             macro_method_requirements: support_macro_metavariable_method_requirements_from_items(
                 &file.items,
@@ -12517,8 +12569,11 @@ impl TokenUsage {
         }
     }
 
-    fn record_dependency_assoc_calls_through_imports(&mut self, file: &syn::File) {
-        let imports = dependency_type_imports(file);
+    fn record_dependency_assoc_calls_through_imports(
+        &mut self,
+        file: &syn::File,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+    ) {
         if imports.is_empty() {
             return;
         }
@@ -12526,13 +12581,25 @@ impl TokenUsage {
         let mut visitor = SupportAssocUsageVisitor::default();
         visitor.visit_file(file);
         for assoc_path in visitor.assoc_paths {
-            self.record_imported_assoc_path(&imports, &assoc_path);
+            self.record_imported_assoc_path(imports, &assoc_path);
         }
 
         for assoc_path in token_path_candidates(&file.to_token_stream()) {
             if support_required_assoc_segments(&assoc_path).is_some() {
-                self.record_imported_assoc_path(&imports, &assoc_path);
+                self.record_imported_assoc_path(imports, &assoc_path);
             }
+        }
+    }
+
+    fn record_dependency_root_aliases(
+        &mut self,
+        root_aliases: &BTreeMap<String, BTreeSet<Vec<String>>>,
+    ) {
+        for (local, targets) in root_aliases {
+            self.dependency_root_aliases
+                .entry(local.clone())
+                .or_default()
+                .extend(targets.iter().cloned());
         }
     }
 
@@ -12635,6 +12702,19 @@ impl TokenUsage {
                 };
                 if root != alias && root != &code_name {
                     continue;
+                }
+                for candidate in &self.path_candidates {
+                    let Some((candidate_root, candidate_rest)) = candidate.split_first() else {
+                        continue;
+                    };
+                    if candidate_root != local {
+                        continue;
+                    }
+                    let mut path = target[1..].to_vec();
+                    path.extend(candidate_rest.iter().cloned());
+                    if let Some(path) = dependency_required_path_string(&path) {
+                        names.insert(path);
+                    }
                 }
                 if target.len() == 1 {
                     if dependency_alias_target_is_module_like(local, target) {
@@ -13162,6 +13242,17 @@ impl Visit<'_> for DependencyTypedValueMethodVisitor {
         visit::visit_expr_method_call(self, node);
     }
 
+    fn visit_expr_field(&mut self, node: &syn::ExprField) {
+        if let Some(field_name) = member_name(&node.member) {
+            if support_assoc_item_name_is_precise(&field_name) {
+                if let Some((root, type_path)) = self.scoped_receiver_type_path(&node.base) {
+                    self.calls.push((root, type_path, field_name));
+                }
+            }
+        }
+        visit::visit_expr_field(self, node);
+    }
+
     fn visit_macro(&mut self, node: &syn::Macro) {
         self.calls
             .extend(self.scoped_macro_metavariable_method_calls(node));
@@ -13373,6 +13464,50 @@ fn dependency_type_imports(file: &syn::File) -> BTreeMap<String, (String, Vec<St
     imports
 }
 
+fn dependency_usage_context_for_source(
+    project: &Project,
+    source: &SourceFile,
+    file: &syn::File,
+) -> DependencyUsageContext {
+    let mut context = DependencyUsageContext {
+        type_imports: dependency_type_imports(file),
+        root_aliases: BTreeMap::new(),
+    };
+    let key = (source.package.clone(), source.module_path.clone());
+    let Some(aliases) = project.module_aliases.get(&key) else {
+        return context;
+    };
+    for (local, target) in aliases {
+        let Some((root, imported_path)) = dependency_import_from_module_alias_target(target) else {
+            continue;
+        };
+        let mut root_target = Vec::with_capacity(imported_path.len() + 1);
+        root_target.push(root.clone());
+        root_target.extend(imported_path.iter().cloned());
+        context
+            .root_aliases
+            .entry(local.clone())
+            .or_default()
+            .insert(root_target);
+        context
+            .type_imports
+            .entry(local.clone())
+            .or_insert((root, imported_path));
+    }
+    context
+}
+
+fn dependency_import_from_module_alias_target(target: &[String]) -> Option<(String, Vec<String>)> {
+    let (root, rest) = target.split_first()?;
+    if matches!(
+        root.as_str(),
+        "crate" | "self" | "super" | "std" | "core" | "alloc"
+    ) {
+        return None;
+    }
+    Some((root.clone(), rest.to_vec()))
+}
+
 fn collect_dependency_type_imports(
     tree: &UseTree,
     mut prefix: Vec<String>,
@@ -13417,10 +13552,15 @@ fn record_dependency_type_import(
     visible_name: &str,
     imports: &mut BTreeMap<String, (String, Vec<String>)>,
 ) {
-    if !support_type_like_ident(visible_name) && !support_type_like_ident(imported_name) {
-        return;
-    }
+    let type_like_import =
+        support_type_like_ident(visible_name) || support_type_like_ident(imported_name);
     let Some(root) = prefix.first() else {
+        if !type_like_import && !matches!(imported_name, "crate" | "self" | "super") {
+            imports.insert(
+                visible_name.to_string(),
+                (imported_name.to_string(), Vec::new()),
+            );
+        }
         return;
     };
     if matches!(root.as_str(), "crate" | "self" | "super") {
@@ -13429,6 +13569,10 @@ fn record_dependency_type_import(
     let mut imported_type_path = prefix[1..].to_vec();
     if imported_name != "self" {
         imported_type_path.push(imported_name.to_string());
+    }
+    if !type_like_import {
+        imports.insert(visible_name.to_string(), (root.clone(), imported_type_path));
+        return;
     }
     if imported_type_path.is_empty()
         || !imported_type_path
@@ -13476,7 +13620,7 @@ fn package_source_usage(
             retain_test_items,
         );
         let target_names = module_cfg_target_names(project, &source.package, &source.module_path);
-        usage.record_file(&file, &target_names);
+        usage.record_source(project, source, &file, &target_names);
     }
     usage
 }
@@ -26945,6 +27089,16 @@ fn external_trait_import_should_remain(
         return false;
     }
     if is_derive_only_external_trait_import(leaf) {
+        if rendered_attrs_mention_unqualified_ident(
+            project,
+            reduced,
+            render_plan,
+            package,
+            module_path,
+            leaf,
+        ) {
+            return true;
+        }
         if render_plan.module_mentions_ident(package, module_path, leaf) {
             return true;
         }

@@ -354,6 +354,36 @@ fn prunes_public_support_struct_fields_outside_root_signature_surface() {
 }
 
 #[test]
+fn retains_public_support_struct_fields_used_by_downstream_field_access() {
+    let workspace = temp_path("rule-public-support-struct-field-access-workspace");
+    let output = temp_path("rule-public-support-struct-field-access-output");
+    let target_dir = temp_path("rule-public-support-struct-field-access-target");
+    write_public_support_struct_field_access_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("public support struct field access rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let app = read(output.join("support_struct_field_access_app/src/lib.rs"));
+    let projection = read(output.join("support_struct_field_access_app/src/projection.rs"));
+    let support = read(output.join("support_field_protocol/src/lib.rs"));
+    assert!(app.contains("pub fn selected"), "{app}");
+    assert!(projection.contains("use super::*"), "{projection}");
+    assert!(support.contains("pub struct ReadResponse"), "{support}");
+    assert!(support.contains("pub thread: Thread"), "{support}");
+    assert!(
+        support.contains("pub approval_policy: Option<String>"),
+        "{support}"
+    );
+    assert!(support.contains("pub sandbox: Option<String>"), "{support}");
+    assert!(!support.contains("dead_note"), "{support}");
+    assert_cargo_check(&output, &target_dir, &app);
+}
+
+#[test]
 fn retains_public_struct_fields_inside_root_signature_surface() {
     let workspace = temp_path("rule-public-signature-struct-field-workspace");
     let output = temp_path("rule-public-signature-struct-field-output");
@@ -830,6 +860,53 @@ fn retains_receiver_methods_inside_expression_macro_arguments() {
         "{lib}"
     );
     assert!(!lib.contains("dead_score"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_closure_receiver_methods_inside_expression_macro_arguments() {
+    let workspace = temp_path("rule-expression-macro-closure-receiver-workspace");
+    let output = temp_path("rule-expression-macro-closure-receiver-output");
+    let target_dir = temp_path("rule-expression-macro-closure-receiver-target");
+    write_expression_macro_closure_receiver_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("expression macro closure receiver rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("expression_macro_closure_receiver_rule/src/lib.rs"));
+    assert!(lib.contains("macro_rules! with_client"), "{lib}");
+    assert!(lib.contains("fn live_label(&self) -> String"), "{lib}");
+    assert!(lib.contains("c.live_label()"), "{lib}");
+    assert!(!lib.contains("dead_label"), "{lib}");
+    assert_cargo_check(&output, &target_dir, &lib);
+}
+
+#[test]
+fn retains_serde_derive_imports_for_rendered_non_callable_items() {
+    let workspace = temp_path("rule-rendered-derive-import-workspace");
+    let output = temp_path("rule-rendered-derive-import-output");
+    let target_dir = temp_path("rule-rendered-derive-import-target");
+    write_rendered_derive_import_rule_fixture(&workspace);
+
+    let report = generate(GenerateOptions {
+        workspace_root: workspace,
+        output_root: output.clone(),
+    })
+    .expect("rendered derive import rule should reduce");
+
+    assert_no_error_hazards(&report.production.hazards);
+    let lib = read(output.join("rendered_derive_import_rule/src/lib.rs"));
+    assert!(lib.contains("use serde::{Deserialize, Serialize}"), "{lib}");
+    assert!(
+        lib.contains("#[derive(Debug, Clone, Serialize, Deserialize)]"),
+        "{lib}"
+    );
+    assert!(lib.contains("#[serde(rename = \"in\")]"), "{lib}");
+    assert!(!lib.contains("DeadWire"), "{lib}");
     assert_cargo_check(&output, &target_dir, &lib);
 }
 
@@ -4980,6 +5057,108 @@ pub fn dead_report(seed: u32) -> String {
     );
 }
 
+fn write_public_support_struct_field_access_rule_fixture(root: &Path) {
+    write(
+        root.join("Cargo.toml"),
+        r#"[workspace]
+members = ["support_struct_field_access_app", "support_field_protocol"]
+resolver = "2"
+"#,
+    );
+    write(
+        root.join("support_struct_field_access_app/Cargo.toml"),
+        &format!(
+            r#"[package]
+name = "support_struct_field_access_app"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+support_field_protocol = {{ path = "../support_field_protocol" }}
+"#,
+            manifest_path(&repo_root().join("crates/opensourced"))
+        ),
+    );
+    write(
+        root.join("support_struct_field_access_app/src/lib.rs"),
+        r#"use opensourced::opensourced;
+use support_field_protocol as upstream;
+
+mod projection;
+
+#[opensourced]
+pub fn selected(seed: &str) -> String {
+    projection::selected(seed)
+}
+
+pub fn dead(seed: &str) -> String {
+    projection::dead(seed)
+}
+"#,
+    );
+    write(
+        root.join("support_struct_field_access_app/src/projection.rs"),
+        r#"use super::*;
+
+pub fn selected(seed: &str) -> String {
+    let response: upstream::ReadResponse = upstream::read(seed);
+    let approval = response.approval_policy.clone().unwrap_or_default();
+    let sandbox = response.sandbox.clone().unwrap_or_default();
+    format!("{}:{approval}:{sandbox}", response.thread.id)
+}
+
+pub fn dead(seed: &str) -> String {
+    upstream::dead(seed).dead_note.unwrap_or_default()
+}
+"#,
+    );
+    write(
+        root.join("support_field_protocol/Cargo.toml"),
+        r#"[package]
+name = "support_field_protocol"
+version = "0.1.0"
+edition = "2021"
+"#,
+    );
+    write(
+        root.join("support_field_protocol/src/lib.rs"),
+        r#"pub struct Thread {
+    pub id: String,
+}
+
+pub struct ReadResponse {
+    pub thread: Thread,
+    pub approval_policy: Option<String>,
+    pub sandbox: Option<String>,
+    pub dead_note: Option<String>,
+}
+
+pub fn read(seed: &str) -> ReadResponse {
+    ReadResponse {
+        thread: Thread {
+            id: seed.to_string(),
+        },
+        approval_policy: Some("on-request".to_string()),
+        sandbox: Some("workspace-write".to_string()),
+        dead_note: None,
+    }
+}
+
+pub fn dead(seed: &str) -> ReadResponse {
+    ReadResponse {
+        thread: Thread {
+            id: seed.to_string(),
+        },
+        approval_policy: None,
+        sandbox: None,
+        dead_note: Some("dead".to_string()),
+    }
+}
+"#,
+    );
+}
+
 fn write_public_signature_struct_field_surface_rule_fixture(root: &Path) {
     write(
         root.join("Cargo.toml"),
@@ -5946,6 +6125,113 @@ fn make_payload() -> Payload {
 #[opensourced]
 pub fn selected() -> u32 {
     passthrough!(make_payload().score())
+}
+"#,
+    );
+}
+
+fn write_expression_macro_closure_receiver_rule_fixture(root: &Path) {
+    write_workspace(
+        root,
+        "expression_macro_closure_receiver_rule",
+        r#"use opensourced::opensourced;
+use std::sync::Arc;
+
+macro_rules! with_client {
+    ($rt:expr, $inner:expr, |$client:ident| $body:expr) => {{
+        let _ = $rt;
+        let $client = &$inner;
+        $body
+    }};
+}
+
+pub struct Client {
+    label: String,
+}
+
+impl Client {
+    pub fn new(label: &str) -> Self {
+        Self {
+            label: label.to_string(),
+        }
+    }
+
+    fn live_label(&self) -> String {
+        self.label.clone()
+    }
+
+    fn dead_label(&self) -> String {
+        "dead".to_string()
+    }
+}
+
+pub struct Facade {
+    client: Arc<Client>,
+}
+
+impl Facade {
+    pub fn new(label: &str) -> Self {
+        Self {
+            client: Arc::new(Client::new(label)),
+        }
+    }
+
+    #[opensourced]
+    pub fn selected(&self) -> String {
+        with_client!((), self.client, |c| { c.live_label() })
+    }
+}
+"#,
+    );
+}
+
+fn write_rendered_derive_import_rule_fixture(root: &Path) {
+    write_workspace_with_dependencies(
+        root,
+        "rendered_derive_import_rule",
+        r#"serde = { version = "1", features = ["derive"] }
+"#,
+        r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct WireEntry {
+    pub direction: Direction,
+    pub label: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum Direction {
+    #[serde(rename = "in")]
+    In,
+    #[serde(rename = "out")]
+    Out,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct DeadWire {
+    pub label: String,
+}
+
+pub struct Recorder {
+    entry: WireEntry,
+}
+
+impl Recorder {
+    pub fn new(label: &str) -> Self {
+        Self {
+            entry: WireEntry {
+                direction: Direction::In,
+                label: label.to_string(),
+            },
+        }
+    }
+}
+
+#[opensourced]
+pub fn selected(label: &str) -> bool {
+    let recorder = Recorder::new(label);
+    matches!(recorder.entry.direction, Direction::In)
 }
 "#,
     );
@@ -7495,8 +7781,7 @@ impl Store {
     }
 
     pub fn apply(&mut self, notification: upstream::Notification) {
-        let rate_limits = notification.rate_limits.clone().into();
-        self.update(Some(rate_limits));
+        self.update(notification.rate_limits.clone().map(Into::into));
     }
 }
 
@@ -7530,7 +7815,7 @@ pub struct RateLimitSnapshot {
             dead_wire_types,
             r#"
 pub struct Notification {
-    pub rate_limits: RateLimitSnapshot,
+    pub rate_limits: Option<RateLimitSnapshot>,
     pub dead: DeadSnapshot0,
 }
 "#,
