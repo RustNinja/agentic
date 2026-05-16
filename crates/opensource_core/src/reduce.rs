@@ -5182,7 +5182,12 @@ impl<'a> DependencyCache<'a> {
 
         let mut dependencies =
             item_dependencies(project, item, expanded_module_roots, &self.root_surface);
-        dependencies.extend(semantic_item_dependencies(self.semantic_hints, item));
+        dependencies.extend(filtered_semantic_item_dependencies(
+            project,
+            item,
+            &self.root_surface,
+            semantic_item_dependencies(self.semantic_hints, item),
+        ));
         self.items.insert(item.clone(), dependencies.clone());
         dependencies
     }
@@ -5208,6 +5213,76 @@ fn semantic_item_dependencies(
         .get(item)
         .map(dependency_set_from_semantic_dependencies)
         .unwrap_or_default()
+}
+
+fn filtered_semantic_item_dependencies(
+    project: &Project,
+    item: &ItemId,
+    root_surface: &RootSurfaceItems,
+    mut dependencies: DependencySet,
+) -> DependencySet {
+    if item.kind == ItemKind::Mod {
+        return DependencySet::default();
+    }
+
+    let Some(record) = project.items.get(item) else {
+        return dependencies;
+    };
+    let Item::Struct(item_struct) = &record.item else {
+        return dependencies;
+    };
+    if item_has_opensourced_attr(&record.item) {
+        return dependencies;
+    }
+
+    let retained_idents = retained_struct_surface_idents(item, item_struct, root_surface);
+    dependencies.items.retain(|dependency| {
+        retained_idents.contains(&dependency.name)
+            || dependency
+                .module_path
+                .iter()
+                .any(|segment| retained_idents.contains(segment))
+    });
+    dependencies.callables.retain(|dependency| {
+        if retained_idents.contains(callable_name(dependency)) {
+            return true;
+        }
+        match dependency {
+            CallableId::Free { module_path, .. } => module_path
+                .iter()
+                .any(|segment| retained_idents.contains(segment)),
+            CallableId::Method { type_path, .. } => type_path
+                .iter()
+                .any(|segment| retained_idents.contains(segment)),
+        }
+    });
+    dependencies.evidence.semantic_edges_applied =
+        dependencies.items.len() + dependencies.callables.len();
+    dependencies
+}
+
+fn retained_struct_surface_idents(
+    item: &ItemId,
+    item_struct: &syn::ItemStruct,
+    root_surface: &RootSurfaceItems,
+) -> BTreeSet<String> {
+    let mut retained_idents = BTreeSet::new();
+    collect_token_idents(&item_struct.vis.to_token_stream(), &mut retained_idents);
+    collect_token_idents(
+        &item_struct.generics.to_token_stream(),
+        &mut retained_idents,
+    );
+    for attr in &item_struct.attrs {
+        collect_token_idents(&attr.to_token_stream(), &mut retained_idents);
+    }
+
+    let retain_public_fields = root_surface.requires_public_field_surface(item, item_struct);
+    for field in &item_struct.fields {
+        if struct_field_static_surface_dependency_should_remain(field, retain_public_fields) {
+            collect_token_idents(&field.to_token_stream(), &mut retained_idents);
+        }
+    }
+    retained_idents
 }
 
 fn dependency_set_from_semantic_dependencies(dependencies: &SemanticDependencies) -> DependencySet {

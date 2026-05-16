@@ -16364,6 +16364,65 @@ pub use dead::Dead;
     }
 
     #[test]
+    fn semantic_item_edges_do_not_retain_pruned_struct_fields() {
+        let root = temp_output("semantic-item-pruned-struct-field-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub struct Facade {
+    pub inner: Core,
+}
+
+pub struct Core {
+    pub used: usize,
+    pub unused: UnusedSurface,
+}
+
+pub struct UnusedSurface {
+    pub value: usize,
+}
+
+#[opensourced]
+pub fn entry(facade: Facade) -> usize {
+    facade.inner.used
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let core = project_item_named(&project, "Core", ItemKind::Struct);
+        let unused_surface = project_item_named(&project, "UnusedSurface", ItemKind::Struct);
+        let mut semantic_hints = SemanticReductionHints::default();
+        semantic_hints.add_item_edge(SemanticOwnerId::Item(core.clone()), unused_surface.clone());
+
+        let reduced = reduce::reduce_with_extra_roots_and_semantics(&project, &[], &semantic_hints)
+            .expect("semantic reduction should work");
+
+        assert!(
+            reduced.reachable_items.contains(&core),
+            "retained struct owner should stay reachable"
+        );
+        assert!(
+            !reduced.reachable_items.contains(&unused_surface),
+            "semantic item edges from fields pruned out of a struct surface should not retain the field type"
+        );
+    }
+
+    #[test]
     #[cfg(feature = "ra-hir")]
     fn applies_ra_semantic_hints_to_reduction() {
         let root = temp_output("ra-semantic-source");
