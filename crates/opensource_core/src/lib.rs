@@ -5652,6 +5652,9 @@ fn item_semantic_proof_discharge(
     if item.kind == model::ItemKind::Macro {
         return SemanticProofDischarge::StructuralPruned;
     }
+    if item_module_has_no_retained_subtree(project, item, retained_callables, retained_items) {
+        return SemanticProofDischarge::StructuralPruned;
+    }
     if pruned_module_has_no_retained_subtree(project, item, retained_callables, retained_items) {
         return SemanticProofDischarge::StructuralPruned;
     }
@@ -5706,6 +5709,38 @@ fn item_source_file_is_pruned(
     retained_source_files: &BTreeSet<PathBuf>,
 ) -> bool {
     item_source_file(project, item).is_some_and(|file| !retained_source_files.contains(file))
+}
+
+fn item_module_has_no_retained_subtree(
+    project: &Project,
+    item: &ItemId,
+    retained_callables: &BTreeSet<CallableId>,
+    retained_items: &BTreeSet<ItemId>,
+) -> bool {
+    if item.module_path.is_empty() {
+        return false;
+    }
+    let retained_callables_in_module = retained_callables.iter().any(|callable| {
+        callable.package() == item.package
+            && callable_module_path(project, callable)
+                .as_deref()
+                .is_some_and(|module_path| path_has_prefix(module_path, &item.module_path))
+    });
+    let retained_items_in_module = retained_items.iter().any(|retained| {
+        retained.package == item.package
+            && path_has_prefix(&retained_item_module_path(retained), &item.module_path)
+    });
+    !retained_callables_in_module && !retained_items_in_module
+}
+
+fn retained_item_module_path(item: &ItemId) -> Vec<String> {
+    if item.kind == model::ItemKind::Mod {
+        let mut module_path = item.module_path.clone();
+        module_path.push(item.name.clone());
+        module_path
+    } else {
+        item.module_path.clone()
+    }
 }
 
 fn pruned_module_has_no_retained_subtree(
@@ -14938,6 +14973,117 @@ pub fn dead_helper() -> u64 {
         assert!(!output.join("app/src/dead_support.rs").exists());
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(!generated.contains("dead_support"));
+    }
+
+    #[test]
+    fn semantic_usage_proof_discharges_pruned_inline_module_items() {
+        let root = temp_output("semantic-usage-inline-module-pruned-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub mod live {
+    pub struct LiveType;
+
+    #[opensourced]
+    pub fn entry() -> LiveType {
+        LiveType
+    }
+}
+
+pub mod dead {
+    pub struct DeadInlineType;
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let live_type = project_item_named(&project, "LiveType", ItemKind::Struct);
+        let dead_module = project_item_named(&project, "dead", ItemKind::Mod);
+        let dead_type = project_item_named(&project, "DeadInlineType", ItemKind::Struct);
+        let mapped_item_ids = BTreeSet::from([live_type, dead_type.clone()]);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: 1,
+            mapped_items: mapped_item_ids.len(),
+            unmapped_callables: project.functions.len().saturating_sub(1),
+            unmapped_items: project.items.len().saturating_sub(mapped_item_ids.len()),
+            mapped_callable_ids: BTreeSet::from([entry]),
+            mapped_item_ids,
+            skipped_item_reference_ids: BTreeSet::from([dead_type.clone()]),
+            reference_queries_skipped: 1,
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerFeedback,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (_render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+            RenderedSymbolProofReport::default(),
+            PublicReexportProofReport::default(),
+        );
+
+        assert_eq!(
+            usage.semantic_proof.status, "complete_for_retained_packages",
+            "{:#?}",
+            usage.semantic_proof
+        );
+        assert_eq!(usage.semantic_proof.summary.unproven_items, 0);
+        assert_eq!(
+            usage.semantic_proof.summary.skipped_reference_query_items,
+            0
+        );
+        assert_eq!(usage.semantic_proof.summary.structural_pruned_items, 2);
+        assert!(usage.unused.items.contains(&dead_module));
+        assert!(usage.unused.items.contains(&dead_type));
+        let production = production_readiness_report(
+            &analyzer,
+            &project,
+            &reduced,
+            Path::new("/tmp"),
+            Some(&usage.semantic_proof),
+            Some(&RenderedSymbolProofReport::default()),
+            Some(&PublicReexportProofReport::default()),
+        );
+        assert!(
+            !production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "semantic_usage_reference_skipped"),
+            "module-pruned skipped references should not leave semantic proof debt: {production:#?}"
+        );
     }
 
     #[test]
