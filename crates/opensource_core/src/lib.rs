@@ -371,6 +371,8 @@ pub struct SemanticUsageProofSummary {
     pub cfg_inactive_items: usize,
     pub source_file_pruned_callables: usize,
     pub source_file_pruned_items: usize,
+    pub rendered_absent_callables: usize,
+    pub rendered_absent_items: usize,
     pub structural_pruned_items: usize,
     pub unmapped_callables: usize,
     pub unmapped_items: usize,
@@ -1973,7 +1975,6 @@ fn generate_loaded(
     let targets = target_report(project, &packages);
     let source_map = source_map_report(project, &render_reduced);
     let macro_surfaces = macro_surface_report(project, &render_reduced);
-    let semantic_proof = semantic_usage_proof_report(project, &analyzer, &usage_decisions);
     let public_reexport_proof =
         public_reexport_proof_report(&options.output_root, &usage_decisions);
     let member_decisions =
@@ -1982,6 +1983,12 @@ fn generate_loaded(
         &options.output_root,
         &usage_decisions,
         &member_decisions,
+    );
+    let semantic_proof = semantic_usage_proof_report(
+        project,
+        &analyzer,
+        &usage_decisions,
+        Some(&rendered_symbol_proof),
     );
     let production = production_readiness_report(
         &analyzer,
@@ -3521,7 +3528,8 @@ fn usage_classification_report(
         prunable_items: &prunable_items,
     };
     let evidence = usage_classification_evidence(project, reduced, &evidence_input);
-    let semantic_proof = semantic_usage_proof_report(project, analyzer, decisions);
+    let semantic_proof =
+        semantic_usage_proof_report(project, analyzer, decisions, Some(&rendered_symbols));
     let rendered_decision_map =
         RenderedUsageDecisionMap::from_rendered_symbols_and_decisions(&rendered_symbols, decisions);
 
@@ -5433,6 +5441,7 @@ fn semantic_usage_proof_report(
     project: &Project,
     analyzer: &AnalyzerReport,
     decisions: &UsageDecisionIndex,
+    rendered_symbols: Option<&RenderedSymbolProofReport>,
 ) -> SemanticUsageProofReport {
     let mut summary = SemanticUsageProofSummary {
         analyzer_available: analyzer.semantic_usage.is_some(),
@@ -5453,6 +5462,7 @@ fn semantic_usage_proof_report(
         .collect::<BTreeSet<_>>();
     let retained_source_files =
         retained_source_files(project, &retained_callables, &retained_items);
+    let rendered_absence = RenderedAbsenceProof::from_report(rendered_symbols);
 
     let mut unproven_callables = Vec::new();
     let mut unproven_items = Vec::new();
@@ -5464,14 +5474,20 @@ fn semantic_usage_proof_report(
         summary.proof_required_callables += 1;
         if let Some(usage) = &analyzer.semantic_usage {
             let mut unproven = false;
-            let discharge =
-                callable_semantic_proof_discharge(project, callable, &retained_source_files);
+            let discharge = callable_semantic_proof_discharge(
+                project,
+                callable,
+                &retained_source_files,
+                &rendered_absence,
+            );
             let mut cfg_discharged = false;
             let mut source_file_discharged = false;
+            let mut rendered_absent_discharged = false;
             if !usage.is_callable_mapped(callable) {
                 match discharge {
                     SemanticProofDischarge::CfgInactive => cfg_discharged = true,
                     SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::RenderedAbsent => rendered_absent_discharged = true,
                     SemanticProofDischarge::None | SemanticProofDischarge::StructuralPruned => {
                         summary.unmapped_callables += 1;
                         unproven = true;
@@ -5482,6 +5498,7 @@ fn semantic_usage_proof_report(
                 match discharge {
                     SemanticProofDischarge::CfgInactive => cfg_discharged = true,
                     SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::RenderedAbsent => rendered_absent_discharged = true,
                     SemanticProofDischarge::None | SemanticProofDischarge::StructuralPruned => {
                         summary.failed_reference_query_callables += 1;
                         unproven = true;
@@ -5492,6 +5509,7 @@ fn semantic_usage_proof_report(
                 match discharge {
                     SemanticProofDischarge::CfgInactive => cfg_discharged = true,
                     SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::RenderedAbsent => rendered_absent_discharged = true,
                     SemanticProofDischarge::None | SemanticProofDischarge::StructuralPruned => {
                         summary.skipped_reference_query_callables += 1;
                         unproven = true;
@@ -5510,6 +5528,8 @@ fn semantic_usage_proof_report(
                     summary.cfg_inactive_callables += 1;
                 } else if source_file_discharged {
                     summary.source_file_pruned_callables += 1;
+                } else if rendered_absent_discharged {
+                    summary.rendered_absent_callables += 1;
                 }
                 summary.proven_callables += 1;
             }
@@ -5531,14 +5551,17 @@ fn semantic_usage_proof_report(
                 &retained_source_files,
                 &retained_callables,
                 &retained_items,
+                &rendered_absence,
             );
             let mut cfg_discharged = false;
             let mut source_file_discharged = false;
+            let mut rendered_absent_discharged = false;
             let mut structural_discharged = false;
             if !usage.is_item_mapped(item) {
                 match discharge {
                     SemanticProofDischarge::CfgInactive => cfg_discharged = true,
                     SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::RenderedAbsent => rendered_absent_discharged = true,
                     SemanticProofDischarge::StructuralPruned => structural_discharged = true,
                     SemanticProofDischarge::None => {
                         summary.unmapped_items += 1;
@@ -5550,6 +5573,7 @@ fn semantic_usage_proof_report(
                 match discharge {
                     SemanticProofDischarge::CfgInactive => cfg_discharged = true,
                     SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::RenderedAbsent => rendered_absent_discharged = true,
                     SemanticProofDischarge::StructuralPruned => structural_discharged = true,
                     SemanticProofDischarge::None => {
                         summary.failed_reference_query_items += 1;
@@ -5561,6 +5585,7 @@ fn semantic_usage_proof_report(
                 match discharge {
                     SemanticProofDischarge::CfgInactive => cfg_discharged = true,
                     SemanticProofDischarge::SourceFilePruned => source_file_discharged = true,
+                    SemanticProofDischarge::RenderedAbsent => rendered_absent_discharged = true,
                     SemanticProofDischarge::StructuralPruned => structural_discharged = true,
                     SemanticProofDischarge::None => {
                         summary.skipped_reference_query_items += 1;
@@ -5579,6 +5604,8 @@ fn semantic_usage_proof_report(
                     summary.cfg_inactive_items += 1;
                 } else if source_file_discharged {
                     summary.source_file_pruned_items += 1;
+                } else if rendered_absent_discharged {
+                    summary.rendered_absent_items += 1;
                 } else if structural_discharged {
                     summary.structural_pruned_items += 1;
                 }
@@ -5619,19 +5646,66 @@ enum SemanticProofDischarge {
     None,
     CfgInactive,
     SourceFilePruned,
+    RenderedAbsent,
     StructuralPruned,
+}
+
+#[derive(Default)]
+struct RenderedAbsenceProof {
+    enabled: bool,
+    callables: BTreeSet<String>,
+    items: BTreeSet<String>,
+}
+
+impl RenderedAbsenceProof {
+    fn from_report(report: Option<&RenderedSymbolProofReport>) -> Self {
+        let Some(report) = report else {
+            return Self::default();
+        };
+        if report.status != "proven" {
+            return Self::default();
+        }
+        let mut proof = Self {
+            enabled: true,
+            ..Self::default()
+        };
+        for entry in &report.entries {
+            match entry.kind.as_str() {
+                "callable" => {
+                    proof.callables.insert(entry.id.clone());
+                }
+                "item" => {
+                    proof.items.insert(entry.id.clone());
+                }
+                _ => {}
+            }
+        }
+        proof
+    }
+
+    fn callable_is_absent(&self, callable: &CallableId) -> bool {
+        self.enabled && !self.callables.contains(&callable.to_string())
+    }
+
+    fn item_is_absent(&self, item: &ItemId) -> bool {
+        self.enabled && !self.items.contains(&item.to_string())
+    }
 }
 
 fn callable_semantic_proof_discharge(
     project: &Project,
     callable: &CallableId,
     retained_source_files: &BTreeSet<PathBuf>,
+    rendered_absence: &RenderedAbsenceProof,
 ) -> SemanticProofDischarge {
     if callable_is_current_target_inactive(project, callable) {
         return SemanticProofDischarge::CfgInactive;
     }
     if callable_source_file_is_pruned(project, callable, retained_source_files) {
         return SemanticProofDischarge::SourceFilePruned;
+    }
+    if rendered_absence.callable_is_absent(callable) {
+        return SemanticProofDischarge::RenderedAbsent;
     }
     SemanticProofDischarge::None
 }
@@ -5642,6 +5716,7 @@ fn item_semantic_proof_discharge(
     retained_source_files: &BTreeSet<PathBuf>,
     retained_callables: &BTreeSet<CallableId>,
     retained_items: &BTreeSet<ItemId>,
+    rendered_absence: &RenderedAbsenceProof,
 ) -> SemanticProofDischarge {
     if item_is_current_target_inactive(project, item) {
         return SemanticProofDischarge::CfgInactive;
@@ -5651,6 +5726,9 @@ fn item_semantic_proof_discharge(
     }
     if item.kind == model::ItemKind::Macro {
         return SemanticProofDischarge::StructuralPruned;
+    }
+    if rendered_absence.item_is_absent(item) {
+        return SemanticProofDischarge::RenderedAbsent;
     }
     if item_module_has_no_retained_subtree(project, item, retained_callables, retained_items) {
         return SemanticProofDischarge::StructuralPruned;
@@ -12895,6 +12973,8 @@ struct SemanticUsageProofSummaryJson {
     cfg_inactive_items: usize,
     source_file_pruned_callables: usize,
     source_file_pruned_items: usize,
+    rendered_absent_callables: usize,
+    rendered_absent_items: usize,
     structural_pruned_items: usize,
     unmapped_callables: usize,
     unmapped_items: usize,
@@ -12925,6 +13005,8 @@ impl SemanticUsageProofSummaryJson {
             cfg_inactive_items: summary.cfg_inactive_items,
             source_file_pruned_callables: summary.source_file_pruned_callables,
             source_file_pruned_items: summary.source_file_pruned_items,
+            rendered_absent_callables: summary.rendered_absent_callables,
+            rendered_absent_items: summary.rendered_absent_items,
             structural_pruned_items: summary.structural_pruned_items,
             unmapped_callables: summary.unmapped_callables,
             unmapped_items: summary.unmapped_items,
@@ -14854,7 +14936,8 @@ pub fn entry() -> i32 {{
         assert!(usage.unused.items.contains(&inactive_module));
         assert!(usage.unused.items.contains(&inactive_type));
 
-        let semantic_proof = semantic_usage_proof_report(&project, &analyzer, &usage_decisions);
+        let semantic_proof =
+            semantic_usage_proof_report(&project, &analyzer, &usage_decisions, None);
         let production = production_readiness_report(
             &analyzer,
             &project,
@@ -15083,6 +15166,118 @@ pub mod dead {
                 .iter()
                 .any(|hazard| hazard.code == "semantic_usage_reference_skipped"),
             "module-pruned skipped references should not leave semantic proof debt: {production:#?}"
+        );
+    }
+
+    #[test]
+    fn semantic_usage_proof_discharges_rendered_absent_items() {
+        let root = temp_output("semantic-usage-rendered-absent-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+pub struct LiveType;
+
+pub struct DeadRootType;
+
+#[opensourced]
+pub fn entry() -> LiveType {
+    LiveType
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let live_type = project_item_named(&project, "LiveType", ItemKind::Struct);
+        let dead_type = project_item_named(&project, "DeadRootType", ItemKind::Struct);
+        let mapped_item_ids = BTreeSet::from([live_type.clone(), dead_type.clone()]);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: 1,
+            mapped_items: mapped_item_ids.len(),
+            mapped_callable_ids: BTreeSet::from([entry]),
+            mapped_item_ids,
+            skipped_item_reference_ids: BTreeSet::from([dead_type.clone()]),
+            reference_queries_skipped: 1,
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerFeedback,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (_render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        let rendered_symbols = RenderedSymbolProofReport {
+            status: "proven".to_string(),
+            summary: RenderedSymbolProofSummary::default(),
+            entries: vec![RenderedSymbolProofEntry {
+                kind: "item".to_string(),
+                id: live_type.to_string(),
+                classification: "retained".to_string(),
+            }],
+        };
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+            rendered_symbols,
+            PublicReexportProofReport::default(),
+        );
+
+        assert_eq!(
+            usage.semantic_proof.status, "complete_for_retained_packages",
+            "{:#?}",
+            usage.semantic_proof
+        );
+        assert_eq!(usage.semantic_proof.summary.unproven_items, 0);
+        assert_eq!(
+            usage.semantic_proof.summary.skipped_reference_query_items,
+            0
+        );
+        assert_eq!(usage.semantic_proof.summary.rendered_absent_items, 1);
+        assert!(usage.unused.items.contains(&dead_type));
+        let production = production_readiness_report(
+            &analyzer,
+            &project,
+            &reduced,
+            Path::new("/tmp"),
+            Some(&usage.semantic_proof),
+            Some(&usage.rendered_symbols),
+            Some(&PublicReexportProofReport::default()),
+        );
+        assert!(
+            !production
+                .hazards
+                .iter()
+                .any(|hazard| hazard.code == "semantic_usage_reference_skipped"),
+            "rendered-absent skipped references should not leave semantic proof debt: {production:#?}"
         );
     }
 
