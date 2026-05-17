@@ -64,6 +64,7 @@ struct RenderPlan {
     import_scope_uses: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
     callable_import_idents: RefCell<BTreeMap<CallableId, BTreeSet<String>>>,
     rendered_non_callable_import_idents: RefCell<BTreeMap<(String, Vec<String>), BTreeSet<String>>>,
+    retained_enum_variants: BTreeMap<String, BTreeSet<String>>,
 }
 
 struct RenderPrepass {
@@ -93,10 +94,13 @@ impl RenderPlan {
         let mut reachable_items = BTreeSet::new();
         let mut rendered_item_idents = BTreeSet::new();
         let prepass = RenderPrepass::new(root_macro_impl_assoc_function_calls(project, reduced));
+        let retained_enum_variants =
+            retained_enum_variants_for_reduced_project(project, reduced, usage);
         let pruned_enum_payload_item_names = droppable_pruned_enum_payload_item_names_by_package(
             project,
             reduced,
             usage,
+            &retained_enum_variants,
             Some(&prepass),
         );
         let callable_idents = reachable_reduced_callable_ident_index(project, reduced);
@@ -242,6 +246,7 @@ impl RenderPlan {
             import_scope_uses: RefCell::new(BTreeMap::new()),
             callable_import_idents: RefCell::new(BTreeMap::new()),
             rendered_non_callable_import_idents: RefCell::new(BTreeMap::new()),
+            retained_enum_variants,
         };
         plan.mentions = ReachableMentionIndex::build(
             project,
@@ -6146,6 +6151,7 @@ fn prune_unreachable_enum_wildcard_match_arms_in_impl(
     item_impl: &mut syn::ItemImpl,
     retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
 ) {
+    prune_unreachable_enum_match_arms_in_impl(item_impl, retained_enum_variants);
     if retained_enum_variants.is_empty() {
         return;
     }
@@ -6160,6 +6166,81 @@ fn prune_unreachable_enum_wildcard_match_arms_in_impl(
         retained_enum_variants,
     };
     pruner.visit_item_impl_mut(item_impl);
+}
+
+fn prune_unreachable_enum_match_arms_in_impl(
+    item_impl: &mut syn::ItemImpl,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
+) {
+    if retained_enum_variants.is_empty() {
+        return;
+    }
+    let mut pruner = RetainedEnumMatchArmPruner {
+        retained_enum_variants,
+    };
+    pruner.visit_item_impl_mut(item_impl);
+}
+
+fn prune_unreachable_enum_match_arms(
+    block: &mut Block,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
+) {
+    if retained_enum_variants.is_empty() {
+        return;
+    }
+    let mut pruner = RetainedEnumMatchArmPruner {
+        retained_enum_variants,
+    };
+    pruner.visit_block_mut(block);
+}
+
+struct RetainedEnumMatchArmPruner<'a> {
+    retained_enum_variants: &'a BTreeMap<String, BTreeSet<String>>,
+}
+
+impl VisitMut for RetainedEnumMatchArmPruner<'_> {
+    fn visit_expr_match_mut(&mut self, node: &mut syn::ExprMatch) {
+        visit_mut::visit_expr_match_mut(self, node);
+        for (enum_name, retained_variants) in self.retained_enum_variants {
+            prune_match_arms_for_retained_enum(node, enum_name, retained_variants);
+        }
+    }
+}
+
+fn prune_match_arms_for_retained_enum(
+    node: &mut syn::ExprMatch,
+    enum_name: &str,
+    retained_variants: &BTreeSet<String>,
+) {
+    if retained_variants.is_empty() {
+        return;
+    }
+
+    let mut covered_variants = BTreeSet::new();
+    node.arms = node
+        .arms
+        .iter()
+        .filter_map(|arm| {
+            let arm_variants = enum_pattern_variants(&arm.pat, enum_name);
+            if !arm_variants.is_empty() && arm_variants.is_disjoint(retained_variants) {
+                return None;
+            }
+            if enum_match_arm_is_unconditional_catch_all(&arm.pat)
+                && retained_variants.is_subset(&covered_variants)
+            {
+                return None;
+            }
+            if arm.guard.is_none() {
+                covered_variants.extend(
+                    arm_variants
+                        .iter()
+                        .filter(|variant| retained_variants.contains(*variant))
+                        .cloned(),
+                );
+            }
+            Some(arm.clone())
+        })
+        .collect();
 }
 
 struct EnumWildcardMatchArmPruner<'a> {
@@ -6253,6 +6334,59 @@ fn collect_enum_pattern_variants(
         }
         _ => {}
     }
+}
+
+fn enum_pattern_variants(pat: &Pat, enum_name: &str) -> BTreeSet<String> {
+    let mut variants = BTreeSet::new();
+    collect_enum_pattern_variants_by_name(pat, enum_name, &mut variants);
+    variants
+}
+
+fn collect_enum_pattern_variants_by_name(pat: &Pat, enum_name: &str, out: &mut BTreeSet<String>) {
+    match pat {
+        Pat::Path(path) => {
+            if let Some(variant) = enum_pattern_path_variant_by_name(&path.path, enum_name) {
+                out.insert(variant);
+            }
+        }
+        Pat::Struct(pat_struct) => {
+            if let Some(variant) = enum_pattern_path_variant_by_name(&pat_struct.path, enum_name) {
+                out.insert(variant);
+            }
+        }
+        Pat::TupleStruct(tuple_struct) => {
+            if let Some(variant) = enum_pattern_path_variant_by_name(&tuple_struct.path, enum_name)
+            {
+                out.insert(variant);
+            }
+        }
+        Pat::Or(pat_or) => {
+            for case in &pat_or.cases {
+                collect_enum_pattern_variants_by_name(case, enum_name, out);
+            }
+        }
+        Pat::Reference(reference) => {
+            collect_enum_pattern_variants_by_name(&reference.pat, enum_name, out);
+        }
+        Pat::Paren(paren) => {
+            collect_enum_pattern_variants_by_name(&paren.pat, enum_name, out);
+        }
+        _ => {}
+    }
+}
+
+fn enum_pattern_path_variant_by_name(path: &syn::Path, enum_name: &str) -> Option<String> {
+    let segments = path_segments(path);
+    let variant = segments.last()?;
+    if segments
+        .iter()
+        .rev()
+        .nth(1)
+        .is_some_and(|parent| parent == enum_name)
+    {
+        return Some(variant.clone());
+    }
+    None
 }
 
 fn enum_pattern_path_variant(
@@ -9240,6 +9374,7 @@ fn droppable_pruned_enum_payload_item_names_by_package(
     project: &Project,
     reduced: &ReducedProject,
     usage: &UsageDecisionIndex,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
     prepass: Option<&RenderPrepass>,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let item_names_by_package = project.items.keys().fold(
@@ -9313,11 +9448,15 @@ fn droppable_pruned_enum_payload_item_names_by_package(
         let idents = required_idents.entry(package).or_default();
         collect_callable_idents(callable, idents);
         if let Some(record) = project.functions.get(callable) {
-            collect_token_idents(&record.item.to_token_stream(), idents);
+            let mut item = record.item.clone();
+            prune_unreachable_enum_match_arms(&mut item.block, retained_enum_variants);
+            collect_token_idents(&item.to_token_stream(), idents);
             expand_alias_surface_idents(&record.aliases, idents);
         }
         if let Some(record) = project.methods.get(callable) {
-            collect_token_idents(&record.item.to_token_stream(), idents);
+            let mut item = record.item.clone();
+            prune_unreachable_enum_match_arms(&mut item.block, retained_enum_variants);
+            collect_token_idents(&item.to_token_stream(), idents);
             expand_alias_surface_idents(&record.aliases, idents);
         }
     }
@@ -14717,50 +14856,42 @@ fn transform_file(
     transformed
 }
 
-fn retained_enum_variants_for_rendered_module(
+fn retained_enum_variants_for_reduced_project(
     project: &Project,
     reduced: &ReducedProject,
-    render_plan: &RenderPlan,
-    package: &str,
-    module_path: &[String],
-    items: &[Item],
+    usage: &UsageDecisionIndex,
 ) -> BTreeMap<String, BTreeSet<String>> {
     let mut retained = BTreeMap::new();
-    for item in items {
-        let Item::Enum(item_enum) = item else {
+    for item_id in &reduced.reachable_items {
+        let Some(record) = project.items.get(item_id) else {
             continue;
         };
-        let Some(id) = item_id(package, module_path, item) else {
+        let Item::Enum(item_enum) = &record.item else {
             continue;
         };
-        if !render_plan.item_should_render(&id) {
+        if root_item_should_render(reduced, item_id) || usage.is_blocked_by_unknown_item(item_id) {
             continue;
         }
-        let variants = if enum_preserves_full_variant_surface(project, reduced, &id, item_enum) {
-            item_enum
-                .variants
-                .iter()
-                .map(|variant| variant.ident.to_string())
-                .collect()
-        } else {
-            item_enum
-                .variants
-                .iter()
-                .filter_map(|variant| {
-                    let variant_name = variant.ident.to_string();
-                    enum_variant_should_remain(
-                        project,
-                        reduced,
-                        package,
-                        module_path,
-                        &item_enum.ident.to_string(),
-                        &variant_name,
-                    )
-                    .then_some(variant_name)
-                })
-                .collect()
-        };
-        retained.insert(item_enum.ident.to_string(), variants);
+        if enum_preserves_full_variant_surface(project, reduced, item_id, item_enum) {
+            continue;
+        }
+        let variants = item_enum
+            .variants
+            .iter()
+            .filter_map(|variant| {
+                let variant_name = variant.ident.to_string();
+                enum_variant_should_remain(
+                    project,
+                    reduced,
+                    &item_id.package,
+                    &item_id.module_path,
+                    &item_id.name,
+                    &variant_name,
+                )
+                .then_some(variant_name)
+            })
+            .collect::<BTreeSet<_>>();
+        retained.insert(item_id.name.clone(), variants);
     }
     retained
 }
@@ -14790,15 +14921,6 @@ fn transform_items(
         module_path,
         items,
     ));
-    let retained_enum_variants = retained_enum_variants_for_rendered_module(
-        project,
-        reduced,
-        render_plan,
-        package,
-        module_path,
-        items,
-    );
-
     let mut transformed = Vec::new();
     for item in items {
         let item = match item {
@@ -14869,6 +14991,10 @@ fn transform_items(
                         module_path,
                         None,
                         &mut function.block,
+                    );
+                    prune_unreachable_enum_match_arms(
+                        &mut function.block,
+                        &render_plan.retained_enum_variants,
                     );
                     allow_dead_code_if_not_publicly_exported(
                         project,
@@ -15093,7 +15219,7 @@ fn transform_items(
                     item_impl.items = kept_impl_items;
                     prune_unreachable_enum_wildcard_match_arms_in_impl(
                         &mut item_impl,
-                        &retained_enum_variants,
+                        &render_plan.retained_enum_variants,
                     );
                     transformed.push(Item::Impl(item_impl));
                     continue;
@@ -15209,6 +15335,10 @@ fn transform_items(
                                 Some(&type_path),
                                 &mut method.block,
                             );
+                            prune_unreachable_enum_match_arms(
+                                &mut method.block,
+                                &render_plan.retained_enum_variants,
+                            );
                             allow_dead_code_if_not_public(&method.vis, &mut method.attrs);
                             kept_impl_items.push(ImplItem::Fn(method));
                             kept_method = true;
@@ -15313,7 +15443,7 @@ fn transform_items(
                     downgrade_uniffi_async_runtime_if_no_async_methods(&mut item_impl);
                     prune_unreachable_enum_wildcard_match_arms_in_impl(
                         &mut item_impl,
-                        &retained_enum_variants,
+                        &render_plan.retained_enum_variants,
                     );
                     Some(Item::Impl(item_impl))
                 } else {
@@ -19402,28 +19532,6 @@ fn trait_type_surface_mentions_unqualified_ident(
         })
 }
 
-fn reachable_callables_mention_ident(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &str,
-    ident: &str,
-) -> bool {
-    reduced
-        .reachable
-        .iter()
-        .filter(|callable| callable.package() == package)
-        .any(|callable| {
-            if callable_mentions_ident(callable, ident) {
-                return true;
-            }
-            project.functions.get(callable).is_some_and(|record| {
-                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
-            }) || project.methods.get(callable).is_some_and(|record| {
-                token_stream_mentions_ident(&record.item.to_token_stream(), ident)
-            })
-        })
-}
-
 fn reachable_module_import_scope_mentions_ident(
     project: &Project,
     reduced: &ReducedProject,
@@ -20387,8 +20495,18 @@ fn enum_attrs_require_full_variant_surface(item_enum: &syn::ItemEnum) -> bool {
 
 fn enum_attr_requires_full_variant_surface(attr: &syn::Attribute) -> bool {
     let path = attr.path();
-    path.is_ident("derive")
-        || path.is_ident("serde")
+    if path.is_ident("derive") {
+        return attr
+            .parse_args_with(Punctuated::<syn::Path, syn::Token![,]>::parse_terminated)
+            .map(|paths| {
+                paths
+                    .iter()
+                    .any(|path| !enum_variant_shape_preserving_derive(path))
+            })
+            .unwrap_or(true);
+    }
+
+    path.is_ident("serde")
         || path.is_ident("clap")
         || path.is_ident("command")
         || path.is_ident("arg")
@@ -20402,6 +20520,20 @@ fn enum_attr_requires_full_variant_surface(attr: &syn::Attribute) -> bool {
                 || token_stream_mentions_ident(&attr.to_token_stream(), "uniffi")
                 || token_stream_mentions_ident(&attr.to_token_stream(), "clap")
                 || token_stream_mentions_ident(&attr.to_token_stream(), "error")))
+}
+
+fn enum_variant_shape_preserving_derive(path: &syn::Path) -> bool {
+    let Some(last) = path
+        .segments
+        .last()
+        .map(|segment| segment.ident.to_string())
+    else {
+        return false;
+    };
+    matches!(
+        last.as_str(),
+        "Clone" | "Copy" | "Debug" | "Eq" | "Hash" | "Ord" | "PartialEq" | "PartialOrd"
+    ) || (last == "Enum" && path_starts_with(path, "uniffi"))
 }
 
 fn prune_private_enum_variants(
@@ -20436,18 +20568,17 @@ fn enum_variant_should_remain(
     enum_name: &str,
     variant_name: &str,
 ) -> bool {
-    reachable_callables_mention_ident(project, reduced, package, variant_name)
-        || reachable_imported_enum_variant_usage(
-            project,
-            reduced,
-            package,
-            module_path,
-            enum_name,
-            variant_name,
-        )
+    reachable_code_constructs_enum_variant(
+        project,
+        reduced,
+        package,
+        module_path,
+        enum_name,
+        variant_name,
+    )
 }
 
-fn reachable_imported_enum_variant_usage(
+fn reachable_code_constructs_enum_variant(
     project: &Project,
     reduced: &ReducedProject,
     target_package: &str,
@@ -20466,14 +20597,7 @@ fn reachable_imported_enum_variant_usage(
         path
     };
 
-    project.files.values().any(|source| {
-        if source.package == target_package && source.module_path == target_module_path {
-            return false;
-        }
-        if !reduced.packages.contains(&source.package) {
-            return false;
-        }
-
+    let module_imports = |source: &SourceFile| {
         let mut imports_enum_surface = false;
         let mut imports_variant_directly = false;
         for glob_path in visible_glob_use_paths(&source.syntax.items) {
@@ -20507,80 +20631,121 @@ fn reachable_imported_enum_variant_usage(
                 }
             }
         }
+        (imports_enum_surface, imports_variant_directly)
+    };
 
-        (imports_enum_surface || imports_variant_directly)
-            && reachable_module_mentions_imported_enum_variant(
-                project,
-                reduced,
-                &source.package,
-                &source.module_path,
-                enum_name,
-                variant_name,
-                imports_variant_directly,
-            )
-    })
-}
-
-fn reachable_module_mentions_imported_enum_variant(
-    project: &Project,
-    reduced: &ReducedProject,
-    package: &str,
-    module_path: &[String],
-    enum_name: &str,
-    variant_name: &str,
-    allow_unqualified_variant: bool,
-) -> bool {
-    reduced
-        .reachable
+    reduced.reachable.iter().any(|callable| {
+        let usage = if let Some(record) = project.functions.get(callable) {
+            let source = project.files.values().find(|source| {
+                source.package == record.package && source.module_path == record.module_path
+            });
+            let allow_unqualified = source
+                .map(module_imports)
+                .is_some_and(|(imports_enum, imports_variant)| imports_enum || imports_variant);
+            let mut visitor =
+                EnumVariantExpressionUseVisitor::new(enum_name, variant_name, allow_unqualified);
+            visitor.visit_block(&record.item.block);
+            visitor.found
+        } else if let Some(record) = project.methods.get(callable) {
+            let source = project.files.values().find(|source| {
+                source.package == callable.package() && source.module_path == record.module_path
+            });
+            let allow_unqualified = source
+                .map(module_imports)
+                .is_some_and(|(imports_enum, imports_variant)| imports_enum || imports_variant);
+            let mut visitor =
+                EnumVariantExpressionUseVisitor::new(enum_name, variant_name, allow_unqualified);
+            visitor.visit_block(&record.item.block);
+            visitor.found
+        } else {
+            false
+        };
+        usage
+    }) || reduced
+        .reachable_items
         .iter()
-        .filter(|callable| callable.package() == package)
-        .any(|callable| {
-            project.functions.get(callable).is_some_and(|record| {
-                record.module_path == module_path
-                    && token_stream_mentions_imported_enum_variant(
-                        &record.item.to_token_stream(),
-                        enum_name,
-                        variant_name,
-                        allow_unqualified_variant,
-                    )
-            }) || project.methods.get(callable).is_some_and(|record| {
-                record.module_path == module_path
-                    && token_stream_mentions_imported_enum_variant(
-                        &record.item.to_token_stream(),
-                        enum_name,
-                        variant_name,
-                        allow_unqualified_variant,
-                    )
-            })
+        .filter(|item| item.package == target_package || reduced.packages.contains(&item.package))
+        .any(|item| {
+            if item.package == target_package
+                && item.module_path == target_module_path
+                && item.name == enum_name
+            {
+                return false;
+            }
+            let Some(record) = project.items.get(item) else {
+                return false;
+            };
+            let source = project.files.values().find(|source| {
+                source.package == record.package && source.module_path == record.module_path
+            });
+            let allow_unqualified = source
+                .map(module_imports)
+                .is_some_and(|(imports_enum, imports_variant)| imports_enum || imports_variant);
+            let mut visitor =
+                EnumVariantExpressionUseVisitor::new(enum_name, variant_name, allow_unqualified);
+            visitor.visit_item(&record.item);
+            visitor.found
         })
-        || reduced
-            .reachable_items
-            .iter()
-            .filter(|item| item.package == package && item.module_path == module_path)
-            .any(|item| {
-                project.items.get(item).is_some_and(|record| {
-                    token_stream_mentions_imported_enum_variant(
-                        &record.item.to_token_stream(),
-                        enum_name,
-                        variant_name,
-                        allow_unqualified_variant,
-                    )
-                })
-            })
 }
 
-fn token_stream_mentions_imported_enum_variant(
-    tokens: &TokenStream,
+struct EnumVariantExpressionUseVisitor<'a> {
+    enum_name: &'a str,
+    variant_name: &'a str,
+    allow_unqualified_variant: bool,
+    found: bool,
+}
+
+impl<'a> EnumVariantExpressionUseVisitor<'a> {
+    fn new(enum_name: &'a str, variant_name: &'a str, allow_unqualified_variant: bool) -> Self {
+        Self {
+            enum_name,
+            variant_name,
+            allow_unqualified_variant,
+            found: false,
+        }
+    }
+}
+
+impl<'ast> Visit<'ast> for EnumVariantExpressionUseVisitor<'_> {
+    fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
+        if expression_path_uses_enum_variant(
+            &node.path,
+            self.enum_name,
+            self.variant_name,
+            self.allow_unqualified_variant,
+        ) {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_path(self, node);
+    }
+
+    fn visit_expr_struct(&mut self, node: &'ast ExprStruct) {
+        if expression_path_uses_enum_variant(
+            &node.path,
+            self.enum_name,
+            self.variant_name,
+            self.allow_unqualified_variant,
+        ) {
+            self.found = true;
+            return;
+        }
+        visit::visit_expr_struct(self, node);
+    }
+}
+
+fn expression_path_uses_enum_variant(
+    path: &syn::Path,
     enum_name: &str,
     variant_name: &str,
     allow_unqualified_variant: bool,
 ) -> bool {
-    token_path_candidates(tokens).into_iter().any(|candidate| {
-        candidate
-            .windows(2)
-            .any(|window| window == [enum_name, variant_name])
-    }) || (allow_unqualified_variant
-        && token_stream_mentions_unqualified_ident(tokens, variant_name))
+    let segments = path_segments(path);
+    segments
+        .windows(2)
+        .any(|window| window == [enum_name, variant_name])
+        || (allow_unqualified_variant
+            && matches!(segments.as_slice(), [segment] if segment == variant_name))
 }
 
 fn prune_private_struct_fields(
@@ -24674,6 +24839,14 @@ fn prune_use_tree(
                 package,
                 module_path,
                 &prefix,
+            ) && !public_reexport_target_resolves_to_unrendered_symbol(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &prefix,
+                is_public_use,
             ) && (!use_target_should_drop(
                 project,
                 reduced,
@@ -24723,6 +24896,14 @@ fn prune_use_tree(
                 package,
                 module_path,
                 &prefix,
+            ) && !public_reexport_target_resolves_to_unrendered_symbol(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                &prefix,
+                is_public_use,
             ) && (!use_target_should_drop(
                 project,
                 reduced,
@@ -24941,6 +25122,104 @@ fn local_use_target_resolves_to_removed_symbol(
         return render_plan.can_remove_item(&item);
     }
     false
+}
+
+fn public_reexport_target_resolves_to_unrendered_symbol(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    target: &[String],
+    is_public_use: bool,
+) -> bool {
+    if !is_public_use {
+        return false;
+    }
+    if target
+        .first()
+        .is_some_and(|first| use_name_is_external_dependency(project, package, first))
+        || target
+            .first()
+            .is_some_and(|first| matches!(first.as_str(), "std" | "core" | "alloc"))
+    {
+        return false;
+    }
+
+    let Some((target_package, target_path)) =
+        resolve_use_target_path(project, package, module_path, target)
+    else {
+        return false;
+    };
+    if !reduced.packages.contains(&target_package) {
+        return false;
+    }
+
+    public_reexport_resolved_path_is_unrendered(
+        project,
+        reduced,
+        render_plan,
+        &target_package,
+        &target_path,
+    )
+}
+
+fn public_reexport_resolved_path_is_unrendered(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    target_package: &str,
+    target_path: &[String],
+) -> bool {
+    if let Some(callable) = find_use_function(project, target_package, target_path) {
+        return !render_plan.callable_should_render(&callable);
+    }
+    if let Some(item) = find_use_item(project, target_package, target_path) {
+        if item.kind == ItemKind::Mod {
+            let mut module_path = item.module_path.clone();
+            module_path.push(item.name.clone());
+            return !module_should_render(
+                project,
+                reduced,
+                render_plan,
+                &item.package,
+                &module_path,
+            );
+        }
+        return !render_plan.item_should_render(&item);
+    }
+    if let Some((alias_package, alias_path)) =
+        resolve_reexported_use_path(project, target_package, target_path)
+    {
+        if reduced.packages.contains(&alias_package) {
+            return public_reexport_resolved_path_is_unrendered(
+                project,
+                reduced,
+                render_plan,
+                &alias_package,
+                &alias_path,
+            );
+        }
+    }
+
+    let Some((name, parent_module_path)) = target_path.split_last() else {
+        return false;
+    };
+    if !project_has_module_or_inline(project, target_package, parent_module_path) {
+        return false;
+    }
+    let Some(items) = module_items_for_path(project, target_package, parent_module_path) else {
+        return false;
+    };
+    !module_rendered_public_visible_names(
+        project,
+        reduced,
+        render_plan,
+        target_package,
+        parent_module_path,
+        items,
+    )
+    .contains(name)
 }
 
 fn public_reexport_name_is_referenced_by_reduced_package(
@@ -25918,6 +26197,7 @@ fn collect_callable_import_idents(
             None,
             &mut block,
         );
+        prune_unreachable_enum_match_arms(&mut block, &render_plan.retained_enum_variants);
         let mut visitor = ImportUsageCollector::new();
         visitor.push_scope();
         visitor.visit_signature(&record.item.sig);
@@ -25942,6 +26222,7 @@ fn collect_callable_import_idents(
         current_type_path,
         &mut block,
     );
+    prune_unreachable_enum_match_arms(&mut block, &render_plan.retained_enum_variants);
     let mut visitor = ImportUsageCollector::new();
     visitor.push_scope();
     visitor.visit_signature(&record.item.sig);

@@ -19073,6 +19073,156 @@ fn unused_helper() -> usize {
     }
 
     #[test]
+    fn enum_match_logging_does_not_retain_unconstructed_uniffi_variants() {
+        let root = temp_output("enum-match-unconstructed-uniffi-variant-source");
+        let output = temp_output("enum-match-unconstructed-uniffi-variant-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nuniffi = \"0.31\"\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+#[uniffi::export]
+pub fn entry() -> usize {
+    let reducer = Reducer;
+    reducer.emit(AppEvent::Used)
+}
+
+pub struct Reducer;
+
+impl Reducer {
+    pub fn emit(&self, event: AppEvent) -> usize {
+        match event {
+            AppEvent::Used => 1,
+            AppEvent::Unused { payload } => payload.value,
+        }
+    }
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum AppEvent {
+    Used,
+    Unused { payload: UnusedPayload },
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct UnusedPayload {
+    pub value: usize,
+}
+"#,
+        );
+
+        let _report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        let rendered = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        assert!(rendered.contains("AppEvent::Used => 1"), "{rendered}");
+        assert!(
+            !rendered.contains("UnusedPayload"),
+            "unconstructed enum variant payload should be dropped:\n{rendered}"
+        );
+        assert!(
+            !rendered.contains("AppEvent::Unused"),
+            "match arms for pruned enum variants should be dropped:\n{rendered}"
+        );
+    }
+
+    #[test]
+    fn public_reexports_drop_pruned_enum_items() {
+        let root = temp_output("public-reexport-pruned-enum-source");
+        let output = temp_output("public-reexport-pruned-enum-output");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"pub mod updates;
+pub use updates::{AppEvent, ThreadStreamingDeltaKind};
+
+pub fn entry() -> usize {
+    let reducer = Reducer;
+    reducer.emit(AppEvent::Used)
+}
+
+pub struct Reducer;
+
+impl Reducer {
+    pub fn emit(&self, event: AppEvent) -> usize {
+        match event {
+            AppEvent::Used => 1,
+            AppEvent::Unused { kind } => match kind {
+                ThreadStreamingDeltaKind::AssistantText => 2,
+            },
+        }
+    }
+}
+"#,
+        );
+        write(
+            root.join("app/src/updates.rs"),
+            r#"#[derive(Debug, Clone)]
+pub enum AppEvent {
+    Used,
+    Unused { kind: ThreadStreamingDeltaKind },
+}
+
+#[derive(Debug, Clone)]
+pub enum ThreadStreamingDeltaKind {
+    AssistantText,
+}
+"#,
+        );
+
+        generate_with_analyzer_roots(
+            GenerateOptions {
+                workspace_root: root,
+                output_root: output.clone(),
+            },
+            AnalyzerMode::Syn,
+            &["app::entry".to_string()],
+        )
+        .expect("reduction should succeed");
+
+        let rendered_lib = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
+        let rendered_updates = fs::read_to_string(output.join("app/src/updates.rs")).unwrap();
+        assert!(
+            rendered_lib.contains("pub use updates::AppEvent;"),
+            "{rendered_lib}"
+        );
+        assert!(
+            !rendered_lib.contains("ThreadStreamingDeltaKind"),
+            "public reexports should drop pruned enum targets:\n{rendered_lib}"
+        );
+        assert!(
+            !rendered_updates.contains("ThreadStreamingDeltaKind"),
+            "pruned enum payload target should not render:\n{rendered_updates}"
+        );
+        assert!(
+            !rendered_updates.contains("Unused"),
+            "unconstructed variant should not render:\n{rendered_updates}"
+        );
+    }
+
+    #[test]
     fn guard_wrapped_field_access_retains_nested_struct_fields() {
         let root = temp_output("guard-wrapped-field-access-source");
         let output = temp_output("guard-wrapped-field-access-output");
