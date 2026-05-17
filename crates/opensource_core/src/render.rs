@@ -218,6 +218,7 @@ impl RenderPlan {
             &reachable_items,
             &reachable_token_idents,
             None,
+            Some(&prepass),
             true,
         );
         let non_callable_mentions = ReachableMentionIndex::build(
@@ -226,6 +227,7 @@ impl RenderPlan {
             &reachable_items,
             &reachable_token_idents,
             None,
+            Some(&prepass),
             false,
         );
         let mut plan = Self {
@@ -254,6 +256,7 @@ impl RenderPlan {
             &plan.reachable_items,
             &reachable_token_idents,
             Some(&plan),
+            None,
             true,
         );
         plan.non_callable_mentions = ReachableMentionIndex::build(
@@ -262,6 +265,7 @@ impl RenderPlan {
             &plan.reachable_items,
             &reachable_token_idents,
             Some(&plan),
+            None,
             false,
         );
         plan
@@ -846,6 +850,7 @@ impl ReachableMentionIndex {
         rendered_items: &BTreeSet<ItemId>,
         reachable_token_idents: &ReachableTokenIdentIndex,
         render_plan: Option<&RenderPlan>,
+        prepass: Option<&RenderPrepass>,
         include_callables: bool,
     ) -> Self {
         let mut index = Self::default();
@@ -871,8 +876,13 @@ impl ReachableMentionIndex {
         }
 
         for item in rendered_items {
-            let idents =
-                rendered_item_surface_idents_for_mention_index(project, reduced, item, render_plan);
+            let idents = rendered_item_surface_idents_for_mention_index(
+                project,
+                reduced,
+                item,
+                render_plan,
+                prepass,
+            );
             index.add_package_idents(&item.package, idents.iter().cloned());
             index.add_module_idents(&item.package, &item.module_path, idents);
         }
@@ -9293,6 +9303,7 @@ fn rendered_item_surface_idents_for_mention_index(
     reduced: &ReducedProject,
     item: &ItemId,
     render_plan: Option<&RenderPlan>,
+    prepass: Option<&RenderPrepass>,
 ) -> BTreeSet<String> {
     let mut idents = BTreeSet::new();
     let Some(record) = project.items.get(item) else {
@@ -9307,6 +9318,7 @@ fn rendered_item_surface_idents_for_mention_index(
                 project,
                 reduced,
                 render_plan,
+                prepass,
                 item,
                 item_struct,
                 &mut idents,
@@ -9335,6 +9347,7 @@ fn collect_struct_surface_idents_for_mention_index(
     project: &Project,
     reduced: &ReducedProject,
     render_plan: Option<&RenderPlan>,
+    prepass: Option<&RenderPrepass>,
     item_id: &ItemId,
     item_struct: &syn::ItemStruct,
     idents: &mut BTreeSet<String>,
@@ -9352,7 +9365,7 @@ fn collect_struct_surface_idents_for_mention_index(
     match &item_struct.fields {
         syn::Fields::Named(fields) => {
             for field in &fields.named {
-                if struct_field_should_remain(
+                if struct_field_should_remain_with_assoc_calls(
                     project,
                     reduced,
                     render_plan,
@@ -9360,6 +9373,7 @@ fn collect_struct_surface_idents_for_mention_index(
                     &item_id.module_path,
                     item_struct,
                     field,
+                    prepass,
                 ) {
                     collect_token_idents(&field.to_token_stream(), idents);
                 }
