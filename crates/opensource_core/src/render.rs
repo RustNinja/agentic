@@ -12570,10 +12570,14 @@ fn narrowed_dependency_features_for_usage(
     let Some(public_names) = package_usage.dependency_public_names(alias) else {
         return value.clone();
     };
+    let serde_type_names = package_usage.dependency_serde_type_names(alias);
     let dependency_package = dependency_package_name(alias, value);
-    let Some(required_features) =
-        inferred_dependency_features(&dependency_package, &public_names, &current_features)
-    else {
+    let Some(required_features) = inferred_dependency_features(
+        &dependency_package,
+        &public_names,
+        &serde_type_names,
+        &current_features,
+    ) else {
         return value.clone();
     };
     if required_features.is_empty()
@@ -12609,10 +12613,12 @@ fn dependency_feature_set(table: &Table) -> Option<BTreeSet<String>> {
 fn inferred_dependency_features(
     dependency_package: &str,
     public_names: &BTreeSet<String>,
+    serde_type_names: &BTreeSet<String>,
     current_features: &BTreeSet<String>,
 ) -> Option<BTreeSet<String>> {
     match dependency_code_name(dependency_package).as_str() {
         "tokio" => inferred_tokio_features(public_names, current_features),
+        "uuid" => inferred_uuid_features(public_names, serde_type_names, current_features),
         _ => None,
     }
 }
@@ -12666,6 +12672,61 @@ fn inferred_tokio_features(
             }
             _ => return None,
         }
+    }
+    Some(features)
+}
+
+fn inferred_uuid_features(
+    public_names: &BTreeSet<String>,
+    serde_type_names: &BTreeSet<String>,
+    current_features: &BTreeSet<String>,
+) -> Option<BTreeSet<String>> {
+    if public_names.is_empty() {
+        return None;
+    }
+    let mut features = BTreeSet::new();
+    for name in public_names {
+        let mut segments = name.split("::");
+        let Some(first) = segments.next() else {
+            return None;
+        };
+        if first != "Uuid" {
+            return None;
+        }
+        let Some(assoc) = segments.next() else {
+            continue;
+        };
+        match assoc {
+            "new_v1" => {
+                features.insert("v1".to_string());
+            }
+            "new_v3" => {
+                features.insert("v3".to_string());
+            }
+            "new_v4" => {
+                features.insert("v4".to_string());
+            }
+            "new_v5" => {
+                features.insert("v5".to_string());
+            }
+            "new_v6" => {
+                features.insert("v6".to_string());
+            }
+            "new_v7" | "now_v7" => {
+                features.insert("v7".to_string());
+            }
+            "new_v8" => {
+                features.insert("v8".to_string());
+            }
+            "as_bytes" | "as_fields" | "as_u128" | "braced" | "clone" | "hyphenated" | "is_nil"
+            | "simple" | "to_string" | "urn" => {}
+            _ => return None,
+        }
+    }
+    if serde_type_names.contains("Uuid")
+        && (current_features.contains("serde") || current_features.contains("full"))
+    {
+        features.insert("serde".to_string());
     }
     Some(features)
 }
@@ -12730,6 +12791,10 @@ impl PackageSourceUsage {
     fn dependency_public_names(&self, alias: &str) -> Option<BTreeSet<String>> {
         self.all.dependency_public_names(alias)
     }
+
+    fn dependency_serde_type_names(&self, alias: &str) -> BTreeSet<String> {
+        self.all.dependency_serde_type_names(alias)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -12750,6 +12815,7 @@ struct TokenUsage {
     dependency_glob_prefixes: BTreeMap<String, BTreeSet<Vec<String>>>,
     dependency_glob_visible_names: BTreeSet<String>,
     dependency_public_names: BTreeMap<String, BTreeSet<String>>,
+    dependency_serde_type_names: BTreeMap<String, BTreeSet<String>>,
 }
 
 impl TokenUsage {
@@ -12800,6 +12866,7 @@ impl TokenUsage {
             &context.type_imports,
         );
         self.record_dependency_assoc_calls_through_imports(file, &context.type_imports);
+        self.record_dependency_serde_types(file, &context.type_imports);
         for item in &file.items {
             if let Item::Use(item_use) = item {
                 self.record_use(item_use);
@@ -12959,6 +13026,12 @@ impl TokenUsage {
                 .or_default()
                 .extend(names.iter().cloned());
         }
+        for (root, names) in &other.dependency_serde_type_names {
+            self.dependency_serde_type_names
+                .entry(root.clone())
+                .or_default()
+                .extend(names.iter().cloned());
+        }
     }
 
     fn mentions_dependency(&self, alias: &str) -> bool {
@@ -13097,6 +13170,116 @@ impl TokenUsage {
         }
         Some(names)
     }
+
+    fn record_dependency_serde_types(
+        &mut self,
+        file: &syn::File,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+    ) {
+        for item in &file.items {
+            self.record_dependency_serde_types_for_item(item, imports);
+        }
+    }
+
+    fn record_dependency_serde_types_for_item(
+        &mut self,
+        item: &Item,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+    ) {
+        match item {
+            Item::Struct(item_struct) if attrs_have_serde_derive(&item_struct.attrs) => {
+                self.record_dependency_serde_types_for_fields(&item_struct.fields, imports);
+            }
+            Item::Enum(item_enum) if attrs_have_serde_derive(&item_enum.attrs) => {
+                for variant in &item_enum.variants {
+                    self.record_dependency_serde_types_for_fields(&variant.fields, imports);
+                }
+            }
+            Item::Union(item_union) if attrs_have_serde_derive(&item_union.attrs) => {
+                for field in item_union.fields.named.iter() {
+                    self.record_dependency_serde_types_for_type(&field.ty, imports);
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_dependency_serde_types_for_fields(
+        &mut self,
+        fields: &syn::Fields,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+    ) {
+        for field in fields {
+            self.record_dependency_serde_types_for_type(&field.ty, imports);
+        }
+    }
+
+    fn record_dependency_serde_types_for_type(
+        &mut self,
+        ty: &Type,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+    ) {
+        let mut visitor = DependencySerdeTypeVisitor {
+            imports,
+            types: BTreeMap::new(),
+        };
+        visitor.visit_type(ty);
+        for (root, names) in visitor.types {
+            self.dependency_serde_type_names
+                .entry(root)
+                .or_default()
+                .extend(names);
+        }
+    }
+
+    fn dependency_serde_type_names(&self, alias: &str) -> BTreeSet<String> {
+        let code_name = dependency_code_name(alias);
+        let mut names = BTreeSet::new();
+        for root in [alias, code_name.as_str()] {
+            if let Some(root_names) = self.dependency_serde_type_names.get(root) {
+                names.extend(root_names.iter().cloned());
+            }
+        }
+        names
+    }
+}
+
+struct DependencySerdeTypeVisitor<'a> {
+    imports: &'a BTreeMap<String, (String, Vec<String>)>,
+    types: BTreeMap<String, BTreeSet<String>>,
+}
+
+impl Visit<'_> for DependencySerdeTypeVisitor<'_> {
+    fn visit_type_path(&mut self, node: &syn::TypePath) {
+        let segments = node
+            .path
+            .segments
+            .iter()
+            .map(|segment| segment.ident.to_string())
+            .collect::<Vec<_>>();
+        if let Some((root, type_path)) = dependency_type_path_from_segments(&segments)
+            .or_else(|| dependency_type_path_from_segments_with_imports(&segments, self.imports))
+        {
+            if let Some(required_path) = dependency_required_path_string(&type_path) {
+                self.types.entry(root).or_default().insert(required_path);
+            }
+        }
+        visit::visit_type_path(self, node);
+    }
+}
+
+fn attrs_have_serde_derive(attrs: &[syn::Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let tokens = attr.to_token_stream();
+        let path = attr.path();
+        (path.is_ident("derive")
+            && (token_stream_mentions_ident(&tokens, "Serialize")
+                || token_stream_mentions_ident(&tokens, "Deserialize")))
+            || (path.is_ident("cfg_attr")
+                && (token_stream_mentions_ident(&tokens, "serde")
+                    || token_stream_mentions_ident(&tokens, "Serialize")
+                    || token_stream_mentions_ident(&tokens, "Deserialize")))
+    })
 }
 
 #[derive(Default)]

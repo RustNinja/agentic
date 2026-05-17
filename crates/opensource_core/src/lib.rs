@@ -19924,27 +19924,117 @@ pub fn entry(sender: broadcast::Sender<u8>) -> usize {
         })
         .expect("reduction should succeed");
 
-        let manifest = fs::read_to_string(output.join("Cargo.toml"))
-            .expect("generated workspace manifest should exist")
-            .parse::<toml::Value>()
-            .expect("generated workspace manifest should parse");
-        let features = manifest
-            .get("workspace")
-            .and_then(|workspace| workspace.get("dependencies"))
-            .and_then(|dependencies| dependencies.get("tokio"))
-            .and_then(|tokio| tokio.get("features"))
-            .and_then(toml::Value::as_array)
-            .expect("generated tokio workspace dependency should keep a feature list")
-            .iter()
-            .map(|feature| {
-                feature
-                    .as_str()
-                    .expect("features should be strings")
-                    .to_string()
-            })
-            .collect::<Vec<_>>();
+        let features = generated_workspace_dependency_features(&output, "tokio");
 
         assert_eq!(features, vec!["sync".to_string()]);
+    }
+
+    #[test]
+    fn narrows_retained_workspace_uuid_features_to_used_constructors() {
+        let root = temp_output("workspace-uuid-feature-narrowing-source");
+        let output = temp_output("workspace-uuid-feature-narrowing-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies.uuid]
+version = "1"
+features = ["v4", "serde"]
+"#,
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nuuid = {{ workspace = true }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use uuid::Uuid;
+
+#[opensourced]
+pub fn entry() -> String {
+    let uuid = Uuid::new_v4().to_string();
+    uuid.clone()
+}
+"#,
+        );
+
+        generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        let features = generated_workspace_dependency_features(&output, "uuid");
+
+        assert_eq!(features, vec!["v4".to_string()]);
+    }
+
+    #[test]
+    fn retains_uuid_serde_feature_for_serde_derived_uuid_fields() {
+        let root = temp_output("workspace-uuid-serde-feature-source");
+        let output = temp_output("workspace-uuid-serde-feature-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies.serde]
+version = "1"
+features = ["derive"]
+
+[workspace.dependencies.uuid]
+version = "1"
+features = ["v4", "serde"]
+"#,
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nserde = {{ workspace = true }}\nuuid = {{ workspace = true }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use serde::{Deserialize, Serialize};
+use uuid::Uuid;
+
+#[derive(Serialize, Deserialize)]
+pub struct Payload {
+    id: Uuid,
+}
+
+#[opensourced]
+pub fn entry() -> Payload {
+    Payload { id: Uuid::new_v4() }
+}
+"#,
+        );
+
+        generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        let features = generated_workspace_dependency_features(&output, "uuid")
+            .into_iter()
+            .collect::<BTreeSet<_>>();
+
+        assert_eq!(
+            features,
+            BTreeSet::from(["serde".to_string(), "v4".to_string()])
+        );
     }
 
     #[test]
@@ -21339,6 +21429,29 @@ pub fn entry() -> usize {
             fs::create_dir_all(parent).unwrap();
         }
         fs::write(path, contents).unwrap();
+    }
+
+    fn generated_workspace_dependency_features(output: &Path, alias: &str) -> Vec<String> {
+        fs::read_to_string(output.join("Cargo.toml"))
+            .expect("generated workspace manifest should exist")
+            .parse::<toml::Value>()
+            .expect("generated workspace manifest should parse")
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(|dependencies| dependencies.get(alias))
+            .and_then(|dependency| dependency.get("features"))
+            .and_then(toml::Value::as_array)
+            .unwrap_or_else(|| {
+                panic!("generated {alias} workspace dependency should keep features")
+            })
+            .iter()
+            .map(|feature| {
+                feature
+                    .as_str()
+                    .expect("features should be strings")
+                    .to_string()
+            })
+            .collect()
     }
 
     fn inactive_target_os() -> &'static str {
