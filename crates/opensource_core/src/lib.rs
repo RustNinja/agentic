@@ -8571,6 +8571,8 @@ fn retained_top_level_macro_invocation_hazard_counts(
                 continue;
             };
             if item_macro.ident.is_some()
+                || (macro_path_starts_with(&item_macro.mac, "uniffi")
+                    && !reduced_package_preserves_uniffi_surface(project, reduced, &source.package))
                 || !macro_invocation_requires_expansion_boundary(
                     &item_macro.mac,
                     &visitor.macro_context,
@@ -8597,6 +8599,56 @@ fn top_level_macro_invocation_mentions_reduced_code(
     token_stream_idents(&item_macro.mac.tokens)
         .iter()
         .any(|ident| reduced_package_mentions_ident(project, reduced, &source.package, ident))
+}
+
+fn macro_path_starts_with(mac: &Macro, name: &str) -> bool {
+    mac.path
+        .segments
+        .first()
+        .is_some_and(|segment| segment.ident == name)
+}
+
+fn reduced_package_preserves_uniffi_surface(
+    project: &Project,
+    reduced: &ReducedProject,
+    package: &str,
+) -> bool {
+    reduced
+        .reachable
+        .iter()
+        .filter(|callable| callable.package() == package)
+        .any(|callable| {
+            project
+                .functions
+                .get(callable)
+                .is_some_and(|record| attrs_include_uniffi_export(&record.item.attrs))
+                || project.methods.get(callable).is_some_and(|record| {
+                    attrs_include_uniffi_export(&record.item.attrs)
+                        || attrs_include_uniffi_export(&record.impl_attrs)
+                })
+        })
+        || reduced
+            .reachable_items
+            .iter()
+            .filter(|item| item.package == package)
+            .any(|item| {
+                project
+                    .items
+                    .get(item)
+                    .is_some_and(|record| attrs_include_uniffi_export(item_attrs(&record.item)))
+            })
+}
+
+fn attrs_include_uniffi_export(attrs: &[Attribute]) -> bool {
+    attrs.iter().any(|attr| {
+        let path = attr.path();
+        (path.segments.len() == 2
+            && path.segments[0].ident == "uniffi"
+            && path.segments[1].ident == "export")
+            || (path.is_ident("cfg_attr")
+                && token_stream_mentions_ident(&attr.to_token_stream(), "uniffi")
+                && token_stream_mentions_ident(&attr.to_token_stream(), "export"))
+    })
 }
 
 fn retained_top_level_out_dir_macro_hazard_counts(
@@ -20038,6 +20090,97 @@ pub fn entry() -> Payload {
     }
 
     #[test]
+    fn removes_uniffi_tokio_feature_without_async_exports() {
+        let root = temp_output("uniffi-no-async-feature-source");
+        let output = temp_output("uniffi-no-async-feature-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nuniffi = {{ version = \"0.31\", features = [\"tokio\"] }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+uniffi::setup_scaffolding!();
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct Payload {
+    pub value: String,
+}
+
+#[uniffi::export]
+#[opensourced]
+pub fn entry() -> Payload {
+    Payload {
+        value: "ok".to_string(),
+    }
+}
+"#,
+        );
+
+        generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        assert_eq!(
+            generated_package_dependency_features(&output, "app", "uniffi"),
+            None
+        );
+    }
+
+    #[test]
+    fn retains_uniffi_tokio_feature_for_async_exports() {
+        let root = temp_output("uniffi-async-feature-source");
+        let output = temp_output("uniffi-async-feature-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nuniffi = {{ version = \"0.31\", features = [\"tokio\"] }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+uniffi::setup_scaffolding!();
+
+#[uniffi::export]
+#[opensourced]
+pub async fn entry() -> String {
+    "ok".to_string()
+}
+"#,
+        );
+
+        generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        assert_eq!(
+            generated_package_dependency_features(&output, "app", "uniffi"),
+            Some(vec!["tokio".to_string()])
+        );
+    }
+
+    #[test]
     fn accepts_copyable_retained_workspace_patch_path_dependencies() {
         let root = temp_output("patch-path-dependency-hazard-source");
         let external = temp_output("patch-path-dependency-hazard-external");
@@ -21452,6 +21595,32 @@ pub fn entry() -> usize {
                     .to_string()
             })
             .collect()
+    }
+
+    fn generated_package_dependency_features(
+        output: &Path,
+        package: &str,
+        alias: &str,
+    ) -> Option<Vec<String>> {
+        fs::read_to_string(output.join(package).join("Cargo.toml"))
+            .expect("generated package manifest should exist")
+            .parse::<toml::Value>()
+            .expect("generated package manifest should parse")
+            .get("dependencies")
+            .and_then(|dependencies| dependencies.get(alias))
+            .and_then(|dependency| dependency.get("features"))
+            .and_then(toml::Value::as_array)
+            .map(|features| {
+                features
+                    .iter()
+                    .map(|feature| {
+                        feature
+                            .as_str()
+                            .expect("features should be strings")
+                            .to_string()
+                    })
+                    .collect()
+            })
     }
 
     fn inactive_target_os() -> &'static str {

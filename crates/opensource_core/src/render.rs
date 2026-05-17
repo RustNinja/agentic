@@ -291,12 +291,10 @@ impl RenderPlan {
             return false;
         }
         self.reachable_items.contains(item)
-            || self.usage.item_decision(item).is_some_and(|decision| {
-                matches!(
-                    decision,
-                    UsageDecision::Used | UsageDecision::BlockedByUnknown
-                )
-            })
+            || self
+                .usage
+                .item_decision(item)
+                .is_some_and(|decision| matches!(decision, UsageDecision::BlockedByUnknown))
     }
 
     fn package_mentions_ident(&self, package: &str, ident: &str) -> bool {
@@ -12571,33 +12569,41 @@ fn narrowed_dependency_features_for_usage(
         return value.clone();
     };
     let serde_type_names = package_usage.dependency_serde_type_names(alias);
+    let has_async_export = package_usage.dependency_has_async_export(alias);
     let dependency_package = dependency_package_name(alias, value);
     let Some(required_features) = inferred_dependency_features(
         &dependency_package,
         &public_names,
         &serde_type_names,
+        has_async_export,
         &current_features,
     ) else {
         return value.clone();
     };
-    if required_features.is_empty()
-        || required_features == current_features
+    if (required_features.features.is_empty() && !required_features.allow_empty)
+        || required_features.features == current_features
         || !required_features
+            .features
             .iter()
             .all(|feature| current_features.contains(feature) || current_features.contains("full"))
     {
         return value.clone();
     }
 
-    table.insert(
-        "features".to_string(),
-        Value::Array(
-            required_features
-                .into_iter()
-                .map(Value::String)
-                .collect::<Vec<_>>(),
-        ),
-    );
+    if required_features.features.is_empty() {
+        table.remove("features");
+    } else {
+        table.insert(
+            "features".to_string(),
+            Value::Array(
+                required_features
+                    .features
+                    .into_iter()
+                    .map(Value::String)
+                    .collect::<Vec<_>>(),
+            ),
+        );
+    }
     Value::Table(table)
 }
 
@@ -12610,15 +12616,41 @@ fn dependency_feature_set(table: &Table) -> Option<BTreeSet<String>> {
         .collect()
 }
 
+struct InferredDependencyFeatures {
+    features: BTreeSet<String>,
+    allow_empty: bool,
+}
+
+impl InferredDependencyFeatures {
+    fn non_empty(features: BTreeSet<String>) -> Self {
+        Self {
+            features,
+            allow_empty: false,
+        }
+    }
+
+    fn allow_empty(features: BTreeSet<String>) -> Self {
+        Self {
+            features,
+            allow_empty: true,
+        }
+    }
+}
+
 fn inferred_dependency_features(
     dependency_package: &str,
     public_names: &BTreeSet<String>,
     serde_type_names: &BTreeSet<String>,
+    has_async_export: bool,
     current_features: &BTreeSet<String>,
-) -> Option<BTreeSet<String>> {
+) -> Option<InferredDependencyFeatures> {
     match dependency_code_name(dependency_package).as_str() {
-        "tokio" => inferred_tokio_features(public_names, current_features),
-        "uuid" => inferred_uuid_features(public_names, serde_type_names, current_features),
+        "tokio" => inferred_tokio_features(public_names, current_features)
+            .map(InferredDependencyFeatures::non_empty),
+        "uniffi" => inferred_uniffi_features(has_async_export, current_features)
+            .map(InferredDependencyFeatures::allow_empty),
+        "uuid" => inferred_uuid_features(public_names, serde_type_names, current_features)
+            .map(InferredDependencyFeatures::non_empty),
         _ => None,
     }
 }
@@ -12673,6 +12705,19 @@ fn inferred_tokio_features(
             _ => return None,
         }
     }
+    Some(features)
+}
+
+fn inferred_uniffi_features(
+    has_async_export: bool,
+    current_features: &BTreeSet<String>,
+) -> Option<BTreeSet<String>> {
+    if has_async_export || !current_features.contains("tokio") || current_features.contains("full")
+    {
+        return None;
+    }
+    let mut features = current_features.clone();
+    features.remove("tokio");
     Some(features)
 }
 
@@ -12795,6 +12840,10 @@ impl PackageSourceUsage {
     fn dependency_serde_type_names(&self, alias: &str) -> BTreeSet<String> {
         self.all.dependency_serde_type_names(alias)
     }
+
+    fn dependency_has_async_export(&self, alias: &str) -> bool {
+        self.all.dependency_has_async_export(alias)
+    }
 }
 
 #[derive(Clone, Default)]
@@ -12816,6 +12865,7 @@ struct TokenUsage {
     dependency_glob_visible_names: BTreeSet<String>,
     dependency_public_names: BTreeMap<String, BTreeSet<String>>,
     dependency_serde_type_names: BTreeMap<String, BTreeSet<String>>,
+    dependency_async_export_roots: BTreeSet<String>,
 }
 
 impl TokenUsage {
@@ -12867,6 +12917,7 @@ impl TokenUsage {
         );
         self.record_dependency_assoc_calls_through_imports(file, &context.type_imports);
         self.record_dependency_serde_types(file, &context.type_imports);
+        self.record_dependency_async_exports(file, &context.type_imports);
         for item in &file.items {
             if let Item::Use(item_use) = item {
                 self.record_use(item_use);
@@ -13032,6 +13083,8 @@ impl TokenUsage {
                 .or_default()
                 .extend(names.iter().cloned());
         }
+        self.dependency_async_export_roots
+            .extend(other.dependency_async_export_roots.iter().cloned());
     }
 
     fn mentions_dependency(&self, alias: &str) -> bool {
@@ -13242,6 +13295,76 @@ impl TokenUsage {
         }
         names
     }
+
+    fn record_dependency_async_exports(
+        &mut self,
+        file: &syn::File,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+    ) {
+        for item in &file.items {
+            self.record_dependency_async_exports_for_item(item, imports);
+        }
+    }
+
+    fn record_dependency_async_exports_for_item(
+        &mut self,
+        item: &Item,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+    ) {
+        match item {
+            Item::Fn(item_fn) => {
+                self.record_dependency_async_export_attrs(
+                    &item_fn.attrs,
+                    item_fn.sig.asyncness.is_some(),
+                    imports,
+                );
+            }
+            Item::Impl(item_impl) => {
+                self.record_dependency_async_export_attrs(
+                    &item_impl.attrs,
+                    impl_items_contain_async_method(&item_impl.items),
+                    imports,
+                );
+                for item in &item_impl.items {
+                    let ImplItem::Fn(method) = item else {
+                        continue;
+                    };
+                    self.record_dependency_async_export_attrs(
+                        &method.attrs,
+                        method.sig.asyncness.is_some(),
+                        imports,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn record_dependency_async_export_attrs(
+        &mut self,
+        attrs: &[syn::Attribute],
+        is_async: bool,
+        imports: &BTreeMap<String, (String, Vec<String>)>,
+    ) {
+        for attr in attrs {
+            let explicit_async_runtime =
+                attr.to_token_stream().to_string().contains("async_runtime");
+            if !(is_async || explicit_async_runtime) {
+                continue;
+            }
+            let Some(root) = dependency_export_macro_root(attr.path(), imports) else {
+                continue;
+            };
+            self.dependency_async_export_roots.insert(root);
+        }
+    }
+
+    fn dependency_has_async_export(&self, alias: &str) -> bool {
+        let code_name = dependency_code_name(alias);
+        self.dependency_async_export_roots
+            .iter()
+            .any(|root| root == alias || root == &code_name)
+    }
 }
 
 struct DependencySerdeTypeVisitor<'a> {
@@ -13280,6 +13403,31 @@ fn attrs_have_serde_derive(attrs: &[syn::Attribute]) -> bool {
                     || token_stream_mentions_ident(&tokens, "Serialize")
                     || token_stream_mentions_ident(&tokens, "Deserialize")))
     })
+}
+
+fn dependency_export_macro_root(
+    path: &syn::Path,
+    imports: &BTreeMap<String, (String, Vec<String>)>,
+) -> Option<String> {
+    let segments = path
+        .segments
+        .iter()
+        .map(|segment| segment.ident.to_string())
+        .collect::<Vec<_>>();
+    let (first, rest) = segments.split_first()?;
+    if first == "crate" || first == "self" || first == "super" {
+        return None;
+    }
+    if rest.last().is_some_and(|segment| segment == "export") {
+        return Some(first.clone());
+    }
+    let (root, imported_path) = imports.get(first)?;
+    let mut resolved_path = imported_path.clone();
+    resolved_path.extend(rest.iter().cloned());
+    resolved_path
+        .last()
+        .is_some_and(|segment| segment == "export")
+        .then(|| root.clone())
 }
 
 #[derive(Default)]
@@ -17676,7 +17824,16 @@ fn collect_retained_module_surface_idents(
             {
                 collect_token_idents(&item_macro.mac.tokens, idents);
             }
-            Item::Macro(item_macro) if item_macro.ident.is_none() => {
+            Item::Macro(item_macro)
+                if item_macro.ident.is_none()
+                    && should_retain_macro_invocation(
+                        project,
+                        reduced,
+                        package,
+                        module_path,
+                        item_macro,
+                    ) =>
+            {
                 collect_token_idents(&item_macro.mac.tokens, idents);
             }
             _ => {}
