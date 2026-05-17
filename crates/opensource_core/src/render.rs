@@ -471,6 +471,7 @@ fn record_enum_member_decisions(
             || enum_variant_should_remain(
                 project,
                 reduced,
+                Some(usage),
                 &item_id.package,
                 &item_id.module_path,
                 &item_id.name,
@@ -9419,6 +9420,7 @@ fn droppable_pruned_enum_payload_item_names_by_package(
             if enum_variant_should_remain(
                 project,
                 reduced,
+                Some(usage),
                 &item_id.package,
                 &item_id.module_path,
                 &item_id.name,
@@ -9559,6 +9561,7 @@ fn collect_enum_surface_idents(
         if enum_variant_should_remain(
             project,
             reduced,
+            None,
             &item_id.package,
             &item_id.module_path,
             &item_id.name,
@@ -14883,6 +14886,7 @@ fn retained_enum_variants_for_reduced_project(
                 enum_variant_should_remain(
                     project,
                     reduced,
+                    Some(usage),
                     &item_id.package,
                     &item_id.module_path,
                     &item_id.name,
@@ -15107,6 +15111,7 @@ fn transform_items(
                         prune_private_enum_variants(
                             project,
                             reduced,
+                            &render_plan.retained_enum_variants,
                             package,
                             module_path,
                             &mut item_enum,
@@ -20539,10 +20544,22 @@ fn enum_variant_shape_preserving_derive(path: &syn::Path) -> bool {
 fn prune_private_enum_variants(
     project: &Project,
     reduced: &ReducedProject,
+    retained_enum_variants: &BTreeMap<String, BTreeSet<String>>,
     package: &str,
     _module_path: &[String],
     item_enum: &mut syn::ItemEnum,
 ) {
+    let enum_name = item_enum.ident.to_string();
+    if let Some(retained_variants) = retained_enum_variants.get(&enum_name) {
+        item_enum.variants = item_enum
+            .variants
+            .iter()
+            .filter(|variant| retained_variants.contains(&variant.ident.to_string()))
+            .cloned()
+            .collect();
+        return;
+    }
+
     item_enum.variants = item_enum
         .variants
         .iter()
@@ -20550,9 +20567,10 @@ fn prune_private_enum_variants(
             enum_variant_should_remain(
                 project,
                 reduced,
+                None,
                 package,
                 _module_path,
-                &item_enum.ident.to_string(),
+                &enum_name,
                 &variant.ident.to_string(),
             )
         })
@@ -20563,6 +20581,7 @@ fn prune_private_enum_variants(
 fn enum_variant_should_remain(
     project: &Project,
     reduced: &ReducedProject,
+    usage: Option<&UsageDecisionIndex>,
     package: &str,
     module_path: &[String],
     enum_name: &str,
@@ -20571,6 +20590,7 @@ fn enum_variant_should_remain(
     reachable_code_constructs_enum_variant(
         project,
         reduced,
+        usage,
         package,
         module_path,
         enum_name,
@@ -20581,6 +20601,7 @@ fn enum_variant_should_remain(
 fn reachable_code_constructs_enum_variant(
     project: &Project,
     reduced: &ReducedProject,
+    usage: Option<&UsageDecisionIndex>,
     target_package: &str,
     target_module_path: &[String],
     enum_name: &str,
@@ -20635,7 +20656,10 @@ fn reachable_code_constructs_enum_variant(
     };
 
     reduced.reachable.iter().any(|callable| {
-        let usage = if let Some(record) = project.functions.get(callable) {
+        if usage.is_some_and(|usage| !usage.should_render_callable(callable)) {
+            return false;
+        }
+        let constructs_variant = if let Some(record) = project.functions.get(callable) {
             let source = project.files.values().find(|source| {
                 source.package == record.package && source.module_path == record.module_path
             });
@@ -20660,12 +20684,15 @@ fn reachable_code_constructs_enum_variant(
         } else {
             false
         };
-        usage
+        constructs_variant
     }) || reduced
         .reachable_items
         .iter()
         .filter(|item| item.package == target_package || reduced.packages.contains(&item.package))
         .any(|item| {
+            if usage.is_some_and(|usage| !usage.should_render_item(item)) {
+                return false;
+            }
             if item.package == target_package
                 && item.module_path == target_module_path
                 && item.name == enum_name
@@ -20707,6 +20734,8 @@ impl<'a> EnumVariantExpressionUseVisitor<'a> {
 }
 
 impl<'ast> Visit<'ast> for EnumVariantExpressionUseVisitor<'_> {
+    fn visit_pat(&mut self, _node: &'ast Pat) {}
+
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         if expression_path_uses_enum_variant(
             &node.path,
@@ -20746,6 +20775,36 @@ fn expression_path_uses_enum_variant(
         .any(|window| window == [enum_name, variant_name])
         || (allow_unqualified_variant
             && matches!(segments.as_slice(), [segment] if segment == variant_name))
+}
+
+#[cfg(test)]
+mod enum_variant_expression_use_visitor_tests {
+    use super::*;
+    use syn::parse_quote;
+
+    #[test]
+    fn ignores_match_patterns_while_detecting_constructors() {
+        let block: Block = parse_quote!({
+            match event {
+                AppEvent::Used => 1,
+                AppEvent::Unused { payload } => payload.value,
+            }
+        });
+        let mut visitor = EnumVariantExpressionUseVisitor::new("AppEvent", "Unused", false);
+        visitor.visit_block(&block);
+        assert!(
+            !visitor.found,
+            "match patterns are not enum variant construction sites"
+        );
+
+        let block: Block = parse_quote!({ AppEvent::Unused { payload: value } });
+        let mut visitor = EnumVariantExpressionUseVisitor::new("AppEvent", "Unused", false);
+        visitor.visit_block(&block);
+        assert!(
+            visitor.found,
+            "struct-like variant construction should count"
+        );
+    }
 }
 
 fn prune_private_struct_fields(
@@ -26121,6 +26180,7 @@ fn rendered_non_callable_import_scan_item(
                     prune_private_enum_variants(
                         project,
                         reduced,
+                        &render_plan.retained_enum_variants,
                         package,
                         module_path,
                         &mut item_enum,
