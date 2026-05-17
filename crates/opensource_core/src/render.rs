@@ -12027,13 +12027,11 @@ fn retained_workspace_dependencies(
                     continue;
                 }
                 if let Some(source) = source_dependencies.get(alias) {
-                    dependencies.insert(
-                        alias.clone(),
-                        support_packages.transformed_workspace_dependency_value(
-                            source,
-                            &project.workspace.root,
-                        ),
-                    );
+                    let value = support_packages
+                        .transformed_workspace_dependency_value(source, &project.workspace.root);
+                    let value =
+                        narrowed_dependency_features_for_usage(alias, &value, package_usage, false);
+                    insert_or_merge_dependency_entry(&mut dependencies, alias, value);
                 }
             }
         }
@@ -12099,6 +12097,21 @@ fn retained_patch_dependency_names(
         }
     }
     Ok(names)
+}
+
+fn insert_or_merge_dependency_entry(dependencies: &mut Table, alias: &str, value: Value) {
+    let Some(existing) = dependencies.get_mut(alias) else {
+        dependencies.insert(alias.to_string(), value);
+        return;
+    };
+    let (Some(existing_table), Some(value_table)) = (existing.as_table_mut(), value.as_table())
+    else {
+        *existing = value;
+        return;
+    };
+    if let Some(features) = value_table.get("features") {
+        merge_feature_values(existing_table, features);
+    }
 }
 
 fn support_package_patch_dependency_names(
@@ -12218,6 +12231,12 @@ fn transformed_dependencies(
                         Path::new(package_name),
                     )
                 };
+                let value = narrowed_dependency_features_for_usage(
+                    alias,
+                    &value,
+                    package_usage,
+                    is_feature_required,
+                );
                 retained_aliases.insert(alias.clone());
                 dependencies.insert(alias.clone(), value);
             }
@@ -12236,14 +12255,18 @@ fn transformed_dependencies(
         ) || is_feature_required
         {
             retained_aliases.insert(alias.clone());
-            dependencies.insert(
-                alias.clone(),
-                support_packages.transformed_dependency_value(
-                    value,
-                    &package.root,
-                    Path::new(package_name),
-                ),
+            let value = support_packages.transformed_dependency_value(
+                value,
+                &package.root,
+                Path::new(package_name),
             );
+            let value = narrowed_dependency_features_for_usage(
+                alias,
+                &value,
+                package_usage,
+                is_feature_required,
+            );
+            dependencies.insert(alias.clone(), value);
         }
     }
 
@@ -12456,6 +12479,12 @@ fn transformed_dependency_table(
                         Path::new(package_name),
                     )
                 };
+                let value = narrowed_dependency_features_for_usage(
+                    alias,
+                    &value,
+                    package_usage,
+                    is_feature_required,
+                );
                 retained_aliases.insert(alias.clone());
                 dependencies.insert(alias.clone(), value);
             }
@@ -12486,6 +12515,12 @@ fn transformed_dependency_table(
                     )
                 })
                 .unwrap_or_else(|| value.clone());
+            let value = narrowed_dependency_features_for_usage(
+                alias,
+                &value,
+                package_usage,
+                is_feature_required,
+            );
             dependencies.insert(alias.clone(), value);
         }
     }
@@ -12512,6 +12547,127 @@ fn dependency_should_render(
             .is_some_and(|package| package_should_preserve_source_tree(project, reduced, package))
         || retain_for_copied_support_source
         || package_usage.mentions_dependency_in_scope(alias, usage_scope)
+}
+
+fn narrowed_dependency_features_for_usage(
+    alias: &str,
+    value: &Value,
+    package_usage: &PackageSourceUsage,
+    is_feature_required: bool,
+) -> Value {
+    if is_feature_required {
+        return value.clone();
+    }
+    let Some(mut table) = value.as_table().cloned() else {
+        return value.clone();
+    };
+    let Some(current_features) = dependency_feature_set(&table) else {
+        return value.clone();
+    };
+    if current_features.is_empty() {
+        return value.clone();
+    }
+    let Some(public_names) = package_usage.dependency_public_names(alias) else {
+        return value.clone();
+    };
+    let dependency_package = dependency_package_name(alias, value);
+    let Some(required_features) =
+        inferred_dependency_features(&dependency_package, &public_names, &current_features)
+    else {
+        return value.clone();
+    };
+    if required_features.is_empty()
+        || required_features == current_features
+        || !required_features
+            .iter()
+            .all(|feature| current_features.contains(feature) || current_features.contains("full"))
+    {
+        return value.clone();
+    }
+
+    table.insert(
+        "features".to_string(),
+        Value::Array(
+            required_features
+                .into_iter()
+                .map(Value::String)
+                .collect::<Vec<_>>(),
+        ),
+    );
+    Value::Table(table)
+}
+
+fn dependency_feature_set(table: &Table) -> Option<BTreeSet<String>> {
+    table
+        .get("features")?
+        .as_array()?
+        .iter()
+        .map(|value| value.as_str().map(str::to_string))
+        .collect()
+}
+
+fn inferred_dependency_features(
+    dependency_package: &str,
+    public_names: &BTreeSet<String>,
+    current_features: &BTreeSet<String>,
+) -> Option<BTreeSet<String>> {
+    match dependency_code_name(dependency_package).as_str() {
+        "tokio" => inferred_tokio_features(public_names, current_features),
+        _ => None,
+    }
+}
+
+fn inferred_tokio_features(
+    public_names: &BTreeSet<String>,
+    current_features: &BTreeSet<String>,
+) -> Option<BTreeSet<String>> {
+    if public_names.is_empty() {
+        return None;
+    }
+    let mut features = BTreeSet::new();
+    for name in public_names {
+        let first = name.split("::").next().unwrap_or(name.as_str());
+        match first {
+            "sync" => {
+                features.insert("sync".to_string());
+            }
+            "time" => {
+                features.insert("time".to_string());
+            }
+            "net" => {
+                features.insert("net".to_string());
+            }
+            "io" => {
+                features.insert("io-util".to_string());
+            }
+            "fs" => {
+                features.insert("fs".to_string());
+            }
+            "process" => {
+                features.insert("process".to_string());
+            }
+            "signal" => {
+                features.insert("signal".to_string());
+            }
+            "task" | "spawn" | "spawn_blocking" => {
+                features.insert("rt".to_string());
+            }
+            "main" | "test" => {
+                features.insert("macros".to_string());
+                if current_features.contains("rt-multi-thread") || current_features.contains("full")
+                {
+                    features.insert("rt-multi-thread".to_string());
+                } else {
+                    features.insert("rt".to_string());
+                }
+            }
+            "select" | "join" | "try_join" => {
+                features.insert("macros".to_string());
+            }
+            _ => return None,
+        }
+    }
+    Some(features)
 }
 
 #[derive(Default)]

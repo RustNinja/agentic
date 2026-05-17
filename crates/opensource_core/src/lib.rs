@@ -19883,6 +19883,71 @@ pub fn entry() -> usize {
     }
 
     #[test]
+    fn narrows_retained_workspace_tokio_features_to_used_public_surface() {
+        let root = temp_output("workspace-tokio-feature-narrowing-source");
+        let output = temp_output("workspace-tokio-feature-narrowing-output");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            r#"[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.dependencies.tokio]
+version = "1"
+features = ["rt-multi-thread", "macros", "sync", "time", "net", "io-util"]
+"#,
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\ntokio = {{ workspace = true }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use tokio::sync::broadcast;
+
+#[opensourced]
+pub fn entry(sender: broadcast::Sender<u8>) -> usize {
+    let _ = sender.send(1);
+    1
+}
+"#,
+        );
+
+        generate(GenerateOptions {
+            workspace_root: root,
+            output_root: output.clone(),
+        })
+        .expect("reduction should succeed");
+
+        let manifest = fs::read_to_string(output.join("Cargo.toml"))
+            .expect("generated workspace manifest should exist")
+            .parse::<toml::Value>()
+            .expect("generated workspace manifest should parse");
+        let features = manifest
+            .get("workspace")
+            .and_then(|workspace| workspace.get("dependencies"))
+            .and_then(|dependencies| dependencies.get("tokio"))
+            .and_then(|tokio| tokio.get("features"))
+            .and_then(toml::Value::as_array)
+            .expect("generated tokio workspace dependency should keep a feature list")
+            .iter()
+            .map(|feature| {
+                feature
+                    .as_str()
+                    .expect("features should be strings")
+                    .to_string()
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(features, vec!["sync".to_string()]);
+    }
+
+    #[test]
     fn accepts_copyable_retained_workspace_patch_path_dependencies() {
         let root = temp_output("patch-path-dependency-hazard-source");
         let external = temp_output("patch-path-dependency-hazard-external");
