@@ -1263,6 +1263,12 @@ fn decision_log_semantic_usage_proof_evidence(
             summary.source_file_pruned_callables, summary.source_file_pruned_items
         ));
     }
+    if summary.rendered_absent_callables + summary.rendered_absent_items > 0 {
+        evidence.push(format!(
+            "rendered_absent_discharge callables={} items={} reason=rendered-symbol proof is proven and these prunable candidates are absent from generated source",
+            summary.rendered_absent_callables, summary.rendered_absent_items
+        ));
+    }
     if summary.structural_pruned_items > 0 {
         evidence.push(format!(
             "structural_pruned_discharge items={} reason=module declarations whose subtrees contain no retained symbols were not rendered",
@@ -6585,6 +6591,14 @@ fn decision_log_steps(
         serde_json::json!(semantic_usage_summary.source_file_pruned_items),
     );
     semantic_usage_metrics.insert(
+        "rendered_absent_callables".to_string(),
+        serde_json::json!(semantic_usage_summary.rendered_absent_callables),
+    );
+    semantic_usage_metrics.insert(
+        "rendered_absent_items".to_string(),
+        serde_json::json!(semantic_usage_summary.rendered_absent_items),
+    );
+    semantic_usage_metrics.insert(
         "structural_pruned_items".to_string(),
         serde_json::json!(semantic_usage_summary.structural_pruned_items),
     );
@@ -6616,7 +6630,7 @@ fn decision_log_steps(
         step: "semantic_usage_proof".to_string(),
         status: semantic_usage_proof.status.clone(),
         decision: "accept pruning only when retained-package candidates are proven unused or explicitly discharged".to_string(),
-        reason: "rust-analyzer reference results are the proof source; cfg-inactive, source-file-pruned, and structural-pruned buckets explain safe pruning when RA cannot map or query a candidate that is not rendered".to_string(),
+        reason: "rust-analyzer reference results and rendered-symbol absence are the proof sources; cfg-inactive, source-file-pruned, rendered-absent, and structural-pruned buckets explain safe pruning when RA cannot map or query a candidate that is not rendered".to_string(),
         metrics: semantic_usage_metrics,
         evidence: decision_log_semantic_usage_proof_evidence(report, 32),
     });
