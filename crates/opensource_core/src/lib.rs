@@ -23,8 +23,11 @@ use proc_macro2::TokenStream;
 use quote::ToTokens;
 use serde::Serialize;
 use syn::{
-    parse::Parser, punctuated::Punctuated, spanned::Spanned, visit::Visit, Attribute, Expr, Item,
-    Lit, Macro, Meta, UseTree,
+    parse::Parser,
+    punctuated::Punctuated,
+    spanned::Spanned,
+    visit::{self, Visit},
+    Attribute, Expr, Item, Lit, Macro, Meta, UseTree,
 };
 
 pub use analyzer::{
@@ -7318,6 +7321,7 @@ fn generated_support_package_syntactic_hazard_counts(
                 &BTreeSet::new(),
             ),
             proven_trait_object_surfaces: BTreeSet::new(),
+            allow_rust_default_variant_attribute: 0,
         };
         visitor.visit_file(&syntax);
         counts.add(visitor.counts.support_package_blocking_subset());
@@ -8986,6 +8990,7 @@ fn retained_module_boundary_hazard_counts(
                 owner: None,
             },
             proven_trait_object_surfaces: BTreeSet::new(),
+            allow_rust_default_variant_attribute: 0,
         };
         for attribute in &item_mod.attrs {
             visitor.visit_attribute(attribute);
@@ -9037,6 +9042,7 @@ fn syntactic_hazard_visitor_for_location<'project>(
             owner,
         },
         proven_trait_object_surfaces: BTreeSet::new(),
+        allow_rust_default_variant_attribute: 0,
     }
 }
 
@@ -9069,6 +9075,7 @@ fn syntactic_hazard_visitor_for_inline_location<'project>(
             owner: None,
         },
         proven_trait_object_surfaces: BTreeSet::new(),
+        allow_rust_default_variant_attribute: 0,
     }
 }
 
@@ -9097,6 +9104,7 @@ struct SyntacticHazardVisitor<'project> {
     macro_context: MacroInvocationContext,
     location: HazardLocation,
     proven_trait_object_surfaces: BTreeSet<String>,
+    allow_rust_default_variant_attribute: usize,
 }
 
 #[derive(Clone, Default)]
@@ -9222,6 +9230,23 @@ impl HazardLocation {
 }
 
 impl<'ast> Visit<'ast> for SyntacticHazardVisitor<'_> {
+    fn visit_item_enum(&mut self, item_enum: &'ast syn::ItemEnum) {
+        for attribute in &item_enum.attrs {
+            self.visit_attribute(attribute);
+        }
+        visit::visit_generics(self, &item_enum.generics);
+
+        let previous = self.allow_rust_default_variant_attribute;
+        if item_enum.attrs.iter().any(attribute_derives_default) {
+            self.allow_rust_default_variant_attribute =
+                self.allow_rust_default_variant_attribute.saturating_add(1);
+        }
+        for variant in &item_enum.variants {
+            self.visit_variant(variant);
+        }
+        self.allow_rust_default_variant_attribute = previous;
+    }
+
     fn visit_item_fn(&mut self, item_fn: &'ast syn::ItemFn) {
         self.with_function_dynamic_surface_proofs(&item_fn.sig.output, &item_fn.block, |visitor| {
             syn::visit::visit_item_fn(visitor, item_fn);
@@ -9274,7 +9299,10 @@ impl<'ast> Visit<'ast> for SyntacticHazardVisitor<'_> {
                 .custom_derive_details
                 .push(self.macro_surface_detail(attribute, format!("derive {derive_path}")));
         }
-        if attribute_requires_macro_expansion(attribute, &self.macro_context) {
+        if !(self.allow_rust_default_variant_attribute > 0
+            && modeled_rust_default_variant_attribute(attribute))
+            && attribute_requires_macro_expansion(attribute, &self.macro_context)
+        {
             let path = format_path(attribute.path());
             let blocked_idents = macro_attribute_blocked_idents(attribute);
             self.record_macro_surface(
@@ -11996,6 +12024,9 @@ fn attribute_requires_macro_expansion(
     if modeled_uniffi_attribute(attribute, context) {
         return false;
     }
+    if modeled_uniffi_helper_attribute(attribute, context) {
+        return false;
+    }
     if modeled_direct_serde_helper_attribute(attribute) {
         return false;
     }
@@ -12068,6 +12099,99 @@ fn classify_serde_helper_meta_key(
             *has_direct_helper = true;
         }
         "with" | "serde_as" => {
+            *has_module_helper = true;
+        }
+        _ => {}
+    }
+}
+
+fn attribute_derives_default(attribute: &Attribute) -> bool {
+    if !attribute.path().is_ident("derive") {
+        return false;
+    }
+    let Ok(list) = attribute.meta.require_list() else {
+        return false;
+    };
+    list.tokens
+        .to_string()
+        .split(|character: char| {
+            !(character.is_ascii_alphanumeric() || matches!(character, '_' | ':'))
+        })
+        .any(|token| token.rsplit("::").next() == Some("Default"))
+}
+
+fn modeled_rust_default_variant_attribute(attribute: &Attribute) -> bool {
+    attribute.path().is_ident("default") && matches!(attribute.meta, Meta::Path(_))
+}
+
+fn modeled_uniffi_helper_attribute(
+    attribute: &Attribute,
+    context: &MacroInvocationContext,
+) -> bool {
+    if !attribute.path().segments.first().is_some_and(|segment| {
+        context
+            .uniffi_macro_roots
+            .contains(&segment.ident.to_string())
+    }) {
+        return false;
+    }
+
+    let mut has_direct_helper = false;
+    let mut has_module_helper = false;
+    collect_uniffi_helper_attribute_shape(
+        &attribute.meta,
+        &mut has_direct_helper,
+        &mut has_module_helper,
+    );
+    has_direct_helper && !has_module_helper
+}
+
+fn collect_uniffi_helper_attribute_shape(
+    meta: &Meta,
+    has_direct_helper: &mut bool,
+    has_module_helper: &mut bool,
+) {
+    match meta {
+        Meta::Path(_) => {}
+        Meta::NameValue(name_value) => {
+            classify_uniffi_helper_meta_key(
+                &format_path(&name_value.path),
+                has_direct_helper,
+                has_module_helper,
+            );
+        }
+        Meta::List(list) => {
+            classify_uniffi_helper_meta_key(
+                &format_path(&list.path),
+                has_direct_helper,
+                has_module_helper,
+            );
+            let Ok(arguments) =
+                Punctuated::<Meta, syn::Token![,]>::parse_terminated.parse2(list.tokens.clone())
+            else {
+                return;
+            };
+            for nested in arguments {
+                collect_uniffi_helper_attribute_shape(
+                    &nested,
+                    has_direct_helper,
+                    has_module_helper,
+                );
+            }
+        }
+    }
+}
+
+fn classify_uniffi_helper_meta_key(
+    key: &str,
+    has_direct_helper: &mut bool,
+    has_module_helper: &mut bool,
+) {
+    match key {
+        "default" => {
+            *has_direct_helper = true;
+        }
+        "custom" | "with" => {
             *has_module_helper = true;
         }
         _ => {}
@@ -14326,6 +14450,67 @@ where
             .surfaces
             .iter()
             .all(|surface| { !(surface.kind == "helper_attribute" && surface.path == "serde") }));
+    }
+
+    #[test]
+    fn default_helper_attributes_are_modeled_without_macro_hazards() {
+        let root = temp_output("default-helper-attribute-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nuniffi = \"0.28\"\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> WireDto {
+    WireDto { value: None, mode: Mode::Auto }
+}
+
+#[derive(Debug, Clone, Default, uniffi::Enum)]
+pub enum Mode {
+    #[default]
+    Auto,
+    Manual,
+}
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct WireDto {
+    #[uniffi(default = None)]
+    pub value: Option<String>,
+    pub mode: Mode,
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("default-helper-attribute-output"),
+        })
+        .expect("generation should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "custom_attribute_macros"),
+            "rust #[default] and UniFFI default helpers should be statically modeled: {:?}",
+            report.production.hazards
+        );
+        assert!(report.macro_surfaces.surfaces.iter().all(|surface| {
+            !(surface.kind == "attribute_macro" && surface.path == "default")
+                && !(surface.kind == "helper_attribute" && surface.path == "uniffi")
+        }));
     }
 
     #[test]

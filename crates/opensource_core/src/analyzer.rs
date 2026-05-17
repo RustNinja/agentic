@@ -414,7 +414,7 @@ fn load_report_with_project(
 #[cfg(feature = "ra-hir")]
 mod rust_analyzer {
     use std::{
-        collections::{BTreeSet, HashMap, VecDeque},
+        collections::{BTreeMap, BTreeSet, HashMap, VecDeque},
         ffi::OsStr,
         fs,
         panic::{self, AssertUnwindSafe},
@@ -1893,6 +1893,11 @@ mod rust_analyzer {
         }
         if symbol.as_deref().is_some_and(|name| {
             unresolved_method_looks_like_common_external_receiver(name, &snippet)
+                || index.is_some_and(|index| {
+                    unresolved_method_receiver_has_project_callable_external_return(
+                        index, name, &snippet,
+                    )
+                })
         }) {
             return (
                 SemanticUnresolvedCategory::Benign,
@@ -2032,6 +2037,19 @@ mod rust_analyzer {
             .is_some_and(|receiver| receiver_is_common_external_value_chain(&receiver))
     }
 
+    fn unresolved_method_receiver_has_project_callable_external_return(
+        index: &ProjectSemanticIndex,
+        method_name: &str,
+        snippet: &str,
+    ) -> bool {
+        if !is_common_external_method_name(method_name) {
+            return false;
+        }
+        method_receiver_snippet(snippet, method_name).is_some_and(|receiver| {
+            receiver_is_common_external_value_chain_with_index(index, &receiver)
+        })
+    }
+
     fn method_receiver_snippet(snippet: &str, method_name: &str) -> Option<String> {
         let normalized = snippet.replace(" .", ".").replace(". ", ".");
         let needle = format!(".{method_name}");
@@ -2074,6 +2092,87 @@ mod rust_analyzer {
             };
             receiver = stripped;
         }
+    }
+
+    fn receiver_is_common_external_value_chain_with_index(
+        index: &ProjectSemanticIndex,
+        receiver: &str,
+    ) -> bool {
+        let normalized = receiver.replace(" .", ".").replace(". ", "");
+        let mut receiver = normalized.trim();
+        loop {
+            if receiver_is_common_external_value_chain(receiver)
+                || receiver_is_project_callable_call_with_external_return(index, receiver)
+            {
+                return true;
+            }
+            let Some((stripped, method)) = strip_trailing_common_method_receiver_call(receiver)
+            else {
+                return false;
+            };
+            if !is_common_external_method_name(method) {
+                return false;
+            }
+            receiver = stripped;
+        }
+    }
+
+    fn receiver_is_project_callable_call_with_external_return(
+        index: &ProjectSemanticIndex,
+        receiver: &str,
+    ) -> bool {
+        let receiver = receiver.trim();
+        if !receiver.ends_with(')') {
+            return false;
+        }
+        let Some(open_index) = matching_call_open_paren(receiver) else {
+            return false;
+        };
+        let callee = receiver[..open_index].trim();
+        if callee.is_empty() || callee.contains('.') {
+            return false;
+        }
+        let Some(name) = callee.rsplit("::").next() else {
+            return false;
+        };
+        index.callable_returns_common_external_type(name)
+    }
+
+    fn strip_trailing_common_method_receiver_call(receiver: &str) -> Option<(&str, &str)> {
+        let receiver = receiver.trim();
+        if !receiver.ends_with(')') {
+            return None;
+        }
+        let open_index = matching_call_open_paren(receiver)?;
+        let callee = receiver[..open_index].trim();
+        let dot_index = callee.rfind('.')?;
+        let method = callee[dot_index + 1..].trim();
+        if method.is_empty()
+            || !method
+                .chars()
+                .all(|character| character.is_ascii_alphanumeric() || character == '_')
+        {
+            return None;
+        }
+        let stripped = callee[..dot_index].trim();
+        (!stripped.is_empty()).then_some((stripped, method))
+    }
+
+    fn matching_call_open_paren(receiver: &str) -> Option<usize> {
+        let mut depth = 0usize;
+        for (index, character) in receiver.char_indices().rev() {
+            match character {
+                ')' => depth += 1,
+                '(' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        return Some(index);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
 
     fn strip_trailing_index_receiver(receiver: &str) -> Option<&str> {
@@ -2531,6 +2630,43 @@ mod rust_analyzer {
             .any(|token| token.rsplit("::").next() == Some("Default"))
     }
 
+    fn callable_return_type_name(output: &syn::ReturnType) -> Option<String> {
+        let syn::ReturnType::Type(_, ty) = output else {
+            return None;
+        };
+        type_path_last_segment(ty)
+    }
+
+    fn type_path_last_segment(ty: &syn::Type) -> Option<String> {
+        match ty {
+            syn::Type::Path(type_path) => type_path
+                .path
+                .segments
+                .last()
+                .map(|segment| segment.ident.to_string()),
+            syn::Type::Reference(reference) => type_path_last_segment(&reference.elem),
+            syn::Type::Group(group) => type_path_last_segment(&group.elem),
+            syn::Type::Paren(paren) => type_path_last_segment(&paren.elem),
+            _ => None,
+        }
+    }
+
+    fn common_external_return_type(type_name: &str) -> bool {
+        matches!(
+            type_name,
+            "BTreeMap"
+                | "BTreeSet"
+                | "HashMap"
+                | "HashSet"
+                | "OsStr"
+                | "OsString"
+                | "Path"
+                | "PathBuf"
+                | "String"
+                | "Vec"
+        )
+    }
+
     struct ProjectSemanticIndex {
         files: HashMap<PathBuf, IndexedSourceFile>,
         root_files: BTreeSet<PathBuf>,
@@ -2541,6 +2677,7 @@ mod rust_analyzer {
         external_crate_roots: BTreeSet<String>,
         method_names: BTreeSet<String>,
         derived_default_types: BTreeSet<String>,
+        callable_return_type_names: BTreeMap<String, BTreeSet<String>>,
     }
 
     impl ProjectSemanticIndex {
@@ -2551,6 +2688,7 @@ mod rust_analyzer {
             let mut external_crate_roots = BTreeSet::new();
             let mut method_names = BTreeSet::new();
             let mut derived_default_types = BTreeSet::new();
+            let mut callable_return_type_names = BTreeMap::<String, BTreeSet<String>>::new();
             let retention =
                 retained_scope(project, &SemanticReductionHints::default(), selected_roots);
             for package in project.workspace.packages.values() {
@@ -2574,6 +2712,12 @@ mod rust_analyzer {
                     root_files.insert(normalize_fs_path(&record.span.file));
                 }
                 local_idents.insert(callable_name(id).to_string());
+                if let Some(return_type) = callable_return_type_name(&record.item.sig.output) {
+                    callable_return_type_names
+                        .entry(callable_name(id).to_string())
+                        .or_default()
+                        .insert(return_type);
+                }
                 if let Some(file) = files.get_mut(&normalize_fs_path(&record.span.file)) {
                     file.callables.push(IndexedCallable {
                         id: id.clone(),
@@ -2589,6 +2733,12 @@ mod rust_analyzer {
                 }
                 local_idents.insert(callable_name(id).to_string());
                 method_names.insert(callable_name(id).to_string());
+                if let Some(return_type) = callable_return_type_name(&record.item.sig.output) {
+                    callable_return_type_names
+                        .entry(callable_name(id).to_string())
+                        .or_default()
+                        .insert(return_type);
+                }
                 if let CallableId::Method { type_path, .. } = id {
                     local_idents.extend(type_path.iter().cloned());
                 }
@@ -2633,6 +2783,7 @@ mod rust_analyzer {
                 external_crate_roots,
                 method_names,
                 derived_default_types,
+                callable_return_type_names,
             }
         }
 
@@ -2774,6 +2925,12 @@ mod rust_analyzer {
                 [type_name, method_name]
                     if method_name == "default" && self.derived_default_types.contains(type_name)
             )
+        }
+
+        fn callable_returns_common_external_type(&self, name: &str) -> bool {
+            self.callable_return_type_names
+                .get(name)
+                .is_some_and(|types| types.iter().any(|ty| common_external_return_type(ty)))
         }
 
         fn callable_at_vfs_offset(
@@ -3245,7 +3402,8 @@ mod rust_analyzer {
             rust_crate_root_ident, snippet_has_only_primitive_turbofish,
             source_has_external_imported_path, source_has_external_imported_symbol,
             unresolved_method_looks_like_common_external_receiver,
-            unresolved_method_receiver_has_external_anchor, ProjectSemanticIndex,
+            unresolved_method_receiver_has_external_anchor,
+            unresolved_method_receiver_has_project_callable_external_return, ProjectSemanticIndex,
         };
         use crate::analyzer::SemanticUnresolvedCategory;
         use ra_ap_syntax::AstNode;
@@ -3424,6 +3582,38 @@ use crate::local::fmt as local_fmt;
         }
 
         #[test]
+        fn project_callable_external_return_methods_are_benign_unresolved_candidates() {
+            let mut index = empty_project_semantic_index();
+            index
+                .callable_return_type_names
+                .entry("apps_root".to_string())
+                .or_default()
+                .insert("PathBuf".to_string());
+
+            assert!(
+                unresolved_method_receiver_has_project_callable_external_return(
+                    &index,
+                    "join",
+                    "apps_root(directory).join(INDEX_FILE)"
+                )
+            );
+            assert!(
+                unresolved_method_receiver_has_project_callable_external_return(
+                    &index,
+                    "join",
+                    "apps_root(directory).join(HTML_DIR).join(format!(\"{app_id}.html\"))"
+                )
+            );
+            assert!(
+                !unresolved_method_receiver_has_project_callable_external_return(
+                    &index,
+                    "create",
+                    "manager().create()"
+                )
+            );
+        }
+
+        #[test]
         fn derived_default_items_qualify_default_calls_as_benign() {
             let item: syn::Item = syn::parse_quote! {
                 #[derive(Debug, Clone, Default)]
@@ -3453,6 +3643,7 @@ use crate::local::fmt as local_fmt;
                 external_crate_roots: std::collections::BTreeSet::new(),
                 method_names: std::collections::BTreeSet::new(),
                 derived_default_types: std::collections::BTreeSet::new(),
+                callable_return_type_names: std::collections::BTreeMap::new(),
             }
         }
     }
