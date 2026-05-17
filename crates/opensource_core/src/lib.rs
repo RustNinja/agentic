@@ -11996,6 +11996,9 @@ fn attribute_requires_macro_expansion(
     if modeled_uniffi_attribute(attribute, context) {
         return false;
     }
+    if modeled_direct_serde_helper_attribute(attribute) {
+        return false;
+    }
 
     let Some(first) = attribute.path().segments.first() else {
         return false;
@@ -12004,6 +12007,71 @@ fn attribute_requires_macro_expansion(
         return !macro_attribute_blocked_idents(attribute).is_empty();
     }
     !attribute_path_is_builtin_or_inert(&first.ident.to_string())
+}
+
+fn modeled_direct_serde_helper_attribute(attribute: &Attribute) -> bool {
+    if !attribute.path().segments.first().is_some_and(|segment| {
+        let ident = segment.ident.to_string();
+        ident == "serde" || ident.ends_with("_serde")
+    }) {
+        return false;
+    }
+    let mut has_direct_helper = false;
+    let mut has_module_helper = false;
+    collect_serde_helper_attribute_shape(
+        &attribute.meta,
+        &mut has_direct_helper,
+        &mut has_module_helper,
+    );
+    has_direct_helper && !has_module_helper
+}
+
+fn collect_serde_helper_attribute_shape(
+    meta: &Meta,
+    has_direct_helper: &mut bool,
+    has_module_helper: &mut bool,
+) {
+    match meta {
+        Meta::Path(_) => {}
+        Meta::NameValue(name_value) => {
+            classify_serde_helper_meta_key(
+                &format_path(&name_value.path),
+                has_direct_helper,
+                has_module_helper,
+            );
+        }
+        Meta::List(list) => {
+            classify_serde_helper_meta_key(
+                &format_path(&list.path),
+                has_direct_helper,
+                has_module_helper,
+            );
+            let Ok(arguments) =
+                Punctuated::<Meta, syn::Token![,]>::parse_terminated.parse2(list.tokens.clone())
+            else {
+                return;
+            };
+            for nested in arguments {
+                collect_serde_helper_attribute_shape(&nested, has_direct_helper, has_module_helper);
+            }
+        }
+    }
+}
+
+fn classify_serde_helper_meta_key(
+    key: &str,
+    has_direct_helper: &mut bool,
+    has_module_helper: &mut bool,
+) {
+    match key {
+        "default" | "deserialize_with" | "serialize_with" | "skip_serializing_if" => {
+            *has_direct_helper = true;
+        }
+        "with" | "serde_as" => {
+            *has_module_helper = true;
+        }
+        _ => {}
+    }
 }
 
 fn modeled_uniffi_attribute(attribute: &Attribute, context: &MacroInvocationContext) -> bool {
@@ -14192,6 +14260,72 @@ pub fn unrelated_dead() -> u32 {
         let generated = fs::read_to_string(output.join("app/src/lib.rs")).unwrap();
         assert!(generated.contains("pub mod wire_helper"));
         assert!(!generated.contains("pub fn unrelated_dead"));
+    }
+
+    #[test]
+    fn direct_serde_helper_attributes_are_modeled_without_macro_hazards() {
+        let root = temp_output("direct-serde-helper-attribute-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nserde = {{ version = \"1\", features = [\"derive\"] }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> WireDto {
+    WireDto { duration: Some(5), optional: None }
+}
+
+#[derive(serde::Serialize)]
+pub struct WireDto {
+    #[serde(serialize_with = "serialize_optional_u64")]
+    pub duration: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub optional: Option<u32>,
+}
+
+pub fn serialize_optional_u64<S>(value: &Option<u64>, serializer: S) -> Result<S::Ok, S::Error>
+where
+    S: serde::Serializer,
+{
+    match value {
+        Some(value) => serializer.serialize_some(value),
+        None => serializer.serialize_none(),
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("direct-serde-helper-attribute-output"),
+        })
+        .expect("generation should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "custom_attribute_macros"),
+            "direct serde helper functions should be statically modeled without macro feedback hazards: {:?}",
+            report.production.hazards
+        );
+        assert!(report
+            .macro_surfaces
+            .surfaces
+            .iter()
+            .all(|surface| { !(surface.kind == "helper_attribute" && surface.path == "serde") }));
     }
 
     #[test]
@@ -18178,6 +18312,81 @@ impl LocalB {
                 .all(|callable| !callable.contains("LocalA::is_empty")
                     && !callable.contains("LocalB::is_empty")),
             "std-like adapter receiver chains should not retain unrelated same-name local methods: {:?}",
+            report.reachable
+        );
+    }
+
+    #[test]
+    fn common_indexed_collection_methods_do_not_trip_method_fallback_cap() {
+        let root = temp_output("common-indexed-collection-no-method-cap-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry(lines: Vec<&str>, index: usize, mut current: Vec<&str>, text: String) -> String {
+    current.clear();
+    let joined = lines[index..].join("\n");
+    let _ = text.as_bytes().get(0);
+    joined
+}
+
+pub struct LocalA;
+pub struct LocalB;
+
+impl LocalA {
+    pub fn clear(&self) {}
+    pub fn join(&self, _separator: &str) -> String {
+        String::new()
+    }
+}
+
+impl LocalB {
+    pub fn clear(&self) {}
+    pub fn join(&self, _separator: &str) -> String {
+        String::new()
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("common-indexed-collection-no-method-cap-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "syntactic_method_fallback_cap"),
+            "indexed common collection receivers should not report capped same-name local method risk: {:?}",
+            report.production.hazards
+        );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("LocalA::clear")
+                    && !callable.contains("LocalB::clear")
+                    && !callable.contains("LocalA::join")
+                    && !callable.contains("LocalB::join")),
+            "indexed common collection receivers should not retain unrelated same-name local methods: {:?}",
             report.reachable
         );
     }

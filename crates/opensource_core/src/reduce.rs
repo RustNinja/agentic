@@ -14804,8 +14804,10 @@ fn is_common_external_receiver_method_name(method_name: &str) -> bool {
         method_name,
         "as_ref"
             | "as_mut"
+            | "as_str"
             | "borrow"
             | "borrow_mut"
+            | "clear"
             | "clone"
             | "contains"
             | "get"
@@ -14837,11 +14839,36 @@ fn receiver_tokens_are_common_external_value_chain(receiver: &str) -> bool {
         if receiver_is_plain_value_or_field_tokens(receiver) {
             return true;
         }
+        if let Some(stripped) = strip_trailing_index_receiver_tokens(receiver) {
+            receiver = stripped;
+            continue;
+        }
         let Some(stripped) = strip_common_no_arg_receiver_adapter_tokens(receiver) else {
             return false;
         };
         receiver = stripped;
     }
+}
+
+fn strip_trailing_index_receiver_tokens(receiver: &str) -> Option<&str> {
+    if !receiver.ends_with(']') {
+        return None;
+    }
+    let mut depth = 0usize;
+    for (index, character) in receiver.char_indices().rev() {
+        match character {
+            ']' => depth += 1,
+            '[' => {
+                depth = depth.saturating_sub(1);
+                if depth == 0 {
+                    let stripped = &receiver[..index];
+                    return (!stripped.is_empty()).then_some(stripped);
+                }
+            }
+            _ => {}
+        }
+    }
+    None
 }
 
 fn receiver_is_plain_value_or_field_tokens(receiver: &str) -> bool {
@@ -14854,6 +14881,7 @@ fn receiver_is_plain_value_or_field_tokens(receiver: &str) -> bool {
 
 fn strip_common_no_arg_receiver_adapter_tokens(receiver: &str) -> Option<&str> {
     for adapter in [
+        "as_bytes",
         "as_deref",
         "as_mut",
         "as_ref",

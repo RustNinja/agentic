@@ -2065,6 +2065,10 @@ mod rust_analyzer {
             if receiver_is_plain_value_or_field_chain(receiver) {
                 return true;
             }
+            if let Some(stripped) = strip_trailing_index_receiver(receiver) {
+                receiver = stripped;
+                continue;
+            }
             let Some((stripped, _adapter)) = strip_common_no_arg_receiver_adapter(receiver) else {
                 return false;
             };
@@ -2072,8 +2076,31 @@ mod rust_analyzer {
         }
     }
 
+    fn strip_trailing_index_receiver(receiver: &str) -> Option<&str> {
+        let receiver = receiver.trim();
+        if !receiver.ends_with(']') {
+            return None;
+        }
+        let mut depth = 0usize;
+        for (index, character) in receiver.char_indices().rev() {
+            match character {
+                ']' => depth += 1,
+                '[' => {
+                    depth = depth.saturating_sub(1);
+                    if depth == 0 {
+                        let stripped = receiver[..index].trim();
+                        return (!stripped.is_empty()).then_some(stripped);
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
+    }
+
     fn strip_common_no_arg_receiver_adapter(receiver: &str) -> Option<(&str, &str)> {
         for adapter in [
+            "as_bytes",
             "as_deref",
             "as_mut",
             "as_ref",
@@ -2099,6 +2126,8 @@ mod rust_analyzer {
                 | "as_mut"
                 | "borrow"
                 | "borrow_mut"
+                | "as_str"
+                | "clear"
                 | "clone"
                 | "contains"
                 | "get"
@@ -3367,6 +3396,22 @@ use crate::local::fmt as local_fmt;
             assert!(unresolved_method_looks_like_common_external_receiver(
                 "is_empty",
                 "entry.name.as_deref().is_empty()"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "is_empty",
+                "line[marker.len_utf8() * length..].trim().is_empty()"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "get",
+                "s.as_bytes().get(m_idx + 1)"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "clear",
+                "current.clear()"
+            ));
+            assert!(unresolved_method_looks_like_common_external_receiver(
+                "as_str",
+                "code.as_str()"
             ));
             assert!(unresolved_method_looks_like_common_external_receiver(
                 "parent",
