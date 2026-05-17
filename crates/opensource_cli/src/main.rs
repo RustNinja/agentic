@@ -4696,10 +4696,20 @@ fn record_semantic_proof_gate(
     report: &GenerateReport,
 ) -> Option<String> {
     let semantic = report.analyzer.semantic.as_ref();
-    let status = semantic
-        .map(semantic_proof_status)
-        .unwrap_or_else(|| "not_available".to_string());
-    let reason = semantic_proof_reason(semantic);
+    let usage_proof = &report.usage.semantic_proof;
+    let usage_proof_complete = semantic_usage_proof_is_complete(usage_proof);
+    let status = if usage_proof_complete {
+        "complete_for_retained_packages".to_string()
+    } else {
+        semantic
+            .map(semantic_proof_status)
+            .unwrap_or_else(|| "not_available".to_string())
+    };
+    let reason = if usage_proof_complete {
+        semantic_usage_proof_complete_reason(usage_proof)
+    } else {
+        semantic_proof_reason(semantic)
+    };
     let blocks = options.production_preset && semantic_proof_status_blocks(&status);
     validation.gates.push(ValidationGateReport {
         name: "semantic_proof".to_string(),
@@ -4710,12 +4720,40 @@ fn record_semantic_proof_gate(
         },
         reason: reason.clone(),
         report_path: slice_report_path(options),
-        error_count: semantic.map(semantic_proof_error_count),
-        warning_count: semantic.map(semantic_proof_warning_count),
+        error_count: if usage_proof_complete {
+            Some(0)
+        } else {
+            semantic.map(semantic_proof_error_count)
+        },
+        warning_count: if usage_proof_complete {
+            Some(0)
+        } else {
+            semantic.map(semantic_proof_warning_count)
+        },
         semantic_warning_hazards: None,
         review_warning_hazards: None,
     });
     blocks.then_some(reason)
+}
+
+fn semantic_usage_proof_is_complete(proof: &opensource_core::SemanticUsageProofReport) -> bool {
+    proof.status == "complete_for_retained_packages"
+        && proof.summary.analyzer_available
+        && proof.summary.unproven_callables == 0
+        && proof.summary.unproven_items == 0
+}
+
+fn semantic_usage_proof_complete_reason(
+    proof: &opensource_core::SemanticUsageProofReport,
+) -> String {
+    let summary = &proof.summary;
+    format!(
+        "retained-package semantic usage proof is complete ({} callable(s) and {} item(s) proven; {} callable(s) and {} item(s) pruned with rendered-output absence proof)",
+        summary.proven_callables,
+        summary.proven_items,
+        summary.rendered_absent_callables,
+        summary.rendered_absent_items
+    )
 }
 
 fn semantic_proof_block_reason(semantic: Option<&SemanticReport>) -> Option<String> {
@@ -10127,6 +10165,7 @@ mod tests {
     use opensource_core::{
         AnalyzerMode, CallableId, CheckDiagnostic, CheckReport, CheckTarget,
         FeedbackWideningReport, GeneratedTargetReport, RootId, SemanticReport,
+        SemanticUsageProofReport, SemanticUsageProofSummary, UsageClassifiedItems,
     };
 
     use super::{
@@ -10140,11 +10179,34 @@ mod tests {
         record_final_production_readiness, record_production_readiness_gate,
         refresh_generated_lockfile_for_locked_validation, run_batch_roots,
         run_feedback_repair_loop, run_plain_check_gate, semantic_hazard_warning_count,
-        semantic_proof_block_reason, semantic_proof_status, should_run_deferred_warning_repair,
-        slice_report_path, try_widen_from_feedback, uncovered_validation_targets,
-        validation_report_path, write_feedback_diagnostics_event, write_report,
-        FeedbackWideningState, ValidationGateReport, ValidationReport,
+        semantic_proof_block_reason, semantic_proof_status, semantic_usage_proof_complete_reason,
+        semantic_usage_proof_is_complete, should_run_deferred_warning_repair, slice_report_path,
+        try_widen_from_feedback, uncovered_validation_targets, validation_report_path,
+        write_feedback_diagnostics_event, write_report, FeedbackWideningState,
+        ValidationGateReport, ValidationReport,
     };
+
+    #[test]
+    fn semantic_usage_proof_gate_prefers_completed_retained_package_proof() {
+        let proof = SemanticUsageProofReport {
+            status: "complete_for_retained_packages".to_string(),
+            summary: SemanticUsageProofSummary {
+                analyzer_available: true,
+                proven_callables: 3,
+                proven_items: 2,
+                rendered_absent_items: 1,
+                ..SemanticUsageProofSummary::default()
+            },
+            unproven: UsageClassifiedItems {
+                callables: Vec::new(),
+                items: Vec::new(),
+            },
+        };
+
+        assert!(semantic_usage_proof_is_complete(&proof));
+        assert!(semantic_usage_proof_complete_reason(&proof)
+            .contains("3 callable(s) and 2 item(s) proven"));
+    }
 
     #[test]
     fn semantic_proof_status_allows_selected_root_complete_with_workspace_budget_limits() {
