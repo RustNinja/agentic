@@ -7315,6 +7315,7 @@ fn generated_support_package_syntactic_hazard_counts(
                 &BTreeSet::new(),
                 &BTreeSet::new(),
                 &BTreeSet::new(),
+                &BTreeSet::new(),
             ),
             proven_trait_object_surfaces: BTreeSet::new(),
         };
@@ -9106,6 +9107,9 @@ struct MacroInvocationContext {
     serde_derive_imports: BTreeSet<String>,
     thiserror_derive_macro_roots: BTreeSet<String>,
     thiserror_derive_imports: BTreeSet<String>,
+    uniffi_macro_roots: BTreeSet<String>,
+    uniffi_derive_imports: BTreeSet<String>,
+    uniffi_attribute_imports: BTreeSet<String>,
     format_like_macro_roots: BTreeSet<String>,
     format_like_macro_imports: BTreeSet<String>,
     local_macro_definitions: BTreeSet<String>,
@@ -9121,6 +9125,7 @@ impl MacroInvocationContext {
         let async_trait_roots = async_trait_macro_roots_for_package(project, package);
         let serde_derive_roots = serde_derive_macro_roots_for_package(project, package);
         let thiserror_derive_roots = thiserror_derive_macro_roots_for_package(project, package);
+        let uniffi_roots = uniffi_macro_roots_for_package(project, package);
         match source {
             Some(source) => Self::for_syntax(
                 &source.syntax,
@@ -9128,12 +9133,14 @@ impl MacroInvocationContext {
                 &async_trait_roots,
                 &serde_derive_roots,
                 &thiserror_derive_roots,
+                &uniffi_roots,
             ),
             None => Self {
                 format_like_macro_roots: roots,
                 async_trait_macro_roots: async_trait_roots,
                 serde_derive_macro_roots: serde_derive_roots,
                 thiserror_derive_macro_roots: thiserror_derive_roots,
+                uniffi_macro_roots: uniffi_roots,
                 ..Self::default()
             },
         }
@@ -9145,6 +9152,7 @@ impl MacroInvocationContext {
         async_trait_roots: &BTreeSet<String>,
         serde_derive_roots: &BTreeSet<String>,
         thiserror_derive_roots: &BTreeSet<String>,
+        uniffi_roots: &BTreeSet<String>,
     ) -> Self {
         Self {
             async_trait_macro_roots: async_trait_roots.clone(),
@@ -9163,6 +9171,17 @@ impl MacroInvocationContext {
                 syntax,
                 thiserror_derive_roots,
                 &["Error"],
+            ),
+            uniffi_macro_roots: uniffi_roots.clone(),
+            uniffi_derive_imports: known_derive_imports_from_file(
+                syntax,
+                uniffi_roots,
+                &["Enum", "Error", "Object", "Record"],
+            ),
+            uniffi_attribute_imports: known_attribute_imports_from_file(
+                syntax,
+                uniffi_roots,
+                &["constructor", "export"],
             ),
             format_like_macro_roots: roots.clone(),
             format_like_macro_imports: format_like_macro_imports_from_file(syntax, roots),
@@ -11100,6 +11119,21 @@ fn thiserror_derive_macro_roots_for_package(project: &Project, package: &str) ->
     roots
 }
 
+fn uniffi_macro_roots_for_package(project: &Project, package: &str) -> BTreeSet<String> {
+    let mut roots = BTreeSet::new();
+    let Some(package) = project.workspace.packages.get(package) else {
+        return roots;
+    };
+    for dependency in &package.dependencies {
+        let package_name = rust_path_ident_for_package(&dependency.package);
+        let alias = rust_path_ident_for_package(&dependency.alias);
+        if package_name == "uniffi" || alias == "uniffi" {
+            roots.insert(alias);
+        }
+    }
+    roots
+}
+
 fn rust_path_ident_for_package(package: &str) -> String {
     package.replace('-', "_")
 }
@@ -11150,6 +11184,19 @@ fn known_derive_imports_from_file(
     imports
 }
 
+fn known_attribute_imports_from_file(
+    syntax: &syn::File,
+    roots: &BTreeSet<String>,
+    attribute_names: &[&str],
+) -> BTreeSet<String> {
+    let attribute_names = attribute_names.iter().copied().collect::<BTreeSet<_>>();
+    let mut imports = BTreeSet::new();
+    for item in &syntax.items {
+        collect_known_attribute_imports_from_item(item, roots, &attribute_names, &mut imports);
+    }
+    imports
+}
+
 fn collect_known_derive_imports_from_item(
     item: &Item,
     roots: &BTreeSet<String>,
@@ -11164,6 +11211,38 @@ fn collect_known_derive_imports_from_item(
             if let Some((_, items)) = &item_mod.content {
                 for item in items {
                     collect_known_derive_imports_from_item(item, roots, derive_names, imports);
+                }
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_known_attribute_imports_from_item(
+    item: &Item,
+    roots: &BTreeSet<String>,
+    attribute_names: &BTreeSet<&str>,
+    imports: &mut BTreeSet<String>,
+) {
+    match item {
+        Item::Use(item_use) => {
+            collect_known_attribute_imports(
+                &item_use.tree,
+                Vec::new(),
+                roots,
+                attribute_names,
+                imports,
+            );
+        }
+        Item::Mod(item_mod) => {
+            if let Some((_, items)) = &item_mod.content {
+                for item in items {
+                    collect_known_attribute_imports_from_item(
+                        item,
+                        roots,
+                        attribute_names,
+                        imports,
+                    );
                 }
             }
         }
@@ -11207,6 +11286,59 @@ fn collect_known_derive_imports(
         UseTree::Glob(_) => {
             if use_prefix_is_known_macro_root(&prefix, roots) {
                 imports.extend(derive_names.iter().map(|name| (*name).to_string()));
+            }
+        }
+    }
+}
+
+fn collect_known_attribute_imports(
+    tree: &UseTree,
+    mut prefix: Vec<String>,
+    roots: &BTreeSet<String>,
+    attribute_names: &BTreeSet<&str>,
+    imports: &mut BTreeSet<String>,
+) {
+    match tree {
+        UseTree::Path(path) => {
+            prefix.push(path.ident.to_string());
+            collect_known_attribute_imports(
+                path.tree.as_ref(),
+                prefix,
+                roots,
+                attribute_names,
+                imports,
+            );
+        }
+        UseTree::Name(name) => {
+            let local = name.ident.to_string();
+            if use_prefix_is_known_macro_root(&prefix, roots)
+                && attribute_names.contains(local.as_str())
+            {
+                imports.insert(local);
+            }
+        }
+        UseTree::Rename(rename) => {
+            let original = rename.ident.to_string();
+            if use_prefix_is_known_macro_root(&prefix, roots)
+                && attribute_names.contains(original.as_str())
+            {
+                imports.insert(rename.rename.to_string());
+            }
+        }
+        UseTree::Group(group) => {
+            for item in &group.items {
+                collect_known_attribute_imports(
+                    item,
+                    prefix.clone(),
+                    roots,
+                    attribute_names,
+                    imports,
+                );
+            }
+        }
+        UseTree::Glob(_) => {
+            if use_prefix_is_known_macro_root(&prefix, roots) {
+                imports.extend(attribute_names.iter().map(|name| (*name).to_string()));
             }
         }
     }
@@ -11796,6 +11928,7 @@ fn derive_path_is_builtin(path: &syn::Path) -> bool {
 fn modeled_known_derive_macro_path(path: &syn::Path, context: &MacroInvocationContext) -> bool {
     modeled_serde_derive_macro_path(path, context)
         || modeled_thiserror_derive_macro_path(path, context)
+        || modeled_uniffi_derive_macro_path(path, context)
 }
 
 fn modeled_serde_derive_macro_path(path: &syn::Path, context: &MacroInvocationContext) -> bool {
@@ -11834,6 +11967,22 @@ fn modeled_thiserror_derive_macro_path(path: &syn::Path, context: &MacroInvocati
     })
 }
 
+fn modeled_uniffi_derive_macro_path(path: &syn::Path, context: &MacroInvocationContext) -> bool {
+    let Some(last) = path.segments.last() else {
+        return false;
+    };
+    let name = last.ident.to_string();
+    if !matches!(name.as_str(), "Enum" | "Error" | "Object" | "Record") {
+        return false;
+    }
+    if path.segments.len() == 1 {
+        return context.uniffi_derive_imports.contains(&name);
+    }
+    path.segments
+        .first()
+        .is_some_and(|root| context.uniffi_macro_roots.contains(&root.ident.to_string()))
+}
+
 fn attribute_requires_macro_expansion(
     attribute: &Attribute,
     context: &MacroInvocationContext,
@@ -11844,6 +11993,9 @@ fn attribute_requires_macro_expansion(
     if modeled_async_trait_attribute(attribute, context) {
         return false;
     }
+    if modeled_uniffi_attribute(attribute, context) {
+        return false;
+    }
 
     let Some(first) = attribute.path().segments.first() else {
         return false;
@@ -11852,6 +12004,24 @@ fn attribute_requires_macro_expansion(
         return !macro_attribute_blocked_idents(attribute).is_empty();
     }
     !attribute_path_is_builtin_or_inert(&first.ident.to_string())
+}
+
+fn modeled_uniffi_attribute(attribute: &Attribute, context: &MacroInvocationContext) -> bool {
+    let path = attribute.path();
+    let Some(last) = path.segments.last() else {
+        return false;
+    };
+    let name = last.ident.to_string();
+    if !matches!(name.as_str(), "constructor" | "export") {
+        return false;
+    }
+    if path.segments.len() == 1 {
+        return context.uniffi_attribute_imports.contains(&name)
+            && !context.local_macro_definitions.contains(&name);
+    }
+    path.segments
+        .first()
+        .is_some_and(|root| context.uniffi_macro_roots.contains(&root.ident.to_string()))
 }
 
 fn modeled_async_trait_attribute(attribute: &Attribute, context: &MacroInvocationContext) -> bool {
@@ -17623,6 +17793,82 @@ pub enum AppError {
                     surface.path.as_str(),
                     "Serialize" | "Deserialize" | "thiserror::Error"
                 ))
+        }));
+    }
+
+    #[test]
+    fn dependency_proven_uniffi_macros_are_modeled() {
+        let root = temp_output("known-uniffi-macros-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\nuniffi = \"0.31\"\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[derive(uniffi::Object)]
+pub struct Bridge;
+
+#[derive(Debug, Clone, uniffi::Record)]
+pub struct AppRecord {
+    pub value: String,
+}
+
+#[derive(Debug, Clone, uniffi::Enum)]
+pub enum AppKind {
+    One,
+}
+
+#[derive(Debug, uniffi::Error)]
+pub enum AppError {
+    Bad,
+}
+
+#[uniffi::export]
+impl Bridge {
+    #[uniffi::constructor]
+    pub fn new() -> Self {
+        Self
+    }
+
+    #[opensourced]
+    pub fn entry(&self) -> Result<AppRecord, AppError> {
+        Ok(AppRecord {
+            value: "ok".to_string(),
+        })
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("known-uniffi-macros-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report.production.hazards.iter().all(|hazard| {
+                !matches!(
+                    hazard.code.as_str(),
+                    "custom_attribute_macros" | "custom_derive_macros"
+                )
+            }),
+            "dependency-proven UniFFI derives and attributes should not be unknown macro blockers: {:?}",
+            report.production.hazards
+        );
+        assert!(report.macro_surfaces.surfaces.iter().all(|surface| {
+            !(matches!(surface.kind.as_str(), "attribute_macro" | "derive_macro")
+                && surface.path.starts_with("uniffi"))
         }));
     }
 
