@@ -8267,7 +8267,7 @@ fn add_reduction_evidence_production_hazards(
         ));
     }
     if evidence.generic_unresolved_method_candidate_matches > 0 && !semantic_pruning_proven {
-        hazards.push(production_hazard(
+        hazards.push(production_hazard_with_details(
             "generic_method_name_fallbacks",
             "warning",
             format!(
@@ -8275,6 +8275,7 @@ fn add_reduction_evidence_production_hazards(
                 evidence.generic_unresolved_method_fallbacks,
                 evidence.generic_unresolved_method_candidate_matches
             ),
+            method_fallback_details(&evidence.generic_unresolved_method_details),
         ));
     }
     let capped_details = capped_method_fallback_details(project, reduced, evidence);
@@ -8322,6 +8323,34 @@ fn capped_method_fallback_details(
                 &detail.method_name,
             )
         })
+        .map(|detail| ProductionHazardDetail {
+            subject: format!(
+                "{}method={}; local_candidate_methods={}; receiver_candidates={}",
+                detail
+                    .owner
+                    .as_ref()
+                    .map(|owner| format!("{owner}: "))
+                    .unwrap_or_default(),
+                detail.method_name,
+                detail.candidate_count,
+                detail.receiver_candidate_count
+            ),
+            package: detail.package.clone(),
+            module_path: detail.module_path.as_ref().map(|path| path.join("::")),
+            file: detail.file.clone(),
+            start_line: detail.start_line,
+            cfg: None,
+            blocked_idents: vec![detail.method_name.clone()],
+            suggested_cargo_args: Vec::new(),
+        })
+        .collect()
+}
+
+fn method_fallback_details(
+    details: &[model::CappedMethodFallbackEvidence],
+) -> Vec<ProductionHazardDetail> {
+    details
+        .iter()
         .map(|detail| ProductionHazardDetail {
             subject: format!(
                 "{}method={}; local_candidate_methods={}; receiver_candidates={}",
@@ -18680,14 +18709,25 @@ impl LocalRunner {
         })
         .expect("reduction should succeed");
 
+        let generic_fallback_hazard = report
+            .production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "generic_method_name_fallbacks");
         assert!(
-            report
-                .production
-                .hazards
-                .iter()
-                .any(|hazard| hazard.code == "generic_method_name_fallbacks"),
+            generic_fallback_hazard.is_some(),
             "generic receiverless fallback debt should be reported: {:?}",
             report.production.hazards
+        );
+        let generic_fallback_hazard = generic_fallback_hazard.unwrap();
+        assert!(
+            generic_fallback_hazard.details.iter().any(|detail| {
+                detail.subject.contains("method=start")
+                    && detail.package.as_deref() == Some("app")
+                    && detail.start_line.is_some()
+            }),
+            "generic receiverless fallback should include structured method evidence: {:?}",
+            generic_fallback_hazard.details
         );
         assert!(
             report
@@ -18696,6 +18736,70 @@ impl LocalRunner {
                 .map(ToString::to_string)
                 .all(|callable| !callable.contains("LocalRunner::start")),
             "generic receiverless fallback should not retain unrelated local methods: {:?}",
+            report.reachable
+        );
+    }
+
+    #[test]
+    fn prelude_receiver_adapter_methods_do_not_trip_generic_fallback() {
+        let root = temp_output("prelude-receiver-adapter-no-generic-fallback-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry(input: String) -> usize {
+    if input.trim().is_empty() {
+        0
+    } else {
+        input.len()
+    }
+}
+
+pub struct LocalProbe;
+
+impl LocalProbe {
+    pub fn is_empty(&self) -> bool {
+        false
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("prelude-receiver-adapter-no-generic-fallback-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "generic_method_name_fallbacks"),
+            "prelude receiver adapter calls should not emit generic method fallback debt: {:?}",
+            report.production.hazards
+        );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("LocalProbe::is_empty")),
+            "prelude receiver adapter calls should not retain unrelated local methods: {:?}",
             report.reachable
         );
     }

@@ -4596,7 +4596,7 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
             visitor.add_fn_inputs(&record.item.sig.inputs);
             visitor.visit_block(&record.item.block);
             let mut dependencies = visitor.dependencies;
-            annotate_capped_method_fallback_evidence(
+            annotate_method_fallback_evidence(
                 &mut dependencies.evidence,
                 &record.package,
                 &record.module_path,
@@ -4648,7 +4648,7 @@ fn callable_dependencies(project: &Project, callable: &CallableId) -> Dependency
             visitor.add_fn_inputs(&record.item.sig.inputs);
             visitor.visit_block(&record.item.block);
             let mut dependencies = visitor.dependencies;
-            annotate_capped_method_fallback_evidence(
+            annotate_method_fallback_evidence(
                 &mut dependencies.evidence,
                 package,
                 &record.module_path,
@@ -4708,7 +4708,7 @@ fn item_dependencies(
     if item_has_opensourced_attr(&record.item) {
         dependencies.extend(item_root_macro_impl_dependencies(project, item));
     }
-    annotate_capped_method_fallback_evidence(
+    annotate_method_fallback_evidence(
         &mut dependencies.evidence,
         &record.package,
         &record.module_path,
@@ -5296,13 +5296,23 @@ fn dependency_set_from_semantic_dependencies(dependencies: &SemanticDependencies
     }
 }
 
-fn annotate_capped_method_fallback_evidence(
+fn annotate_method_fallback_evidence(
     evidence: &mut ReductionEvidence,
     package: &str,
     module_path: &[String],
     owner: String,
     span: &crate::model::SourceSpan,
 ) {
+    for detail in &mut evidence.generic_unresolved_method_details {
+        if detail.owner.is_some() {
+            continue;
+        }
+        detail.package = Some(package.to_string());
+        detail.module_path = Some(module_path.to_vec());
+        detail.owner = Some(owner.clone());
+        detail.file = Some(span.file.clone());
+        detail.start_line.get_or_insert(span.start_line);
+    }
     for detail in &mut evidence.capped_unresolved_method_details {
         if detail.owner.is_some() {
             continue;
@@ -7714,6 +7724,19 @@ impl<'a> DependencyVisitor<'a> {
             self.dependencies
                 .evidence
                 .generic_unresolved_method_candidate_matches += matches.len();
+            self.dependencies
+                .evidence
+                .generic_unresolved_method_details
+                .push(CappedMethodFallbackEvidence {
+                    method_name: method_name.to_string(),
+                    candidate_count: matches.len(),
+                    receiver_candidate_count: receiver_candidates.len(),
+                    package: None,
+                    module_path: None,
+                    owner: None,
+                    file: None,
+                    start_line,
+                });
             return;
         }
 
@@ -9988,6 +10011,18 @@ impl<'a> DependencyVisitor<'a> {
             _ => None,
         }
     }
+
+    fn common_external_method_call_with_receiver_candidates(
+        &self,
+        call: &ExprMethodCall,
+        receiver_candidates: &[TypeRef],
+    ) -> bool {
+        common_external_receiver_method_call(call)
+            && !receiver_candidates.is_empty()
+            && receiver_candidates
+                .iter()
+                .all(|candidate| self.resolver.type_ref_is_external(candidate))
+    }
 }
 
 struct UnresolvedExternalCallVisitor<'a, 'project> {
@@ -10510,6 +10545,15 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             resolved_methods.sort();
             resolved_methods.dedup();
             let has_resolved_method = !resolved_methods.is_empty();
+            let mut common_external_receivers = receiver_candidates.clone();
+            common_external_receivers.push(receiver.clone());
+            common_external_receivers.sort();
+            common_external_receivers.dedup();
+            let has_common_external_receiver = self
+                .common_external_method_call_with_receiver_candidates(
+                    call,
+                    &common_external_receivers,
+                );
             for callable in &resolved_methods {
                 self.add_method_dependency(callable);
             }
@@ -10529,23 +10573,28 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
                 self.add_closure_arg_dependencies(call, &resolved_methods);
             }
             if !has_resolved_method && !has_trait_bound_method && !has_default_trait_method {
-                self.add_unresolved_method_candidates(
-                    &method,
-                    &receiver_candidates,
-                    Some(call.method.span().start().line),
-                );
-                if method == "as_str" {
-                    self.add_unique_visible_method_name_dependency(&method);
-                }
-                self.add_trait_impls_for_type_named(&receiver, "Deref");
-                self.add_trait_impls_for_type_named(&receiver, "DerefMut");
-                self.add_extension_trait_dependencies_for_method(&receiver, &method);
-                self.add_deref_target_method_dependencies(&receiver, &method);
-                for candidate in &receiver_candidates {
-                    self.add_trait_impls_for_type_named(candidate, "Deref");
-                    self.add_trait_impls_for_type_named(candidate, "DerefMut");
-                    self.add_extension_trait_dependencies_for_method(candidate, &method);
-                    self.add_deref_target_method_dependencies(candidate, &method);
+                if has_common_external_receiver {
+                    // The method belongs to a std/prelude-like receiver chain. Avoid retaining
+                    // unrelated local methods that only share a common adapter name.
+                } else {
+                    self.add_unresolved_method_candidates(
+                        &method,
+                        &receiver_candidates,
+                        Some(call.method.span().start().line),
+                    );
+                    if method == "as_str" {
+                        self.add_unique_visible_method_name_dependency(&method);
+                    }
+                    self.add_trait_impls_for_type_named(&receiver, "Deref");
+                    self.add_trait_impls_for_type_named(&receiver, "DerefMut");
+                    self.add_extension_trait_dependencies_for_method(&receiver, &method);
+                    self.add_deref_target_method_dependencies(&receiver, &method);
+                    for candidate in &receiver_candidates {
+                        self.add_trait_impls_for_type_named(candidate, "Deref");
+                        self.add_trait_impls_for_type_named(candidate, "DerefMut");
+                        self.add_extension_trait_dependencies_for_method(candidate, &method);
+                        self.add_deref_target_method_dependencies(candidate, &method);
+                    }
                 }
                 self.add_external_method_arg_trait_impls(call);
             }
@@ -10588,6 +10637,11 @@ impl<'ast> Visit<'ast> for DependencyVisitor<'_> {
             if !resolved_methods.is_empty() {
                 self.add_peer_trait_impls_for_resolved_methods(&resolved_methods);
                 self.add_closure_arg_dependencies(call, &resolved_methods);
+            } else if self
+                .common_external_method_call_with_receiver_candidates(call, &receiver_candidates)
+            {
+                // The receiver candidates resolve to std/prelude-like types, so a common
+                // collection/string/path method should not pull in local same-name methods.
             } else {
                 self.add_unresolved_method_candidates(
                     &method,
@@ -13616,6 +13670,11 @@ impl Resolver<'_> {
         };
         matches!(first.as_str(), "std" | "core" | "alloc")
             || self.package_has_dependency_named(first)
+            || (self.resolver_item_for_type(type_ref).is_none()
+                && type_ref
+                    .type_path
+                    .last()
+                    .is_some_and(|name| is_known_prelude_receiver_type(name)))
             || !self
                 .project
                 .workspace
@@ -14739,9 +14798,27 @@ fn generic_name_only_method_fallback(method_name: &str) -> bool {
 fn common_external_receiver_method_call(call: &ExprMethodCall) -> bool {
     let method = call.method.to_string();
     is_common_external_receiver_method_name(&method)
-        && receiver_tokens_are_common_external_value_chain(
-            &call.receiver.to_token_stream().to_string(),
-        )
+        && receiver_expr_is_common_external_value_chain(&call.receiver)
+}
+
+fn receiver_expr_is_common_external_value_chain(expression: &Expr) -> bool {
+    match expression {
+        Expr::Path(path) => path.qself.is_none() && path.path.segments.len() == 1,
+        Expr::Field(field) => receiver_expr_is_common_external_value_chain(&field.base),
+        Expr::Index(index) => receiver_expr_is_common_external_value_chain(&index.expr),
+        Expr::MethodCall(call)
+            if call.args.is_empty()
+                && is_common_no_arg_receiver_adapter_name(&call.method.to_string()) =>
+        {
+            receiver_expr_is_common_external_value_chain(&call.receiver)
+        }
+        Expr::Reference(reference) => receiver_expr_is_common_external_value_chain(&reference.expr),
+        Expr::Paren(paren) => receiver_expr_is_common_external_value_chain(&paren.expr),
+        Expr::Group(group) => receiver_expr_is_common_external_value_chain(&group.expr),
+        _ => receiver_tokens_are_common_external_value_chain(
+            &expression.to_token_stream().to_string(),
+        ),
+    }
 }
 
 fn type_is_known_external_conversion_target(ty: &Type, resolver: &Resolver<'_>) -> bool {
@@ -14774,6 +14851,25 @@ fn is_known_prelude_conversion_target(type_name: &str) -> bool {
     matches!(
         type_name,
         "Box" | "Cow" | "OsString" | "PathBuf" | "String" | "Vec"
+    )
+}
+
+fn is_known_prelude_receiver_type(type_name: &str) -> bool {
+    matches!(
+        type_name,
+        "BTreeMap"
+            | "BTreeSet"
+            | "Box"
+            | "Cow"
+            | "HashMap"
+            | "HashSet"
+            | "OsStr"
+            | "OsString"
+            | "Path"
+            | "PathBuf"
+            | "String"
+            | "Vec"
+            | "str"
     )
 }
 
@@ -14898,6 +14994,22 @@ fn strip_common_no_arg_receiver_adapter_tokens(receiver: &str) -> Option<&str> {
         }
     }
     None
+}
+
+fn is_common_no_arg_receiver_adapter_name(adapter: &str) -> bool {
+    matches!(
+        adapter,
+        "as_bytes"
+            | "as_deref"
+            | "as_mut"
+            | "as_ref"
+            | "as_str"
+            | "borrow"
+            | "borrow_mut"
+            | "trim"
+            | "trim_end"
+            | "trim_start"
+    )
 }
 
 fn is_conversion_adapter_path(path: &Path, trait_name: &str, method_name: &str) -> bool {
