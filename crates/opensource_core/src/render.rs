@@ -6315,6 +6315,7 @@ fn transform_restricted_support_file(
     let retained_enum_variants = support_retained_enum_variants(syntax, live_set, &non_enum_usage);
     let enum_variant_type_usage =
         support_live_enum_variant_type_usage(syntax, live_set, &retained_enum_variants);
+    live_import_names.extend(support_live_import_names(&enum_variant_type_usage));
     for variant_name in support_live_enum_variant_names(syntax, live_set, &retained_enum_variants) {
         if !non_enum_usage.bare_idents.contains(&variant_name)
             && !non_enum_usage.path_roots.contains(&variant_name)
