@@ -53,6 +53,7 @@ struct RenderPlan {
     pruned_enum_payload_item_names: BTreeMap<String, BTreeSet<String>>,
     callable_idents_by_package: BTreeMap<String, BTreeSet<String>>,
     root_macro_impl_assoc_function_calls: RootMacroImplAssocFunctionCalls,
+    attribute_helper_callables: BTreeSet<CallableId>,
     mentions: ReachableMentionIndex,
     non_callable_mentions: ReachableMentionIndex,
     concrete_struct_field_needs: RefCell<BTreeMap<(ItemId, String), bool>>,
@@ -248,6 +249,7 @@ impl RenderPlan {
             pruned_enum_payload_item_names,
             callable_idents_by_package: callable_idents.by_package,
             root_macro_impl_assoc_function_calls: prepass.root_macro_impl_assoc_function_calls,
+            attribute_helper_callables: BTreeSet::new(),
             concrete_struct_field_needs: RefCell::new(BTreeMap::new()),
             callable_concrete_struct_fields: RefCell::new(BTreeMap::new()),
             package_struct_field_needs: RefCell::new(BTreeMap::new()),
@@ -279,11 +281,16 @@ impl RenderPlan {
             None,
             false,
         );
+        plan.attribute_helper_callables = attribute_helper_callables(project, reduced, &plan);
+        let attribute_helper_callables = plan.attribute_helper_callables.clone();
+        plan.mentions
+            .add_callables(project, &attribute_helper_callables);
         plan
     }
 
     fn callable_should_render(&self, callable: &CallableId) -> bool {
         self.usage.should_render_callable(callable)
+            || self.attribute_helper_callables.contains(callable)
     }
 
     fn item_should_render(&self, item: &ItemId) -> bool {
@@ -295,6 +302,7 @@ impl RenderPlan {
 
     fn can_remove_callable(&self, callable: &CallableId) -> bool {
         self.usage.can_remove_callable(callable)
+            && !self.attribute_helper_callables.contains(callable)
     }
 
     fn can_remove_item(&self, item: &ItemId) -> bool {
@@ -386,6 +394,12 @@ pub(crate) fn rendered_member_decision_index(
         .iter()
         .map(ToString::to_string)
         .collect();
+    decisions.retained_callables.extend(
+        render_plan
+            .attribute_helper_callables
+            .iter()
+            .map(ToString::to_string),
+    );
 
     for (item_id, record) in &project.items {
         if !reduced.packages.contains(&item_id.package) || !render_plan.item_should_render(item_id)
@@ -431,6 +445,31 @@ pub(crate) fn rendered_member_decision_index(
     }
 
     decisions
+}
+
+fn attribute_helper_callables(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+) -> BTreeSet<CallableId> {
+    project
+        .functions
+        .iter()
+        .filter_map(|(id, record)| {
+            if !reduced.packages.contains(id.package()) {
+                return None;
+            }
+            rendered_attrs_mention_unqualified_ident(
+                project,
+                reduced,
+                render_plan,
+                &record.package,
+                &record.module_path,
+                &record.item.sig.ident.to_string(),
+            )
+            .then(|| id.clone())
+        })
+        .collect()
 }
 
 fn record_struct_member_decisions(
@@ -987,6 +1026,27 @@ impl ReachableMentionIndex {
         }
 
         index
+    }
+
+    fn add_callables(&mut self, project: &Project, callables: &BTreeSet<CallableId>) {
+        for callable in callables {
+            let package = callable.package();
+            let mut idents = BTreeSet::new();
+            collect_callable_idents(callable, &mut idents);
+            let module_path = if let Some(record) = project.functions.get(callable) {
+                collect_token_idents(&record.item.to_token_stream(), &mut idents);
+                expand_alias_surface_idents(&record.aliases, &mut idents);
+                record.module_path.as_slice()
+            } else if let Some(record) = project.methods.get(callable) {
+                collect_token_idents(&record.item.to_token_stream(), &mut idents);
+                expand_alias_surface_idents(&record.aliases, &mut idents);
+                record.module_path.as_slice()
+            } else {
+                callable_module_path(callable)
+            };
+            self.add_package_idents(package, idents.iter().cloned());
+            self.add_module_idents(package, module_path, idents);
+        }
     }
 
     fn add_package_idents<I>(&mut self, package: &str, idents: I)
@@ -16108,16 +16168,7 @@ fn transform_items(
                     module_path: module_path.to_vec(),
                     name: function.sig.ident.to_string(),
                 };
-                (render_plan.callable_should_render(&id)
-                    || rendered_attrs_mention_unqualified_ident(
-                        project,
-                        reduced,
-                        render_plan,
-                        package,
-                        module_path,
-                        &function.sig.ident.to_string(),
-                    ))
-                .then(|| {
+                render_plan.callable_should_render(&id).then(|| {
                     let mut function = function.clone();
                     strip_opensourced_attrs(&mut function.attrs);
                     if !preserve_uniffi_surface {
