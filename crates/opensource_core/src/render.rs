@@ -16108,7 +16108,16 @@ fn transform_items(
                     module_path: module_path.to_vec(),
                     name: function.sig.ident.to_string(),
                 };
-                render_plan.callable_should_render(&id).then(|| {
+                (render_plan.callable_should_render(&id)
+                    || rendered_attrs_mention_unqualified_ident(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        &function.sig.ident.to_string(),
+                    ))
+                .then(|| {
                     let mut function = function.clone();
                     strip_opensourced_attrs(&mut function.attrs);
                     if !preserve_uniffi_surface {
@@ -29922,9 +29931,18 @@ fn impl_item_attrs_mention_unqualified_ident(item: &ImplItem, ident: &str) -> bo
 }
 
 fn attrs_mention_unqualified_ident(attrs: &[syn::Attribute], ident: &str) -> bool {
-    attrs
+    attrs.iter().any(|attr| {
+        token_stream_mentions_unqualified_ident(&attr.to_token_stream(), ident)
+            || attribute_helper_paths_mention_unqualified_ident(attr, ident)
+    })
+}
+
+fn attribute_helper_paths_mention_unqualified_ident(attr: &syn::Attribute, ident: &str) -> bool {
+    let mut paths = BTreeSet::new();
+    collect_support_attribute_helper_paths(&attr.meta, &mut paths);
+    paths
         .iter()
-        .any(|attr| token_stream_mentions_unqualified_ident(&attr.to_token_stream(), ident))
+        .any(|path| path.last().is_some_and(|segment| segment == ident))
 }
 
 fn resolve_use_target_path(

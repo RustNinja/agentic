@@ -210,11 +210,47 @@ name = "helper"
 version.workspace = true
 edition.workspace = true
 license.workspace = true
+
+[dependencies]
+serde = { path = "../serde" }
+"#,
+    );
+    write(
+        &fixture.join("serde/Cargo.toml"),
+        r#"
+[package]
+name = "serde"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+"#,
+    );
+    write(
+        &fixture.join("serde/src/lib.rs"),
+        r#"
+extern crate proc_macro;
+
+use proc_macro::TokenStream;
+
+#[proc_macro_derive(Serialize, attributes(serde))]
+pub fn serialize(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
+}
+
+#[proc_macro_derive(Deserialize, attributes(serde))]
+pub fn deserialize(_input: TokenStream) -> TokenStream {
+    TokenStream::new()
+}
 "#,
     );
     write(
         &fixture.join("helper/src/lib.rs"),
         r#"
+use serde::{Deserialize, Serialize};
+
 pub struct Inner {
     value: usize,
 }
@@ -245,9 +281,20 @@ struct DebugBox<T: std::fmt::Debug> {
     value: T,
 }
 
+#[derive(Serialize, Deserialize)]
 enum Status {
     Ready,
     Blocked,
+}
+
+fn default_status() -> Status {
+    Status::Ready
+}
+
+#[derive(Serialize, Deserialize)]
+struct Settings {
+    #[serde(default = "default_status")]
+    status: Status,
 }
 
 struct Adapter {
@@ -284,6 +331,7 @@ pub struct Outer {
     adapter: Adapter,
     kind: AdapterKind,
     status: Status,
+    settings: Settings,
 }
 
 impl Outer {
@@ -296,10 +344,15 @@ impl Outer {
             AdapterKind::Alpha => 1,
             AdapterKind::Beta => 2,
         };
-        match &self.status {
+        let status_score = match &self.status {
             Status::Ready => 1,
             Status::Blocked => 0,
-        }
+        };
+        let settings_score = match &self.settings.status {
+            Status::Ready => 1,
+            Status::Blocked => 0,
+        };
+        status_score + settings_score
     }
 }
 
@@ -340,6 +393,10 @@ pub fn touch_outer(outer: &Outer) -> usize {
     assert!(
         helper_source.contains("impl From<SurfaceInput> for Adapter"),
         "compiler-required external trait impl should keep its original header:\n{helper_source}"
+    );
+    assert!(
+        helper_source.contains("fn default_status"),
+        "attribute helper functions referenced through serde string paths must render:\n{helper_source}"
     );
 
     let status = Command::new("cargo")
