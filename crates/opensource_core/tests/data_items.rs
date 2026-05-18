@@ -351,6 +351,147 @@ pub fn touch_outer(outer: &Outer) -> usize {
     assert!(status.success(), "generated workspace should compile");
 }
 
+#[test]
+fn retains_external_extension_trait_imports_in_restricted_support_sources() {
+    let fixture = temp_dir("support-extension-trait-fixture");
+    let output = temp_dir("support-extension-trait-output");
+    let target = temp_dir("support-extension-trait-target");
+    let opensourced_path = opensourced_crate_path();
+
+    write(
+        &fixture.join("Cargo.toml"),
+        r#"
+[workspace]
+members = ["app"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+"#,
+    );
+    write(
+        &fixture.join("app/Cargo.toml"),
+        &format!(
+            r#"
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+opensourced = {{ path = "{}" }}
+support-ext-consumer = {{ path = "../support-ext-consumer" }}
+"#,
+            toml_path(&opensourced_path)
+        ),
+    );
+    write(
+        &fixture.join("app/src/lib.rs"),
+        r#"
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> usize {
+    support_ext_consumer::selected()
+}
+"#,
+    );
+    write(
+        &fixture.join("support-ext-consumer/Cargo.toml"),
+        r#"
+[package]
+name = "support-ext-consumer"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+support-ext-trait = { path = "../support-ext-trait" }
+"#,
+    );
+    write(
+        &fixture.join("support-ext-consumer/src/lib.rs"),
+        r#"
+use support_ext_trait::{StreamExt, StreamValue};
+
+pub fn selected() -> usize {
+    let mut value = StreamValue::new(13);
+    value.next_ext()
+}
+
+pub fn dead() -> usize {
+    0
+}
+"#,
+    );
+    write(
+        &fixture.join("support-ext-trait/Cargo.toml"),
+        r#"
+[package]
+name = "support-ext-trait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+"#,
+    );
+    write(
+        &fixture.join("support-ext-trait/src/lib.rs"),
+        r#"
+pub struct StreamValue {
+    value: usize,
+}
+
+impl StreamValue {
+    pub fn new(value: usize) -> Self {
+        Self { value }
+    }
+}
+
+pub trait StreamExt {
+    fn next_ext(&mut self) -> usize;
+}
+
+impl StreamExt for StreamValue {
+    fn next_ext(&mut self) -> usize {
+        self.value
+    }
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: fixture,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let support_source =
+        fs::read_to_string(output.join("support-ext-consumer/src/lib.rs")).unwrap();
+    assert!(
+        support_source.contains("StreamExt"),
+        "support extension trait import must survive method-call-only usage:\n{support_source}"
+    );
+    assert!(
+        support_source.contains("next_ext"),
+        "live extension-trait method call should remain:\n{support_source}"
+    );
+    assert!(
+        !support_source.contains("pub fn dead"),
+        "dead support functions should still be pruned:\n{support_source}"
+    );
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", target)
+        .status()
+        .expect("cargo check should start");
+    assert!(status.success(), "generated workspace should compile");
+}
+
 fn write_fixture(root: &Path) {
     let opensourced_path = opensourced_crate_path();
 

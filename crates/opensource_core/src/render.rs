@@ -6351,6 +6351,11 @@ fn transform_restricted_support_file(
                 live_set,
                 pruned_variant_payload_drop_names,
             ),
+            Item::Mod(item_mod) => {
+                support_child_module_file(ctx.modules, source_file, &item_mod.ident.to_string())
+                    .is_some_and(|child_file| live_by_file.contains_key(&child_file))
+                    .then(|| item.clone())
+            }
             Item::Use(item_use) if use_is_public_api_reexport(&item_use.vis) => {
                 let mut item_use = item_use.clone();
                 item_use.tree = prune_support_public_use_tree(
@@ -9066,6 +9071,12 @@ fn support_private_import_name_should_render(
             imported_name,
             live_method_names,
         )
+        || support_private_external_trait_import_has_live_method_scope(
+            ctx,
+            prefix,
+            imported_name,
+            live_method_names,
+        )
 }
 
 fn support_private_trait_import_has_live_method_scope(
@@ -9129,6 +9140,42 @@ fn support_private_trait_import_has_live_method_scope(
                 live_method_names.contains(&function.sig.ident.to_string())
             })
     })
+}
+
+fn support_private_external_trait_import_has_live_method_scope(
+    ctx: &SupportResolveContext<'_>,
+    prefix: &[String],
+    imported_name: &str,
+    live_method_names: &BTreeSet<String>,
+) -> bool {
+    if live_method_names.is_empty() {
+        return false;
+    }
+    let Some(first) = prefix.first() else {
+        return false;
+    };
+    if !ctx.dependency_roots.contains(first) && !matches!(first.as_str(), "std" | "core" | "alloc")
+    {
+        return false;
+    }
+
+    let mut target = prefix.to_vec();
+    target.push(imported_name.to_string());
+    if known_trait_method_idents(&target, imported_name).is_some_and(|methods| {
+        methods
+            .iter()
+            .any(|method| live_method_names.contains(*method))
+    }) {
+        return true;
+    }
+    if generic_trait_method_name_candidates(imported_name)
+        .iter()
+        .any(|method| live_method_names.contains(method))
+    {
+        return true;
+    }
+
+    imported_name.ends_with("Ext")
 }
 
 fn support_import_is_derive_only(prefix: &[String], imported_name: &str) -> bool {
@@ -29385,6 +29432,111 @@ fn known_trait_method_idents(target: &[String], leaf: &str) -> Option<&'static [
             "write_u32",
             "write_u64",
             "write_u128",
+        ]),
+        (Some("futures" | "futures_util"), "FutureExt") => Some(&[
+            "boxed",
+            "boxed_local",
+            "catch_unwind",
+            "compat",
+            "flatten",
+            "fuse",
+            "inspect",
+            "left_future",
+            "map",
+            "map_into",
+            "now_or_never",
+            "remote_handle",
+            "right_future",
+            "shared",
+            "then",
+            "unit_error",
+        ]),
+        (Some("futures" | "futures_util"), "SinkExt") => Some(&[
+            "buffer",
+            "close",
+            "fanout",
+            "feed",
+            "flush",
+            "send",
+            "send_all",
+            "sink_err_into",
+            "sink_map_err",
+            "with",
+            "with_flat_map",
+        ]),
+        (Some("futures" | "futures_util"), "StreamExt") => Some(&[
+            "all",
+            "any",
+            "boxed",
+            "boxed_local",
+            "buffer_unordered",
+            "chain",
+            "chunks",
+            "collect",
+            "concat",
+            "count",
+            "cycle",
+            "enumerate",
+            "filter",
+            "filter_map",
+            "find",
+            "flat_map",
+            "flatten",
+            "fold",
+            "for_each",
+            "fuse",
+            "inspect",
+            "into_future",
+            "left_stream",
+            "map",
+            "merge",
+            "next",
+            "peekable",
+            "ready_chunks",
+            "right_stream",
+            "scan",
+            "select_next_some",
+            "skip",
+            "skip_while",
+            "take",
+            "take_until",
+            "take_while",
+            "then",
+            "try_filter",
+            "unzip",
+            "zip",
+        ]),
+        (Some("futures" | "futures_util"), "TryFutureExt") => Some(&[
+            "and_then",
+            "err_into",
+            "flatten_sink",
+            "inspect_err",
+            "inspect_ok",
+            "map_err",
+            "map_ok",
+            "or_else",
+            "try_flatten",
+            "try_flatten_stream",
+            "unwrap_or_else",
+        ]),
+        (Some("futures" | "futures_util"), "TryStreamExt") => Some(&[
+            "and_then",
+            "err_into",
+            "inspect_err",
+            "inspect_ok",
+            "map_err",
+            "map_ok",
+            "or_else",
+            "try_collect",
+            "try_concat",
+            "try_filter",
+            "try_filter_map",
+            "try_flatten",
+            "try_for_each",
+            "try_fold",
+            "try_next",
+            "try_skip_while",
+            "try_take_while",
         ]),
         (Some("serde"), "Serialize") => Some(&["serialize"]),
         (Some("sha1"), "Digest") => Some(&["chain_update", "finalize", "reset", "update"]),
