@@ -15429,6 +15429,7 @@ fn transform_items(
     let mut transformed = Vec::new();
     for item in items {
         let item = match item {
+            _ if item_is_current_target_inactive(item) => None,
             _ if item_is_test(item) && !retain_test_items => None,
             Item::Use(item_use) if use_mentions_opensourced(&item_use.tree) => None,
             Item::Use(item_use)
@@ -15693,6 +15694,9 @@ fn transform_items(
                     }
                     let mut kept_impl_items = Vec::new();
                     for impl_item in &item_impl.items {
+                        if impl_item_is_current_target_inactive(impl_item) {
+                            continue;
+                        }
                         if retain_test_items
                             || impl_item_should_render_for_trait_surface(
                                 project,
@@ -15760,6 +15764,9 @@ fn transform_items(
                         .as_ref()
                         .is_some_and(|(trait_package, trait_path)| {
                             item_impl.items.iter().any(|impl_item| {
+                                if impl_item_is_current_target_inactive(impl_item) {
+                                    return false;
+                                }
                                 if !retain_test_items && impl_item_is_test(impl_item) {
                                     return false;
                                 }
@@ -15788,12 +15795,18 @@ fn transform_items(
                     && item_impl
                         .items
                         .iter()
-                        .filter(|impl_item| retain_test_items || !impl_item_is_test(impl_item))
+                        .filter(|impl_item| {
+                            !impl_item_is_current_target_inactive(impl_item)
+                                && (retain_test_items || !impl_item_is_test(impl_item))
+                        })
                         .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
                 let root_macro_impl_surface_is_required = render_plan
                     .root_item_impl_surface_should_render(reduced, package, &type_path, item_impl);
 
                 for impl_item in &item_impl.items {
+                    if impl_item_is_current_target_inactive(impl_item) {
+                        continue;
+                    }
                     if let ImplItem::Fn(method) = impl_item {
                         if attrs_are_test(&method.attrs) && !retain_test_items {
                             continue;
@@ -15853,7 +15866,8 @@ fn transform_items(
                 }
                 let kept_inherent_assoc_item = trait_path.is_none()
                     && item_impl.items.iter().any(|impl_item| {
-                        (retain_test_items || !impl_item_is_test(impl_item))
+                        !impl_item_is_current_target_inactive(impl_item)
+                            && (retain_test_items || !impl_item_is_test(impl_item))
                             && inherent_impl_assoc_item_should_render(
                                 project,
                                 reduced,
@@ -15877,6 +15891,9 @@ fn transform_items(
                     if trait_path.is_some() {
                         kept_impl_items.clear();
                         for impl_item in &item_impl.items {
+                            if impl_item_is_current_target_inactive(impl_item) {
+                                continue;
+                            }
                             if retain_test_items
                                 || impl_item_should_render_for_trait_surface(
                                     project,
@@ -15905,7 +15922,8 @@ fn transform_items(
                     } else if root_macro_impl_surface_is_required {
                         kept_impl_items.clear();
                         for impl_item in &item_impl.items {
-                            if (retain_test_items || !impl_item_is_test(impl_item))
+                            if !impl_item_is_current_target_inactive(impl_item)
+                                && (retain_test_items || !impl_item_is_test(impl_item))
                                 && root_macro_impl_item_should_render(item_impl, impl_item)
                             {
                                 let mut impl_item = impl_item.clone();
@@ -15919,7 +15937,8 @@ fn transform_items(
                         }
                     } else {
                         for impl_item in &item_impl.items {
-                            if !matches!(impl_item, ImplItem::Fn(_))
+                            if !impl_item_is_current_target_inactive(impl_item)
+                                && !matches!(impl_item, ImplItem::Fn(_))
                                 && (retain_test_items || !impl_item_is_test(impl_item))
                                 && (matches!(impl_item, ImplItem::Macro(_) | ImplItem::Verbatim(_))
                                     || inherent_impl_assoc_item_should_render(
@@ -17240,15 +17259,19 @@ fn item_attrs(item: &Item) -> Option<&[syn::Attribute]> {
     match item {
         Item::Const(item) => Some(&item.attrs),
         Item::Enum(item) => Some(&item.attrs),
+        Item::ExternCrate(item) => Some(&item.attrs),
         Item::Fn(item) => Some(&item.attrs),
+        Item::ForeignMod(item) => Some(&item.attrs),
         Item::Impl(item) => Some(&item.attrs),
         Item::Macro(item) => Some(&item.attrs),
         Item::Mod(item) => Some(&item.attrs),
         Item::Static(item) => Some(&item.attrs),
         Item::Struct(item) => Some(&item.attrs),
         Item::Trait(item) => Some(&item.attrs),
+        Item::TraitAlias(item) => Some(&item.attrs),
         Item::Type(item) => Some(&item.attrs),
         Item::Union(item) => Some(&item.attrs),
+        Item::Use(item) => Some(&item.attrs),
         _ => None,
     }
 }
@@ -25085,6 +25108,10 @@ fn item_is_test(item: &Item) -> bool {
     }
 }
 
+fn item_is_current_target_inactive(item: &Item) -> bool {
+    item_attrs(item).is_some_and(attrs_disable_current_target)
+}
+
 fn impl_item_is_test(item: &ImplItem) -> bool {
     match item {
         ImplItem::Const(item) => attrs_are_test(&item.attrs),
@@ -25094,6 +25121,111 @@ fn impl_item_is_test(item: &ImplItem) -> bool {
         ImplItem::Verbatim(_) => false,
         _ => false,
     }
+}
+
+fn impl_item_is_current_target_inactive(item: &ImplItem) -> bool {
+    let attrs = match item {
+        ImplItem::Const(item) => &item.attrs,
+        ImplItem::Fn(item) => &item.attrs,
+        ImplItem::Type(item) => &item.attrs,
+        ImplItem::Macro(item) => &item.attrs,
+        ImplItem::Verbatim(_) => return false,
+        _ => return false,
+    };
+    attrs_disable_current_target(attrs)
+}
+
+fn attrs_disable_current_target(attrs: &[syn::Attribute]) -> bool {
+    attrs
+        .iter()
+        .any(cfg_attribute_is_definitely_false_for_current_target)
+}
+
+fn cfg_attribute_is_definitely_false_for_current_target(attribute: &syn::Attribute) -> bool {
+    if !attribute.path().is_ident("cfg") {
+        return false;
+    }
+    attribute
+        .parse_args::<Meta>()
+        .ok()
+        .and_then(|meta| cfg_meta_eval_current_target(&meta))
+        .is_some_and(|active| !active)
+}
+
+fn cfg_meta_eval_current_target(meta: &Meta) -> Option<bool> {
+    match meta {
+        Meta::Path(path) => cfg_path_eval_current_target(path),
+        Meta::NameValue(name_value) => {
+            let key = name_value.path.segments.last()?.ident.to_string();
+            let value = expr_string_literal(&name_value.value)?;
+            cfg_key_value_eval_current_target(&key, &value)
+        }
+        Meta::List(list) => {
+            let key = list.path.segments.last()?.ident.to_string();
+            let args = Punctuated::<Meta, syn::Token![,]>::parse_terminated
+                .parse2(list.tokens.clone())
+                .ok()?
+                .into_iter()
+                .collect::<Vec<_>>();
+            match key.as_str() {
+                "all" => {
+                    let mut has_unknown = false;
+                    for arg in &args {
+                        match cfg_meta_eval_current_target(arg) {
+                            Some(true) => {}
+                            Some(false) => return Some(false),
+                            None => has_unknown = true,
+                        }
+                    }
+                    (!has_unknown).then_some(true)
+                }
+                "any" => {
+                    let mut has_unknown = false;
+                    for arg in &args {
+                        match cfg_meta_eval_current_target(arg) {
+                            Some(true) => return Some(true),
+                            Some(false) => {}
+                            None => has_unknown = true,
+                        }
+                    }
+                    (!has_unknown).then_some(false)
+                }
+                "not" if args.len() == 1 => cfg_meta_eval_current_target(&args[0]).map(|v| !v),
+                _ => None,
+            }
+        }
+    }
+}
+
+fn cfg_path_eval_current_target(path: &syn::Path) -> Option<bool> {
+    let key = path.segments.last()?.ident.to_string();
+    match key.as_str() {
+        "test" => Some(false),
+        "unix" => Some(cfg!(unix)),
+        "windows" => Some(cfg!(windows)),
+        "debug_assertions" => Some(cfg!(debug_assertions)),
+        _ => None,
+    }
+}
+
+fn cfg_key_value_eval_current_target(key: &str, value: &str) -> Option<bool> {
+    match key {
+        "target_arch" => Some(value == std::env::consts::ARCH),
+        "target_family" => Some(value == std::env::consts::FAMILY),
+        "target_os" => Some(value == std::env::consts::OS),
+        "target_pointer_width" => Some(value == (std::mem::size_of::<usize>() * 8).to_string()),
+        _ => None,
+    }
+}
+
+fn expr_string_literal(expr: &Expr) -> Option<String> {
+    let Expr::Lit(expr_lit) = expr else {
+        return None;
+    };
+    let Lit::Str(lit) = &expr_lit.lit else {
+        return None;
+    };
+    Some(lit.value())
 }
 
 fn trait_item_is_test(item: &TraitItem) -> bool {

@@ -237,6 +237,9 @@ impl Parser {
         aliases: &HashMap<String, Vec<String>>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         for item in items {
+            if item_attrs_exclude_current_target(item) {
+                continue;
+            }
             match item {
                 Item::Fn(function) => {
                     let id = CallableId::Free {
@@ -362,6 +365,9 @@ impl Parser {
             .unwrap_or_default();
 
         for impl_item in &item_impl.items {
+            if impl_item_attrs_exclude_current_target(impl_item) {
+                continue;
+            }
             if let ImplItem::Fn(method) = impl_item {
                 let id = CallableId::Method {
                     package: package.to_string(),
@@ -399,6 +405,9 @@ impl Parser {
         item_mod: &ItemMod,
     ) -> Result<(), Box<dyn std::error::Error>> {
         if item_mod.content.is_some() {
+            return Ok(());
+        }
+        if module_attrs_exclude_current_target(&item_mod.attrs) {
             return Ok(());
         }
 
@@ -915,6 +924,41 @@ fn module_attrs_exclude_current_target(attrs: &[Attribute]) -> bool {
         .any(|attr| is_cfg_test_attr(attr) || cfg_attr_is_definitely_false_for_current_target(attr))
 }
 
+fn item_attrs_exclude_current_target(item: &Item) -> bool {
+    let attrs = match item {
+        Item::Const(item) => &item.attrs,
+        Item::Enum(item) => &item.attrs,
+        Item::ExternCrate(item) => &item.attrs,
+        Item::Fn(item) => &item.attrs,
+        Item::ForeignMod(item) => &item.attrs,
+        Item::Impl(item) => &item.attrs,
+        Item::Macro(item) => &item.attrs,
+        Item::Mod(item) => &item.attrs,
+        Item::Static(item) => &item.attrs,
+        Item::Struct(item) => &item.attrs,
+        Item::Trait(item) => &item.attrs,
+        Item::TraitAlias(item) => &item.attrs,
+        Item::Type(item) => &item.attrs,
+        Item::Union(item) => &item.attrs,
+        Item::Use(item) => &item.attrs,
+        Item::Verbatim(_) => return false,
+        _ => return false,
+    };
+    module_attrs_exclude_current_target(attrs)
+}
+
+fn impl_item_attrs_exclude_current_target(item: &ImplItem) -> bool {
+    let attrs = match item {
+        ImplItem::Const(item) => &item.attrs,
+        ImplItem::Fn(item) => &item.attrs,
+        ImplItem::Type(item) => &item.attrs,
+        ImplItem::Macro(item) => &item.attrs,
+        ImplItem::Verbatim(_) => return false,
+        _ => return false,
+    };
+    module_attrs_exclude_current_target(attrs)
+}
+
 fn cfg_attr_is_definitely_false_for_current_target(attr: &Attribute) -> bool {
     if !attr.path().is_ident("cfg") {
         return false;
@@ -1058,6 +1102,103 @@ mod tests {
     }
 
     #[test]
+    fn parse_skips_existing_module_behind_inactive_target_cfg() {
+        let root = temp_workspace("parse-existing-inactive-cfg-module");
+        let inactive_os = inactive_target_os();
+        fs::create_dir_all(root.join("app/src")).expect("fixture dirs should create");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .expect("workspace manifest should write");
+        fs::write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("package manifest should write");
+        fs::write(
+            root.join("app/src/lib.rs"),
+            format!(
+                "#[cfg(target_os = \"{inactive_os}\")]\nmod inactive;\n\npub fn selected() -> usize {{ 1 }}\n"
+            ),
+        )
+        .expect("lib source should write");
+        fs::write(
+            root.join("app/src/inactive.rs"),
+            "pub fn should_not_parse() -> usize { missing_dependency::value() }\n",
+        )
+        .expect("inactive module source should write");
+
+        let workspace = crate::manifest::load_workspace_without_marker_targets(&root)
+            .expect("workspace should load");
+        let project =
+            parse_workspace(workspace).expect("inactive existing module should be skipped");
+        assert!(project
+            .functions
+            .keys()
+            .any(|id| id.to_string() == "app::selected"));
+        assert!(!project
+            .functions
+            .keys()
+            .any(|id| id.to_string().contains("should_not_parse")));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
+    fn parse_skips_inline_items_behind_inactive_target_cfg() {
+        let root = temp_workspace("parse-inline-inactive-cfg-items");
+        let inactive_os = inactive_target_os();
+        fs::create_dir_all(root.join("app/src")).expect("fixture dirs should create");
+        fs::write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        )
+        .expect("workspace manifest should write");
+        fs::write(
+            root.join("app/Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[lib]\npath = \"src/lib.rs\"\n",
+        )
+        .expect("package manifest should write");
+        fs::write(
+            root.join("app/src/lib.rs"),
+            format!(
+                r#"#[cfg(target_os = "{inactive_os}")]
+pub fn inactive_free() -> usize {{ 1 }}
+
+pub struct Active;
+
+impl Active {{
+    #[cfg(target_os = "{inactive_os}")]
+    pub fn inactive_method(&self) -> usize {{ 1 }}
+
+    pub fn active_method(&self) -> usize {{ 2 }}
+}}
+"#
+            ),
+        )
+        .expect("lib source should write");
+
+        let workspace = crate::manifest::load_workspace_without_marker_targets(&root)
+            .expect("workspace should load");
+        let project = parse_workspace(workspace).expect("inactive inline items should be skipped");
+        assert!(!project
+            .functions
+            .keys()
+            .any(|id| id.to_string() == "app::inactive_free"));
+        assert!(project
+            .methods
+            .keys()
+            .any(|id| id.to_string() == "app::Active::active_method"));
+        assert!(!project
+            .methods
+            .keys()
+            .any(|id| id.to_string() == "app::Active::inactive_method"));
+
+        fs::remove_dir_all(root).ok();
+    }
+
+    #[test]
     fn explicit_root_parse_ignores_unrelated_broken_workspace_packages() {
         let root = temp_workspace("parse-root-package-closure");
         fs::create_dir_all(root.join("app/src")).expect("app dirs should create");
@@ -1124,5 +1265,12 @@ mod tests {
             .expect("system time should be after unix epoch")
             .as_nanos();
         std::env::temp_dir().join(format!("slicer-{label}-{}-{nanos}", std::process::id()))
+    }
+
+    fn inactive_target_os() -> &'static str {
+        match std::env::consts::OS {
+            "windows" => "macos",
+            _ => "windows",
+        }
     }
 }
