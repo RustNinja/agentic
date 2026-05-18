@@ -37,6 +37,8 @@ type RootMacroImplAssocFunctionCalls = BTreeSet<(String, String, String)>;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct RenderedMemberDecisionIndex {
+    pub(crate) retained_callables: BTreeSet<String>,
+    pub(crate) retained_items: BTreeSet<String>,
     pub(crate) retained: BTreeSet<String>,
     pub(crate) blocked_by_unknown: BTreeSet<String>,
     pub(crate) prunable: BTreeSet<String>,
@@ -64,6 +66,7 @@ struct RenderPlan {
     import_scope_uses: RefCell<BTreeMap<ImportScopeMentionKey, bool>>,
     callable_import_idents: RefCell<BTreeMap<CallableId, BTreeSet<String>>>,
     rendered_non_callable_import_idents: RefCell<BTreeMap<(String, Vec<String>), BTreeSet<String>>>,
+    type_surface_dependency_items: BTreeSet<ItemId>,
     retained_enum_variants: BTreeMap<String, BTreeSet<String>>,
 }
 
@@ -211,6 +214,13 @@ impl RenderPlan {
                 break;
             }
         }
+        let type_surface_dependency_items = retain_type_surface_dependency_items(
+            project,
+            reduced,
+            &prepass,
+            &mut reachable_items,
+            &mut rendered_item_idents,
+        );
 
         let mentions = ReachableMentionIndex::build(
             project,
@@ -248,6 +258,7 @@ impl RenderPlan {
             import_scope_uses: RefCell::new(BTreeMap::new()),
             callable_import_idents: RefCell::new(BTreeMap::new()),
             rendered_non_callable_import_idents: RefCell::new(BTreeMap::new()),
+            type_surface_dependency_items,
             retained_enum_variants,
         };
         plan.mentions = ReachableMentionIndex::build(
@@ -287,10 +298,16 @@ impl RenderPlan {
     }
 
     fn can_remove_item(&self, item: &ItemId) -> bool {
+        if self.type_surface_dependency_items.contains(item) {
+            return false;
+        }
         self.usage.can_remove_item(item) || !self.item_is_retained_or_blocked(item)
     }
 
     fn item_is_retained_or_blocked(&self, item: &ItemId) -> bool {
+        if self.type_surface_dependency_items.contains(item) {
+            return true;
+        }
         if self.usage.can_remove_item(item) {
             return false;
         }
@@ -364,6 +381,11 @@ pub(crate) fn rendered_member_decision_index(
 ) -> RenderedMemberDecisionIndex {
     let render_plan = RenderPlan::build(project, reduced, usage);
     let mut decisions = RenderedMemberDecisionIndex::default();
+    decisions.retained_items = render_plan
+        .type_surface_dependency_items
+        .iter()
+        .map(ToString::to_string)
+        .collect();
 
     for (item_id, record) in &project.items {
         if !reduced.packages.contains(&item_id.package) || !render_plan.item_should_render(item_id)
@@ -625,6 +647,13 @@ fn record_impl_assoc_item_decisions(
                     trait_item_for_package_path(project, trait_package, trait_path)
                 })
         });
+    let external_trait_impl_type_surface_is_required = external_trait_impl_type_surface_is_required(
+        render_plan,
+        package,
+        &type_path,
+        trait_path.as_deref(),
+        trait_item.as_ref(),
+    );
     let impl_surface_renders = impl_surface_should_render(
         project,
         reduced,
@@ -639,7 +668,7 @@ fn record_impl_assoc_item_decisions(
         trait_input_type_paths.as_slice(),
         trait_item.as_ref(),
         item_impl,
-    );
+    ) || external_trait_impl_type_surface_is_required;
     let parent_is_blocked =
         path_item_is_blocked_by_unknown(usage, package, &type_path, type_surface_item_kinds())
             || trait_path.as_ref().is_some_and(|trait_path| {
@@ -647,6 +676,54 @@ fn record_impl_assoc_item_decisions(
             });
 
     for impl_item in &item_impl.items {
+        if let ImplItem::Fn(method) = impl_item {
+            let id = CallableId::Method {
+                package: package.to_string(),
+                type_path: type_path.clone(),
+                trait_path: trait_path.clone(),
+                trait_input_type_paths: trait_input_type_paths.clone(),
+                method: method.sig.ident.to_string(),
+            };
+            let should_remain = impl_surface_renders
+                && if trait_path.is_some() {
+                    external_trait_impl_type_surface_is_required
+                        || impl_item_should_render_for_trait_surface(
+                            project,
+                            reduced,
+                            package,
+                            &type_path,
+                            trait_path.as_deref(),
+                            resolved_trait.as_ref().map(|(trait_package, trait_path)| {
+                                (trait_package.as_str(), trait_path.as_slice())
+                            }),
+                            trait_input_type_paths.as_slice(),
+                            trait_item.as_ref(),
+                            item_impl,
+                            impl_item,
+                        )
+                } else {
+                    render_plan.callable_should_render(&id)
+                        || render_plan.retained_impl_surfaces_call_inherent_associated_function(
+                            package,
+                            &type_path,
+                            &method.sig.ident.to_string(),
+                        )
+                        || inherent_impl_method_should_render(
+                            project,
+                            reduced,
+                            render_plan,
+                            package,
+                            module_path,
+                            &type_path,
+                            item_impl,
+                            &method.sig.ident.to_string(),
+                        )
+                };
+            if should_remain {
+                decisions.retained_callables.insert(id.to_string());
+            }
+            continue;
+        }
         let Some((name, kind)) = impl_item_assoc_name_kind(impl_item) else {
             continue;
         };
@@ -1066,6 +1143,503 @@ fn insert_render_plan_item(
         item,
         Some(prepass),
     ));
+}
+
+fn retain_type_surface_dependency_items(
+    project: &Project,
+    reduced: &ReducedProject,
+    prepass: &RenderPrepass,
+    reachable_items: &mut BTreeSet<ItemId>,
+    rendered_item_idents: &mut BTreeSet<String>,
+) -> BTreeSet<ItemId> {
+    let mut type_surface_dependency_items = BTreeSet::new();
+    loop {
+        let mut added = false;
+        let current_items = reachable_items.iter().cloned().collect::<Vec<_>>();
+        let mut dependencies = BTreeSet::new();
+        for item in current_items {
+            dependencies.extend(type_surface_dependency_items_for_item(project, &item));
+        }
+        dependencies.extend(external_trait_impl_header_type_surface_dependency_items(
+            project,
+            reachable_items,
+        ));
+        for dependency in dependencies {
+            type_surface_dependency_items.insert(dependency.clone());
+            if reachable_items.contains(&dependency) {
+                continue;
+            }
+            insert_render_plan_item(
+                project,
+                reduced,
+                prepass,
+                reachable_items,
+                rendered_item_idents,
+                &dependency,
+            );
+            added = true;
+        }
+        if !added {
+            break;
+        }
+    }
+    type_surface_dependency_items
+}
+
+fn external_trait_impl_header_type_surface_dependency_items(
+    project: &Project,
+    rendered_items: &BTreeSet<ItemId>,
+) -> BTreeSet<ItemId> {
+    let mut dependencies = BTreeSet::new();
+    let packages = rendered_items
+        .iter()
+        .map(|item| item.package.clone())
+        .collect::<BTreeSet<_>>();
+    for package in packages {
+        for module_path in project_module_paths(project, &package) {
+            let Some(items) = module_items_for_path(project, &package, &module_path) else {
+                continue;
+            };
+            let aliases = project
+                .module_aliases
+                .get(&(package.clone(), module_path.clone()))
+                .cloned()
+                .unwrap_or_default();
+            for item in items {
+                let Item::Impl(item_impl) = item else {
+                    continue;
+                };
+                if !external_trait_impl_header_depends_on_rendered_type(
+                    project,
+                    rendered_items,
+                    &package,
+                    &module_path,
+                    item_impl,
+                    &aliases,
+                ) {
+                    continue;
+                }
+                collect_impl_header_type_surface_dependency_items(
+                    project,
+                    &package,
+                    &module_path,
+                    &aliases,
+                    item_impl,
+                    &mut dependencies,
+                );
+            }
+        }
+    }
+    dependencies
+}
+
+fn external_trait_impl_header_depends_on_rendered_type(
+    project: &Project,
+    rendered_items: &BTreeSet<ItemId>,
+    package: &str,
+    module_path: &[String],
+    item_impl: &syn::ItemImpl,
+    aliases: &HashMap<String, Vec<String>>,
+) -> bool {
+    let Some((_, trait_path, _)) = &item_impl.trait_ else {
+        return false;
+    };
+    let Some(type_path) =
+        resolved_local_type_path(project, package, module_path, &item_impl.self_ty, aliases)
+    else {
+        return false;
+    };
+    if !path_item_is_rendered(
+        rendered_items,
+        package,
+        &type_path,
+        type_surface_item_kinds(),
+    ) {
+        return false;
+    }
+
+    let trait_path = normalized_path(module_path, trait_path, aliases);
+    let resolved_trait = item_impl.trait_.as_ref().and_then(|(_, path, _)| {
+        resolve_trait_path_for_impl(project, package, module_path, path, aliases)
+    });
+    let trait_item = trait_item_for_path(project, package, &trait_path).or_else(|| {
+        resolved_trait
+            .as_ref()
+            .and_then(|(trait_package, trait_path)| {
+                trait_item_for_package_path(project, trait_package, trait_path)
+            })
+    });
+    trait_item.is_none()
+}
+
+fn path_item_is_rendered(
+    rendered_items: &BTreeSet<ItemId>,
+    package: &str,
+    path: &[String],
+    kinds: &[ItemKind],
+) -> bool {
+    let Some((name, module_path)) = path.split_last() else {
+        return false;
+    };
+    kinds.iter().any(|kind| {
+        rendered_items.contains(&ItemId {
+            package: package.to_string(),
+            module_path: module_path.to_vec(),
+            name: name.clone(),
+            kind: *kind,
+        })
+    })
+}
+
+fn collect_impl_header_type_surface_dependency_items(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    item_impl: &syn::ItemImpl,
+    items: &mut BTreeSet<ItemId>,
+) {
+    for param in &item_impl.generics.params {
+        match param {
+            syn::GenericParam::Type(param) => {
+                for bound in &param.bounds {
+                    collect_type_param_bound_surface_dependency_items(
+                        project,
+                        package,
+                        module_path,
+                        aliases,
+                        bound,
+                        items,
+                    );
+                }
+            }
+            syn::GenericParam::Lifetime(_) => {}
+            syn::GenericParam::Const(param) => {
+                collect_type_surface_dependency_items(
+                    project,
+                    package,
+                    module_path,
+                    aliases,
+                    &param.ty,
+                    items,
+                );
+            }
+        }
+    }
+    if let Some(where_clause) = &item_impl.generics.where_clause {
+        for predicate in &where_clause.predicates {
+            match predicate {
+                syn::WherePredicate::Type(predicate) => {
+                    collect_type_surface_dependency_items(
+                        project,
+                        package,
+                        module_path,
+                        aliases,
+                        &predicate.bounded_ty,
+                        items,
+                    );
+                    for bound in &predicate.bounds {
+                        collect_type_param_bound_surface_dependency_items(
+                            project,
+                            package,
+                            module_path,
+                            aliases,
+                            bound,
+                            items,
+                        );
+                    }
+                }
+                syn::WherePredicate::Lifetime(_) => {}
+                _ => {}
+            }
+        }
+    }
+    collect_type_surface_dependency_items(
+        project,
+        package,
+        module_path,
+        aliases,
+        &item_impl.self_ty,
+        items,
+    );
+    if let Some((_, trait_path, _)) = &item_impl.trait_ {
+        for segment in &trait_path.segments {
+            collect_path_arguments_surface_dependency_items(
+                project,
+                package,
+                module_path,
+                aliases,
+                &segment.arguments,
+                items,
+            );
+        }
+    }
+}
+
+fn type_surface_dependency_items_for_item(project: &Project, item: &ItemId) -> BTreeSet<ItemId> {
+    let Some(record) = project.items.get(item) else {
+        return BTreeSet::new();
+    };
+    let mut items = BTreeSet::new();
+    match &record.item {
+        Item::Struct(item_struct) => {
+            for field in item_struct.fields.iter() {
+                collect_type_surface_dependency_items(
+                    project,
+                    &record.package,
+                    &record.module_path,
+                    &record.aliases,
+                    &field.ty,
+                    &mut items,
+                );
+            }
+        }
+        Item::Enum(item_enum) => {
+            for variant in &item_enum.variants {
+                for field in variant.fields.iter() {
+                    collect_type_surface_dependency_items(
+                        project,
+                        &record.package,
+                        &record.module_path,
+                        &record.aliases,
+                        &field.ty,
+                        &mut items,
+                    );
+                }
+            }
+        }
+        Item::Union(item_union) => {
+            for field in item_union.fields.named.iter() {
+                collect_type_surface_dependency_items(
+                    project,
+                    &record.package,
+                    &record.module_path,
+                    &record.aliases,
+                    &field.ty,
+                    &mut items,
+                );
+            }
+        }
+        Item::Type(item_type) => {
+            collect_type_surface_dependency_items(
+                project,
+                &record.package,
+                &record.module_path,
+                &record.aliases,
+                &item_type.ty,
+                &mut items,
+            );
+        }
+        _ => {}
+    }
+    items
+}
+
+fn collect_type_surface_dependency_items(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    ty: &Type,
+    items: &mut BTreeSet<ItemId>,
+) {
+    if let Some(item) = type_to_type_like_item(project, package, module_path, ty, aliases) {
+        items.insert(item);
+    }
+    match ty {
+        Type::Array(array) => collect_type_surface_dependency_items(
+            project,
+            package,
+            module_path,
+            aliases,
+            &array.elem,
+            items,
+        ),
+        Type::BareFn(function) => {
+            for input in &function.inputs {
+                collect_type_surface_dependency_items(
+                    project,
+                    package,
+                    module_path,
+                    aliases,
+                    &input.ty,
+                    items,
+                );
+            }
+            if let syn::ReturnType::Type(_, output) = &function.output {
+                collect_type_surface_dependency_items(
+                    project,
+                    package,
+                    module_path,
+                    aliases,
+                    output,
+                    items,
+                );
+            }
+        }
+        Type::Group(group) => collect_type_surface_dependency_items(
+            project,
+            package,
+            module_path,
+            aliases,
+            &group.elem,
+            items,
+        ),
+        Type::ImplTrait(impl_trait) => {
+            for bound in &impl_trait.bounds {
+                collect_type_param_bound_surface_dependency_items(
+                    project,
+                    package,
+                    module_path,
+                    aliases,
+                    bound,
+                    items,
+                );
+            }
+        }
+        Type::Paren(paren) => collect_type_surface_dependency_items(
+            project,
+            package,
+            module_path,
+            aliases,
+            &paren.elem,
+            items,
+        ),
+        Type::Path(type_path) => {
+            for segment in &type_path.path.segments {
+                collect_path_arguments_surface_dependency_items(
+                    project,
+                    package,
+                    module_path,
+                    aliases,
+                    &segment.arguments,
+                    items,
+                );
+            }
+        }
+        Type::Ptr(ptr) => collect_type_surface_dependency_items(
+            project,
+            package,
+            module_path,
+            aliases,
+            &ptr.elem,
+            items,
+        ),
+        Type::Reference(reference) => collect_type_surface_dependency_items(
+            project,
+            package,
+            module_path,
+            aliases,
+            &reference.elem,
+            items,
+        ),
+        Type::Slice(slice) => collect_type_surface_dependency_items(
+            project,
+            package,
+            module_path,
+            aliases,
+            &slice.elem,
+            items,
+        ),
+        Type::TraitObject(trait_object) => {
+            for bound in &trait_object.bounds {
+                collect_type_param_bound_surface_dependency_items(
+                    project,
+                    package,
+                    module_path,
+                    aliases,
+                    bound,
+                    items,
+                );
+            }
+        }
+        Type::Tuple(tuple) => {
+            for elem in &tuple.elems {
+                collect_type_surface_dependency_items(
+                    project,
+                    package,
+                    module_path,
+                    aliases,
+                    elem,
+                    items,
+                );
+            }
+        }
+        _ => {}
+    }
+}
+
+fn collect_type_param_bound_surface_dependency_items(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    bound: &syn::TypeParamBound,
+    items: &mut BTreeSet<ItemId>,
+) {
+    let syn::TypeParamBound::Trait(bound) = bound else {
+        return;
+    };
+    if let Some(item) = path_to_type_like_item(project, package, module_path, &bound.path, aliases)
+    {
+        items.insert(item);
+    }
+    for segment in &bound.path.segments {
+        collect_path_arguments_surface_dependency_items(
+            project,
+            package,
+            module_path,
+            aliases,
+            &segment.arguments,
+            items,
+        );
+    }
+}
+
+fn collect_path_arguments_surface_dependency_items(
+    project: &Project,
+    package: &str,
+    module_path: &[String],
+    aliases: &HashMap<String, Vec<String>>,
+    arguments: &PathArguments,
+    items: &mut BTreeSet<ItemId>,
+) {
+    let PathArguments::AngleBracketed(arguments) = arguments else {
+        return;
+    };
+    for argument in &arguments.args {
+        match argument {
+            GenericArgument::Type(ty) => collect_type_surface_dependency_items(
+                project,
+                package,
+                module_path,
+                aliases,
+                ty,
+                items,
+            ),
+            GenericArgument::AssocType(assoc) => collect_type_surface_dependency_items(
+                project,
+                package,
+                module_path,
+                aliases,
+                &assoc.ty,
+                items,
+            ),
+            GenericArgument::Constraint(constraint) => {
+                for bound in &constraint.bounds {
+                    collect_type_param_bound_surface_dependency_items(
+                        project,
+                        package,
+                        module_path,
+                        aliases,
+                        bound,
+                        items,
+                    );
+                }
+            }
+            _ => {}
+        }
+    }
 }
 
 pub fn write_reduced_workspace(
@@ -15802,6 +16376,14 @@ fn transform_items(
                         .all(|impl_item| !matches!(impl_item, ImplItem::Fn(_)));
                 let root_macro_impl_surface_is_required = render_plan
                     .root_item_impl_surface_should_render(reduced, package, &type_path, item_impl);
+                let external_trait_impl_type_surface_is_required =
+                    external_trait_impl_type_surface_is_required(
+                        render_plan,
+                        package,
+                        &type_path,
+                        trait_path.as_deref(),
+                        trait_item.as_ref(),
+                    );
 
                 for impl_item in &item_impl.items {
                     if impl_item_is_current_target_inactive(impl_item) {
@@ -15887,6 +16469,7 @@ fn transform_items(
                     || default_trait_impl_is_required
                     || marker_trait_impl_is_required
                     || root_macro_impl_surface_is_required
+                    || external_trait_impl_type_surface_is_required
                 {
                     if trait_path.is_some() {
                         kept_impl_items.clear();
@@ -15895,6 +16478,7 @@ fn transform_items(
                                 continue;
                             }
                             if retain_test_items
+                                || external_trait_impl_type_surface_is_required
                                 || impl_item_should_render_for_trait_surface(
                                     project,
                                     reduced,
@@ -17407,7 +17991,13 @@ fn retained_impl_headers_mention_unqualified_ident(
         return idents.contains(ident);
     }
 
-    let idents = retained_impl_header_unqualified_idents(project, reduced, package, module_path);
+    let idents = retained_impl_header_unqualified_idents(
+        project,
+        reduced,
+        Some(render_plan),
+        package,
+        module_path,
+    );
     let contains_ident = idents.contains(ident);
     render_plan
         .retained_impl_header_unqualified_idents
@@ -17419,6 +18009,7 @@ fn retained_impl_headers_mention_unqualified_ident(
 fn retained_impl_header_unqualified_idents(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     module_path: &[String],
 ) -> BTreeSet<String> {
@@ -17446,7 +18037,17 @@ fn retained_impl_header_unqualified_idents(
                         module_path,
                         item_impl,
                         &aliases,
-                    ));
+                    ))
+                || render_plan.is_some_and(|render_plan| {
+                    external_trait_impl_header_type_surface_is_required(
+                        project,
+                        render_plan,
+                        package,
+                        module_path,
+                        item_impl,
+                        &aliases,
+                    )
+                });
         if header_should_render
             || root_macro_impl_surface_should_render_for_module(
                 project,
@@ -17461,6 +18062,45 @@ fn retained_impl_header_unqualified_idents(
         }
     }
     idents
+}
+
+fn external_trait_impl_header_type_surface_is_required(
+    project: &Project,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    item_impl: &syn::ItemImpl,
+    aliases: &HashMap<String, Vec<String>>,
+) -> bool {
+    let Some(type_path) =
+        resolved_local_type_path(project, package, module_path, &item_impl.self_ty, aliases)
+    else {
+        return false;
+    };
+    let trait_path = item_impl
+        .trait_
+        .as_ref()
+        .map(|(_, path, _)| normalized_path(module_path, path, aliases));
+    let resolved_trait = item_impl.trait_.as_ref().and_then(|(_, path, _)| {
+        resolve_trait_path_for_impl(project, package, module_path, path, aliases)
+    });
+    let trait_item = trait_path
+        .as_ref()
+        .and_then(|trait_path| trait_item_for_path(project, package, trait_path))
+        .or_else(|| {
+            resolved_trait
+                .as_ref()
+                .and_then(|(trait_package, trait_path)| {
+                    trait_item_for_package_path(project, trait_package, trait_path)
+                })
+        });
+    external_trait_impl_type_surface_is_required(
+        render_plan,
+        package,
+        &type_path,
+        trait_path.as_deref(),
+        trait_item.as_ref(),
+    )
 }
 
 fn retained_impl_non_fn_items_mention_ident(
@@ -19241,6 +19881,18 @@ fn path_item_should_render(
             kind: *kind,
         })
     })
+}
+
+fn external_trait_impl_type_surface_is_required(
+    render_plan: &RenderPlan,
+    package: &str,
+    type_path: &[String],
+    trait_path: Option<&[String]>,
+    trait_item: Option<&ItemId>,
+) -> bool {
+    trait_path.is_some()
+        && trait_item.is_none()
+        && path_item_should_render(render_plan, package, type_path, type_surface_item_kinds())
 }
 
 fn type_surface_item_kinds() -> &'static [ItemKind] {
@@ -21267,7 +21919,18 @@ impl<'a> EnumVariantExpressionUseVisitor<'a> {
 }
 
 impl<'ast> Visit<'ast> for EnumVariantExpressionUseVisitor<'_> {
-    fn visit_pat(&mut self, _node: &'ast Pat) {}
+    fn visit_pat(&mut self, node: &'ast Pat) {
+        if pattern_uses_enum_variant(
+            node,
+            self.enum_name,
+            self.variant_name,
+            self.allow_unqualified_variant,
+        ) {
+            self.found = true;
+            return;
+        }
+        visit::visit_pat(self, node);
+    }
 
     fn visit_expr_path(&mut self, node: &'ast syn::ExprPath) {
         if expression_path_uses_enum_variant(
@@ -21310,13 +21973,57 @@ fn expression_path_uses_enum_variant(
             && matches!(segments.as_slice(), [segment] if segment == variant_name))
 }
 
+fn pattern_uses_enum_variant(
+    pat: &Pat,
+    enum_name: &str,
+    variant_name: &str,
+    allow_unqualified_variant: bool,
+) -> bool {
+    match pat {
+        Pat::Path(path) => expression_path_uses_enum_variant(
+            &path.path,
+            enum_name,
+            variant_name,
+            allow_unqualified_variant,
+        ),
+        Pat::Struct(pat_struct) => expression_path_uses_enum_variant(
+            &pat_struct.path,
+            enum_name,
+            variant_name,
+            allow_unqualified_variant,
+        ),
+        Pat::TupleStruct(tuple_struct) => expression_path_uses_enum_variant(
+            &tuple_struct.path,
+            enum_name,
+            variant_name,
+            allow_unqualified_variant,
+        ),
+        Pat::Or(pat_or) => pat_or.cases.iter().any(|case| {
+            pattern_uses_enum_variant(case, enum_name, variant_name, allow_unqualified_variant)
+        }),
+        Pat::Reference(reference) => pattern_uses_enum_variant(
+            &reference.pat,
+            enum_name,
+            variant_name,
+            allow_unqualified_variant,
+        ),
+        Pat::Paren(paren) => pattern_uses_enum_variant(
+            &paren.pat,
+            enum_name,
+            variant_name,
+            allow_unqualified_variant,
+        ),
+        _ => false,
+    }
+}
+
 #[cfg(test)]
 mod enum_variant_expression_use_visitor_tests {
     use super::*;
     use syn::parse_quote;
 
     #[test]
-    fn ignores_match_patterns_while_detecting_constructors() {
+    fn treats_match_patterns_as_variant_dependency_surfaces() {
         let block: Block = parse_quote!({
             match event {
                 AppEvent::Used => 1,
@@ -21326,8 +22033,8 @@ mod enum_variant_expression_use_visitor_tests {
         let mut visitor = EnumVariantExpressionUseVisitor::new("AppEvent", "Unused", false);
         visitor.visit_block(&block);
         assert!(
-            !visitor.found,
-            "match patterns are not enum variant construction sites"
+            visitor.found,
+            "retained match arms require the matched enum variant to remain renderable"
         );
 
         let block: Block = parse_quote!({ AppEvent::Unused { payload: value } });

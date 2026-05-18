@@ -154,6 +154,161 @@ fn keeps_reachable_data_items_and_prunes_dead_code() {
     assert!(status.success(), "generated workspace should compile");
 }
 
+#[test]
+fn retains_private_field_type_items_needed_by_rendered_surfaces() {
+    let fixture = temp_dir("field-type-surface-fixture");
+    let output = temp_dir("field-type-surface-output");
+    let target = temp_dir("field-type-surface-target");
+    let opensourced_path = opensourced_crate_path();
+
+    write(
+        &fixture.join("Cargo.toml"),
+        r#"
+[workspace]
+members = ["app", "helper"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+"#,
+    );
+    write(
+        &fixture.join("app/Cargo.toml"),
+        &format!(
+            r#"
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+helper = {{ path = "../helper" }}
+opensourced = {{ path = "{}" }}
+"#,
+            toml_path(&opensourced_path)
+        ),
+    );
+    write(
+        &fixture.join("app/src/lib.rs"),
+        r#"
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry(outer: &helper::Outer) -> usize {
+    helper::touch_outer(outer)
+}
+"#,
+    );
+    write(
+        &fixture.join("helper/Cargo.toml"),
+        r#"
+[package]
+name = "helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+"#,
+    );
+    write(
+        &fixture.join("helper/src/lib.rs"),
+        r#"
+pub struct Inner {
+    value: usize,
+}
+
+pub mod inputs {
+    pub struct SurfaceInput {
+        pub value: usize,
+    }
+}
+
+use inputs::SurfaceInput;
+
+struct DebugInner;
+
+impl std::fmt::Debug for DebugInner {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str("DebugInner")
+    }
+}
+
+struct DebugBox<T: std::fmt::Debug> {
+    value: T,
+}
+
+enum Status {
+    Ready,
+    Blocked,
+}
+
+struct Adapter {
+    value: usize,
+}
+
+impl From<SurfaceInput> for Adapter {
+    fn from(value: SurfaceInput) -> Self {
+        Adapter { value: value.value }
+    }
+}
+
+pub struct Outer {
+    inner: Inner,
+    debug: DebugBox<DebugInner>,
+    adapter: Adapter,
+    status: Status,
+}
+
+impl Outer {
+    pub fn touch(&self) -> usize {
+        let _ = &self.inner;
+        let _ = &self.debug.value;
+        let _ = self.adapter.value;
+        match &self.status {
+            Status::Ready => 1,
+            Status::Blocked => 0,
+        }
+    }
+}
+
+pub fn touch_outer(outer: &Outer) -> usize {
+    outer.touch()
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: fixture,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let helper_source = fs::read_to_string(output.join("helper/src/lib.rs")).unwrap();
+    assert!(helper_source.contains("pub struct Outer"));
+    assert!(
+        helper_source.contains("pub struct Inner"),
+        "field type item must be rendered when the retained field uses it:\n{helper_source}"
+    );
+    assert!(
+        helper_source.contains("pub struct SurfaceInput"),
+        "external impl headers must retain local input type surfaces:\n{helper_source}"
+    );
+    assert!(
+        helper_source.contains("impl From<SurfaceInput> for Adapter"),
+        "compiler-required external trait impl should keep its original header:\n{helper_source}"
+    );
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", target)
+        .status()
+        .expect("cargo check should start");
+    assert!(status.success(), "generated workspace should compile");
+}
+
 fn write_fixture(root: &Path) {
     let opensourced_path = opensourced_crate_path();
 

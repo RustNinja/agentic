@@ -1975,10 +1975,13 @@ fn generate_loaded(
     let targets = target_report(project, &packages);
     let source_map = source_map_report(project, &render_reduced);
     let macro_surfaces = macro_surface_report(project, &render_reduced);
-    let public_reexport_proof =
-        public_reexport_proof_report(&options.output_root, &usage_decisions);
     let member_decisions =
         render::rendered_member_decision_index(project, &render_reduced, &usage_decisions);
+    let public_reexport_proof = public_reexport_proof_report_with_retained_surface_items(
+        &options.output_root,
+        &usage_decisions,
+        &member_decisions.retained_items,
+    );
     let rendered_symbol_proof = rendered_symbol_proof_report_with_members(
         &options.output_root,
         &usage_decisions,
@@ -3665,6 +3668,9 @@ fn rendered_symbol_proof_report_with_members(
         let classification = if retained_callables.contains(callable) {
             summary.retained_callables += 1;
             "retained"
+        } else if member_decisions.retained_callables.contains(callable) {
+            summary.retained_callables += 1;
+            "retained"
         } else if rendered.structural_callables.contains(callable) {
             summary.retained_callables += 1;
             "retained"
@@ -3690,6 +3696,9 @@ fn rendered_symbol_proof_report_with_members(
 
     for item in &rendered.items {
         let classification = if retained_items.contains(item) {
+            summary.retained_items += 1;
+            "retained"
+        } else if member_decisions.retained_items.contains(item) {
             summary.retained_items += 1;
             "retained"
         } else if rendered.module_items.contains(item)
@@ -4708,16 +4717,34 @@ struct GeneratedPublicReexportSymbols {
     source_parse_failures: usize,
 }
 
+#[cfg(test)]
 fn public_reexport_proof_report(
     output_root: &Path,
     decisions: &UsageDecisionIndex,
 ) -> PublicReexportProofReport {
+    public_reexport_proof_report_with_retained_surface_items(
+        output_root,
+        decisions,
+        &BTreeSet::new(),
+    )
+}
+
+fn public_reexport_proof_report_with_retained_surface_items(
+    output_root: &Path,
+    decisions: &UsageDecisionIndex,
+    retained_surface_items: &BTreeSet<String>,
+) -> PublicReexportProofReport {
     let symbols = collect_generated_public_reexports(output_root, &decisions.retained_packages);
-    let retained_symbols = usage_symbol_base_paths(
+    let mut retained_symbols = usage_symbol_base_paths(
         &decisions.used_callables,
         &decisions.blocked_by_unknown_callables,
         &decisions.used_items,
         &decisions.blocked_by_unknown_items,
+    );
+    retained_symbols.extend(
+        retained_surface_items
+            .iter()
+            .map(|item| usage_item_base_path(item)),
     );
     let prunable_symbols = usage_symbol_base_paths(
         &decisions.prunable_callables,
@@ -13698,8 +13725,9 @@ mod tests {
         generate_with_analyzer_feedback, generate_with_analyzer_roots,
         generated_package_source_roots, production_hazard_with_details,
         production_readiness_report, production_readiness_status, public_reexport_proof_report,
-        rendered_symbol_proof_report, rendered_symbol_proof_report_with_members,
-        resolve_feedback_widening_roots, semantic_hazard_metrics, semantic_unresolved_details,
+        public_reexport_proof_report_with_retained_surface_items, rendered_symbol_proof_report,
+        rendered_symbol_proof_report_with_members, resolve_feedback_widening_roots,
+        semantic_hazard_metrics, semantic_unresolved_details,
         semantic_unresolved_owner_is_retained, semantic_usage_proof_report,
         unknown_surface_category, usage_classification_report, usage_evidence_reason,
         usage_guarded_render_reduction, write_generate_report, AnalyzerMode, AnalyzerReport,
@@ -17086,6 +17114,64 @@ pub use dead::Dead;
                     .resolved_targets
                     .iter()
                     .any(|target| target == "external_helper::dead::Dead")
+        }));
+    }
+
+    #[test]
+    fn public_reexport_proof_accepts_retained_type_surface_items() {
+        let output = temp_output("surface-public-reexport-proof");
+        write(
+            output.join("Cargo.toml"),
+            r#"[workspace]
+members = ["support"]
+"#,
+        );
+        write(
+            output.join("support/Cargo.toml"),
+            r#"[package]
+name = "support"
+version = "0.1.0"
+edition = "2021"
+"#,
+        );
+        write(
+            output.join("support/src/lib.rs"),
+            r#"mod api;
+
+pub use api::Config;
+"#,
+        );
+        write(output.join("support/src/api.rs"), "pub struct Config;\n");
+        let config = ItemId {
+            package: "support".to_string(),
+            module_path: vec!["api".to_string()],
+            name: "Config".to_string(),
+            kind: ItemKind::Struct,
+        };
+        let decisions = UsageDecisionIndex {
+            retained_packages: BTreeSet::from(["support".to_string()]),
+            prunable_items: BTreeSet::from([config.clone()]),
+            ..UsageDecisionIndex::default()
+        };
+        let retained_surface_items = BTreeSet::from([config.to_string()]);
+
+        let proof = public_reexport_proof_report_with_retained_surface_items(
+            &output,
+            &decisions,
+            &retained_surface_items,
+        );
+
+        assert_eq!(proof.status, "proven", "{proof:#?}");
+        assert_eq!(proof.summary.retained_targets, 1, "{proof:#?}");
+        assert_eq!(proof.summary.prunable_targets, 0, "{proof:#?}");
+        assert!(proof.entries.iter().any(|entry| {
+            entry.package == "support"
+                && entry.visible == "Config"
+                && entry.classification == "retained"
+                && entry
+                    .resolved_targets
+                    .iter()
+                    .any(|target| target == "support::api::Config")
         }));
     }
 
