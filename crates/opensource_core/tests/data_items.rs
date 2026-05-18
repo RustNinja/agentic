@@ -222,10 +222,16 @@ pub struct Inner {
 pub mod inputs {
     pub struct SurfaceInput {
         pub value: usize,
+        pub label: String,
+    }
+
+    pub enum SurfaceKind {
+        Alpha,
+        Beta,
     }
 }
 
-use inputs::SurfaceInput;
+use inputs::{SurfaceInput, SurfaceKind};
 
 struct DebugInner;
 
@@ -246,11 +252,29 @@ enum Status {
 
 struct Adapter {
     value: usize,
+    label_len: usize,
 }
 
 impl From<SurfaceInput> for Adapter {
     fn from(value: SurfaceInput) -> Self {
-        Adapter { value: value.value }
+        Adapter {
+            value: value.value,
+            label_len: value.label.len(),
+        }
+    }
+}
+
+enum AdapterKind {
+    Alpha,
+    Beta,
+}
+
+impl From<SurfaceKind> for AdapterKind {
+    fn from(value: SurfaceKind) -> Self {
+        match value {
+            SurfaceKind::Alpha => Self::Alpha,
+            SurfaceKind::Beta => Self::Beta,
+        }
     }
 }
 
@@ -258,6 +282,7 @@ pub struct Outer {
     inner: Inner,
     debug: DebugBox<DebugInner>,
     adapter: Adapter,
+    kind: AdapterKind,
     status: Status,
 }
 
@@ -266,6 +291,11 @@ impl Outer {
         let _ = &self.inner;
         let _ = &self.debug.value;
         let _ = self.adapter.value;
+        let _ = self.adapter.label_len;
+        let _ = match &self.kind {
+            AdapterKind::Alpha => 1,
+            AdapterKind::Beta => 2,
+        };
         match &self.status {
             Status::Ready => 1,
             Status::Blocked => 0,
@@ -294,6 +324,18 @@ pub fn touch_outer(outer: &Outer) -> usize {
     assert!(
         helper_source.contains("pub struct SurfaceInput"),
         "external impl headers must retain local input type surfaces:\n{helper_source}"
+    );
+    assert!(
+        helper_source.contains("pub label: String"),
+        "type-surface dependencies must keep the full struct shape:\n{helper_source}"
+    );
+    assert!(
+        helper_source.contains("pub enum SurfaceKind"),
+        "external impl headers must retain local enum input surfaces:\n{helper_source}"
+    );
+    assert!(
+        helper_source.contains("Alpha") && helper_source.contains("Beta"),
+        "type-surface dependencies must keep enum variants needed by retained impls:\n{helper_source}"
     );
     assert!(
         helper_source.contains("impl From<SurfaceInput> for Adapter"),

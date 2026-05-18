@@ -405,6 +405,7 @@ pub(crate) fn rendered_member_decision_index(
             Item::Enum(item_enum) => record_enum_member_decisions(
                 project,
                 reduced,
+                &render_plan,
                 usage,
                 item_id,
                 item_enum,
@@ -480,6 +481,7 @@ fn record_struct_member_decisions(
 fn record_enum_member_decisions(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: &RenderPlan,
     usage: &UsageDecisionIndex,
     item_id: &ItemId,
     item_enum: &syn::ItemEnum,
@@ -492,6 +494,7 @@ fn record_enum_member_decisions(
         let name = variant.ident.to_string();
         let member = rendered_member_symbol_path(item_id, &name);
         let should_remain = preserves_full_surface
+            || render_plan.type_surface_dependency_items.contains(item_id)
             || enum_variant_should_remain(
                 project,
                 reduced,
@@ -16120,7 +16123,8 @@ fn transform_items(
                         strip_uniffi_attrs_from_fields(&mut item_struct.fields);
                         strip_uniffi_attrs(&mut item_struct.attrs);
                     }
-                    let preserve_private_fields = root_item_should_render(reduced, &id);
+                    let preserve_private_fields = root_item_should_render(reduced, &id)
+                        || render_plan.type_surface_dependency_items.contains(&id);
                     prune_private_struct_fields(
                         project,
                         reduced,
@@ -16183,7 +16187,9 @@ fn transform_items(
                             strip_uniffi_attrs_from_variant(variant);
                         }
                     }
-                    if !enum_preserves_full_variant_surface(project, reduced, &id, &item_enum) {
+                    if !enum_preserves_full_variant_surface(project, reduced, &id, &item_enum)
+                        && !render_plan.type_surface_dependency_items.contains(&id)
+                    {
                         prune_private_enum_variants(
                             project,
                             reduced,
@@ -17947,6 +17953,7 @@ fn retained_impl_attrs_mention_ident(
 fn retained_impl_attrs_mention_unqualified_ident(
     project: &Project,
     reduced: &ReducedProject,
+    render_plan: Option<&RenderPlan>,
     package: &str,
     module_path: &[String],
     ident: &str,
@@ -17964,7 +17971,18 @@ fn retained_impl_attrs_mention_unqualified_ident(
         let Item::Impl(item_impl) = item else {
             return false;
         };
-        if !impl_has_reachable_method(project, reduced, package, module_path, item_impl, &aliases) {
+        if !impl_has_reachable_method(project, reduced, package, module_path, item_impl, &aliases)
+            && !render_plan.is_some_and(|render_plan| {
+                external_trait_impl_header_type_surface_is_required(
+                    project,
+                    render_plan,
+                    package,
+                    module_path,
+                    item_impl,
+                    &aliases,
+                )
+            })
+        {
             return false;
         }
         item_impl
@@ -18186,6 +18204,51 @@ fn retained_impl_non_fn_items_mention_unqualified_ident(
                         &aliases,
                     )
                 })
+                && token_stream_mentions_unqualified_ident(&impl_item.to_token_stream(), ident)
+        })
+    })
+}
+
+fn retained_impl_fn_items_mention_unqualified_ident(
+    project: &Project,
+    reduced: &ReducedProject,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    let Some(items) = module_items_for_path(project, package, module_path) else {
+        return false;
+    };
+    let aliases = project
+        .module_aliases
+        .get(&(package.to_string(), module_path.to_vec()))
+        .cloned()
+        .unwrap_or_default();
+
+    items.iter().any(|item| {
+        let Item::Impl(item_impl) = item else {
+            return false;
+        };
+        let Some(type_path) =
+            resolved_local_type_path(project, package, module_path, &item_impl.self_ty, &aliases)
+        else {
+            return false;
+        };
+        item_impl.items.iter().any(|impl_item| {
+            matches!(impl_item, ImplItem::Fn(_))
+                && impl_item_should_render_for_field_scan(
+                    project,
+                    reduced,
+                    Some(render_plan),
+                    package,
+                    module_path,
+                    item_impl,
+                    impl_item,
+                    &type_path,
+                    &aliases,
+                    None,
+                )
                 && token_stream_mentions_unqualified_ident(&impl_item.to_token_stream(), ident)
         })
     })
@@ -20017,6 +20080,7 @@ fn reachable_module_mentions_unqualified_ident(
         || retained_impl_attrs_mention_unqualified_ident(
             project,
             reduced,
+            None,
             package,
             module_path,
             ident,
@@ -22295,6 +22359,11 @@ fn struct_field_should_remain_with_assoc_calls(
         name: item_struct.ident.to_string(),
         kind: ItemKind::Struct,
     };
+    if render_plan
+        .is_some_and(|render_plan| render_plan.type_surface_dependency_items.contains(&item_id))
+    {
+        return true;
+    }
     if reachable_callables_need_concrete_struct_field(
         project,
         reduced,
@@ -25585,6 +25654,18 @@ fn impl_item_should_render_for_field_scan(
     {
         return true;
     }
+    if let Some(render_plan) = render_plan {
+        if external_trait_impl_header_type_surface_is_required(
+            project,
+            render_plan,
+            package,
+            module_path,
+            item_impl,
+            aliases,
+        ) {
+            return true;
+        }
+    }
     let root_macro_impl_surface_should_render = if let Some(render_plan) = render_plan {
         render_plan.root_item_impl_surface_should_render(reduced, package, type_path, item_impl)
     } else {
@@ -27181,61 +27262,67 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
         return true;
     }
 
-    if retained_impl_attrs_mention_unqualified_ident(project, reduced, package, module_path, ident)
-        || retained_impl_headers_mention_unqualified_ident(
-            project,
-            reduced,
-            render_plan,
-            package,
-            module_path,
-            ident,
-        )
-        || retained_impl_non_fn_items_mention_unqualified_ident(
-            project,
-            reduced,
-            Some(render_plan),
-            package,
-            module_path,
-            ident,
-        )
-        || retained_root_macro_impl_items_mention_unqualified_ident(
-            project,
-            reduced,
-            package,
-            module_path,
-            ident,
-        )
-        || retained_macro_definitions_mention_unqualified_ident(
-            project,
-            reduced,
-            Some(render_plan),
-            package,
-            module_path,
-            ident,
-        )
-        || retained_macro_invocations_mention_unqualified_ident(
-            project,
-            reduced,
-            package,
-            module_path,
-            ident,
-        )
-        || retained_foreign_items_mention_unqualified_ident_in_plan(
-            project,
-            render_plan,
-            package,
-            module_path,
-            ident,
-        )
-        || rendered_attrs_mention_unqualified_ident(
-            project,
-            reduced,
-            render_plan,
-            package,
-            module_path,
-            ident,
-        )
-    {
+    if retained_impl_attrs_mention_unqualified_ident(
+        project,
+        reduced,
+        Some(render_plan),
+        package,
+        module_path,
+        ident,
+    ) || retained_impl_headers_mention_unqualified_ident(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        ident,
+    ) || retained_impl_non_fn_items_mention_unqualified_ident(
+        project,
+        reduced,
+        Some(render_plan),
+        package,
+        module_path,
+        ident,
+    ) || retained_impl_fn_items_mention_unqualified_ident(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        ident,
+    ) || retained_root_macro_impl_items_mention_unqualified_ident(
+        project,
+        reduced,
+        package,
+        module_path,
+        ident,
+    ) || retained_macro_definitions_mention_unqualified_ident(
+        project,
+        reduced,
+        Some(render_plan),
+        package,
+        module_path,
+        ident,
+    ) || retained_macro_invocations_mention_unqualified_ident(
+        project,
+        reduced,
+        package,
+        module_path,
+        ident,
+    ) || retained_foreign_items_mention_unqualified_ident_in_plan(
+        project,
+        render_plan,
+        package,
+        module_path,
+        ident,
+    ) || rendered_attrs_mention_unqualified_ident(
+        project,
+        reduced,
+        render_plan,
+        package,
+        module_path,
+        ident,
+    ) {
         return true;
     }
 
