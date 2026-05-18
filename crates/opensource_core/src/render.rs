@@ -27290,6 +27290,12 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
         package,
         module_path,
         ident,
+    ) || retained_type_surface_items_mention_unqualified_ident(
+        project,
+        render_plan,
+        package,
+        module_path,
+        ident,
     ) || retained_root_macro_impl_items_mention_unqualified_ident(
         project,
         reduced,
@@ -27365,6 +27371,24 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
                 &source.syntax.items,
                 ident,
             )
+        })
+}
+
+fn retained_type_surface_items_mention_unqualified_ident(
+    project: &Project,
+    render_plan: &RenderPlan,
+    package: &str,
+    module_path: &[String],
+    ident: &str,
+) -> bool {
+    render_plan
+        .type_surface_dependency_items
+        .iter()
+        .filter(|item| item.package == package && item.module_path == module_path)
+        .any(|item| {
+            project.items.get(item).is_some_and(|record| {
+                token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)
+            })
         })
 }
 
