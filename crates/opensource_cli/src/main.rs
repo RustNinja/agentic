@@ -4836,37 +4836,108 @@ fn semantic_proof_reason(semantic: Option<&SemanticReport>) -> String {
     };
     match semantic_proof_status(semantic).as_str() {
         "complete" => "rust-analyzer semantic proof covered the selected slice".to_string(),
-        "selected_root_complete_workspace_limited" => format!(
-            "selected root semantic proof is complete; wider workspace analysis remains limited ({} budget-skipped file(s), {} top-down-scoped file(s), {} unqueried method call(s), {} unqueried path(s))",
-            semantic.skipped_files.saturating_sub(semantic.top_down_skipped_files),
-            semantic.top_down_skipped_files,
-            semantic.unqueried_method_calls,
-            semantic.unqueried_paths
-        ),
+        "selected_root_complete_workspace_limited" => {
+            let reason = format!(
+                "selected root semantic proof is complete; wider workspace analysis remains limited ({} budget-skipped file(s), {} top-down-scoped file(s), {} unqueried method call(s), {} unqueried path(s))",
+                semantic
+                    .skipped_files
+                    .saturating_sub(semantic.top_down_skipped_files),
+                semantic.top_down_skipped_files,
+                semantic.unqueried_method_calls,
+                semantic.unqueried_paths
+            );
+            append_semantic_budget_recommendation(reason, semantic, false)
+        }
         "selected_root_failed" => format!(
             "selected root semantic proof failed in {} root file(s)",
             semantic.selected_root_failed_files
         ),
-        "selected_root_limited" => format!(
-            "selected root semantic proof is budget-limited ({} skipped root file(s), {} unqueried root method call(s), {} unqueried root path(s))",
-            semantic.selected_root_skipped_files,
-            semantic.selected_root_unqueried_method_calls,
-            semantic.selected_root_unqueried_paths
-        ),
+        "selected_root_limited" => {
+            let reason = format!(
+                "selected root semantic proof is budget-limited ({} skipped root file(s), {} unqueried root method call(s), {} unqueried root path(s))",
+                semantic.selected_root_skipped_files,
+                semantic.selected_root_unqueried_method_calls,
+                semantic.selected_root_unqueried_paths
+            );
+            append_semantic_budget_recommendation(reason, semantic, true)
+        }
         "workspace_failed" => format!(
             "workspace semantic proof failed in {} file(s)",
             semantic.failed_files
         ),
-        "workspace_limited" => format!(
-            "workspace semantic proof is limited ({} budget-skipped file(s), {} top-down-scoped file(s), {} unqueried method call(s), {} unqueried path(s))",
-            semantic.skipped_files.saturating_sub(semantic.top_down_skipped_files),
-            semantic.top_down_skipped_files,
-            semantic.unqueried_method_calls,
-            semantic.unqueried_paths
-        ),
+        "workspace_limited" => {
+            let reason = format!(
+                "workspace semantic proof is limited ({} budget-skipped file(s), {} top-down-scoped file(s), {} unqueried method call(s), {} unqueried path(s))",
+                semantic
+                    .skipped_files
+                    .saturating_sub(semantic.top_down_skipped_files),
+                semantic.top_down_skipped_files,
+                semantic.unqueried_method_calls,
+                semantic.unqueried_paths
+            );
+            append_semantic_budget_recommendation(reason, semantic, false)
+        }
         "empty" => "rust-analyzer semantic proof did not find Rust source files".to_string(),
         _ => "rust-analyzer semantic proof state is unknown".to_string(),
     }
+}
+
+fn append_semantic_budget_recommendation(
+    reason: String,
+    semantic: &SemanticReport,
+    selected_root_only: bool,
+) -> String {
+    let Some(recommendation) = semantic_budget_recommendation(semantic, selected_root_only) else {
+        return reason;
+    };
+    format!("{reason}; rerun with at least {recommendation}")
+}
+
+fn semantic_budget_recommendation(
+    semantic: &SemanticReport,
+    selected_root_only: bool,
+) -> Option<String> {
+    let skipped_files = if selected_root_only {
+        semantic.selected_root_skipped_files
+    } else {
+        semantic
+            .skipped_files
+            .saturating_sub(semantic.top_down_skipped_files)
+    };
+    let unqueried_method_calls = if selected_root_only {
+        semantic.selected_root_unqueried_method_calls
+    } else {
+        semantic.unqueried_method_calls
+    };
+    let unqueried_paths = if selected_root_only {
+        semantic.selected_root_unqueried_paths
+    } else {
+        semantic.unqueried_paths
+    };
+
+    let mut flags = Vec::new();
+    if skipped_files > 0 {
+        flags.push(format!(
+            "--ra-file-budget {}",
+            semantic.file_budget.saturating_add(skipped_files)
+        ));
+    }
+    if unqueried_method_calls > 0 {
+        flags.push(format!(
+            "--ra-method-call-budget {}",
+            semantic
+                .method_call_budget
+                .saturating_add(unqueried_method_calls)
+        ));
+    }
+    if unqueried_paths > 0 {
+        flags.push(format!(
+            "--ra-path-budget {}",
+            semantic.path_budget.saturating_add(unqueried_paths)
+        ));
+    }
+
+    (!flags.is_empty()).then(|| flags.join(" "))
 }
 
 fn semantic_proof_error_count(semantic: &SemanticReport) -> usize {
@@ -10279,6 +10350,10 @@ mod tests {
             source_files: 120,
             analyzed_files: 48,
             skipped_files: 72,
+            top_down_skipped_files: 62,
+            file_budget: 48,
+            method_call_budget: 1000,
+            path_budget: 2000,
             unqueried_method_calls: 1301,
             unqueried_paths: 10933,
             selected_root_source_files: 1,
@@ -10291,6 +10366,10 @@ mod tests {
             "selected_root_complete_workspace_limited"
         );
         assert!(semantic_proof_block_reason(Some(&semantic)).is_none());
+        let reason = super::semantic_proof_reason(Some(&semantic));
+        assert!(reason.contains("--ra-file-budget 58"));
+        assert!(reason.contains("--ra-method-call-budget 2301"));
+        assert!(reason.contains("--ra-path-budget 12933"));
     }
 
     #[test]
@@ -10298,16 +10377,25 @@ mod tests {
         let semantic = SemanticReport {
             source_files: 7,
             analyzed_files: 7,
+            file_budget: 7,
+            method_call_budget: 100,
+            path_budget: 200,
             selected_root_source_files: 1,
             selected_root_analyzed_files: 1,
+            selected_root_skipped_files: 1,
+            selected_root_unqueried_method_calls: 2,
             selected_root_unqueried_paths: 3,
             ..SemanticReport::default()
         };
 
         assert_eq!(semantic_proof_status(&semantic), "selected_root_limited");
-        assert!(semantic_proof_block_reason(Some(&semantic))
+        let reason = semantic_proof_block_reason(Some(&semantic))
             .expect("selected-root limits should block production")
-            .contains("selected root semantic proof is budget-limited"));
+            .to_string();
+        assert!(reason.contains("selected root semantic proof is budget-limited"));
+        assert!(reason.contains("--ra-file-budget 8"));
+        assert!(reason.contains("--ra-method-call-budget 102"));
+        assert!(reason.contains("--ra-path-budget 203"));
     }
 
     #[test]
