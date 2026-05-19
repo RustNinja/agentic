@@ -14984,6 +14984,7 @@ fn strip_common_no_arg_receiver_adapter_tokens(receiver: &str) -> Option<&str> {
         "as_str",
         "borrow",
         "borrow_mut",
+        "into_inner",
         "trim",
         "trim_end",
         "trim_start",
@@ -15006,6 +15007,7 @@ fn is_common_no_arg_receiver_adapter_name(adapter: &str) -> bool {
             | "as_str"
             | "borrow"
             | "borrow_mut"
+            | "into_inner"
             | "trim"
             | "trim_end"
             | "trim_start"

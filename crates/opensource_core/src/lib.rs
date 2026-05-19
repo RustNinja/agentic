@@ -19362,6 +19362,80 @@ impl Cache {
     }
 
     #[test]
+    fn poisoned_lock_into_inner_get_does_not_trip_generic_method_fallback() {
+        let root = temp_output("poisoned-lock-into-inner-get-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+use std::collections::HashMap;
+use std::sync::RwLock;
+
+#[derive(Clone)]
+pub struct Session {
+    pub name: String,
+}
+
+pub struct Store {
+    sessions: RwLock<HashMap<String, Session>>,
+}
+
+#[opensourced]
+pub fn entry(store: &Store, key: &str) -> Option<Session> {
+    match store.sessions.read() {
+        Ok(guard) => guard.get(key).cloned(),
+        Err(error) => error.into_inner().get(key).cloned(),
+    }
+}
+
+pub struct LocalCache;
+
+impl LocalCache {
+    pub fn get(&self, _key: &str) -> usize {
+        1
+    }
+}
+"#,
+        );
+
+        let report = generate(GenerateOptions {
+            workspace_root: root,
+            output_root: temp_output("poisoned-lock-into-inner-get-output"),
+        })
+        .expect("reduction should succeed");
+
+        assert!(
+            report
+                .production
+                .hazards
+                .iter()
+                .all(|hazard| hazard.code != "generic_method_name_fallbacks"),
+            "poisoned lock into_inner map access should be modeled as an external receiver chain: {:?}",
+            report.production.hazards
+        );
+        assert!(
+            report
+                .reachable
+                .iter()
+                .map(ToString::to_string)
+                .all(|callable| !callable.contains("LocalCache::get")),
+            "poisoned lock fallback should not retain unrelated local get methods: {:?}",
+            report.reachable
+        );
+    }
+
+    #[test]
     fn pruned_struct_fields_do_not_retain_dependency_public_reexports() {
         let root = temp_output("pruned-field-reexport-source");
         let opensourced_path = workspace_root().join("crates/opensourced");
