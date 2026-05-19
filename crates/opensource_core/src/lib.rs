@@ -6397,7 +6397,7 @@ fn add_semantic_usage_reference_hazard(
             "semantic_usage_reference_skipped",
             "warning",
             format!(
-                "rust-analyzer reference search skipped {} indexed callable/item proof query/queries in top-down mode; retained-package pruning remains review-required until a full semantic proof or compiler feedback discharges it",
+                "rust-analyzer reference search skipped {} indexed callable/item proof query/queries in top-down mode; increase OPENSOURCE_RA_REFERENCE_QUERY_BUDGET or pass --ra-reference-budget to run a deeper retained-package pruning proof",
                 usage.reference_queries_skipped
             ),
         ));
