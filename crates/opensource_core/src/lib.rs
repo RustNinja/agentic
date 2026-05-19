@@ -6299,7 +6299,7 @@ fn production_readiness_report_inner(
         &mut hazards,
     );
     add_semantic_usage_mapping_hazard(analyzer, project, reduced, &mut hazards);
-    add_semantic_usage_reference_hazard(analyzer, project, semantic_pruning_proven, &mut hazards);
+    add_semantic_usage_reference_hazard(analyzer, project, semantic_proof, &mut hazards);
 
     production_readiness_status(hazards)
 }
@@ -6386,21 +6386,22 @@ fn add_semantic_usage_mapping_hazard(
 fn add_semantic_usage_reference_hazard(
     analyzer: &AnalyzerReport,
     project: &Project,
-    semantic_pruning_proven: bool,
+    semantic_proof: Option<&SemanticUsageProofReport>,
     hazards: &mut Vec<ProductionHazardReport>,
 ) {
     let Some(usage) = &analyzer.semantic_usage else {
         return;
     };
-    if usage.reference_queries_skipped > 0 && !semantic_pruning_proven {
-        hazards.push(production_hazard(
-            "semantic_usage_reference_skipped",
-            "warning",
-            format!(
-                "rust-analyzer reference search skipped {} indexed callable/item proof query/queries in top-down mode; increase OPENSOURCE_RA_REFERENCE_QUERY_BUDGET or pass --ra-reference-budget to run a deeper retained-package pruning proof",
-                usage.reference_queries_skipped
-            ),
-        ));
+    if usage.reference_queries_skipped > 0 && !semantic_pruning_proof_complete(semantic_proof) {
+        let (debt, details) = semantic_usage_skipped_reference_debt(project, usage, semantic_proof);
+        if debt > 0 {
+            hazards.push(production_hazard_with_details(
+                "semantic_usage_reference_skipped",
+                "warning",
+                semantic_usage_skipped_reference_message(debt, usage.reference_queries_skipped),
+                details,
+            ));
+        }
     }
     if usage.reference_query_failures == 0 {
         return;
@@ -6453,6 +6454,97 @@ fn add_semantic_usage_reference_hazard(
         "rust-analyzer reference search failed for one or more mapped items; those candidates are retained as unknown until compiler feedback or a later semantic pass proves they are removable",
         details,
     ));
+}
+
+fn semantic_usage_skipped_reference_debt(
+    project: &Project,
+    usage: &SemanticUsageReport,
+    semantic_proof: Option<&SemanticUsageProofReport>,
+) -> (usize, Vec<ProductionHazardDetail>) {
+    let Some(proof) = semantic_proof else {
+        return (usage.reference_queries_skipped, Vec::new());
+    };
+    let debt = proof.summary.skipped_reference_query_callables
+        + proof.summary.skipped_reference_query_items;
+    let mut details = Vec::new();
+    for callable in &proof.unproven.callables {
+        if !usage.callable_reference_query_skipped(callable) {
+            continue;
+        }
+        if let Some(detail) = callable_production_hazard_detail(project, callable) {
+            details.push(detail);
+        }
+    }
+    for item in &proof.unproven.items {
+        if !usage.item_reference_query_skipped(item) {
+            continue;
+        }
+        if let Some(detail) = item_production_hazard_detail(project, item) {
+            details.push(detail);
+        }
+    }
+    (debt, details)
+}
+
+fn semantic_usage_skipped_reference_message(debt: usize, skipped_total: usize) -> String {
+    let total_context = if skipped_total == debt {
+        String::new()
+    } else {
+        format!(" ({skipped_total} total indexed query/queries skipped)")
+    };
+    format!(
+        "rust-analyzer reference search skipped {debt} retained-package callable/item pruning proof query/queries{total_context}; increase OPENSOURCE_RA_REFERENCE_QUERY_BUDGET or pass --ra-reference-budget to run a deeper retained-package pruning proof"
+    )
+}
+
+fn callable_production_hazard_detail(
+    project: &Project,
+    callable: &CallableId,
+) -> Option<ProductionHazardDetail> {
+    if let Some(record) = project.functions.get(callable) {
+        Some(ProductionHazardDetail {
+            subject: callable.to_string(),
+            package: Some(callable.package().to_string()),
+            module_path: callable_detail_module_path(callable),
+            file: Some(record.span.file.clone()),
+            start_line: Some(record.span.start_line),
+            cfg: None,
+            blocked_idents: Vec::new(),
+            suggested_cargo_args: Vec::new(),
+        })
+    } else if let Some(record) = project.methods.get(callable) {
+        Some(ProductionHazardDetail {
+            subject: callable.to_string(),
+            package: Some(callable.package().to_string()),
+            module_path: callable_detail_module_path(callable),
+            file: Some(record.span.file.clone()),
+            start_line: Some(record.span.start_line),
+            cfg: None,
+            blocked_idents: Vec::new(),
+            suggested_cargo_args: Vec::new(),
+        })
+    } else {
+        None
+    }
+}
+
+fn item_production_hazard_detail(
+    project: &Project,
+    item: &ItemId,
+) -> Option<ProductionHazardDetail> {
+    project
+        .items
+        .get(item)
+        .map(|record| ProductionHazardDetail {
+            subject: item.to_string(),
+            package: Some(item.package.clone()),
+            module_path: Some(item.module_path.join("::")),
+            file: Some(record.span.file.clone()),
+            start_line: Some(record.span.start_line),
+            cfg: None,
+            blocked_idents: Vec::new(),
+            suggested_cargo_args: Vec::new(),
+        })
 }
 
 fn callable_detail_module_path(callable: &CallableId) -> Option<String> {
@@ -15425,6 +15517,135 @@ pub fn clean_dead_code() -> i32 {
                 .any(|hazard| hazard.code == "semantic_usage_reference_skipped"),
             "per-target reference proof completion should discharge unrelated skipped queries: {production:#?}"
         );
+    }
+
+    #[test]
+    fn semantic_usage_reference_skip_hazard_reports_unproven_debt_only() {
+        let root = temp_output("semantic-usage-reference-skip-debt-source");
+        let opensourced_path = workspace_root().join("crates/opensourced");
+        write(
+            root.join("Cargo.toml"),
+            "[workspace]\nmembers = [\"app\"]\nresolver = \"2\"\n",
+        );
+        write(
+            root.join("app/Cargo.toml"),
+            &format!(
+                "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[dependencies]\nopensourced = {{ path = {:?} }}\n",
+                opensourced_path
+            ),
+        );
+        write(
+            root.join("app/src/lib.rs"),
+            r#"use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry() -> i32 {
+    1
+}
+
+pub fn same_file_dead_code() -> i32 {
+    2
+}
+
+pub mod dead_support;
+"#,
+        );
+        write(
+            root.join("app/src/dead_support.rs"),
+            r#"pub fn pruned_file_dead_code() -> i32 {
+    3
+}
+"#,
+        );
+
+        let workspace = manifest::load_workspace(&root).expect("workspace should load");
+        let project = parse::parse_workspace(workspace).expect("workspace should parse");
+        let reduced =
+            reduce::reduce_with_extra_roots(&project, &[]).expect("initial reduction should work");
+        let entry = project_callable_named(&project, "entry");
+        let same_file_dead = project_callable_named(&project, "same_file_dead_code");
+        let pruned_file_dead = project_callable_named(&project, "pruned_file_dead_code");
+        let mapped_callable_ids = BTreeSet::from([
+            entry.clone(),
+            same_file_dead.clone(),
+            pruned_file_dead.clone(),
+        ]);
+        let semantic_usage = SemanticUsageReport {
+            indexed_callables: project.functions.len() + project.methods.len(),
+            indexed_items: project.items.len(),
+            mapped_callables: mapped_callable_ids.len(),
+            unmapped_callables: project
+                .functions
+                .len()
+                .saturating_sub(mapped_callable_ids.len()),
+            mapped_callable_ids: mapped_callable_ids.clone(),
+            skipped_callable_reference_ids: BTreeSet::from([
+                same_file_dead.clone(),
+                pruned_file_dead.clone(),
+            ]),
+            reference_queries_skipped: 10,
+            unmapped_items: project.items.len(),
+            ..SemanticUsageReport::default()
+        };
+        let analyzer = AnalyzerReport {
+            mode: AnalyzerMode::RustAnalyzerFeedback,
+            loaded: true,
+            engine: "rust-analyzer HIR".to_string(),
+            notes: Vec::new(),
+            semantic: Some(SemanticReport::default()),
+            semantic_hints: SemanticReductionHints::default(),
+            semantic_usage: Some(semantic_usage),
+        };
+        let production = production_readiness_status(Vec::new());
+
+        let (_render_reduced, usage_decisions) =
+            usage_guarded_render_reduction(&project, &reduced, &analyzer, &production)
+                .expect("usage-guarded render reduction should work");
+        let usage = usage_classification_report(
+            &project,
+            &reduced,
+            &analyzer,
+            &usage_decisions,
+            &production,
+            RenderedSymbolProofReport::default(),
+            PublicReexportProofReport::default(),
+        );
+
+        assert_eq!(
+            usage
+                .semantic_proof
+                .summary
+                .skipped_reference_query_callables,
+            1,
+            "{:#?}",
+            usage.semantic_proof
+        );
+        let production = production_readiness_report(
+            &analyzer,
+            &project,
+            &reduced,
+            Path::new("/tmp"),
+            Some(&usage.semantic_proof),
+            Some(&RenderedSymbolProofReport::default()),
+            Some(&PublicReexportProofReport::default()),
+        );
+        let hazard = production
+            .hazards
+            .iter()
+            .find(|hazard| hazard.code == "semantic_usage_reference_skipped")
+            .expect("same-file skipped callable should leave focused reference proof debt");
+        assert!(
+            hazard.message.contains("skipped 1 retained-package"),
+            "{hazard:#?}"
+        );
+        assert!(
+            hazard
+                .message
+                .contains("(10 total indexed query/queries skipped)"),
+            "{hazard:#?}"
+        );
+        assert_eq!(hazard.details.len(), 1);
+        assert_eq!(hazard.details[0].subject, same_file_dead.to_string());
     }
 
     #[test]
