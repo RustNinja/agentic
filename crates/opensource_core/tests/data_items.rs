@@ -549,6 +549,185 @@ impl StreamExt for StreamValue {
     assert!(status.success(), "generated workspace should compile");
 }
 
+#[test]
+fn prunes_imports_used_only_by_pruned_trait_type_surface_members() {
+    let fixture = temp_dir("trait-type-surface-import-fixture");
+    let output = temp_dir("trait-type-surface-import-output");
+    let target = temp_dir("trait-type-surface-import-target");
+    let opensourced_path = opensourced_crate_path();
+
+    write(
+        &fixture.join("Cargo.toml"),
+        r#"
+[workspace]
+members = ["app", "helper", "async-trait", "support-types"]
+resolver = "2"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2021"
+license = "MIT"
+"#,
+    );
+    write(
+        &fixture.join("app/Cargo.toml"),
+        &format!(
+            r#"
+[package]
+name = "app"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+helper = {{ path = "../helper" }}
+opensourced = {{ path = "{}" }}
+"#,
+            toml_path(&opensourced_path)
+        ),
+    );
+    write(
+        &fixture.join("app/src/lib.rs"),
+        r#"
+use opensourced::opensourced;
+
+#[opensourced]
+pub fn entry(transport: &dyn helper::RemoteTransport, health: &helper::Health) -> usize {
+    helper::transport_name(transport).len() + helper::health_score(health)
+}
+"#,
+    );
+    write(
+        &fixture.join("helper/Cargo.toml"),
+        r#"
+[package]
+name = "helper"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+async-trait = { path = "../async-trait" }
+support-types = { path = "../support-types" }
+"#,
+    );
+    write(
+        &fixture.join("helper/src/lib.rs"),
+        r#"
+use async_trait::async_trait;
+use std::time::Instant;
+use support_types::RemoteArgs;
+
+use crate::error::TransportError;
+
+pub mod error {
+    pub struct TransportError;
+}
+
+#[async_trait]
+pub trait RemoteTransport: Send + Sync + 'static {
+    async fn reconnect(&self, args: &RemoteArgs) -> Result<(), TransportError>;
+}
+
+pub enum Health {
+    Connected,
+    Unresponsive { since: Instant },
+}
+
+pub fn transport_name(_transport: &dyn RemoteTransport) -> &'static str {
+    "remote"
+}
+
+pub fn health_score(health: &Health) -> usize {
+    match health {
+        Health::Connected => 1,
+        Health::Unresponsive { since } => since.elapsed().as_secs() as usize,
+    }
+}
+"#,
+    );
+    write(
+        &fixture.join("async-trait/Cargo.toml"),
+        r#"
+[package]
+name = "async-trait"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lib]
+proc-macro = true
+"#,
+    );
+    write(
+        &fixture.join("async-trait/src/lib.rs"),
+        r#"
+extern crate proc_macro;
+
+use proc_macro::TokenStream;
+
+#[proc_macro_attribute]
+pub fn async_trait(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    item
+}
+"#,
+    );
+    write(
+        &fixture.join("support-types/Cargo.toml"),
+        r#"
+[package]
+name = "support-types"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+"#,
+    );
+    write(
+        &fixture.join("support-types/src/lib.rs"),
+        r#"
+pub struct RemoteArgs {
+    pub label: String,
+}
+"#,
+    );
+
+    generate(GenerateOptions {
+        workspace_root: fixture,
+        output_root: output.clone(),
+    })
+    .expect("reduction should succeed");
+
+    let helper_source = fs::read_to_string(output.join("helper/src/lib.rs")).unwrap();
+    assert!(
+        helper_source.contains("pub trait RemoteTransport"),
+        "trait type surface should remain:\n{helper_source}"
+    );
+    assert!(
+        !helper_source.contains("async_trait"),
+        "attribute macro import used only by pruned trait members should be removed:\n{helper_source}"
+    );
+    assert!(
+        !helper_source.contains("RemoteArgs"),
+        "type import used only by pruned trait members should be removed:\n{helper_source}"
+    );
+    assert!(
+        !helper_source.contains("TransportError"),
+        "local import used only by pruned trait members should be removed:\n{helper_source}"
+    );
+    assert!(
+        helper_source.contains("use std::time::Instant"),
+        "enum payload imports used by retained variants must remain:\n{helper_source}"
+    );
+
+    let status = Command::new("cargo")
+        .arg("check")
+        .current_dir(&output)
+        .env("CARGO_TARGET_DIR", target)
+        .status()
+        .expect("cargo check should start");
+    assert!(status.success(), "generated workspace should compile");
+}
+
 fn write_fixture(root: &Path) {
     let opensourced_path = opensourced_crate_path();
 

@@ -27400,6 +27400,7 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
         ident,
     ) || retained_type_surface_items_mention_unqualified_ident(
         project,
+        reduced,
         render_plan,
         package,
         module_path,
@@ -27484,17 +27485,37 @@ fn reachable_module_import_scope_uses_imported_ident_uncached(
 
 fn retained_type_surface_items_mention_unqualified_ident(
     project: &Project,
+    reduced: &ReducedProject,
     render_plan: &RenderPlan,
     package: &str,
     module_path: &[String],
     ident: &str,
 ) -> bool {
+    let preserve_uniffi_surface = package_preserves_uniffi_surface(project, reduced, package);
     render_plan
         .type_surface_dependency_items
         .iter()
         .filter(|item| item.package == package && item.module_path == module_path)
         .any(|item| {
             project.items.get(item).is_some_and(|record| {
+                if matches!(record.item, Item::Trait(_)) {
+                    return rendered_non_callable_import_scan_item(
+                        project,
+                        reduced,
+                        render_plan,
+                        package,
+                        module_path,
+                        &record.item,
+                        preserve_uniffi_surface,
+                    )
+                    .is_some_and(|rendered_item| {
+                        token_stream_mentions_unqualified_ident(
+                            &rendered_item.to_token_stream(),
+                            ident,
+                        )
+                    });
+                }
+
                 token_stream_mentions_unqualified_ident(&record.item.to_token_stream(), ident)
             })
         })
@@ -29894,14 +29915,29 @@ fn rendered_attrs_mention_unqualified_ident(
             reduced.reachable.contains(&id)
                 && attrs_mention_unqualified_ident(&function.attrs, ident)
         }
+        Item::Trait(_) => {
+            let preserve_uniffi_surface =
+                package_preserves_uniffi_surface(project, reduced, package);
+            rendered_non_callable_import_scan_item(
+                project,
+                reduced,
+                render_plan,
+                package,
+                module_path,
+                item,
+                preserve_uniffi_surface,
+            )
+            .is_some_and(|rendered_item| {
+                item_attrs_mention_unqualified_ident(&rendered_item, ident)
+            })
+        }
         Item::Struct(_)
         | Item::Enum(_)
         | Item::Union(_)
         | Item::Type(_)
         | Item::Const(_)
         | Item::Static(_)
-        | Item::Macro(_)
-        | Item::Trait(_) => item_id(package, module_path, item).is_some_and(|id| {
+        | Item::Macro(_) => item_id(package, module_path, item).is_some_and(|id| {
             render_plan.item_should_render(&id) && item_attrs_mention_unqualified_ident(item, ident)
         }),
         Item::Impl(item_impl) => {
