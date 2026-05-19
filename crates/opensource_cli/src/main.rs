@@ -38,6 +38,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
         return Err("output root must be different from workspace root".into());
     }
 
+    apply_semantic_budget_overrides(&options);
     initialize_event_log(&options)?;
     write_event_log(
         &options,
@@ -54,6 +55,10 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             ),
             ("batch_roots", serde_json::json!(options.batch_roots)),
             ("root_selectors", serde_json::json!(options.root_selectors)),
+            (
+                "semantic_budget_overrides",
+                semantic_budget_overrides_json(&options),
+            ),
         ]),
     )?;
     write_event_log(
@@ -1904,6 +1909,9 @@ struct CliOptions {
     random_seed: u64,
     batch_roots: bool,
     batch_report: Option<PathBuf>,
+    semantic_file_budget: Option<usize>,
+    semantic_method_call_budget: Option<usize>,
+    semantic_path_budget: Option<usize>,
     workspace_root: PathBuf,
     output_root: PathBuf,
 }
@@ -2138,6 +2146,9 @@ where
     let mut random_seed = 0;
     let mut batch_roots = false;
     let mut batch_report = None;
+    let mut semantic_file_budget = None;
+    let mut semantic_method_call_budget = None;
+    let mut semantic_path_budget = None;
     let mut workspace_root_arg = None;
     let mut output_root_arg = None;
     let mut positional = Vec::new();
@@ -2279,6 +2290,21 @@ where
                 args.next()
                     .ok_or("--batch-report requires a following path")?,
             ));
+        } else if arg == OsStr::new("--ra-file-budget")
+            || arg == OsStr::new("--semantic-file-budget")
+        {
+            let flag = arg.to_str().unwrap_or("--ra-file-budget");
+            semantic_file_budget = Some(parse_usize_arg(flag, args.next())?);
+        } else if arg == OsStr::new("--ra-method-call-budget")
+            || arg == OsStr::new("--semantic-method-call-budget")
+        {
+            let flag = arg.to_str().unwrap_or("--ra-method-call-budget");
+            semantic_method_call_budget = Some(parse_usize_arg(flag, args.next())?);
+        } else if arg == OsStr::new("--ra-path-budget")
+            || arg == OsStr::new("--semantic-path-budget")
+        {
+            let flag = arg.to_str().unwrap_or("--ra-path-budget");
+            semantic_path_budget = Some(parse_usize_arg(flag, args.next())?);
         } else if arg == OsStr::new("--workspace-root") {
             workspace_root_arg = Some(PathBuf::from(
                 args.next()
@@ -2345,8 +2371,31 @@ where
         random_seed,
         batch_roots,
         batch_report,
+        semantic_file_budget,
+        semantic_method_call_budget,
+        semantic_path_budget,
         workspace_root,
         output_root,
+    })
+}
+
+fn apply_semantic_budget_overrides(options: &CliOptions) {
+    if let Some(value) = options.semantic_file_budget {
+        std::env::set_var("OPENSOURCE_RA_SEMANTIC_FILE_BUDGET", value.to_string());
+    }
+    if let Some(value) = options.semantic_method_call_budget {
+        std::env::set_var("OPENSOURCE_RA_METHOD_CALL_BUDGET", value.to_string());
+    }
+    if let Some(value) = options.semantic_path_budget {
+        std::env::set_var("OPENSOURCE_RA_PATH_BUDGET", value.to_string());
+    }
+}
+
+fn semantic_budget_overrides_json(options: &CliOptions) -> serde_json::Value {
+    serde_json::json!({
+        "files": options.semantic_file_budget,
+        "method_calls": options.semantic_method_call_budget,
+        "paths": options.semantic_path_budget,
     })
 }
 
@@ -10153,9 +10202,11 @@ fn usage() -> String {
         "[--baseline-target-dir <path>] [--slice-report <path>] [--decision-log <path>] [--event-log <path>] [--validation-report <path>] ",
         "[--preflight-report <path>] [--root <selector>|--root-selector <selector>] [--roots-file <path>] ",
         "[--random-roots <n>] [--random-root-package <package>] [--random-seed <n>] [--batch-roots] [--batch-report <path>] ",
+        "[--ra-file-budget <n>] [--ra-method-call-budget <n>] [--ra-path-budget <n>] ",
         "[--workspace-root <workspace-root-or-Cargo.toml>] [--output <output-root>] <workspace-root-or-Cargo.toml> <output-root>\n",
         "default analyzer: ra-hir when the binary is built with the ra-hir feature, otherwise syn; ",
         "ra-feedback exposes the bounded RA outgoing-call closure explicitly and skips whole-project reference proof for fast top-down slicing; ",
+        "--ra-file-budget, --ra-method-call-budget, and --ra-path-budget override the RA semantic analysis budgets for larger roots; ",
         "--production defaults to ra-hir-proc-macros with RA feedback closure when available; ",
         "--root selects functions/items in memory without editing source, while #[opensourced] roots still work"
     )
@@ -10817,6 +10868,50 @@ pub fn selected() -> usize {
         let options = parse_options(["--analyzer", "ra-feedback", "workspace", "out"]);
 
         assert_eq!(options.analyzer_mode, AnalyzerMode::RustAnalyzerFeedback);
+    }
+
+    #[test]
+    fn explicit_ra_semantic_budget_flags_are_accepted() {
+        let options = parse_options([
+            "--ra-file-budget",
+            "96",
+            "--ra-method-call-budget",
+            "5000",
+            "--ra-path-budget",
+            "10000",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(options.semantic_file_budget, Some(96));
+        assert_eq!(options.semantic_method_call_budget, Some(5000));
+        assert_eq!(options.semantic_path_budget, Some(10000));
+        assert_eq!(
+            super::semantic_budget_overrides_json(&options),
+            serde_json::json!({
+                "files": 96,
+                "method_calls": 5000,
+                "paths": 10000,
+            })
+        );
+    }
+
+    #[test]
+    fn semantic_budget_aliases_are_accepted() {
+        let options = parse_options([
+            "--semantic-file-budget",
+            "12",
+            "--semantic-method-call-budget",
+            "34",
+            "--semantic-path-budget",
+            "56",
+            "workspace",
+            "out",
+        ]);
+
+        assert_eq!(options.semantic_file_budget, Some(12));
+        assert_eq!(options.semantic_method_call_budget, Some(34));
+        assert_eq!(options.semantic_path_budget, Some(56));
     }
 
     #[test]
